@@ -94,7 +94,10 @@ enum ReviewPresentation {
         if pending > 0 {
             return Headline(state: .review, title: "Review \(name)", subtitle: "\(pending) \(pending == 1 ? "tool needs" : "tools need") review. Agents cannot call \(pending == 1 ? "it" : "them") until approved.")
         }
-        if review.tools.isEmpty { return Headline(state: .review, title: "Review \(name)", subtitle: reviewSubtitle) }
+        if review.tools.isEmpty {
+            // Approved without seeing tools: still an approved server, with nothing captured yet.
+            return Headline(state: .approved, title: "\(name) is approved", subtitle: "No tool definitions have been captured yet. New or changed tools come back here for review.")
+        }
         let blocked = review.tools.filter(\.disabled).count
         let total = review.tools.count
         let summary = "All \(total) \(total == 1 ? "tool" : "tools") approved\(blocked > 0 ? " (\(blocked) blocked)" : "")."

@@ -78,7 +78,8 @@ export function reviewHeadline(review: ServerReviewResponse): ReviewHeadline {
     }
   }
   if (tools.length === 0) {
-    return { state: 'review', title: `Review ${name}`, subtitle: 'Review tool definitions before changing what agents can call.' }
+    // Approved without seeing tools: still an approved server, just with nothing captured yet.
+    return { state: 'approved', title: `${name} is approved`, subtitle: 'No tool definitions have been captured yet. New or changed tools come back here for review.' }
   }
   const blocked = tools.filter(t => t.disabled).length
   const summary = `All ${tools.length} ${plural(tools.length, 'tool', 'tools')} approved${blocked > 0 ? ` (${blocked} blocked)` : ''}.`

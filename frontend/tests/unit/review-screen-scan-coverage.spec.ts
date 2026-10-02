@@ -126,4 +126,25 @@ describe('ReviewScreen scan coverage banner', () => {
     expect(wrapper.get('[data-test="review-tool-b"]').text()).toContain('not_scanned')
     expect(wrapper.get('[data-test="review-tool-c"]').text()).toContain('warnings')
   })
+
+  it('does not carry a rescan started on one server over to the next server', async () => {
+    const noScan = (name: string) => ({
+      success: true,
+      data: {
+        server: { name, transport: 'stdio', quarantined: true, definitions_captured: true, scan: { verdict: 'not_scanned', coverage: 'none' } },
+        tools: [{ name: 'a', description: 'a', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'not_scanned' }],
+      },
+    })
+    ;(api.getServerReview as any).mockImplementation(async (name: string) => noScan(name))
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'alpha' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    await wrapper.get('[data-test="review-scan-action"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="review-scan-summary"]').text()).toContain('Scan in progress…')
+
+    await wrapper.setProps({ serverName: 'beta' })
+    await flushPromises()
+    expect(wrapper.get('[data-test="review-scan-summary"]').text()).toContain('Not scanned yet.')
+    expect(wrapper.find('[data-test="review-scan-action"]').exists()).toBe(true)
+  })
 })

@@ -127,7 +127,8 @@ async function refreshAfterScanSettled(event: Event) {
   rescanning.value = false
   void load()
 }
-watch(() => props.serverName, load)
+// Component reuse across /review/A -> /review/B: scan state belongs to the old server.
+watch(() => props.serverName, () => { scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

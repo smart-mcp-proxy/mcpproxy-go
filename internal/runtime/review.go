@@ -326,8 +326,9 @@ func reviewCoverage(job *scanner.ScanJob, records []*storage.ToolApprovalRecord,
 // security banner, so every unknown resolves to not covered.
 //
 //   - A scan that exported no definitions covers nothing.
-//   - A definition added or changed after the scan started
-//     (DefinitionChangedAt) is not covered.
+//   - A definition added or changed after the scan read its definitions
+//     (DefinitionChangedAt after ScanContext.ToolsExportedAt, or StartedAt
+//     for a scan that recorded no export time) is not covered.
 //   - A scan that recorded its tool names covers exactly those tools.
 //   - A legacy scan (no recorded names, ToolsExported > 0) covers approved
 //     records, and pending records of a quarantined server (its whole toolset
@@ -338,7 +339,14 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 	if job == nil || job.Status != scanner.ScanJobStatusCompleted || job.ScanContext == nil || job.ScanContext.ToolsExported == 0 {
 		return false
 	}
-	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(job.StartedAt) {
+	// The scan analysed the definitions as exported, which can be well before
+	// the engine stamps StartedAt (scanner resolution, image checks). Legacy
+	// jobs carry no export time and fall back to StartedAt.
+	analysedAt := job.StartedAt
+	if !job.ScanContext.ToolsExportedAt.IsZero() {
+		analysedAt = job.ScanContext.ToolsExportedAt
+	}
+	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(analysedAt) {
 		return false
 	}
 	if len(job.ScanContext.ToolNames) > 0 {

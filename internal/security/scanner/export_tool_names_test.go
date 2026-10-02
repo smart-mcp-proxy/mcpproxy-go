@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -76,4 +77,26 @@ func TestStartScanRecordsToolNamesOnScanContext(t *testing.T) {
 			assert.Equal(t, []string{"a", "b"}, final.ScanContext.ToolNames)
 		})
 	}
+}
+
+func TestStartScanRecordsToolsExportedAt(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	svc.SetServerInfoProvider(&namesProvider{
+		info:  &ServerInfo{Name: "srv-at", Protocol: "stdio", Command: "node", Args: []string{"server.js"}},
+		tools: []map[string]interface{}{{"name": "a"}},
+	})
+
+	before := time.Now().UTC().Add(-time.Second)
+	job, err := svc.StartScan(context.Background(), "srv-at", false, nil, "")
+	require.NoError(t, err)
+	waitForScanIdle(t, svc, "srv-at")
+
+	final, err := store.GetScanJob(job.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.ScanContext)
+	assert.False(t, final.ScanContext.ToolsExportedAt.IsZero())
+	assert.True(t, final.ScanContext.ToolsExportedAt.After(before))
 }

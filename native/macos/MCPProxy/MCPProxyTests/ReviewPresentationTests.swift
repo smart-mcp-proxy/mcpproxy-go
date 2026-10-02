@@ -108,6 +108,23 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertEqual(approved.subtitle, "All 3 tools approved (1 blocked). New or changed tools come back here for review.")
     }
 
+    func testTrustedServerWithNoCapturedToolsReadsAsApproved() throws {
+        let trusted = try ReviewPresentation.headline(review(quarantined: false, tools: []))
+        XCTAssertEqual(trusted.state, .approved)
+        XCTAssertEqual(trusted.title, "fixture is approved")
+        XCTAssertTrue(trusted.subtitle.contains("No tool definitions"))
+
+        let quarantined = try ReviewPresentation.headline(review(quarantined: true, tools: []))
+        XCTAssertEqual(quarantined.state, .review)
+    }
+
+    func testQuarantineEscapesTheServerNameInThePath() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("MCPProxy/API/APIClient.swift"))
+        XCTAssertTrue(source.contains(#"/api/v1/servers/\(Self.escapePathComponent(id))/quarantine"#))
+        XCTAssertFalse(source.contains(#"/api/v1/servers/\(id)/quarantine"#))
+    }
+
     func testToolStateSelectsTheControl() throws {
         let tools = try review(quarantined: false, tools: [("p", "pending", false), ("c", "changed", false), ("a", "approved", false), ("b", "approved", true)]).tools
         XCTAssertEqual(ReviewPresentation.toolState(tools[0], quarantined: false), .approveReject)

@@ -1112,7 +1112,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			scanCtx.ToolsExported, scanCtx.ToolNames = s.exportToolDefinitions(serverName, req.SourceDir)
+			scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 
 			// If export failed, retry once. Reconnect ONLY when the server is
 			// actually disconnected (that path handles quarantined servers
@@ -1125,7 +1125,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				if s.serverInfo.IsConnected(serverName) {
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
-					scanCtx.ToolsExported, scanCtx.ToolNames = s.exportToolDefinitions(serverName, req.SourceDir)
+					scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))
@@ -1134,7 +1134,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 							zap.String("server", serverName), zap.Error(err))
 					} else {
 						s.waitForConnection(serverName, 30*time.Second)
-						scanCtx.ToolsExported, scanCtx.ToolNames = s.exportToolDefinitions(serverName, req.SourceDir)
+						scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 					}
 				}
 			}
@@ -2347,6 +2347,15 @@ func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
 	s.logger.Warn("Timed out waiting for server to connect for scan",
 		zap.String("server", serverName),
 		zap.Duration("timeout", timeout))
+}
+
+// exportToolDefinitionsStamped runs exportToolDefinitions and also returns the
+// instant just before the definitions were read. Taking the stamp first means a
+// definition change racing the read is judged not covered rather than covered.
+func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) (int, []string, time.Time) {
+	at := time.Now().UTC()
+	count, names := s.exportToolDefinitions(serverName, sourceDir)
+	return count, names, at
 }
 
 // exportToolDefinitions writes a tools.json file to the source directory

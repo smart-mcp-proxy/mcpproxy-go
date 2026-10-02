@@ -220,3 +220,25 @@ func TestReviewScanCoverage(t *testing.T) {
 		require.NotContains(t, string(encoded), "tools_scanned")
 	})
 }
+
+// A definition that changes after the tool export but before the engine
+// stamps StartedAt was never analysed, so the tool is not covered.
+func TestReviewToolCoveredUsesExportTime(t *testing.T) {
+	started := time.Now().Add(-time.Hour)
+	exportedAt := started.Add(-30 * time.Second)
+	job := &scanner.ScanJob{
+		Status: scanner.ScanJobStatusCompleted, StartedAt: started,
+		ScanContext: &scanner.ScanContext{ToolsExported: 1, ToolNames: []string{"notes"}, ToolsExportedAt: exportedAt},
+	}
+	changedBetween := &storage.ToolApprovalRecord{ToolName: "notes", Status: storage.ToolApprovalStatusChanged, DefinitionChangedAt: exportedAt.Add(10 * time.Second)}
+	require.False(t, reviewToolCovered(job, false, "srv", changedBetween), "changed after export, before StartedAt")
+
+	changedBefore := &storage.ToolApprovalRecord{ToolName: "notes", Status: storage.ToolApprovalStatusApproved, DefinitionChangedAt: exportedAt.Add(-time.Second)}
+	require.True(t, reviewToolCovered(job, false, "srv", changedBefore), "changed before the export is analysed")
+
+	legacy := &scanner.ScanJob{
+		Status: scanner.ScanJobStatusCompleted, StartedAt: started,
+		ScanContext: &scanner.ScanContext{ToolsExported: 1, ToolNames: []string{"notes"}},
+	}
+	require.True(t, reviewToolCovered(legacy, false, "srv", changedBetween), "no export time falls back to StartedAt")
+}

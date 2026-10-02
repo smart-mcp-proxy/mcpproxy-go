@@ -118,4 +118,17 @@ describe('ReviewScreen approved state', () => {
     expect(wrapper.find('[data-test="review-approve-server"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="review-requarantine"]').exists()).toBe(false)
   })
+
+  it('reads as approved, with a quarantine control, for a trusted server with no captured tools', async () => {
+    const wrapper = await mountScreen(false, [])
+    expect(wrapper.get('[data-test="review-heading"]').text()).toBe('fixture is approved')
+    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('No tool definitions')
+    expect(wrapper.find('[data-test="review-requarantine"]').exists()).toBe(true)
+  })
+
+  it('keeps the review heading for a quarantined server with no tools', async () => {
+    const wrapper = await mountScreen(true, [])
+    expect(wrapper.get('[data-test="review-heading"]').text()).toBe('Review fixture')
+    expect(wrapper.find('[data-test="review-requarantine"]').exists()).toBe(false)
+  })
 })
