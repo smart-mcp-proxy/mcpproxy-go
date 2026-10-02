@@ -1200,7 +1200,7 @@ jobs:
           path: unsigned/*.exe
 
       - name: Submit to SignPath for signing
-        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627  # v2.3
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'
