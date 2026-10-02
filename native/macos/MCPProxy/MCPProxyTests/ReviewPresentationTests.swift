@@ -125,6 +125,61 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertFalse(source.contains(#"/api/v1/servers/\(id)/quarantine"#))
     }
 
+    // MARK: Default selection (Spec 109 fix-review-defaults, D41)
+
+    private func selectionTool(_ name: String, defaultAllowed: Bool?, description: String = "d", verdict: String = "clean") throws -> ReviewTool {
+        let field = defaultAllowed.map { ",\"default_allowed\":\($0)" } ?? ""
+        let json = "{\"name\":\"\(name)\",\"description\":\"\(description)\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"\(verdict)\"\(field)}"
+        return try JSONDecoder().decode(ReviewTool.self, from: Data(json.utf8))
+    }
+
+    func testDefaultSelectionFollowsDefaultAllowed() throws {
+        let tools = [
+            try selectionTool("read_a", defaultAllowed: true),
+            try selectionTool("write_a", defaultAllowed: false),
+            // An older core sends no field: it reads as false, so a mismatched core fails closed.
+            try selectionTool("old_core", defaultAllowed: nil),
+        ]
+        XCTAssertEqual(tools[0].defaultAllowed, true)
+        XCTAssertNil(tools[2].defaultAllowed)
+        XCTAssertEqual(ReviewPresentation.initialSelection(tools), ["read_a"])
+    }
+
+    func testMergeSelectionKeepsUnchecksAndDropsStaleChecks() throws {
+        let readA = try selectionTool("read_a", defaultAllowed: true)
+        let writeA = try selectionTool("write_a", defaultAllowed: false)
+
+        // An explicit uncheck always survives a reload.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([readA], choices: ["read_a": .init(allowed: false, tool: readA)]), [])
+        // An explicit check survives while the payload is the one the user saw.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([writeA], choices: ["write_a": .init(allowed: true, tool: writeA)]), ["write_a"])
+        // A changed definition or verdict falls back to the default.
+        let redefined = try selectionTool("write_a", defaultAllowed: false, description: "now also deletes")
+        XCTAssertEqual(ReviewPresentation.mergeSelection([redefined], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        let rescanned = try selectionTool("write_a", defaultAllowed: false, verdict: "warnings")
+        XCTAssertEqual(ReviewPresentation.mergeSelection([rescanned], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        // A choice for a tool that is gone is ignored.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([readA], choices: ["gone": .init(allowed: true, tool: writeA)]), ["read_a"])
+    }
+
+    func testApproveLabels() {
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 3, total: 9, definitionsCaptured: true), "Approve Server (3 of 9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 9, definitionsCaptured: true), "Approve Server (0 of 9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 1, total: 1, definitionsCaptured: true), "Approve Server (1 of 1 tool)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 0, definitionsCaptured: true), "Approve Without Seeing Tools")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 5, definitionsCaptured: false), "Approve Without Seeing Tools")
+        XCTAssertEqual(ReviewPresentation.approveAllLabel(total: 9), "Approve All (9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveAllLabel(total: 1), "Approve All (1 tool)")
+    }
+
+    func testSelectionHintMatchesWeb() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        let web = try String(contentsOf: url.appendingPathComponent("frontend/src/utils/reviewPresentation.ts"))
+        XCTAssertTrue(web.contains("'\(ReviewPresentation.selectionHint)'"), "the macOS hint must be the Web sentence")
+        XCTAssertEqual(ReviewPresentation.selectionHint, "Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab.")
+    }
+
     func testToolStateSelectsTheControl() throws {
         let tools = try review(quarantined: false, tools: [("p", "pending", false), ("c", "changed", false), ("a", "approved", false), ("b", "approved", true)]).tools
         XCTAssertEqual(ReviewPresentation.toolState(tools[0], quarantined: false), .approveReject)

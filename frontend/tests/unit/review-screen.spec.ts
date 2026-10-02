@@ -13,11 +13,11 @@ const review = (definitionsCaptured = true) => ({
   data: {
     server: { name: 'fixture', transport: 'stdio', command: 'node ./fixture.js', trust_mode: 'manual', source_registry_id: 'official', source_registry_provenance: 'catalog', quarantined: true, definitions_captured: definitionsCaptured },
     tools: [
-      { name: 'read_file', description: 'read', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
-      { name: 'write_file', description: 'write', tier: 'write', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
-      { name: 'remove_file', description: 'remove', tier: 'destructive', approval_status: 'changed', disabled: false, scan_verdict: 'warnings', diff: { description: '- old\n+ new' } },
-      { name: 'implicit', description: 'implicit', tier: 'unannotated', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
-      { name: 'legacy', description: 'legacy', tier: 'unknown', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
+      { name: 'read_file', description: 'read', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: true },
+      { name: 'write_file', description: 'write', tier: 'write', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false },
+      { name: 'remove_file', description: 'remove', tier: 'destructive', approval_status: 'changed', disabled: false, scan_verdict: 'warnings', default_allowed: false, diff: { description: '- old\n+ new' } },
+      { name: 'implicit', description: 'implicit', tier: 'unannotated', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false },
+      { name: 'legacy', description: 'legacy', tier: 'unknown', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false },
     ],
   },
 })
@@ -51,10 +51,11 @@ describe('ReviewScreen (T086)', () => {
 
   it('sends unchecked tools as the block selection', async () => {
     const wrapper = await mountScreen()
-    await wrapper.get('[data-test="review-allow-remove_file"]').setValue(false)
+    // Only read_file starts checked (default_allowed); checking write_file takes it off the block list.
+    await wrapper.get('[data-test="review-allow-write_file"]').setValue(true)
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['remove_file'])
+    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['remove_file', 'implicit', 'legacy'])
   })
 
   it('offers definition capture and asks for a blind-approval confirmation', async () => {
@@ -83,7 +84,7 @@ describe('ReviewScreen (T086)', () => {
     expect(wrapper.findAll('article[data-test^="review-tool-"]')).toHaveLength(1)
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, [])
+    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['write_file', 'remove_file', 'implicit', 'legacy'])
     expect(api.listScanHistory).toHaveBeenCalled()
   })
 
@@ -97,7 +98,7 @@ describe('ReviewScreen (T086)', () => {
     expect(forceDialog.showModal).toHaveBeenCalled()
     await wrapper.findAll('dialog')[1].get('button.btn-error').trigger('click')
     await flushPromises()
-    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'fixture', true, [])
+    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'fixture', true, ['write_file', 'remove_file', 'implicit', 'legacy'])
   })
 
 	it('keeps fleet scan start and progress controls reachable from the review flow', async () => {

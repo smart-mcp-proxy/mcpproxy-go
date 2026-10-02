@@ -1430,6 +1430,8 @@ export interface ReviewTool {
   scan_verdict: string
   held_reason?: string
   held_signals?: string[]
+  /** Fail-closed default selection computed by the core (D41); absent on an older core, which reads as false. */
+  default_allowed?: boolean
   previous?: ReviewToolPrevious | null
   diff?: ReviewToolDiff | null
 }
