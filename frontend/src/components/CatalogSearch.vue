@@ -339,6 +339,24 @@ async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
     : 'More than one installed server matches this catalog entry. Open the intended server from Servers.'
 }
 
+// formatCount renders a popularity count compactly: 950, 1.2k, 21k, 1.2M.
+function formatCount(n: number): string {
+  if (n < 1000) return String(n)
+  const compact = (v: number, suffix: string) => `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10}${suffix}`
+  if (Math.round(n / 1000) < 1000) return compact(n / 1000, 'k')
+  return compact(n / 1_000_000, 'M')
+}
+
+// popularityLabel is the card's popularity signal (FR-061): GitHub stars when
+// known ("★ 21k"), else source-native installs ("1.2M installs"), else nothing.
+function popularityLabel(r: CatalogResult): string {
+  const p = r.popularity
+  if (!p) return ''
+  if (p.stars && p.stars > 0) return `★ ${formatCount(p.stars)}`
+  if (p.installs && p.installs > 0) return `${formatCount(p.installs)} installs`
+  return ''
+}
+
 // CatalogResultCard is a small local functional-ish component (kept in this
 // file rather than a separate SFC: it is presentational-only and has no
 // reason to be reused outside CatalogSearch).
@@ -368,10 +386,19 @@ const CatalogResultCard = defineComponent({
                 // interpolation already escapes this.
                 h('h3', { class: 'font-semibold truncate', 'data-test': 'catalog-result-title' }, r.title),
                 h('p', { class: 'text-xs text-base-content/60 font-mono truncate' }, r.id),
+                r.publisher || popularityLabel(r)
+                  ? h('p', { class: 'text-xs text-base-content/60 mt-0.5 flex gap-2' }, [
+                      r.publisher ? h('span', { class: 'truncate', 'data-test': 'catalog-result-publisher' }, `by ${r.publisher}`) : null,
+                      popularityLabel(r) ? h('span', { class: 'shrink-0', 'data-test': 'catalog-result-popularity' }, popularityLabel(r)) : null,
+                    ])
+                  : null,
               ]),
               h('div', { class: 'flex gap-1 shrink-0' }, [
-                r.official ? h('span', { class: 'badge badge-sm badge-primary' }, 'Official') : null,
-                r.verified && !r.official ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
+                // Spec 109 D36.6: no per-card "Official" badge. Every default
+                // source is official, so it carried no signal; the Official
+                // section heading says it once. Verified means the publisher
+                // owns the source repository (D36.5).
+                r.verified ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
                 r.from_cache
                   ? h('span', { class: 'badge badge-sm badge-warning badge-outline', title: 'The source\u2019s live search is unavailable; this entry is from its cached list.', 'data-test': `catalog-from-cache-${r.source}-${r.id}` }, 'From cached list')
                   : null,
