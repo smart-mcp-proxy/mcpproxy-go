@@ -322,6 +322,14 @@ Verified post-merge review findings of 108-c2, 108-e and 108-g (audit finding id
 
 ---
 
+## Phase 15: PR fix-1458 — profile index reconcile on every profile change (issue #1458 item 1)
+
+Go only, after 108-l and retro-go (no UI).
+
+- [x] T147 [US1] #1458 item 1: `ApplyConfig` and `ReloadConfiguration` reconcile the per-profile indexes when `profiles` or `anonymous_profile` change (single owner; the funnel's own call removed). A stale index only hid in-scope tools (`retrieve_tools` re-admits every hit against the live scope), it never exposed one. Tests: `TestApplyConfig_ProfileServersEditRebuildsProfileIndexImmediately`, `…ProfileCreateRenameDeleteReconcileImmediately`, `…AnonymousProfileOnlyEditIsHarmless`, `TestProfileIndexInputsChanged`, `TestReloadConfiguration_ProfileEditRebuildsProfileIndexImmediately`, `TestRetrieveTools_ProfileWidenedByHandEditIsSearchableImmediately`, `…ByRawApply…`, `…ByConfigPatch…`, `TestRetrieveTools_ProfileNarrowedStaleIndexNeverExposes`
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
@@ -335,6 +343,7 @@ Verified post-merge review findings of 108-c2, 108-e and 108-g (audit finding id
 Spec 109-l (attention kinds from 108 warnings, parity rows, macOS ScopeFilter un-hiding) ← 108-f, 108-i, 108-j, 108-k, 109-i
 ```
 
+- fix-1458 (Go only, no UI) lands after 108-l and 108-retro-go.
 - 108-d runs its matrix over every resolution source, so it lands after 108-c (binding/anonymous rows need client credentials). 108-b does not need 108-c: its discovery rows use URL, session and legacy-pin sources. Because 108-b and 108-c merge in parallel, neither can extend the other's tests; 108-d (the first PR after both) adds the binding/anonymous rows to 108-b's table-driven discovery tests in T044a.
 - Actual merge order so far: `a → c (part 1, #1389) → b → d → c2 → e → f …` — 108-d merged before the second half of 108-c (108-c2), so the FR-009a gate is open for 108-c2 and its US5 tests need no override.
 - 108-k depends on 108-f (108-e is always merged before f) and on Spec 109-h/109-i/109-k (the macOS `ClientsView`, the `MainWindow.swift` sidebar sections and `SettingsView.swift` wording, and the `ScopeFilter` it extends); it runs in parallel with g, h, i and does not wait for j. The 109-i edge (codex review round 2) removes the unordered `MainWindow.swift`/`SettingsView.swift` pair; T110a pins that both sides' items survive.
@@ -354,4 +363,4 @@ MVP = 108-a + 108-b (US1 discovery via config + `/mcp/p/<slug>` or pinned tokens
 
 ## Task Count
 
-180 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127.
+181 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147.
