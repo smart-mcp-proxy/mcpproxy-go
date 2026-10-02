@@ -173,8 +173,19 @@ func TestScopeOracleV3_NewResolutionSourcesMatchAcrossFixtures(t *testing.T) {
 					fullResp := callRetrieveToolsV3(t, full.proxy, callers.full, query, 10)
 					require.NotNil(t, narrowResp.HiddenByProfile, "the profile must be active for %s", source)
 					require.NotNil(t, fullResp.HiddenByProfile, "the profile must be active for %s", source)
-					assert.Nil(t, narrowResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
-					assert.Nil(t, fullResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
+					// Spec 108 D39: a credential source (locked pin, switchable
+					// binding) tells the caller its OWN profile; the anonymous source
+					// never reveals the operator's anonymous_profile. Either way the
+					// two fixtures must answer identically (JSONEq below).
+					if source == "anonymous profile" {
+						assert.Nil(t, narrowResp.Profile, "the anonymous source never reveals the base profile")
+						assert.Nil(t, fullResp.Profile, "the anonymous source never reveals the base profile")
+					} else {
+						require.NotNil(t, narrowResp.Profile, "a credential source names its own profile for %s", source)
+						require.NotNil(t, fullResp.Profile, "a credential source names its own profile for %s", source)
+						assert.Equal(t, "cap-read-a", *narrowResp.Profile)
+						assert.Equal(t, "cap-read-a", *fullResp.Profile)
+					}
 					if query == "read_thing" {
 						require.NotEmpty(t, narrowResp.Tools, "positive control: the admitted read tool is discoverable")
 						require.NotEmpty(t, fullResp.Tools, "positive control: the admitted read tool is discoverable")

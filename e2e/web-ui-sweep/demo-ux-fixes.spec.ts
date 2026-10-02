@@ -69,16 +69,18 @@ for (const viewport of VIEWPORTS) {
     const measured = await chip.evaluate((el) => {
       const rect = el.getBoundingClientRect()
       const cell = el.closest('td')!.getBoundingClientRect()
-      // One line: a Range over the inner text node reports a single client rect.
+      // One line: every client rect of a Range over the text starts at the same top
+      // (a wrapped second line would add a rect with a different top).
       const inner = el.querySelector('.truncate') ?? el
       const range = document.createRange()
       range.selectNodeContents(inner)
+      const tops = new Set(Array.from(range.getClientRects()).map((r) => Math.round(r.top)))
       return {
         scrollHeight: (el as HTMLElement).scrollHeight,
         clientHeight: (el as HTMLElement).clientHeight,
         scrollWidth: (inner as HTMLElement).scrollWidth,
         clientWidth: (inner as HTMLElement).clientWidth,
-        lines: range.getClientRects().length,
+        lines: tops.size,
         insideCell: rect.left >= cell.left - 1 && rect.right <= cell.right + 1 && rect.top >= cell.top - 1 && rect.bottom <= cell.bottom + 1,
         hasTitle: el.hasAttribute('title'),
       }

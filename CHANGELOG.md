@@ -7,6 +7,16 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **profiles / tool refusals:** a profile's tool refusal now names the profile to a caller whose
+  effective profile is its own (a pin, a client binding, the URL or `set_profile`):
+  `blocked by profile: github:create_issue is a write tool; profile "Work Read-only" (work-readonly)
+  allows read tools only`, and likewise for the deny-rule and unannotated texts. `retrieve_tools`
+  returns `profile` for the same callers. A caller that connects without a credential keeps the
+  previous, non-disclosing text and gets no `profile` field, so the operator's `anonymous_profile` is
+  never handed out. **Migration:** a consumer that matches the old refusal wording for a pinned or
+  bound credential should match on the `block_reason` (`profile_tier`, `profile_rule`,
+  `profile_unannotated`) instead. (spec 108 D39, narrowing D27)
+
 - **mcp/describe_tool:** the per-id error code `invisible` is retired. An id on a server the
   session cannot see (agent-token scope or active profile) now reports `not_found` — the same
   code, `remediation` text and shape as an id that does not exist. A distinct code confirmed
@@ -60,6 +70,13 @@ Releases follow [Semantic Versioning](https://semver.org/).
   [Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Features
+
+- **catalog:** a catalog source whose live search times out or fails is now answered from the listing
+  the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
+  `from_cache` ("From cached list" in the Web UI and macOS, `(cached)` in the CLI) and the source
+  stays in `unavailable[]` with `fallback` and `cached_at`. The empty-query browse lists Popular
+  before Official and the curated reference servers first. (spec 109 FR-060, D35)
+- **web:** the command palette (Cmd/Ctrl+K) also finds profiles, clients and agent tokens. (spec 109 FR-054)
 
 - **mcp:** schema-deferred direct mode — a new `direct_tool_response_mode` key (`full` | `deferred`,
   **default `full`, so this is opt-in and changes nothing until you turn it on**). In `deferred`,
@@ -149,6 +166,14 @@ Releases follow [Semantic Versioning](https://semver.org/).
     ([Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Bug Fixes
+
+- **web/settings:** toggles for nullable settings (`quarantine_enabled`, `telemetry.enabled` and the
+  `audit_log.*` booleans) show the value the core actually applies instead of OFF when the key is
+  absent, and the page header now says to press Save changes instead of "Changes save instantly".
+  (spec 109 D35)
+- **web/clients:** the token Profile chip stays on one line, radio and checkbox labels sit next to
+  their control, and a client with no mcpproxy entry offers **Connect** (macOS: Connect…) instead of
+  "Upgrade to client credential". (spec 108 D39)
 
 - **security/scope:** `set_profile` and `/mcp/p` now report the intersection of an agent
   token's grant and the requested profile through a single selectable-profile predicate; a

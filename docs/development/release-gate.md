@@ -129,6 +129,10 @@ page disagree):
   sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
   agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
   needs-attention item, layout and keyboard order).
+- `demo-ux-fixes.spec.ts`: the layout findings of the live Web UI demo, measured
+  at 1440 and 900 px: the token Profile chip is one line inside its cell, and
+  radio labels sit next to their radios in the create-profile, custom-client and
+  bulk-move dialogs.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),

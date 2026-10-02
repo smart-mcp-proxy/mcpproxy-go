@@ -500,6 +500,14 @@ test('the command palette finds a profile and opens its editor (Spec 109 T163)',
     const during = listRequests.slice(before)
     expect(during.filter((p) => p === '/api/v1/clients'), 'one /clients request after the first keystroke').toHaveLength(1)
     expect(during.filter((p) => p === '/api/v1/tokens'), 'one /tokens request after the first keystroke').toHaveLength(1)
+    // The default row is "Search tools for ..."; arrow down to the profile row, then Enter.
+    const options = palette.locator('[role="option"]')
+    const index = await options.evaluateAll(
+      (els, id) => els.findIndex((el) => el.getAttribute('data-test') === id),
+      await row.getAttribute('data-test'),
+    )
+    expect(index).toBeGreaterThan(0)
+    for (let n = 0; n < index; n++) await page.keyboard.press('ArrowDown')
     await page.keyboard.press('Enter')
     await expect(page).toHaveURL(new RegExp(`/ui/profiles/${RO_PROFILE}`))
   } finally {
