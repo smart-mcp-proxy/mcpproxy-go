@@ -85,15 +85,21 @@ func TestReviewCommandGoldens(t *testing.T) {
 func TestReviewCommandPromptsAndHonorsDecline(t *testing.T) {
 	for _, action := range []string{"approve", "reject"} {
 		t.Run(action, func(t *testing.T) {
+			// approve reads the review before it prompts (the prompt names the
+			// exact tool count), so it needs a daemon; reject does not.
+			recorder := &reviewRecorder{}
+			newMemoryReviewDaemon(t, recorder)
+			setOutputGlobals(t, "table", false)
 			var prompt string
 			cmd := newReviewCommand(func(message string) (bool, error) {
 				prompt = message
 				return false, nil
 			})
-			cmd.SetArgs([]string{action, "filesystem"})
+			cmd.SetArgs([]string{action, "memory"})
 			require.NoError(t, cmd.Execute())
-			require.Contains(t, prompt, "filesystem")
+			require.Contains(t, prompt, "memory")
 			require.Contains(t, strings.ToLower(prompt), action)
+			require.Empty(t, recorder.writes(), "declining sends no write")
 		})
 	}
 }

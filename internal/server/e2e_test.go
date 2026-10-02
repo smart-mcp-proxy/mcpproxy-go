@@ -1180,6 +1180,9 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 			Tier        string          `json:"tier"`
 			ScanVerdict string          `json:"scan_verdict"`
 			Annotations json.RawMessage `json:"annotations"`
+			// default_allowed is always present and false on the live path:
+			// nothing was scanned, so nothing starts pre-selected (D41.7).
+			DefaultAllowed *bool `json:"default_allowed"`
 		} `json:"tools"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(resultText), &liveReview))
@@ -1188,6 +1191,10 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	require.Equal(t, "write", liveReview.Tools[0].Tier)
 	require.Equal(t, "not_scanned", liveReview.Tools[0].ScanVerdict)
 	require.NotEmpty(t, liveReview.Tools[0].Annotations)
+	for _, tool := range liveReview.Tools {
+		require.NotNil(t, tool.DefaultAllowed, "live inspection must carry default_allowed for %s", tool.Name)
+		require.False(t, *tool.DefaultAllowed, "live inspection must start %s unchecked", tool.Name)
+	}
 
 	// After inspection, server should be disconnected again (exemption revoked)
 	time.Sleep(1 * time.Second)

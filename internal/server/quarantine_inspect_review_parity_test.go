@@ -54,6 +54,64 @@ func TestInspectQuarantinedTools_UsesComposerWhenDefinitionsCaptured(t *testing.
 	require.JSONEq(t, string(wantTools), string(gotTools))
 }
 
+// default_allowed is the review screens' fail-closed selection hint (D41). The
+// captured inspection serialises the composer, so it must equal the REST value
+// for a mix of tiers; inspect_tools is an approval-state listing and does not
+// carry it.
+func TestInspectQuarantinedCarriesDefaultAllowed(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{
+		Name: "github", Enabled: true, Quarantined: true,
+	}})
+	require.NoError(t, rt.StorageManager().SaveUpstreamServer(&config.ServerConfig{
+		Name: "github", Enabled: true, Quarantined: true,
+	}))
+	readOnly, writes := true, false
+	for name, hint := range map[string]*bool{"list_issues": &readOnly, "create_issue": &writes} {
+		require.NoError(t, rt.StorageManager().SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "github", ToolName: name, Status: storage.ToolApprovalStatusPending,
+			CurrentHash: "h-" + name, CurrentDescription: name,
+			CurrentAnnotations: &config.ToolAnnotations{ReadOnlyHint: hint},
+		}))
+	}
+	review, err := rt.GetServerReview(context.Background(), "github")
+	require.NoError(t, err)
+	want := map[string]bool{}
+	for _, tool := range review.Tools {
+		want[tool.Name] = tool.DefaultAllowed
+	}
+	require.Len(t, want, 2)
+
+	result, err := proxy.handleInspectQuarantinedTools(context.Background(), quarantineRequest(map[string]interface{}{"name": "github"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "%v", result.Content)
+	var payload struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &payload))
+	require.Len(t, payload.Tools, 2)
+	for _, tool := range payload.Tools {
+		var name string
+		require.NoError(t, json.Unmarshal(tool["name"], &name))
+		raw, ok := tool["default_allowed"]
+		require.Truef(t, ok, "captured inspection must carry default_allowed for %s", name)
+		var got bool
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, want[name], got, name)
+	}
+
+	listed, err := proxy.handleInspectToolApprovals(context.Background(), quarantineRequest(map[string]interface{}{"name": "github"}))
+	require.NoError(t, err)
+	require.False(t, listed.IsError, "%v", listed.Content)
+	var approvals struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(listed.Content[0].(mcp.TextContent).Text), &approvals))
+	require.NotEmpty(t, approvals.Tools)
+	for _, tool := range approvals.Tools {
+		require.NotContains(t, tool, "default_allowed", "inspect_tools is an approval listing, not a selection hint")
+	}
+}
+
 func TestInspectToolsIncludesCanonicalReviewFields(t *testing.T) {
 	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{
 		Name: "github", Enabled: true, Quarantined: true,
