@@ -49,7 +49,7 @@ type p109Task struct {
 }
 
 var (
-	p109TaskLine  = regexp.MustCompile("^- \\[[ xX]\\] (T\\d+[a-z]*)\\b")
+	p109TaskLine  = regexp.MustCompile(`^- \[[ xX]\] (T\d+[a-z]*)\b`)
 	p109Backtick  = regexp.MustCompile("`([^`]+)`")
 	p109PathLike  = regexp.MustCompile(`^[\w@./-]+\.(go|ts|vue|swift|json|sh|md|yml|yaml|js|py)$`)
 	p109TestLike  = regexp.MustCompile(`(_test\.go|\.spec\.ts|\.test\.ts|Tests?\.swift|\.test\.sh)$`)

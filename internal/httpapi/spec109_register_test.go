@@ -88,15 +88,12 @@ func p109CheckRegisterRow(t testing.TB, row p109RegisterRow, frs109 map[string]b
 	case strings.HasPrefix(d, "108"):
 		// "108 (FR-044, removal). Interim: ..." names Spec 108 FRs in the first
 		// parenthesis only.
-		seg := d
+		seg := ""
 		if open := strings.Index(d, "("); open >= 0 {
-			if cl := strings.Index(d[open:], ")"); cl >= 0 {
-				seg = d[open : open+cl]
-			} else {
-				seg = d[open:]
+			seg = d[open:]
+			if cl := strings.Index(seg, ")"); cl >= 0 {
+				seg = seg[:cl]
 			}
-		} else {
-			seg = ""
 		}
 		for _, fr := range p109ExpandFRs(seg) {
 			if !frs108[fr] {
