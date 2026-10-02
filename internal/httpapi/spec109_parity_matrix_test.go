@@ -115,6 +115,9 @@ func p109CompareToSpec(spec []p109SpecRow, m p109Matrix) []string {
 	var problems []string
 	byRow := map[string]p109MatrixRow{}
 	for _, r := range m.Rows {
+		if _, dup := byRow[r.Row]; dup {
+			problems = append(problems, fmt.Sprintf("row %s appears twice in parity-matrix.json", r.Row))
+		}
 		byRow[r.Row] = r
 	}
 	seen := map[string]bool{}
@@ -188,6 +191,11 @@ func TestSpec109ParityMatrixMatchesSpec(t *testing.T) {
 	t.Run("a capability text mismatch is caught", func(t *testing.T) {
 		mut := p109CloneMatrix(m)
 		mut.Rows[2].Capability += " (edited)"
+		require.NotEmpty(t, p109CompareToSpec(spec, mut))
+	})
+	t.Run("a duplicated row is caught", func(t *testing.T) {
+		mut := p109CloneMatrix(m)
+		mut.Rows = append(mut.Rows, mut.Rows[3])
 		require.NotEmpty(t, p109CompareToSpec(spec, mut))
 	})
 	t.Run("a (108) cell recorded as a plain tick is caught", func(t *testing.T) {

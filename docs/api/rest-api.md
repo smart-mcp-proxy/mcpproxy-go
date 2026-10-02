@@ -912,7 +912,7 @@ Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:s
 
 #### GET /api/v1/review
 
-The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`) or a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts). `count` is the number of rows, the number the Review queue badge shows. Filtered like `GET /servers` for scoped callers.
+The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`) or a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts). `count` is the number of rows, the number the Review queue badge shows. For a scoped caller (an agent token or a non-admin user session) the queue lists only the servers that caller may see.
 
 ```json
 {

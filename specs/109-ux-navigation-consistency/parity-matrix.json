@@ -1095,19 +1095,19 @@
         },
         "cli": {
           "status": "out",
-          "reason": "CLI and export stay unfolded for scripts",
+          "reason": "CLI and export stay unfolded for scripts.",
           "ids": [],
           "tests": []
         },
         "mcp": {
           "status": "out",
-          "reason": "CLI and export stay unfolded for scripts",
+          "reason": "Agents do not query activity history (Spec 108 parity row 15).",
           "ids": [],
           "tests": []
         },
         "rest": {
           "status": "out",
-          "reason": "CLI and export stay unfolded for scripts",
+          "reason": "Folding is presentation only; the REST list stays unfolded, like the CLI and export.",
           "ids": [],
           "tests": []
         }
@@ -1246,7 +1246,7 @@
         },
         "mcp": {
           "status": "out",
-          "reason": "macOS: the native Home already shows token savings, distribution and calls; a separate native Usage view is a follow-up (navigation-map.md)",
+          "reason": "Usage data is an operator view and is not agent-facing.",
           "ids": [],
           "tests": []
         },
@@ -1285,19 +1285,19 @@
         },
         "cli": {
           "status": "out",
-          "reason": "CLI/MCP have no navigation",
+          "reason": "The CLI has no navigation.",
           "ids": [],
           "tests": []
         },
         "mcp": {
           "status": "out",
-          "reason": "CLI/MCP have no navigation",
+          "reason": "MCP has no navigation.",
           "ids": [],
           "tests": []
         },
         "rest": {
           "status": "out",
-          "reason": "CLI/MCP have no navigation",
+          "reason": "Deep links are UI navigation; REST takes the same filters as query parameters directly.",
           "ids": [],
           "tests": []
         }
@@ -1381,7 +1381,7 @@
         },
         "rest": {
           "status": "out",
-          "reason": "macOS uses per-view search fields and the standard Find (⌘F); a web-style palette would not match platform conventions",
+          "reason": "The palette is a Web UI feature and has no API.",
           "ids": [],
           "tests": []
         }
