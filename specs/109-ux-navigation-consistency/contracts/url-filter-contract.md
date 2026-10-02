@@ -58,7 +58,7 @@ useScopeQuery(page: PageId): {
 
 | `view` | Request | Contract parameters that apply |
 |---|---|---|
-| `calls` | `GET /activity?type=tool_call,internal_tool_call` | all Activity parameters |
+| `calls` | `GET /activity?type=tool_call,internal_tool_call` (+ `policy_decision` when `status=blocked`: Web `effectiveTypes`, macOS `ScopeFilter`) | all Activity parameters |
 | `system` | `GET /activity?type=<every other type>` | all Activity parameters |
 | `all` | `GET /activity` (no `type`) | all Activity parameters |
 | `sessions` | `GET /sessions` (existing route and its own `limit`/`status` paging; no `/activity` request, no `type`) | `session` selects and highlights that session row; `from`/`to` stay in the URL and render as disabled "not applicable here" chips (rule 5); `server`, `tool`, `status`, `type`, `auth_type` likewise stay in the URL as disabled chips. `profile`, `client` and `token` (once available) **are** sent to `GET /sessions` (Spec 108 FR-031) |
@@ -74,7 +74,7 @@ An explicit `type` overrides the `view` mapping for `calls`/`system`/`all` and i
 5. A page that does not support a sticky parameter keeps it in the URL and shows it as a disabled chip reading "not applicable here". A parameter a page supports only client-side (Tools/Servers `status`) is applied in the page and never sent to REST; a value a page cannot apply (a Usage range other than the three `window` presets) is shown as a disabled chip that says so — no chip ever implies server-side filtering the backend does not perform (codex round 3).
 6. Unknown parameters are preserved untouched. Legacy `?session=` links on Activity keep working, and `?risk=` maps to `tier`.
 7. A parameter or link row whose `requires` feature is absent from `GET /api/v1/status` `features` is hidden (rule in the parameter section); it becomes visible without a reload when the status refresh lists it.
-8. **Contradictory parameters** (today exactly one case: a URL `server` that differs from the `tool` prefix): `toRest()` returns `null`; the page issues no request, shows the conflict empty state and marks both chips; removing either chip resolves it and triggers the normal fetch. The CLI exits 1 before any request and macOS `ScopeFilter.restQuery()` returns `nil` with the same empty state, so no surface shows rows under filters it did not apply. A future parameter pair that can contradict follows this rule; precedence (one value silently winning) is never used.
+8. **Contradictory parameters** (today exactly one case: a URL `server` that differs from the `tool` prefix): `toRest()` returns `null`; the page issues no request, shows the conflict empty state and marks both chips; removing either chip resolves it and triggers the normal fetch. Clearing either conflicting filter, or "Clear filters", issues exactly one request for what remains. The CLI exits 1 before any request and macOS `ScopeFilter.restQuery()` returns `nil` with the same empty state, so no surface shows rows under filters it did not apply. A future parameter pair that can contradict follows this rule; precedence (one value silently winning) is never used.
 
 ## Link map (owned by Spec 109)
 

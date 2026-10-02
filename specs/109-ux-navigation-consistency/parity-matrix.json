@@ -1180,19 +1180,24 @@
         "web": {
           "status": "must",
           "ids": [
-            "component:frontend/src/components/UsageSummaryStrip.vue"
+            "route:home",
+            "component:frontend/src/views/Home.vue",
+            "component:frontend/src/views/Usage.vue"
           ],
           "tests": [
-            "vitest:frontend/tests/unit/usage-tokens-saved-estimate.spec.ts"
+            "vitest:frontend/tests/unit/usage-tokens-saved-estimate.spec.ts",
+            "vitest:frontend/tests/unit/home-token-savings-estimate.spec.ts"
           ]
         },
         "macos": {
           "status": "must",
           "ids": [
-            "symbol:native/macos/MCPProxy/MCPProxy/Views/HomeView.swift#HomeView"
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/HomeView.swift#HomeView",
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/HomeView.swift#HomeTokenSavingsBadge"
           ],
           "tests": [
-            "xctest:native/macos/MCPProxy/MCPProxyTests/HomeRoutingTests.swift"
+            "xctest:native/macos/MCPProxy/MCPProxyTests/HomeRoutingTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/HomeTokenSavingsBadgeTests.swift"
           ]
         },
         "cli": {
