@@ -112,7 +112,7 @@ func TestSettingsNullableDefaultsMatchGoResolvers(t *testing.T) {
 // and maps are not followed: per-server and per-profile structs are edited on
 // their own pages, not through the Settings catalogue.
 func collectNullableBoolPaths(t reflect.Type, prefix string, seen map[reflect.Type]bool, out *[]string) {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct || seen[t] {
@@ -131,11 +131,11 @@ func collectNullableBoolPaths(t reflect.Type, prefix string, seen map[reflect.Ty
 			path = prefix + "." + tag
 		}
 		ft := f.Type
-		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Bool {
+		if ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Bool {
 			*out = append(*out, path)
 			continue
 		}
-		if ft.Kind() == reflect.Ptr || ft.Kind() == reflect.Struct {
+		if ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Struct {
 			collectNullableBoolPaths(ft, path, seen, out)
 		}
 	}

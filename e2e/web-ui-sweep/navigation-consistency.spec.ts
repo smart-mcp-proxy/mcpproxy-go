@@ -10,6 +10,7 @@
 // Launcher: scripts/run-web-smoke.sh (boots a real mcpproxy instance with its
 // embedded frontend, never a dev server).
 import { test, expect, Page } from '@playwright/test'
+import { RO_PROFILE, SERVER, cleanupProfiles, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -474,5 +475,34 @@ test('client, profile and token scope links stay hidden without scope_filters (S
       page.locator(`[data-test="clients-page"] a[href*="${key}="]`),
       `a ${key}= link must stay hidden until features.scope_filters lists it`,
     ).toHaveCount(0)
+  }
+})
+
+// Spec 109 D35 (T163): the palette also finds profiles, clients and agent
+// tokens. The three lists load on the first non-empty input, never on open.
+test('the command palette finds a profile and opens its editor (Spec 109 T163)', async ({ page }) => {
+  test.skip(!SERVER, 'needs a fixture upstream (SWEEP_SERVER_NAME) to seed the profile')
+  await seedProfiles()
+  try {
+    const listRequests: string[] = []
+    page.on('request', (request) => {
+      const u = new URL(request.url())
+      if (/^\/api\/v1\/(profiles|clients|tokens)$/.test(u.pathname)) listRequests.push(u.pathname)
+    })
+    await goto(page, '/', 'main')
+    const palette = page.locator('dialog[data-test="command-palette"]')
+    await page.keyboard.press('ControlOrMeta+K')
+    await expect(palette).toHaveAttribute('open', '')
+    const before = listRequests.length
+    await palette.locator('input').fill('e2e')
+    const row = palette.locator('[data-test^="palette-row-profiles-"]').first()
+    await expect(row).toContainText(RO_PROFILE)
+    const during = listRequests.slice(before)
+    expect(during.filter((p) => p === '/api/v1/clients'), 'one /clients request after the first keystroke').toHaveLength(1)
+    expect(during.filter((p) => p === '/api/v1/tokens'), 'one /tokens request after the first keystroke').toHaveLength(1)
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(new RegExp(`/ui/profiles/${RO_PROFILE}`))
+  } finally {
+    await cleanupProfiles()
   }
 })

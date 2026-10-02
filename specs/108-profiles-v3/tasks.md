@@ -328,6 +328,16 @@ Go only, after 108-l and retro-go (no UI).
 
 - [x] T147 [US1] #1458 item 1: `ApplyConfig` and `ReloadConfiguration` reconcile the per-profile indexes when `profiles` or `anonymous_profile` change (single owner; the funnel's own call removed). A stale index only hid in-scope tools (`retrieve_tools` re-admits every hit against the live scope), it never exposed one. Tests: `TestApplyConfig_ProfileServersEditRebuildsProfileIndexImmediately`, `…ProfileCreateRenameDeleteReconcileImmediately`, `…AnonymousProfileOnlyEditIsHarmless`, `TestProfileIndexInputsChanged`, `TestReloadConfiguration_ProfileEditRebuildsProfileIndexImmediately`, `TestRetrieveTools_ProfileWidenedByHandEditIsSearchableImmediately`, `…ByRawApply…`, `…ByConfigPatch…`, `TestRetrieveTools_ProfileNarrowedStaleIndexNeverExposes`
 
+## Phase 16: PR demo-ux-fixes — gaps found in the live Web UI demo (2026-10-02)
+
+Four findings from a live demo of `main` at `b3191a059`; Spec 109's T160–T165 own the catalog, palette and Settings ones. Decisions: research D39.
+
+- [x] T148 [US1] #4 the tool refusals name the caller's OWN profile (narrows D27): `profileDisclosedTo`, `profileRefusalSubject` and `profileToolPolicyRefusal` in `internal/server/profile_refusals.go`; pin, binding, url and session are told `profile "<title>" (<slug>)`, anonymous and dangling callers keep today's text; `retrieve_tools` returns `profile` for the same sources through the same predicate. Golden `internal/profile/testdata/contract/tool_refusals.json` read by `internal/server/profile_refusals_test.go`, the MCP, REST and replay tests in `internal/server/call_tool_profile_v3_test.go` and `internal/server/rest_profile_v3_test.go`, `internal/httpapi/tool_refusal_golden_test.go` and `cmd/mcpproxy/activity_blocked_refusal_test.go`
+- [x] T149 [US2] #7 the token Profile chip stays on one line with an ellipsis and the full title on hover: `frontend/tests/unit/agent-tokens-profile-chip.spec.ts`
+- [x] T150 [US2] #8 a client row with no mcpproxy entry offers Connect, not Upgrade (FR-042, FR-048): the `credential_cta` family of `internal/profile/testdata/contract/labels.json`, read by `internal/httpapi/profiles_v3_parity_test.go`, `frontend/tests/unit/profiles-enums-labels.spec.ts`, `frontend/tests/unit/client-binding-controls.spec.ts`, `ProfilesEnumsLabelsTests.swift`, `ClientBindingModelTests.swift` and `ClientsTrayMenuTests.swift`
+- [x] T151 [US2] #9 radio and checkbox labels sit next to their control: one unlayered rule in `frontend/src/assets/main.css`, pinned by `frontend/tests/unit/form-control-label-shim.spec.ts` and the Playwright sweep `e2e/web-ui-sweep/demo-ux-fixes.spec.ts`
+- [x] T152 [US2] Docs and bookkeeping for T148–T151: `docs/features/profiles.md`, `contracts/refusals.md`, `contracts/mcp-tools.md`, FR-011, FR-042, FR-048, `parity-matrix.json`, research D39
+
 ---
 
 ## Dependencies & Execution Order
@@ -363,4 +373,4 @@ MVP = 108-a + 108-b (US1 discovery via config + `/mcp/p/<slug>` or pinned tokens
 
 ## Task Count
 
-181 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147.
+186 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 · demo-ux-fixes 5 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147; demo-ux-fixes added T148–T152.

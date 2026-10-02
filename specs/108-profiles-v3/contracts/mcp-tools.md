@@ -9,7 +9,7 @@ When the effective profile is non-legacy (sets any of the six policy fields `max
 ```
 
 - `hidden_by_profile`: integer ≥ 0 (FR-011). Present iff the effective profile is non-legacy — including `0` when nothing matched was excluded (e.g. a `max_tier: destructive`-only profile); omitted for no profile and for legacy profiles, whatever their `title`. A dangling base (FR-020 deny-all for a pin, binding or `anonymous_profile` naming a missing profile) and the FR-008a binding guard always count as non-legacy: `hidden_by_profile: 0`. Never accompanied by names, descriptions or per-server breakdowns. Counted by the extended index API (`SearchToolsAdmitted`, data-model §2) over the full match set before the limit — `indexedToolVisible` on the already-cut result cannot do it (FR-011).
-- `profile`: effective profile slug **only when the caller selected it** (`profile_source` `url` or `session`); omitted for no profile and for every base the caller did not choose (`pin`, `binding`, `anonymous`, incl. dangling bases and the guard), so discovery never confirms that a caller is pinned or to what (FR-011, research D27).
+- `profile`: effective profile slug **only to a caller whose effective profile is its own** (`profile_source` `pin`, `binding`, `url` or `session`); omitted for no profile, for `anonymous` (the operator's `anonymous_profile`) and for a dangling base or the guard (FR-011, research D39, which narrows D27).
 - Frozen goldens: legacy fixtures unchanged; one new golden `retrieve_tools_profile_v3.golden.json`.
 
 ## `describe_tool`
