@@ -77,7 +77,7 @@ func TestSpec109DocsPublished(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(b)
+		text := strings.ReplaceAll(string(b), "\r\n", "\n")
 		start := strings.Index(text, "## New groups and commands")
 		end := strings.Index(text, "## Changed commands")
 		if start < 0 || end <= start {

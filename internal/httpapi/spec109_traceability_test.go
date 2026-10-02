@@ -91,7 +91,8 @@ func p109ReadRepo(t testing.TB, rel string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(p109Root(t), rel))
 	require.NoError(t, err, rel)
-	return string(b)
+	// Windows checkouts (core.autocrlf) yield CRLF; the table parsers split on "\n".
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 func p109Tasks(t testing.TB) map[string]p109Task {
