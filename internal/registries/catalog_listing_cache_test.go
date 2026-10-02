@@ -61,6 +61,9 @@ func useFlakyRegistry(t *testing.T, f *flakySource) {
 	t.Helper()
 	ResetListingCacheForTest()
 	t.Cleanup(ResetListingCacheForTest)
+	// Registered after the reset so it runs first: a timed-out fetch keeps
+	// running in the background and must not leak into the next test.
+	t.Cleanup(func() { quiesceWarmBehind(t) })
 	withTestRegistries(t, []RegistryEntry{
 		{ID: "slowreg", Name: "Slow", ServersURL: f.srv.URL, Provenance: "official"},
 	})
@@ -168,6 +171,8 @@ func TestSearchAll_StaleCacheOver24hIsNotUsed(t *testing.T) {
 	useFlakyRegistry(t, f)
 	opts := SearchOptions{SourceTimeout: fastTimeout, PopularityWait: -1}
 
+	// Background fetches from earlier tests read listingNow when they cache.
+	quiesceWarmBehind(t)
 	base := time.Now()
 	prev := listingNow
 	t.Cleanup(func() {
