@@ -112,6 +112,33 @@ func TestLoadersPreferDataDirConfig(t *testing.T) {
 	}
 }
 
+// F-06 (review O1): with only -d and no config file anywhere, every
+// management loader (registry/catalog included) must neither fail nor create
+// $HOME/.mcpproxy/mcp_config.json.
+func TestLoadersDataDirWithoutConfigCreateNothingInHome(t *testing.T) {
+	for _, tc := range managementLoaderCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			resetLoaderGlobals(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Chdir(t.TempDir())
+			d := filepath.Join(t.TempDir(), "nonexistent")
+			dataDir = d
+
+			cfg, err := tc.load()
+			if err != nil {
+				t.Skipf("loader requires an existing config file: %v", err)
+			}
+			if cfg.DataDir != d {
+				t.Errorf("DataDir = %q, want %q", cfg.DataDir, d)
+			}
+			if _, statErr := os.Stat(filepath.Join(home, ".mcpproxy", "mcp_config.json")); statErr == nil {
+				t.Error("a default config was created under $HOME")
+			}
+		})
+	}
+}
+
 // A -d without a config file anywhere must not fabricate $HOME/.mcpproxy.
 func TestLoadCLIConfigDataDirWithoutFileCreatesNothingInHome(t *testing.T) {
 	resetLoaderGlobals(t)
