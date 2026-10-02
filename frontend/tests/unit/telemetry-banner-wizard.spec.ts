@@ -385,6 +385,20 @@ describe('Telemetry notice reflects the effective state (Spec 109 FR-044a)', () 
     expect(banner.find('[data-test="telemetry-banner"]').exists()).toBe(false)
   })
 
+  it('a failed status fetch does not start the reuse window: the next load retries', async () => {
+    ;(api.getStatus as any).mockResolvedValueOnce({ success: false, error: 'Unauthorized' })
+    const store = useOnboardingStore()
+    await store.loadTelemetryState()
+    expect(store.telemetryState).toBeNull()
+    ;(api.getStatus as any).mockResolvedValueOnce({ success: true, data: { telemetry: envState } })
+    await store.loadTelemetryState()
+    expect(store.telemetryState?.source).toBe('env')
+    // and a success IS reused within 30 s
+    const calls = (api.getStatus as any).mock.calls.length
+    await store.loadTelemetryState()
+    expect((api.getStatus as any).mock.calls.length).toBe(calls)
+  })
+
   it('fetches status once for a banner and an inline notice mounted together', async () => {
     statusWith(envState)
     const router = routerFor()

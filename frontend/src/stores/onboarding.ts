@@ -89,7 +89,11 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     telemetryStateInFlight = (async () => {
       try {
         const res = await api.getStatus()
-        setTelemetryState(res?.success ? res.data?.telemetry ?? null : null)
+        // A failed fetch (401 before the API key is stored, a dropped
+        // connection) must not start the 30 s reuse window, or the notice
+        // would stay on "unknown" until it expires.
+        if (res?.success) setTelemetryState(res.data?.telemetry ?? null)
+        else telemetryState.value = null
       } catch {
         telemetryState.value = null
       } finally {
