@@ -396,13 +396,13 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 		}
 		active := row.CredentialState == profile.CredentialStateClient
 		row.Connected = active
-		row.State = "other"
+		row.State = contracts.ClientPresenceOther
 		if active {
 			row.ProfileSource = string(profile.SourceBinding)
 			if rec.ProfileMode == auth.ProfileModeLocked {
 				row.ProfileSource = string(profile.SourcePin)
 			}
-			row.State = "connected_never_seen"
+			row.State = contracts.ClientPresenceConnectedNeverSeen
 		}
 		if pctx != nil {
 			for _, sess := range pctx.sessions {
@@ -413,7 +413,7 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 					continue
 				}
 				if active {
-					row.State = "connected_seen"
+					row.State = contracts.ClientPresenceConnectedSeen
 				}
 				if sess.Status == "active" {
 					row.ActiveSessions++
@@ -506,14 +506,14 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		seenAfterDisconnect := lastSeen != nil && (disconnectedAt.IsZero() || lastSeen.After(disconnectedAt))
 		row.Connected = !connectedAt.IsZero() || seenAfterDisconnect || (withSessions && status.Connected)
 		if seenAfterDisconnect {
-			row.State = "connected_seen"
+			row.State = contracts.ClientPresenceConnectedSeen
 		} else if !connectedAt.IsZero() || (withSessions && status.Connected) {
-			row.State = "connected_never_seen"
+			row.State = contracts.ClientPresenceConnectedNeverSeen
 		} else if status.Exists {
-			row.State = "installed"
+			row.State = contracts.ClientPresenceInstalled
 			row.ConnectionUnverified = true
 		} else {
-			row.State = "not_installed"
+			row.State = contracts.ClientPresenceNotInstalled
 		}
 		for _, session := range sessions {
 			if !clientMatches(session.ClientName, def.ClientInfoNames) {
@@ -561,7 +561,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 			}
 		}
 		if found < 0 {
-			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: "other"})
+			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: contracts.ClientPresenceOther})
 			found = len(result) - 1
 		}
 		if session.Status == "active" {
@@ -592,7 +592,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 			}
 		}
 		if found < 0 {
-			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: "other"})
+			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: contracts.ClientPresenceOther})
 			found = len(result) - 1
 		}
 		if result[found].LastSeen == nil || seenAt.After(*result[found].LastSeen) {

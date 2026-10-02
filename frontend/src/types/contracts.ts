@@ -395,6 +395,39 @@ export type Tier =
   | typeof TierUnannotated
   | typeof TierUnknown;
 
+// Tool review states (approval_status) - generated from internal/contracts/terminology.go
+export const ToolApprovalApproved = 'approved' as const;
+export const ToolApprovalPending = 'pending' as const;
+export const ToolApprovalChanged = 'changed' as const;
+export type ToolApprovalState =
+  | typeof ToolApprovalApproved
+  | typeof ToolApprovalPending
+  | typeof ToolApprovalChanged;
+
+// Activity views (the `view` URL parameter; the CLI has no `sessions`) - generated from internal/contracts/terminology.go
+export const ActivityViewCalls = 'calls' as const;
+export const ActivityViewSessions = 'sessions' as const;
+export const ActivityViewSystem = 'system' as const;
+export const ActivityViewAll = 'all' as const;
+export type ActivityView =
+  | typeof ActivityViewCalls
+  | typeof ActivityViewSessions
+  | typeof ActivityViewSystem
+  | typeof ActivityViewAll;
+
+// Client presence states (GET /clients row state) - generated from internal/contracts/terminology.go
+export const ClientPresenceConnectedSeen = 'connected_seen' as const;
+export const ClientPresenceConnectedNeverSeen = 'connected_never_seen' as const;
+export const ClientPresenceInstalled = 'installed' as const;
+export const ClientPresenceNotInstalled = 'not_installed' as const;
+export const ClientPresenceOther = 'other' as const;
+export type ClientPresenceState =
+  | typeof ClientPresenceConnectedSeen
+  | typeof ClientPresenceConnectedNeverSeen
+  | typeof ClientPresenceInstalled
+  | typeof ClientPresenceNotInstalled
+  | typeof ClientPresenceOther;
+
 export interface Tool {
   name: string;
   server_name: string;

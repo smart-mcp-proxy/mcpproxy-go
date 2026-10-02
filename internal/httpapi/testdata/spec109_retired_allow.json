@@ -1,0 +1,9 @@
+{
+  "allow": [
+    {
+      "path": "frontend/src/navigation/navModel.ts",
+      "literal": "Dashboard",
+      "reason": "Server-edition admin menu (/admin/dashboard); the server-edition navigation is out of scope for Spec 109 (spec.md Out of Scope). Follow-up: rename with the server-edition admin pass."
+    }
+  ]
+}

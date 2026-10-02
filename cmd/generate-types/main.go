@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // contractsRelPath is the location of the generated TypeScript file
@@ -461,6 +463,13 @@ export type Tier =
   | typeof TierUnknown;
 
 `)
+
+	// Spec 109 FR-090 terminology enums - generated from
+	// internal/contracts/terminology.go (the one Go source). The golden
+	// internal/contracts/testdata/terminology.json pins the same values.
+	sb.WriteString(enumBlock("ToolApproval", "ToolApprovalState", "Tool review states (approval_status)", contracts.AllToolApprovalStates()))
+	sb.WriteString(enumBlock("ActivityView", "ActivityView", "Activity views (the `view` URL parameter; the CLI has no `sessions`)", contracts.AllActivityViews()))
+	sb.WriteString(enumBlock("ClientPresence", "ClientPresenceState", "Client presence states (GET /clients row state)", contracts.AllClientPresenceStates()))
 
 	// Tool types
 	sb.WriteString(`export interface Tool {
@@ -1092,5 +1101,33 @@ export interface ClientView {
 }
 `)
 
+	return sb.String()
+}
+
+// enumBlock renders one terminology family as `export const <Prefix><Camel> =
+// 'v' as const;` lines plus the union type, exactly the shape of the Health*
+// and Tier* blocks above.
+func enumBlock(prefix, typeName, comment string, values []string) string {
+	var sb strings.Builder
+	sb.WriteString("// " + comment + " - generated from internal/contracts/terminology.go\n")
+	names := make([]string, 0, len(values))
+	for _, v := range values {
+		name := prefix
+		for _, w := range strings.Split(v, "_") {
+			name += strings.ToUpper(w[:1]) + w[1:]
+		}
+		names = append(names, name)
+		sb.WriteString("export const " + name + " = '" + v + "' as const;\n")
+	}
+	sb.WriteString("export type " + typeName + " =\n")
+	for i, n := range names {
+		sb.WriteString("  | typeof " + n)
+		if i == len(names)-1 {
+			sb.WriteString(";\n")
+		} else {
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
 	return sb.String()
 }
