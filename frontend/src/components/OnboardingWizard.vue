@@ -207,7 +207,15 @@
             <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
-          <ImportServers :key="importSession" detected :show-empty="false" @imported="onSharedImport" />
+          <!-- The done card below is the one completion state; suppress the
+               importer's own "imported" line while it shows (review F2.1). -->
+          <ImportServers
+            :key="importSession"
+            detected
+            :show-empty="false"
+            :show-message="serversView !== 'imported'"
+            @imported="onSharedImport"
+          />
 
           <!-- Detected import sources (Spec 046 v2 — sectioned checkbox layout) -->
           <div v-if="false" class="flex justify-center py-4">

@@ -69,7 +69,9 @@ const sixQuarantined = ['memory', 'fixture', 'filesystem', 'everything', 'fetchy
 
 const ImportServersStub = {
   emits: ['imported'],
-  template: '<button data-test="stub-import" @click="$emit(\'imported\', 2)">import</button>',
+  props: { detected: Boolean, showMessage: { type: Boolean, default: true } },
+  template:
+    '<div><button data-test="stub-import" @click="$emit(\'imported\', 2)">import</button><p v-if="detected && showMessage" data-test="stub-own-message">imported</p></div>',
 }
 
 function makeRouter() {
@@ -154,6 +156,9 @@ describe('OnboardingWizard Servers step completion after an import (fix-usertest
 
     expect(wrapper.find('[data-test="servers-import-done"]').text()).toContain('2 servers imported.')
     expect(wrapper.find('[data-test="servers-nothing-to-import"]').exists()).toBe(false)
+    // One completion state: the importer's own "imported" line is suppressed
+    // while the wizard's done card shows (review F2.1).
+    expect(wrapper.find('[data-test="stub-own-message"]').exists()).toBe(false)
     const verify = wrapper.find('[data-test="servers-import-done-verify"]')
     expect(verify.text()).toContain('Continue to Verify')
     await verify.trigger('click')

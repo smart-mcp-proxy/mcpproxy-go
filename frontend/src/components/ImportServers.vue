@@ -21,7 +21,7 @@
       </div>
       <div v-else-if="showEmpty" class="text-sm opacity-70" data-test="detected-import-empty">{{ importedOnce ? 'Nothing left to import — every server in your client configs is on MCPProxy.' : 'No importable servers found in local client configs.' }}</div>
       <div v-if="detectedError" class="alert alert-error text-sm mt-3">{{ detectedError }}</div>
-      <p v-if="detectedMessage" class="text-sm mt-3" :class="detectedImportedCount > 0 ? 'text-success' : ''" data-test="detected-import-message">{{ detectedImportedCount > 0 ? '✓ ' : '' }}{{ detectedMessage }}</p>
+      <p v-if="detectedMessage && showMessage" class="text-sm mt-3" :class="detectedImportedCount > 0 ? 'text-success' : ''" data-test="detected-import-message">{{ detectedImportedCount > 0 ? '✓ ' : '' }}{{ detectedMessage }}</p>
       <p v-if="detectedSelectedCount" class="text-xs mt-2" data-test="detected-selection-summary">
         <span class="font-semibold">{{ detectedSelectedCount }}</span> selected
         <span v-if="detectedRenames.size" class="text-warning"> · {{ detectedRenames.size }} renamed</span>
@@ -100,7 +100,7 @@ import { importSummary } from '@/utils/onboardingServersStep'
 
 // showEmpty: the wizard owns its own empty and completion states, so it turns
 // this one off; standalone use keeps the first-load empty line.
-const props = withDefaults(defineProps<{ detected?: boolean; showEmpty?: boolean }>(), { detected: false, showEmpty: true })
+const props = withDefaults(defineProps<{ detected?: boolean; showEmpty?: boolean; showMessage?: boolean }>(), { detected: false, showEmpty: true, showMessage: true })
 const emit = defineEmits<{ imported: [count: number] }>()
 
 const content = ref('')
