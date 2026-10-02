@@ -2035,11 +2035,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	if updates.Protocol != "" {
 		existing.Protocol = updates.Protocol
 	}
-	// Booleans are always applied since the handler only calls UpdateServer
-	// when the caller explicitly provided these fields
+	// Enabled and ReconnectOnUse are always applied: the REST handler resolves
+	// them against the existing server before calling UpdateServer.
 	existing.Enabled = updates.Enabled
-	existing.Quarantined = updates.Quarantined
 	existing.ReconnectOnUse = updates.ReconnectOnUse
+	// Quarantine is applied only when the caller stated it (the REST PATCH
+	// handler marks the explicit bit when the body carries `quarantined`).
+	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+	// false copied from a config snapshot, which must never un-quarantine.
+	if updates.QuarantineExplicitlySet() {
+		existing.Quarantined = updates.Quarantined
+		existing.MarkQuarantineExplicitlySet(true)
+	}
 
 	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
 	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
