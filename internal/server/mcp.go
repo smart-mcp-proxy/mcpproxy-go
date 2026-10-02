@@ -1746,6 +1746,10 @@ type mcpCatalogServerEntry struct {
 	Official   bool                   `json:"official"`
 	Popularity *registries.Popularity `json:"popularity,omitempty"`
 	Source     string                 `json:"source"`
+	// FromCache is true when this entry came from the source's cached listing
+	// because its live search failed (Spec 109 D35); the source is then also in
+	// the response's unavailable[] with fallback "cached_listing".
+	FromCache bool `json:"from_cache,omitempty"`
 }
 
 // catalogServerEntryWithSecretLike returns a copy of entry whose
@@ -1796,6 +1800,7 @@ func (p *MCPProxyServer) handleSearchServersAllSources(ctx context.Context, sess
 			Official:    h.Official,
 			Popularity:  h.Popularity,
 			Source:      h.Source,
+			FromCache:   h.FromCache,
 		})
 	}
 

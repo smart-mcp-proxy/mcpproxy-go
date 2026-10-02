@@ -55,7 +55,7 @@ struct CatalogView: View {
                 .accessibilityIdentifier("catalog-search-input")
 
             if !unavailable.isEmpty {
-                Text(unavailable.map { "\($0.source) (\($0.reason))" }.joined(separator: ", ") + " unavailable")
+                Text(unavailable.map(\.noticeLine).joined(separator: "\n"))
                     .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.orange)
                     .padding(.horizontal)
@@ -183,6 +183,11 @@ struct CatalogView: View {
                         badge("Official", tint: .accentColor)
                     } else if r.verified {
                         badge("Verified", tint: .green)
+                    }
+                    if r.fromCache {
+                        badge("From cached list", tint: .orange)
+                            .help("The source’s live search is unavailable; this entry is from its cached list.")
+                            .accessibilityIdentifier("catalog-from-cache-\(r.source)-\(r.catalogID)")
                     }
                     badge(r.transport, tint: .secondary)
                 }

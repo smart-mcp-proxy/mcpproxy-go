@@ -19,7 +19,9 @@
     <template v-else>
       <div v-if="addError && !pendingResult" class="alert alert-error text-sm mb-3" data-test="catalog-add-error">{{ addError }}</div>
       <div v-if="unavailable.length > 0" class="alert alert-warning text-sm mb-3" data-test="catalog-unavailable-notice">
-        <span>{{ unavailable.map((u) => `${u.source} (${u.reason})`).join(', ') }} unavailable</span>
+        <div>
+          <div v-for="line in unavailableLines" :key="line">{{ line }}</div>
+        </div>
       </div>
 
       <template v-if="sections">
@@ -119,7 +121,7 @@
 import { ref, reactive, computed, watch, onMounted, defineComponent, h } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
-import type { CatalogResult, CatalogSections } from '@/types'
+import type { CatalogResult, CatalogSections, CatalogSourceError } from '@/types'
 import SecretToggle from '@/components/SecretToggle.vue'
 import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useDialogOpen } from '@/composables/useDialogOpen'
@@ -134,7 +136,17 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const results = ref<CatalogResult[]>([])
 const sections = ref<CatalogSections | null>(null)
-const unavailable = ref<{ source: string; reason: string }[]>([])
+const unavailable = ref<CatalogSourceError[]>([])
+
+// One line per source that failed. A source that answered from its cached
+// listing says so (Spec 109 D35); the others keep the original wording.
+const unavailableLines = computed(() =>
+  unavailable.value.map((u) =>
+    u.fallback === 'cached_listing'
+      ? `${u.source}: live search unavailable (${u.reason}); showing matches from its cached list`
+      : `${u.source} (${u.reason}) unavailable`
+  )
+)
 const addingKey = ref<string | null>(null)
 // FR-063: once added this page-visit, the entry's button flips to "Added ✓ ·
 // Open" and stays that way (a fresh search doesn't re-fetch config, so an
@@ -360,6 +372,9 @@ const CatalogResultCard = defineComponent({
               h('div', { class: 'flex gap-1 shrink-0' }, [
                 r.official ? h('span', { class: 'badge badge-sm badge-primary' }, 'Official') : null,
                 r.verified && !r.official ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
+                r.from_cache
+                  ? h('span', { class: 'badge badge-sm badge-warning badge-outline', title: 'The source\u2019s live search is unavailable; this entry is from its cached list.', 'data-test': `catalog-from-cache-${r.source}-${r.id}` }, 'From cached list')
+                  : null,
                 h('span', { class: 'badge badge-sm badge-ghost' }, r.transport),
               ]),
             ]),

@@ -926,11 +926,20 @@ export interface CatalogResult {
   added: boolean
   /** Unique visible installed server selected by the backend before redaction. */
   added_server_name?: string
+  /**
+   * True when this hit came from the source's cached listing because its live
+   * search failed (Spec 109 D35). The source is then also in `unavailable`.
+   */
+  from_cache?: boolean
 }
 
 export interface CatalogSourceError {
   source: string
   reason: string
+  /** "cached_listing" when the hits for this source came from its cached listing. */
+  fallback?: 'cached_listing'
+  /** RFC 3339: when that cached listing was last refreshed. */
+  cached_at?: string
 }
 
 export interface CatalogSections {

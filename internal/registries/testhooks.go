@@ -56,3 +56,11 @@ func SetGitHubAPIBaseForTest(base string) (restore func()) {
 		githubAPIBaseOverride.Store(&p)
 	}
 }
+
+// ResetListingCacheForTest empties the per-source listing cache (Spec 109 D35)
+// so a test neither inherits nor leaks cached listings.
+func ResetListingCacheForTest() {
+	listingCache.mu.Lock()
+	defer listingCache.mu.Unlock()
+	listingCache.m = make(map[string]listingCacheEntry)
+}

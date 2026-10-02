@@ -399,6 +399,12 @@ func renderCatalogSearch(formatter clioutput.OutputFormatter, resp *cliclient.Ca
 			printCatalogTable(formatter, resp.Results)
 		}
 		for _, u := range resp.Unavailable {
+			if u.Fallback != "" {
+				// The live fetch failed but its cached listing answered
+				// (Spec 109 D35); the rows above are marked (cached).
+				fmt.Printf("⚠ %s unavailable: %s; showing matches from its cached list\n", u.Source, u.Reason)
+				continue
+			}
 			fmt.Printf("⚠ %s unavailable: %s\n", u.Source, u.Reason)
 		}
 		return nil
@@ -419,7 +425,11 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 		if r.Added {
 			added = "✓"
 		}
-		rows = append(rows, []string{r.Source, r.ID, truncateStr(r.Title, 40), r.Transport, added})
+		source := r.Source
+		if r.FromCache {
+			source += " (cached)"
+		}
+		rows = append(rows, []string{source, r.ID, truncateStr(r.Title, 40), r.Transport, added})
 	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err == nil {
