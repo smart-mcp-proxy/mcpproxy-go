@@ -245,3 +245,156 @@ describe('Telemetry notice dismissal is shared across mounted surfaces (Spec 109
     expect(banner.find('[data-test="telemetry-banner"]').exists()).toBe(false)
   })
 })
+
+// Spec 109 FR-044a (codex first-run user test F-03): the notice reflects the
+// effective telemetry state served on /api/v1/status.
+describe('Telemetry notice reflects the effective state (Spec 109 FR-044a)', () => {
+  const envState = { enabled: false, source: 'env', disabled_by: 'MCPPROXY_TELEMETRY=false' }
+  const offLine =
+    'Anonymous usage telemetry is off — disabled by MCPPROXY_TELEMETRY=false in the environment. Nothing is sent.'
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    vi.clearAllMocks()
+    ;(api.getActivities as any).mockResolvedValue({ success: true, data: { activities: [] } })
+    ;(api.getConfig as any).mockResolvedValue({ success: true, data: {} })
+    ;(api.getDockerStatus as any).mockResolvedValue({ success: true, data: { available: false } })
+    ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: [] })
+    ;(api.getCanonicalConfigPaths as any).mockResolvedValue({ success: true, data: { paths: [] } })
+    ;(api.getOnboardingState as any).mockResolvedValue({
+      success: true,
+      data: {
+        has_connected_client: true,
+        has_configured_server: true,
+        connected_client_count: 1,
+        connected_client_ids: ['cursor'],
+        configured_server_count: 1,
+        state: { engaged: false },
+        should_show_wizard: true,
+        first_mcp_client_ever: true,
+        mcp_clients_seen_ever: ['cursor'],
+        incomplete_tab_count: 0,
+        has_usable_server: true,
+        usable_servers: ['github'],
+      },
+    })
+  })
+
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  function statusWith(telemetry?: unknown) {
+    ;(api.getStatus as any).mockResolvedValue({ success: true, data: telemetry ? { telemetry } : {} })
+  }
+
+  function routerFor() {
+    return createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+        { path: '/activity', name: 'activity', component: { template: '<div />' } },
+        { path: '/servers', name: 'servers', component: { template: '<div />' } },
+        { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
+      ],
+    })
+  }
+
+  async function mountBanner() {
+    const router = routerFor()
+    router.push('/')
+    await router.isReady()
+    const wrapper = mount(TelemetryBanner, { global: { plugins: [router] } })
+    await flushPromises()
+    return wrapper
+  }
+
+  async function mountWizardOnVerify() {
+    const router = routerFor()
+    router.push('/')
+    await router.isReady()
+    const wrapper = mount(OnboardingWizard, {
+      props: { show: true },
+      global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } },
+    })
+    await flushPromises()
+    await wrapper.find('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('env opt-out: the banner states it is off and why, with no Manage link or opt-out disclosure', async () => {
+    statusWith(envState)
+    const wrapper = await mountBanner()
+    const banner = wrapper.find('[data-test="telemetry-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.attributes('data-mode')).toBe('off_env')
+    expect(wrapper.find('[data-test="telemetry-off-env"]').text()).toBe(offLine)
+    expect(wrapper.find('[data-test="telemetry-banner-settings-link"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="telemetry-banner-disclosure"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('sends anonymous usage statistics')
+  })
+
+  it('config opt-out: no banner at all (the user chose it)', async () => {
+    statusWith({ enabled: false, source: 'config' })
+    const wrapper = await mountBanner()
+    expect(wrapper.find('[data-test="telemetry-banner"]').exists()).toBe(false)
+  })
+
+  it('enabled: the original notice is unchanged', async () => {
+    statusWith({ enabled: true, source: 'default' })
+    const wrapper = await mountBanner()
+    expect(wrapper.find('[data-test="telemetry-banner"]').attributes('data-mode')).toBe('notice')
+    expect(wrapper.text()).toContain('MCPProxy sends anonymous usage statistics')
+    expect(wrapper.find('[data-test="telemetry-banner-settings-link"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="telemetry-banner-disclosure"]').exists()).toBe(true)
+  })
+
+  it('an older core without status.telemetry keeps the original notice', async () => {
+    statusWith(undefined)
+    const wrapper = await mountBanner()
+    expect(wrapper.find('[data-test="telemetry-banner"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('MCPProxy sends anonymous usage statistics')
+  })
+
+  it('wizard Verify step: env opt-out shows the off line instead of the usage-statistics copy', async () => {
+    statusWith(envState)
+    const wrapper = await mountWizardOnVerify()
+    const notice = wrapper.find('[data-test="wizard-telemetry-notice"]')
+    expect(notice.exists()).toBe(true)
+    expect(notice.find('[data-test="telemetry-off-env"]').text()).toBe(offLine)
+    expect(notice.text()).not.toContain('MCPProxy sends anonymous usage statistics')
+  })
+
+  it('dismissing the off line on the wizard hides the banner too (shared key)', async () => {
+    statusWith(envState)
+    const router = routerFor()
+    router.push('/')
+    await router.isReady()
+    const banner = mount(TelemetryBanner, { global: { plugins: [router] } })
+    const wizard = mount(OnboardingWizard, {
+      props: { show: true },
+      global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } },
+    })
+    await flushPromises()
+    await wizard.find('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    await wizard.find('[data-test="wizard-telemetry-notice-dismiss"]').trigger('click')
+    expect(localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY)).toBe('true')
+    expect(banner.find('[data-test="telemetry-banner"]').exists()).toBe(false)
+  })
+
+  it('fetches status once for a banner and an inline notice mounted together', async () => {
+    statusWith(envState)
+    const router = routerFor()
+    router.push('/')
+    await router.isReady()
+    const store = useOnboardingStore()
+    mount(TelemetryBanner, { global: { plugins: [router] } })
+    mount(TelemetryBanner, { props: { variant: 'inline' }, global: { plugins: [router] } })
+    await flushPromises()
+    expect((api.getStatus as any).mock.calls.length).toBe(1)
+    expect(store.telemetryState?.source).toBe('env')
+  })
+})

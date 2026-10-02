@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { OnboardingStateResponse, OnboardingMarkRequest } from '@/types'
+import type { OnboardingStateResponse, OnboardingMarkRequest, TelemetryState } from '@/types'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 
@@ -62,6 +62,41 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   function dismissTelemetryNotice(): void {
     telemetryNoticeDismissed.value = true
     localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+  }
+
+  // Effective telemetry state (Spec 109 FR-044a), read off GET /api/v1/status.
+  // null = unknown (an older core, a scoped caller, a failed fetch): every
+  // consumer treats that as "show the standard notice".
+  const telemetryState = ref<TelemetryState | null>(null)
+  let telemetryStateFetchedAt = 0
+  let telemetryStateInFlight: Promise<void> | null = null
+
+  function setTelemetryState(s?: TelemetryState | null): void {
+    telemetryState.value = s ?? null
+    telemetryStateFetchedAt = Date.now()
+  }
+
+  /**
+   * Load the effective telemetry state. One in-flight request is shared by every
+   * caller (the banner and the wizard mount together), and a value fetched in
+   * the last 30 s is reused. Errors leave the state null.
+   */
+  function loadTelemetryState(force = false): Promise<void> {
+    if (telemetryStateInFlight) return telemetryStateInFlight
+    if (!force && telemetryStateFetchedAt && Date.now() - telemetryStateFetchedAt < 30_000) {
+      return Promise.resolve()
+    }
+    telemetryStateInFlight = (async () => {
+      try {
+        const res = await api.getStatus()
+        setTelemetryState(res?.success ? res.data?.telemetry ?? null : null)
+      } catch {
+        telemetryState.value = null
+      } finally {
+        telemetryStateInFlight = null
+      }
+    })()
+    return telemetryStateInFlight
   }
 
   // Computed
@@ -219,6 +254,9 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     wizardInitialTab,
     telemetryNoticeDismissed,
     dismissTelemetryNotice,
+    telemetryState,
+    setTelemetryState,
+    loadTelemetryState,
     shouldShowWizard,
     hasConnectedClient,
     hasConfiguredServer,

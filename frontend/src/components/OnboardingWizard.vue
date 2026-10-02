@@ -561,21 +561,7 @@
                final step. TelemetryBanner.vue hides itself while the wizard
                is open, so this is the only place it appears until the user
                closes the wizard. -->
-          <p
-            v-if="!telemetryNoticeDismissed"
-            class="mt-4 border-t border-base-300 pt-3 text-[11px] opacity-60 flex items-center gap-2"
-            data-test="wizard-telemetry-notice"
-          >
-            <span class="flex-1">
-              MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected.
-              <a href="https://mcpproxy.app/telemetry" target="_blank" rel="noopener noreferrer" class="link link-hover underline">Learn more</a>
-            </span>
-            <button
-              class="btn btn-ghost btn-xs"
-              data-test="wizard-telemetry-notice-dismiss"
-              @click="dismissTelemetryNotice"
-            >Dismiss</button>
-          </p>
+          <TelemetryBanner variant="inline" />
         </section>
       </div>
 
@@ -685,6 +671,7 @@ import ManualServerForm from '@/components/ManualServerForm.vue'
 import ImportServers from '@/components/ImportServers.vue'
 import ClientConnectList from '@/components/ClientConnectList.vue'
 import ReviewQueueList from '@/components/ReviewQueueList.vue'
+import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
@@ -777,18 +764,6 @@ const loadingImportSources = ref(false)
 // Verify tab — recent activity preview.
 const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
-
-// Spec 109-b FR-044: the telemetry notice's one-line form for the wizard's
-// final step, sharing TelemetryBanner.vue's dismissal state (the store's
-// `telemetryNoticeDismissed` ref, backed by one localStorage key) so acting
-// on either surface silences both immediately — the banner and this wizard
-// are mounted together on Dashboard.vue for the whole session, so a
-// component-local copy read only at mount would miss the other surface's
-// dismissal until a full reload.
-const telemetryNoticeDismissed = computed(() => onboarding.telemetryNoticeDismissed)
-function dismissTelemetryNotice() {
-  onboarding.dismissTelemetryNotice()
-}
 
 // Verify tab — second milestone (UX audit F13). Lifetime flag from the
 // Spec 044 activation bucket, read off `GET /api/v1/status`, which already

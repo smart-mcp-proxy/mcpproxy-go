@@ -640,12 +640,25 @@ export interface TokenMetrics {
 // parameters. Absent (or `scope_filters` absent/empty) means none yet — the
 // Spec 108 rows of useScopeQuery's parameter table stay hidden until this
 // lists them.
+/**
+ * Effective telemetry state served on GET /api/v1/status (Spec 109 FR-044a).
+ * `source` is where the state came from: an environment variable, the config
+ * file, or the unset default (on). `disabled_by` is present only for `env`.
+ */
+export interface TelemetryState {
+  enabled: boolean
+  source: 'env' | 'config' | 'default'
+  disabled_by?: string
+}
+
 export interface StatusResponse {
   edition: string
   running: boolean
   routing_mode: string
   default_instructions?: string
   activation?: { first_real_tool_call_ever?: boolean }
+  // Spec 109 FR-044a: omitted for scoped callers and by cores that predate it.
+  telemetry?: TelemetryState
   features?: { scope_filters?: string[] }
 }
 
