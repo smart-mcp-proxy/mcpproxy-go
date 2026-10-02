@@ -292,3 +292,21 @@ No finding on this spec. **Propagated from Spec 108** (its research D32): the FR
 - **P12 #1437 item 5** — a revoked token's name stays reserved (activity history references it); the `409` says so. Spec 108 FR-043 and the Tokens contract carry one sentence.
 - **P14 Agent-token expiry** — no attention kind in this PR (a regular token's expiry is not a Spec 108 warning); follow-up.
 - **R3 cost** — one credential-store scan plus an onboarding-state read per 30 s; ~1 ms at the 100-token deployment cap (`auth.MaxTokens`), asserted by `TestAttention108ClientWarningInputBudget`.
+
+## D34 - 109-m implementation decisions (2026-10-02)
+
+M1 order: 108-l merged first (#1456) and 109-l (#1457) before this PR; helpers here are prefixed `p109` and reuse 108-l's `p108` resolvers (`p108Unresolved`, `p108Surfaces`) instead of copying them, so the follow-up "merge the 108/109 parity checkers" is a rename, not a rewrite.
+M2 six FR-090 enums, one Go source: `internal/contracts/terminology.go` holds the tool approval, activity view and client presence constants (`httpapi/clients.go` uses the presence ones). Health statuses and attention kinds stay in `internal/health` and `internal/runtime` (both import `contracts`, so re-exporting them would be an import cycle); the golden test reads all six families together. There is no `AllHealthStatuses()` for the same reason.
+M3 one golden, `internal/contracts/testdata/terminology.json`, regenerated with `UPDATE_GOLDEN=1`, decoded by Go, vitest and XCTest by relative path; the Web label tables for activity views and tiers became exported (`ACTIVITY_VIEW_LABELS`, `TIER_LABELS`) so the golden can pin them.
+M4 MCP and REST field names are compared as JSON key sets (review tools, catalog results, `health`); it was already green and now pins the names.
+M5 retired names: an exact-literal scan of string literals and template text, an allowlist with reasons (only the server-edition admin menu), a staleness check on it, and the dead `NavBar.vue` deleted.
+M6 SC-002: one fixture, computed by `Compute`, served by the real `GET /attention` handler, and replayed by the CLI, vitest and XCTest from one golden.
+M7 SC-003 found a real leak: a connected-but-unusable server whose payload had neither status nor summary read "Connected" on the Web card, detail header and tray. It now reads "Unavailable".
+M8 SC-005 is `scripts/check-no-unquarantine-callers.sh` plus its self-test, a unit-tests.yml job. Whole-line comments are excluded because the code explains why the call is gone.
+M9, M10 the register and traceability checks are Go tests over the spec files. FR coverage counts a citation in a task line, its phase heading or the finding table; the register's `Resolved:` rule also accepts the finding table as the FR to task map. The dry run found two stale test paths and two moved ones (annotated, not rewritten).
+M11 `parity-matrix.json` uses 108-l's schema with string row ids and a `spec108` status for `(108)` cells; the REST column's text without a tick counts as a ticked cell.
+M12 SC-008 order: one registry fixture drives REST (which writes the golden), MCP, CLI, vitest and XCTest.
+M13 live run: see the PR; one scratch instance, local builds.
+M14 docs are retargeted to published pages (the root `docs/cli-management-commands.md` is not published); `catalog add` takes `--env` only, so the secret toggle's CLI form is `upstream add --secret-env|--secret-header` and `contracts/cli.md` was corrected.
+M15 CI path filters: native and frontend workflows run when a Go-owned golden they read by path changes.
+M16 `NavBar.vue` deleted. M17 `CatalogTests` already reads `ref_names.json` by path. M18 release notes in the CHANGELOG. M19 task count recomputed mechanically.
