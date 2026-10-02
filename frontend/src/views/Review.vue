@@ -1,11 +1,16 @@
 <template>
   <div class="space-y-6" data-test="review-queue">
     <div class="flex flex-wrap items-end justify-between gap-3"><div><h1 class="text-3xl font-bold">Review queue</h1><p class="text-base-content/70">Review servers and tool changes before agents can use them.</p></div><span class="badge badge-warning badge-lg">{{ queue?.count ?? 0 }}</span></div>
-    <div v-if="loading" class="text-center py-10"><span class="loading loading-spinner loading-lg"></span></div>
-    <div v-else-if="error" class="alert alert-error">{{ error }}</div>
-    <div v-else-if="selectedServer"><ReviewScreen :server-name="selectedServer" :change="change" @approved="load" /></div>
+    <!-- Only the first load blanks the page: a background reload (review.changed) must not unmount ReviewScreen, or its per-instance selection is lost (D41.4). -->
+    <div v-if="loading && !queue" class="text-center py-10"><span class="loading loading-spinner loading-lg"></span></div>
+    <div v-else-if="error && !queue" class="alert alert-error">{{ error }}</div>
+    <div v-else-if="selectedServer">
+      <div v-if="error" class="alert alert-error mb-4" data-test="review-queue-error">{{ error }}</div><ReviewScreen :server-name="selectedServer" :change="change" @approved="load" /></div>
     <div v-else-if="!(queue?.servers.length)" class="alert alert-success" data-test="review-queue-empty">Nothing is waiting for review.</div>
-    <ReviewQueueList v-else :rows="filteredRows" :change="change" />
+    <template v-else>
+      <div v-if="error" class="alert alert-error" data-test="review-queue-error">{{ error }}</div>
+      <ReviewQueueList :rows="filteredRows" :change="change" />
+    </template>
     <ScanHistory v-if="!selectedServer" />
   </div>
 </template>
