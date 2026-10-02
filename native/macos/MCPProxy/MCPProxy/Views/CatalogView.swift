@@ -145,6 +145,14 @@ struct CatalogView: View {
         return order
     }
 
+    /// The one trust badge a catalog card shows (Spec 109 D37.6). A per-card
+    /// "Official" badge is gone: every default source is official, so it carried
+    /// no signal, and the Official section heading says it. Verified means the
+    /// publisher owns the source repository (D37.5). Mirrors CatalogSearch.vue.
+    static func trustBadge(_ r: CatalogResult) -> String? {
+        r.verified ? "Verified" : nil
+    }
+
     @ViewBuilder
     private func sectionBlock(title: String, items: [CatalogResult], testID: String) -> some View {
         if !items.isEmpty {
@@ -179,10 +187,8 @@ struct CatalogView: View {
                 }
                 Spacer()
                 HStack(spacing: 4) {
-                    if r.official {
-                        badge("Official", tint: .accentColor)
-                    } else if r.verified {
-                        badge("Verified", tint: .green)
+                    if let trust = Self.trustBadge(r) {
+                        badge(trust, tint: .green)
                     }
                     if r.fromCache {
                         badge("From cached list", tint: .orange)

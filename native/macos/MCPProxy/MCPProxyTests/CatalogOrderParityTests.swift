@@ -34,6 +34,9 @@ final class CatalogOrderParityTests: XCTestCase {
         XCTAssertEqual(first.catalogID, "io.github.github/github-mcp-server")
         XCTAssertTrue(first.official)
         XCTAssertTrue(first.verified)
+        XCTAssertEqual(first.title, "GitHub")
+        XCTAssertEqual(first.publisher, "github")
+        XCTAssertEqual(CatalogView.trustBadge(first), "Verified")
     }
 
     func testEveryRowHasADistinctListIdentity() throws {
