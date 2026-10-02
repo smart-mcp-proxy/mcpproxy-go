@@ -250,6 +250,68 @@ func (r *Runtime) storedServersForAdmission() (map[string]*config.ServerConfig, 
 	return byName, true
 }
 
+// gateServerForRestart runs one server entry that was just re-read from
+// mcp_config.json (the #467 disk-first restart) through the admission gate and
+// reports whether the result may be persisted to config.db.
+//
+// Why: the raw file entry of a server that never stated `quarantined` decodes as
+// Quarantined=false. Persisting or using it as-is silently erased the quarantine
+// the gate recorded at load, and every later config write, reload or reboot then
+// saw a known, live, un-stated server and admitted it. Only the restarted server
+// is gated (not the whole file) so other servers do not re-log the "predate the
+// gate" warning or emit duplicate first-seen activity on every restart.
+//
+// Like the gate itself this can only ever ADD quarantine.
+func (r *Runtime) gateServerForRestart(diskCfg *config.Config, srv *config.ServerConfig) (*config.ServerConfig, bool) {
+	stored, ok := r.storedServersForAdmission()
+	return r.admitServerForRestart(diskCfg, srv, stored, ok)
+}
+
+// admitServerForRestart is gateServerForRestart with the storage view injected.
+//
+// When storage is readable the disk entry goes through applyConfigLoadAdmissionGate
+// as a one-server config. When it is not, the gate would abstain, but a restart
+// must not then trust the raw file (fail closed): a server that states nothing
+// inherits the quarantine of the currently published (already gated) entry, or
+// the trust-mode default if the runtime has never seen it. An unreadable storage
+// is never written to. An explicit operator `quarantined` value is always obeyed.
+func (r *Runtime) admitServerForRestart(diskCfg *config.Config, srv *config.ServerConfig, stored map[string]*config.ServerConfig, storageOK bool) (*config.ServerConfig, bool) {
+	if storageOK {
+		one := *diskCfg
+		one.Servers = []*config.ServerConfig{srv}
+		gated, _ := r.applyConfigLoadAdmissionGate(&one, stored, true)
+		return gated.Servers[0], true
+	}
+
+	out := config.CopyServerConfig(srv)
+	if out.QuarantineExplicitlySet() || out.Quarantined {
+		return out, false
+	}
+	published := r.Config()
+	if r.configSvc != nil {
+		if snap := r.configSvc.Current(); snap != nil && snap.Config != nil {
+			published = snap.Config
+		}
+	}
+	known := false
+	if published != nil {
+		for _, sc := range published.Servers {
+			if sc != nil && sc.Name == srv.Name {
+				out.Quarantined = sc.Quarantined
+				known = true
+				break
+			}
+		}
+	}
+	if !known && diskCfg.QuarantineDefaultForServer(out) {
+		out.Quarantined = true
+	}
+	r.logger.Warn("Server storage unreadable during restart; keeping the published quarantine decision instead of trusting the config file",
+		zap.String("server", srv.Name),
+		zap.Bool("quarantined", out.Quarantined))
+	return out, false
+}
+
 // gateConfigForAdmission is the one-call form used by paths that hold a config
 // they have not published yet (ApplyConfig before its disk write, and the
 // configsvc pre-publish hook). It reads storage itself.
