@@ -22,7 +22,7 @@ Profile gate evaluated after the Spec 105 server-scope gate and before upstream 
 
 ## `code_execution`
 
-Absent from `tools/list` and refused at call (`tool not found` uniform shape) when the profile's effective code execution is off: `code_execution: false`, or unset under a `read`/`write` `max_tier` (FR-003a). Nested `call_tool` refusals are returned to the script as the same error text and recorded as children (`parent_id`).
+Absent from `tools/list` and refused at call (`tool not found` uniform shape) when the profile's effective code execution is off: `code_execution: false`, or unset under a `read`/`write` `max_tier` (FR-003a). Nested `call_tool` refusals are returned to the script as the same error text and recorded as `tool_call` children (`parent_id`, `status=blocked`) carrying the same `block_reason` as a top-level refusal.
 
 ## `set_profile` (semantics change only)
 

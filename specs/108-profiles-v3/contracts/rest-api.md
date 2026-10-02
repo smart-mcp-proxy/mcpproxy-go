@@ -52,7 +52,7 @@ Every mutating route writes one `profile_change` record and emits `profiles.chan
 
 ## Access explain
 
-`GET /access/explain?tool=<server:tool>&client=<id>|token=<name>|profile=<name>|anonymous=true` (exactly one subject; admin) → `AccessExplanation` (data-model §7: `steps[]`, `verdict`, `first_failure`, top-level `fixes[]`). `400` when the subject is missing/ambiguous; unknown tool → verdict `hidden` with step `server_state`/`tool_approval` failing as appropriate (admin callers get full detail). Error texts: `400 exactly one of client, token, profile, anonymous is required`; `400 use client=<id> for a client credential` (`token=client-<id>`); `400 access/explain covers upstream tools (server:tool) only` (a built-in tool name); `404 client not found` / `404 token not found` / `404 profile not found`; in the server edition `client=` is `404 client not found`.
+`GET /access/explain?tool=<server:tool>&client=<id>|token=<name>|profile=<name>|anonymous=true` (exactly one subject; admin) → `AccessExplanation` (data-model §7: `steps[]`, `verdict`, `first_failure`, top-level `fixes[]`; `fixes[].profile` is the destination profile slug of a `move_client` fix, omitted for every other action). `400` when the subject is missing/ambiguous; unknown tool → verdict `hidden` with step `server_state`/`tool_approval` failing as appropriate (admin callers get full detail). Error texts: `400 exactly one of client, token, profile, anonymous is required`; `400 use client=<id> for a client credential` (`token=client-<id>`); `400 access/explain covers upstream tools (server:tool) only` (a built-in tool name); `404 client not found` / `404 token not found` / `404 profile not found`; in the server edition `client=` is `404 client not found`.
 
 ## Filters on grids (FR-031)
 
