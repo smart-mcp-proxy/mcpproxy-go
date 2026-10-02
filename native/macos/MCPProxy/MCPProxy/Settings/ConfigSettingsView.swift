@@ -29,6 +29,14 @@ final class ConfigStore: ObservableObject {
     /// default is this" instead of "nothing". Fetched, never hardcoded — the
     /// Web UI does the same and the two must not drift.
     @Published var defaultInstructions: String?
+    /// Spec 109 FR-044a / F-10: the listen address the connected core is
+    /// actually bound to (`status.listen_addr`), so Settings can name which core
+    /// is being edited and when the saved address differs (pending restart).
+    @Published var runningListenAddr: String?
+    /// Settings whose effective value is forced from outside the config file
+    /// (an environment telemetry opt-out), keyed by setting key. The value is
+    /// the reason shown under the row. Locked rows are read-only and never dirty.
+    @Published private(set) var locks: [String: String] = [:]
 
     private var original: [String: Any] = [:]
     /// The API response exactly as the core sent it. `working`/`original` are
@@ -53,10 +61,55 @@ final class ConfigStore: ObservableObject {
         }
         // Best-effort: an older core without the field just leaves the generic
         // placeholder in place, so this never fails the settings load.
-        if let status = try? await api.status(), let text = status.defaultInstructions, !text.isEmpty {
-            defaultInstructions = text
+        if let status = try? await api.status() {
+            if let text = status.defaultInstructions, !text.isEmpty {
+                defaultInstructions = text
+            }
+            applyStatus(status)
         }
         loading = false
+    }
+
+    /// Adopt what `GET /api/v1/status` says about the connected core: its running
+    /// listen address (F-10) and the effective telemetry state (F-03).
+    func applyStatus(_ status: StatusResponse) {
+        let running = status.listenAddr.flatMap { $0.isEmpty ? nil : $0 }
+        runningListenAddr = running
+        adoptRunningListenIfBlank()
+        if let reason = TelemetryNotice.settingLock(state: status.telemetry) {
+            locks["telemetry.enabled"] = reason
+        } else {
+            locks.removeValue(forKey: "telemetry.enabled")
+        }
+        revision += 1
+    }
+
+    /// A config without `listen` would render the catalogue placeholder, which a
+    /// reader (and an accessibility client) takes for a value. Show the address
+    /// the core is really bound to instead, in both `working` and `original` so
+    /// the field is not dirty and a Save never PATCHes `listen`.
+    private func adoptRunningListenIfBlank() {
+        guard loaded, let running = runningListenAddr,
+              isBlankValue(configGet(working, "listen")), isBlankValue(configGet(original, "listen"))
+        else { return }
+        configSet(&working, "listen", running)
+        configSet(&original, "listen", running)
+    }
+
+    func lockReason(_ key: String) -> String? { locks[key] }
+
+    /// The line under the Listen address field: which core this is and where it
+    /// listens, plus a pending-restart note when the saved address differs.
+    var listenNote: String? {
+        guard let running = runningListenAddr else { return nil }
+        let version = appState.version.trimmingCharacters(in: .whitespaces)
+        let core = version.isEmpty ? "Connected core" : "Connected core \(version)"
+        var note = "\(core) is listening on \(running)."
+        if let saved = (configGet(original, "listen") as? String)?.trimmingCharacters(in: .whitespaces),
+           !saved.isEmpty, saved != running {
+            note += " The saved address \(saved) takes effect after a restart."
+        }
+        return note
     }
 
     /// Populate the store from a raw `GET /api/v1/config` response.
@@ -74,6 +127,7 @@ final class ConfigStore: ObservableObject {
         working = normalized
         original = normalized
         loaded = true
+        adoptRunningListenIfBlank()
         revision += 1
     }
 
@@ -111,7 +165,8 @@ final class ConfigStore: ObservableObject {
     }
 
     func isDirty(_ key: String) -> Bool {
-        !valuesEqual(configGet(working, key), configGet(original, key))
+        if locks[key] != nil { return false }
+        return !valuesEqual(configGet(working, key), configGet(original, key))
     }
 
     func dirtyKeys(in fields: [ConfigField]) -> [String] {
@@ -155,8 +210,12 @@ final class ConfigStore: ObservableObject {
 
     func boolBinding(_ key: String) -> Binding<Bool> {
         Binding(
-            get: { (self.value(key) as? NSNumber)?.boolValue ?? (self.value(key) as? Bool) ?? false },
-            set: { self.setValue(key, $0) }
+            // A locked key shows its forced effective value (off), not the stored one.
+            get: {
+                if self.locks[key] != nil { return false }
+                return (self.value(key) as? NSNumber)?.boolValue ?? (self.value(key) as? Bool) ?? false
+            },
+            set: { if self.locks[key] == nil { self.setValue(key, $0) } }
         )
     }
 
@@ -428,6 +487,18 @@ struct ConfigFieldRow: View {
             if let help = field.help {
                 Text(help).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            // Spec 109 FR-044a: forced from outside the config file; say why.
+            if let reason = store.lockReason(field.key) {
+                Text(reason).font(.caption).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setting-locked-\(field.key)")
+            }
+            // F-10: which core this is, and where it really listens.
+            if field.key == "listen", let note = store.listenNote {
+                Text(note).font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setting-listen-running")
+            }
             if let err = validationError {
                 Text(err).font(.caption).foregroundColor(.red)
             }
@@ -435,6 +506,10 @@ struct ConfigFieldRow: View {
     }
 
     @ViewBuilder private var control: some View {
+        controlBody.disabled(store.lockReason(field.key) != nil)
+    }
+
+    @ViewBuilder private var controlBody: some View {
         switch field.control {
         case .toggle:
             Toggle("", isOn: store.boolBinding(field.key)).labelsHidden()

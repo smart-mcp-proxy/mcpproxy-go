@@ -41,7 +41,21 @@ func markFirstRunCompleted() {
 ///   • Continue button persists the choice and dismisses.
 struct FirstRunDialog: View {
     @Binding var launchAtLogin: Bool
+    /// Spec 109 FR-044a: `.offEnv` when the app's environment disables
+    /// telemetry, so the welcome says it is off and why.
+    var telemetryNotice: FirstRunTelemetryNotice = .notice
     let onContinue: () -> Void
+
+    /// The telemetry sentence for the current notice mode.
+    var telemetryText: String {
+        switch telemetryNotice {
+        case .notice:
+            return "MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected — you can turn this off anytime in Settings."
+        case .offEnv(let reason):
+            return TelemetryNotice.offLine(
+                state: TelemetryStateDTO(enabled: false, source: "env", disabledBy: reason))
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -73,7 +87,7 @@ struct FirstRunDialog: View {
             // somewhere in first-run/onboarding, not only after the fact in
             // Settings — this is the macOS app's first-run surface, the
             // direct counterpart of the Web UI wizard's own one-liner.
-            Text("MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected — you can turn this off anytime in Settings.")
+            Text(telemetryText)
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -139,7 +153,8 @@ func presentFirstRunDialogIfNeeded() {
     // Build the dialog inside an NSHostingController so we can drive the
     // window imperatively (modal NSApp.runModal → block-free dismissal).
     let host = NSHostingController(
-        rootView: FirstRunDialogBinding(choice: choice)
+        rootView: FirstRunDialogBinding(
+            choice: choice, telemetryNotice: FirstRunTelemetryNotice.resolve())
     )
     host.view.layoutSubtreeIfNeeded()
     host.view.frame = NSRect(
@@ -178,11 +193,13 @@ func presentFirstRunDialogIfNeeded() {
 /// Choice, and wires the Continue button to `NSApp.stopModal`.
 private struct FirstRunDialogBinding: View {
     let choice: FirstRunDialogChoice
+    let telemetryNotice: FirstRunTelemetryNotice
     @State private var launchAtLogin: Bool = true
 
     var body: some View {
         FirstRunDialog(
             launchAtLogin: $launchAtLogin,
+            telemetryNotice: telemetryNotice,
             onContinue: {
                 choice.launchAtLogin = launchAtLogin
                 NSApp.stopModal()
