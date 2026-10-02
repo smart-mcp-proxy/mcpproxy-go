@@ -94,6 +94,10 @@ var rawServerLeafDoors = map[string]string{
 		"by attention_subscriber.go's attentionServerDetail from transport + URL HOST ONLY (e.g. " +
 		"\"OAuth · api.githubcopilot.com\", data-model.md §4) — never a path, query, header or credential. " +
 		"It is prose derived from an already-public field, not the operator's raw config.",
+	"internal/httpapi/server.go:(m).handleGetStatus": "the telemetry field is telemetry.EffectiveState: a bool, " +
+		"a fixed source enum (env|config|default) and an env-var-name reason enum. It reads one boolean from the " +
+		"running config and the process environment's presence flags; no operator-supplied string, URL, header or " +
+		"credential reaches it.",
 }
 
 // openDoors is the third state a door can be in, and the only honest one for a
