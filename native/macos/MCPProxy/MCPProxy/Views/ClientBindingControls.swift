@@ -6,7 +6,7 @@
 // credential badge; its detail carries the profile Picker, the Locked toggle
 // and the credential actions. A client WITHOUT an active client credential gets
 // no working picker or toggle: they are disabled and replaced by the primary
-// button that gets it one ("Upgrade to client credential…" or "Reconnect…").
+// button that gets it one ("Connect…", "Upgrade to client credential…" or "Reconnect…").
 
 import SwiftUI
 

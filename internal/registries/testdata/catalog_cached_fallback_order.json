@@ -1,0 +1,108 @@
+{
+  "_comment": "Spec 109 D35 (T160): catalog search \"github\" while one source is down. sources + query are the INPUT: every source is served by an httptest registry; a source with flaky:true is browsed once first (priming the per-source listing cache) and then answers 500. ids + results + unavailable are the golden OUTPUT written by internal/httpapi/spec109_catalog_order_test.go with UPDATE_GOLDEN=1 (REST GET /catalog/search). unavailable keeps only source and fallback (the reason and cached_at vary per run). The MCP search_servers, CLI catalog search, vitest and XCTest legs read the same file. ids are \"<source>:<entry id>\".",
+  "query": "github",
+  "sources": [
+    {
+      "id": "official",
+      "name": "Official",
+      "provenance": "official",
+      "servers": [
+        {
+          "id": "io.github.github/github-mcp-server",
+          "name": "GitHub",
+          "description": "GitHub's official MCP server",
+          "url": "https://api.githubcopilot.com/mcp/"
+        }
+      ]
+    },
+    {
+      "id": "slowreg",
+      "name": "Slow",
+      "provenance": "custom",
+      "flaky": true,
+      "servers": [
+        {
+          "id": "slow/github-a",
+          "name": "github-a",
+          "description": "A GitHub helper",
+          "installCmd": "npx github-a-mcp"
+        },
+        {
+          "id": "slow/notes-x",
+          "name": "notes-x",
+          "description": "Notes",
+          "installCmd": "npx notes-x-mcp"
+        },
+        {
+          "id": "slow/issues",
+          "name": "Issue sync",
+          "description": "Syncs github issues",
+          "installCmd": "npx issue-sync-mcp"
+        }
+      ]
+    }
+  ],
+  "ids": [
+    "official:io.github.github/github-mcp-server",
+    "slowreg:slow/github-a",
+    "slowreg:slow/issues"
+  ],
+  "results": [
+    {
+      "source": "official",
+      "id": "io.github.github/github-mcp-server",
+      "title": "GitHub",
+      "publisher": "github",
+      "verified": true,
+      "official": true,
+      "description": "GitHub's official MCP server",
+      "transport": "http",
+      "install": {
+        "url": "https://api.githubcopilot.com/mcp/"
+      },
+      "added": false
+    },
+    {
+      "source": "slowreg",
+      "id": "slow/github-a",
+      "title": "github-a",
+      "publisher": "Slow",
+      "verified": false,
+      "official": false,
+      "description": "A GitHub helper",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "github-a-mcp"
+        ]
+      },
+      "added": false,
+      "from_cache": true
+    },
+    {
+      "source": "slowreg",
+      "id": "slow/issues",
+      "title": "Issue sync",
+      "publisher": "Slow",
+      "verified": false,
+      "official": false,
+      "description": "Syncs github issues",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "issue-sync-mcp"
+        ]
+      },
+      "added": false,
+      "from_cache": true
+    }
+  ],
+  "unavailable": [
+    {
+      "source": "slowreg",
+      "fallback": "cached_listing"
+    }
+  ]
+}

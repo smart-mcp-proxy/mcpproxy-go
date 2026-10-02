@@ -37,17 +37,25 @@ extension APIClient: ClientBindingSource {}
 /// What the profile controls of a Clients row show and allow (K9).
 struct ClientBindingControlsState: Equatable {
     enum CTA: Equatable {
-        /// `none`, `admin_key` or `unknown`: connect it with a client credential.
+        /// `none` or `unknown`: the client never connected; connect it.
+        case connect
+        /// `admin_key`: the client holds the admin key; upgrade it to a client credential.
         case upgrade
         /// `revoked` or `expired`: the credential is dead; reconnect.
         case reconnect
 
-        var title: String {
+        /// The bare words, equal to labels.json `credential_cta`.
+        var word: String {
             switch self {
-            case .upgrade: return "Upgrade to client credential…"
-            case .reconnect: return "Reconnect…"
+            case .connect: return CredentialState.none.ctaWord
+            case .upgrade: return CredentialState.adminKey.ctaWord
+            case .reconnect: return CredentialState.revoked.ctaWord
             }
         }
+
+        /// The button or menu title: the words plus the ellipsis that says a
+        /// dialog (the previewed connect) follows.
+        var title: String { word + "…" }
     }
 
     /// The picker and the lock toggle work only with an active client credential.
@@ -73,7 +81,8 @@ struct ClientBindingControlsState: Equatable {
         switch state {
         case .client: cta = nil
         case .revoked, .expired: cta = .reconnect
-        default: cta = .upgrade
+        case .adminKey: cta = .upgrade
+        case .none, .unknown: cta = .connect
         }
         profile = client.boundProfile
         isLocked = client.isLocked

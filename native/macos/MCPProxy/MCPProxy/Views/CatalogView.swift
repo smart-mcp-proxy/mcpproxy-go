@@ -55,7 +55,7 @@ struct CatalogView: View {
                 .accessibilityIdentifier("catalog-search-input")
 
             if !unavailable.isEmpty {
-                Text(unavailable.map { "\($0.source) (\($0.reason))" }.joined(separator: ", ") + " unavailable")
+                Text(unavailable.map(\.noticeLine).joined(separator: "\n"))
                     .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.orange)
                     .padding(.horizontal)
@@ -105,8 +105,14 @@ struct CatalogView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let sections {
-                        sectionBlock(title: "Official", items: sections.official, testID: "catalog-section-official")
-                        sectionBlock(title: "Popular", items: sections.popular, testID: "catalog-section-popular")
+                        ForEach(Self.sectionOrder(sections), id: \.self) { section in
+                            switch section {
+                            case .popular:
+                                sectionBlock(title: "Popular", items: sections.popular, testID: "catalog-section-popular")
+                            case .official:
+                                sectionBlock(title: "Official", items: sections.official, testID: "catalog-section-official")
+                            }
+                        }
                         if sections.official.isEmpty && sections.popular.isEmpty {
                             Text("Nothing to browse yet.")
                                 .font(.scaled(.callout, scale: fontScale))
@@ -124,6 +130,19 @@ struct CatalogView: View {
                 .padding(.bottom, 8)
             }
         }
+    }
+
+    /// The browse sections in render order: Popular first when it has entries
+    /// (popularity if available), then Official (curated first). An empty
+    /// section is omitted. Mirrors the Web UI's CatalogSearch.vue and the CLI
+    /// table (Spec 109 D35, amends Spec 110 FR-005).
+    enum BrowseSection: Hashable { case popular, official }
+
+    static func sectionOrder(_ sections: CatalogSections) -> [BrowseSection] {
+        var order: [BrowseSection] = []
+        if !sections.popular.isEmpty { order.append(.popular) }
+        if !sections.official.isEmpty { order.append(.official) }
+        return order
     }
 
     @ViewBuilder
@@ -164,6 +183,11 @@ struct CatalogView: View {
                         badge("Official", tint: .accentColor)
                     } else if r.verified {
                         badge("Verified", tint: .green)
+                    }
+                    if r.fromCache {
+                        badge("From cached list", tint: .orange)
+                            .help("The source’s live search is unavailable; this entry is from its cached list.")
+                            .accessibilityIdentifier("catalog-from-cache-\(r.source)-\(r.catalogID)")
                     }
                     badge(r.transport, tint: .secondary)
                 }

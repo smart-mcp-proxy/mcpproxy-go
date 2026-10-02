@@ -362,6 +362,17 @@ The parameters, link-map rows, sidebar entry and header slot are already wired (
 - [x] T158 [US6] #1437 item 1: `limitServersToProfile` holds a pinned caller to its own pin (tool counts and server rows agree with `GET /tools`); administrator output unchanged
 - [x] T159 [US6] #1437 item 5: `POST /tokens` answers a revoked holder with `A revoked token named "x" still holds this name for activity history; choose another name`
 
+## Phase 15: PR demo-ux-fixes — gaps found in the live Web UI demo (2026-10-02)
+
+Not new requirements: nine findings from a live demo of `main` at `b3191a059`, fixed test-first on every surface that shows them. Spec 109 owns the catalog, palette and Settings findings; Spec 108's T148–T152 own the profile-shaped ones. Decisions: research D35.
+
+- [x] T160 [P] #1 catalog cached-listing fallback (FR-060): a per-source in-memory listing cache (`internal/registries/listing_cache.go`) fills from every successful fetch; a source whose live fetch fails serves its cached listing, filtered by name, description or id (`internal/registries/catalog_listing_cache_test.go`, 24 h limit, 2,000 entries per source, pruned on config load). The source stays in `unavailable[]` with `fallback: "cached_listing"` and `cached_at`, hits carry `from_cache`. One golden (`internal/registries/testdata/catalog_cached_fallback_order.json`) written by `internal/httpapi/spec109_catalog_cached_fallback_test.go` and replayed by `internal/server/spec109_catalog_cached_fallback_test.go`, `cmd/mcpproxy/catalog_cached_fallback_test.go` (table `(cached)` and the fallback sentence), `frontend/tests/unit/catalog-cached-fallback.spec.ts` and `CatalogOrderParityTests.swift` ("From cached list")
+- [x] T161 [P] #2 nullable booleans render their effective value: `defaultValue` widens to booleans and a `defaultFor` hook handles the edition- and block-dependent `audit_log.*` keys in `frontend/src/views/settings/fields.ts`; one fixture (`internal/config/testdata/settings_nullable_defaults.json`) pinned to the Go resolvers by `internal/config/settings_nullable_defaults_test.go` (every `*bool` path under `Config` must be classified) and to the form by `frontend/tests/unit/settings-nullable-defaults.spec.ts`
+- [x] T162 [P] #3 the Settings header names the button it describes (`SAVE_CHANGES_LABEL`): `frontend/tests/unit/settings-header-copy.spec.ts`
+- [x] T163 [P] #5 the ⌘K palette finds profiles, clients and agent tokens (FR-054), needle-only, loaded once per open on the first non-empty input, links built by `frontend/src/utils/scopeLinks.ts`: `frontend/tests/unit/command-palette-directory.spec.ts`
+- [x] T164 [P] #6 useful browse order (FR-060; amends Spec 110 FR-005): Official is curated-first, then round-robin across sources, never popularity-ordered (`internal/registries/catalog_browse_order_test.go`); Popular renders before Official when non-empty on the Web UI (`frontend/tests/unit/catalog-browse-order.spec.ts`), macOS (`CatalogTests.swift`) and the CLI table (`cmd/mcpproxy/catalog_cmd_test.go`)
+- [x] T165 [P] Docs and bookkeeping for T160–T164: `docs/api/rest-api.md`, `docs/cli/catalog-commands.md`, `specs/109-ux-navigation-consistency/parity-matrix.json`, `quickstart.md` recipe `demo-ux-fixes`, research D35
+
 ---
 
 ## Dependencies & Execution Order
@@ -410,4 +421,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-195 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 186 before 109-m); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+201 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).

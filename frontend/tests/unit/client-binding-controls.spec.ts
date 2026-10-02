@@ -197,9 +197,11 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
   })
 
   it.each([
-    ['none', 'Upgrade to client credential'],
+    // Spec 108 D39 (T150): only a known admin-key holder is an "upgrade"; an
+    // installed client that never connected has nothing to upgrade.
+    ['none', 'Connect'],
     ['admin_key', 'Upgrade to client credential'],
-    ['unknown', 'Upgrade to client credential'],
+    ['unknown', 'Connect'],
     ['revoked', 'Reconnect'],
     ['expired', 'Reconnect'],
   ])('%s: chip and switch disabled, PUT never called, CTA "%s" opens the connect list for the client', async (state, cta) => {

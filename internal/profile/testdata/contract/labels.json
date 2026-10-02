@@ -41,6 +41,14 @@
     "expired": "Expired",
     "unknown": "Unknown"
   },
+  "credential_cta": {
+    "client": "",
+    "admin_key": "Upgrade to client credential",
+    "none": "Connect",
+    "revoked": "Reconnect",
+    "expired": "Reconnect",
+    "unknown": "Connect"
+  },
   "binding_mode": {
     "locked": "Locked",
     "switchable": "Switchable"

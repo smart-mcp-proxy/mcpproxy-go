@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { AUDIT_LOG_FIELDS, ADVANCED_ACCORDIONS, allCatalogFields } from '../../src/views/settings/fields'
+import { AUDIT_LOG_FIELDS, ADVANCED_ACCORDIONS, allCatalogFields, buildPartial, hydrateConfigState } from '../../src/views/settings/fields'
 
 // Spec 107 PR-D (T110a/T110, US3): the `audit_log.*` accordion rows of
 // `contracts/config-keys.md` — every row is restart-pinned ("audit_log is
@@ -53,5 +53,39 @@ describe('Settings audit-log accordion (Spec 107 T110)', () => {
     for (const k of keys()) {
       expect(allCatalogFields().map((f) => f.key)).toContain(k)
     }
+  })
+})
+
+// F3.1: hydrating an absent audit_log block as enabled+stdout ON must not make
+// a dirty-keys-only save of another audit_log field produce a sink-less block.
+describe('audit_log partial save carries the displayed sink state (F3.1)', () => {
+  it('server edition, absent block: a compress-only edit also sends enabled and stdout', () => {
+    const { working } = hydrateConfigState({}, { edition: 'server' })
+    working.audit_log.compress = false
+    expect(buildPartial(working, ['audit_log.compress'])).toEqual({
+      audit_log: { compress: false, enabled: true, stdout: true },
+    })
+  })
+
+  it('personal edition, absent block: a rotation edit sends enabled=false so the block validates', () => {
+    const { working } = hydrateConfigState({})
+    working.audit_log.max_size_mb = 50
+    expect(buildPartial(working, ['audit_log.max_size_mb'])).toEqual({
+      audit_log: { max_size_mb: 50, enabled: false, stdout: false },
+    })
+  })
+
+  it('an explicitly dirty sink key keeps its own value', () => {
+    const { working } = hydrateConfigState({}, { edition: 'server' })
+    working.audit_log.stdout = false
+    working.audit_log.path = '/tmp/a.jsonl'
+    expect(buildPartial(working, ['audit_log.stdout', 'audit_log.path'])).toEqual({
+      audit_log: { stdout: false, path: '/tmp/a.jsonl', enabled: true },
+    })
+  })
+
+  it('does not touch audit_log when no audit_log key is dirty', () => {
+    const { working } = hydrateConfigState({}, { edition: 'server' })
+    expect(buildPartial(working, ['quarantine_enabled'])).not.toHaveProperty('audit_log')
   })
 })

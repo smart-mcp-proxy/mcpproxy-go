@@ -767,7 +767,9 @@
           ],
           "tests": [
             "vitest:frontend/tests/unit/add-server-catalog.spec.ts",
-            "vitest:frontend/tests/unit/catalog-order-parity.spec.ts"
+            "vitest:frontend/tests/unit/catalog-order-parity.spec.ts",
+            "vitest:frontend/tests/unit/catalog-cached-fallback.spec.ts",
+            "vitest:frontend/tests/unit/catalog-browse-order.spec.ts"
           ]
         },
         "macos": {
@@ -786,7 +788,9 @@
             "cmd:catalog search"
           ],
           "tests": [
-            "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI"
+            "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI",
+            "go:cmd/mcpproxy/catalog_cached_fallback_test.go#TestCatalogCachedFallbackParityCLI",
+            "go:cmd/mcpproxy/catalog_cmd_test.go#TestRenderCatalogSearch_PopularBeforeOfficialAndEmptySectionHidden"
           ]
         },
         "mcp": {
@@ -795,7 +799,8 @@
             "mcp:search_servers"
           ],
           "tests": [
-            "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden"
+            "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden",
+            "go:internal/server/spec109_catalog_cached_fallback_test.go#TestSearchServers_CachedFallbackMatchesTheRESTGolden"
           ],
           "fields": [
             "search"
@@ -807,7 +812,8 @@
             "rest:GET /api/v1/catalog/search"
           ],
           "tests": [
-            "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden"
+            "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden",
+            "go:internal/httpapi/spec109_catalog_cached_fallback_test.go#TestCatalogCachedFallback_RESTWritesTheGolden"
           ]
         }
       }
@@ -1358,7 +1364,8 @@
             "component:frontend/src/components/CommandPalette.vue"
           ],
           "tests": [
-            "vitest:frontend/tests/unit/command-palette.spec.ts"
+            "vitest:frontend/tests/unit/command-palette.spec.ts",
+            "vitest:frontend/tests/unit/command-palette-directory.spec.ts"
           ]
         },
         "macos": {

@@ -65,6 +65,13 @@ struct CatalogResult: Codable, Identifiable, Equatable {
     /// avoids comparing the catalog install target with redacted server URLs
     /// or command arguments after a prior session.
     let addedServerName: String?
+    /// Wire `from_cache` (omitted when false): this hit came from the source's
+    /// cached listing because its live search failed (Spec 109 D35).
+    let fromCacheWire: Bool?
+
+    /// True for a hit served from the source's cached listing. Shown as the
+    /// "From cached list" badge; the source is also in `unavailable`.
+    var fromCache: Bool { fromCacheWire ?? false }
 
     /// Globally unique list identity (and the key for per-card local state).
     /// Length prefixes keep the composition unambiguous when either value
@@ -77,6 +84,7 @@ struct CatalogResult: Codable, Identifiable, Equatable {
         case requiredInputs = "required_inputs"
         case sourceCodeURL = "source_code_url"
         case addedServerName = "added_server_name"
+        case fromCacheWire = "from_cache"
     }
 }
 
@@ -84,6 +92,26 @@ struct CatalogResult: Codable, Identifiable, Equatable {
 struct CatalogSourceError: Codable, Equatable {
     let source: String
     let reason: String
+    /// `cached_listing` when the hits for this source came from its cached
+    /// listing instead of a live fetch (Spec 109 D35); nil otherwise.
+    let fallback: String?
+    /// RFC 3339: when that cached listing was last refreshed.
+    let cachedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case source, reason, fallback
+        case cachedAt = "cached_at"
+    }
+
+    /// The one-line notice the Catalog view shows for this source. A source that
+    /// answered from its cached listing says so; the others keep the original
+    /// wording. Identical text on the Web UI (CatalogSearch.vue).
+    var noticeLine: String {
+        if fallback == "cached_listing" {
+            return "\(source): live search unavailable (\(reason)); showing matches from its cached list"
+        }
+        return "\(source) (\(reason)) unavailable"
+    }
 }
 
 /// The empty-query landing sections (FR-060), each capped at 12 server-side.

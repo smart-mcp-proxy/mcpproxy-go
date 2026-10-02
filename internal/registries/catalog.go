@@ -7,6 +7,7 @@ package registries
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -31,12 +32,19 @@ type Popularity struct {
 // GET /registries/{id}/servers and MCP search_servers keep serving its JSON
 // unchanged (contracts/rest-api.md#catalog).
 type CatalogHit struct {
-	Entry      ServerEntry
-	Source     string
-	Title      string
-	Publisher  string
-	Verified   bool
-	Official   bool
+	Entry     ServerEntry
+	Source    string
+	Title     string
+	Publisher string
+	Verified  bool
+	Official  bool
+	// Curated marks a hit from the built-in reference source (Spec 109 D35):
+	// the shipped, hand-picked basics. buildSections lists them first in the
+	// Official section. Pure data, set by BuildCatalogHit.
+	Curated bool
+	// FromCache marks a hit served from the per-source listing cache because
+	// the source's live fetch failed (Spec 109 D35); see listing_cache.go.
+	FromCache  bool
 	Popularity *Popularity
 }
 
@@ -80,6 +88,10 @@ type CatalogResult struct {
 	// This lets clients open a credential-bearing install without attempting to
 	// join against redacted GET /servers fields.
 	AddedServerName string `json:"added_server_name,omitempty"`
+	// FromCache is true when this hit came from the source's cached listing
+	// because its live search failed. The source is also in unavailable[] with
+	// fallback="cached_listing" (Spec 109 D35).
+	FromCache bool `json:"from_cache,omitempty"`
 }
 
 // CatalogSections groups the empty-query landing results (FR-060): the
@@ -97,6 +109,12 @@ type CatalogSections struct {
 type SourceError struct {
 	Source string `json:"source"`
 	Reason string `json:"reason"`
+	// Fallback is "cached_listing" when SearchAll answered for this source from
+	// its cached listing instead (the hits carry FromCache); CachedAt is when
+	// that listing was last refreshed. Both are empty when there was nothing to
+	// fall back on (Spec 109 D35).
+	Fallback string     `json:"fallback,omitempty"`
+	CachedAt *time.Time `json:"cached_at,omitempty"`
 }
 
 // SearchOptions configures a catalog search. SourceTimeout defaults to 5s;
@@ -190,9 +208,36 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 				if sctx.Err() != nil {
 					reason = fmt.Sprintf("timeout after %s", timeout)
 				}
-				outcomes[i] = sourceOutcome{unavailable: &SourceError{Source: reg.ID, Reason: reason}}
+				failure := &SourceError{Source: reg.ID, Reason: reason}
+				// Answer from the source's cached listing when the live fetch
+				// failed for any reason except a missing API key (that source
+				// never fetched, so nothing is cached for it). The source stays
+				// in unavailable[]; the hits are marked FromCache.
+				if !errors.Is(err, ErrRegistryKeyMissing) {
+					if cached, at, ok := cachedListing(&reg); ok {
+						matches := make([]CatalogHit, 0, len(cached))
+						for i := range cached {
+							if len(matches) >= fetchLimit {
+								break
+							}
+							if !matchCachedEntry(&cached[i], q) {
+								continue
+							}
+							cached[i].Registry = reg.Name
+							hit := BuildCatalogHit(&reg, cached[i])
+							hit.FromCache = true
+							matches = append(matches, hit)
+						}
+						failure.Fallback = FallbackCachedListing
+						failure.CachedAt = &at
+						outcomes[i] = sourceOutcome{hits: matches, unavailable: failure}
+						return
+					}
+				}
+				outcomes[i] = sourceOutcome{unavailable: failure}
 				return
 			}
+			cacheListing(&reg, entries)
 
 			hits := make([]CatalogHit, 0, len(entries))
 			for _, e := range entries {
@@ -215,7 +260,6 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	for _, outcome := range outcomes {
 		if outcome.unavailable != nil {
 			unavailable = append(unavailable, *outcome.unavailable)
-			continue
 		}
 		for _, h := range outcome.hits {
 			key := h.Source + "\x00" + h.Entry.ID
@@ -344,6 +388,7 @@ func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 		Publisher: derivePublisher(entry.ID, reg.Name),
 		Verified:  official,
 		Official:  official,
+		Curated:   reg.Protocol == protocolReference,
 	}
 	// FR-001/FR-002: copy the source-native signal (e.g. Docker pull_count)
 	// first, then layer in GitHub stars from the provider's cache only — no
@@ -520,12 +565,12 @@ func relevanceScore(h CatalogHit, q string) int {
 // (BEFORE limit truncation and BEFORE any Rank sort) into the empty-query
 // landing sections (Spec 110 FR-005, amending Spec 109 FR-060):
 //
-//   - Official: official-source hits in `pool`'s own MERGE (source-native)
-//     order — registry-list order, then each source's native order. Pool
-//     MUST NOT have been Rank-sorted yet: on an all-official default install
-//     every hit ties on Official/Verified, so Rank order IS popularity order,
-//     and building Official from a ranked pool silently reintroduces the bug
-//     this spec fixes. Capped at 12.
+//   - Official: the official-source hits of `pool`, curated first, never
+//     popularity-ordered (Spec 109 D35 amends Spec 110 FR-005; see
+//     officialBrowseOrder). Pool MUST NOT have been Rank-sorted yet: on an
+//     all-official default install every hit ties on Official/Verified, so Rank
+//     order IS popularity order, and building Official from a ranked pool
+//     silently reintroduces the bug Spec 110 fixed. Capped at 12.
 //   - Popular: hits with a known signal (stars>0 ∨ installs>0), sorted by
 //     popularity (FR-004) then Rank as a tiebreak, at most one per GitHub
 //     repo key (a monorepo's shared star count keeps only the first by Rank —
@@ -533,10 +578,9 @@ func relevanceScore(h CatalogHit, q string) int {
 func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	sections := &CatalogSections{Official: []CatalogHit{}, Popular: []CatalogHit{}}
 
-	for _, h := range pool {
-		if h.Official && len(sections.Official) < catalogSectionCap {
-			sections.Official = append(sections.Official, h)
-		}
+	sections.Official = officialBrowseOrder(pool)
+	if len(sections.Official) > catalogSectionCap {
+		sections.Official = sections.Official[:catalogSectionCap]
 	}
 
 	candidates := make([]CatalogHit, 0, len(pool))
@@ -572,6 +616,46 @@ func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	return sections
 }
 
+// officialBrowseOrder orders the official-source hits of the merged pool (in
+// MERGE order: registry-list order, then each source's native order) for the
+// empty-query Official section. The curated reference servers come first, in
+// curated order; the rest are interleaved round-robin across their sources in
+// registry-list order, each source keeping its native order. The official
+// source paginates alphabetically by reverse-DNS id, so taking its first twelve
+// would list obscure namespaces and hide the curated basics (Spec 109 D35, demo
+// finding #6). Popularity plays no part: Popular must still differ from Official.
+func officialBrowseOrder(pool []CatalogHit) []CatalogHit {
+	var out []CatalogHit
+	var sources []string
+	bySource := make(map[string][]CatalogHit)
+	for _, h := range pool {
+		if !h.Official {
+			continue
+		}
+		if h.Curated {
+			out = append(out, h)
+			continue
+		}
+		if _, ok := bySource[h.Source]; !ok {
+			sources = append(sources, h.Source)
+		}
+		bySource[h.Source] = append(bySource[h.Source], h)
+	}
+	for round := 0; ; round++ {
+		progressed := false
+		for _, src := range sources {
+			if round < len(bySource[src]) {
+				out = append(out, bySource[src][round])
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
+}
+
 // ToCatalogResult builds the REST DTO from an internal hit. added is computed
 // by the caller (httpapi layer, FR-007 scoped join) — SearchAll itself has no
 // notion of the calling caller's visibility.
@@ -601,6 +685,7 @@ func ToCatalogResult(h CatalogHit, added bool) CatalogResult {
 		RequiredInputs: inputs,
 		SourceCodeURL:  h.Entry.SourceCodeURL,
 		Added:          added,
+		FromCache:      h.FromCache,
 	}
 }
 

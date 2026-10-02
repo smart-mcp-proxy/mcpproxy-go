@@ -13,6 +13,30 @@ final class CatalogTests: XCTestCase {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    // MARK: - Browse section order (Spec 109 D35, T164)
+
+    private func sampleResult(_ id: String) throws -> CatalogResult {
+        try decode(CatalogResult.self, from: """
+        {"source": "official", "id": "\(id)", "title": "\(id)", "verified": true, "official": true,
+         "description": "d", "transport": "stdio", "install": {"command": "npx"}, "added": false}
+        """)
+    }
+
+    /// Popular is rendered first when it has entries, then Official; an empty
+    /// section is never listed (same order as the Web UI and the CLI table).
+    func testPopularSectionRendersFirst() throws {
+        let popular = [try sampleResult("hot")]
+        let official = [try sampleResult("filesystem")]
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: official, popular: popular)),
+            [.popular, .official])
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: official, popular: [])), [.official])
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: [], popular: popular)), [.popular])
+        XCTAssertEqual(CatalogView.sectionOrder(CatalogSections(official: [], popular: [])), [])
+    }
+
     // MARK: - CatalogResult decode (contracts/rest-api.md#catalog example)
 
     func testDecodesTheContractExampleShape() throws {

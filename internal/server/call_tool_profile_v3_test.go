@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,27 +34,22 @@ func TestCallTool_ProfileV3_RefusalsAreStableAcrossResolutionSources(t *testing.
 		"anonymous": anonCtx,
 	}
 	cases := []struct {
-		name, tool, refusal string
+		name, tool, golden string
+		tier               profile.Tier
+		capText            string
 	}{
-		{
-			name: "tier cap", tool: "github:create_issue",
-			refusal: "blocked by profile: github:create_issue is a write tool; this profile allows read tools only",
-		},
-		{
-			name: "deny rule", tool: "github:get_secret_scanning_alert",
-			refusal: "blocked by profile: github:get_secret_scanning_alert is denied by a profile rule",
-		},
-		{
-			name: "unannotated deny", tool: "github:search_code",
-			refusal: "blocked by profile: github:search_code has no tier annotation; an operator can classify it in the profile to allow it",
-		},
+		{name: "tier cap", tool: "github:create_issue", golden: "tier", tier: profile.TierWrite, capText: "read"},
+		{name: "deny rule", tool: "github:get_secret_scanning_alert", golden: "rule", tier: profile.TierRead, capText: "read"},
+		{name: "unannotated deny", tool: "github:search_code", golden: "unannotated", tier: profile.TierUnannotated, capText: "read"},
 	}
 	variants := []string{contracts.ToolVariantRead, contracts.ToolVariantWrite, contracts.ToolVariantDestructive}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			server, tool, _ := strings.Cut(tc.tool, ":")
+			disclosed := v3Disclosed(t, tc.golden, server, tool, tc.tier, tc.capText, "work-readonly")
+			undisclosed := undisclosedToolRefusal(t, tc.golden, server, tool, tc.tier, tc.capText)
 			for _, variant := range variants {
 				t.Run(variant, func(t *testing.T) {
-					var first string
 					for source, contextFor := range sources {
 						t.Run(source, func(t *testing.T) {
 							result, err := proxy.handleCallToolVariant(contextFor(), auditCallToolRequest(tc.tool, nil), variant)
@@ -61,14 +57,17 @@ func TestCallTool_ProfileV3_RefusalsAreStableAcrossResolutionSources(t *testing.
 							require.NotNil(t, result)
 							require.True(t, result.IsError)
 							text := resultText(t, result)
-							require.Equal(t, tc.refusal, text)
-							require.NotContains(t, text, "work-readonly")
-							require.NotContains(t, text, "Work · Read-only")
-							if first == "" {
-								first = text
-							} else {
-								require.Equal(t, first, text, "refusal bytes must not reveal the resolution source")
+							if source == "anonymous" {
+								// Spec 108 D39: the operator's anonymous_profile is never
+								// handed to an unauthenticated caller.
+								require.Equal(t, undisclosed, text)
+								require.NotContains(t, text, "work-readonly")
+								require.NotContains(t, text, "Work · Read-only")
+								return
 							}
+							// pin, binding, url, session: the caller's own profile is named.
+							require.Equal(t, disclosed, text)
+							require.Contains(t, text, `"Work · Read-only" (work-readonly)`)
 						})
 					}
 				})
@@ -76,6 +75,32 @@ func TestCallTool_ProfileV3_RefusalsAreStableAcrossResolutionSources(t *testing.
 		})
 	}
 	require.Empty(t, up.dispatched(), "profile denials must happen before upstream I/O")
+}
+
+// Spec 108 D39: an anonymous caller keeps the non-disclosing text.
+func TestCallTool_AnonymousProfileRefusalStaysUndisclosed(t *testing.T) {
+	proxy, rt := newProfilesV3Fixture(t)
+	startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
+	proxy.currentConfig().AnonymousProfile = "work-readonly"
+
+	result, err := proxy.handleCallToolVariant(anonCtx(), auditCallToolRequest("github:create_issue", nil), contracts.ToolVariantWrite)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", resultText(t, result))
+}
+
+// Spec 108 D39: a dangling pin has no policy and answers like an out-of-scope
+// token (the Spec 105 non-disclosing shape), never naming a profile.
+func TestCallTool_DanglingPinStaysNonDisclosing(t *testing.T) {
+	proxy, rt := newProfilesV3Fixture(t)
+	startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
+
+	result, err := proxy.handleCallToolVariant(pinnedProfileCtx("gone"), auditCallToolRequest("github:create_issue", nil), contracts.ToolVariantWrite)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	text := resultText(t, result)
+	require.NotContains(t, text, "gone")
+	require.NotContains(t, text, "blocked by profile")
 }
 
 func TestCallTool_ProfileV3_RestDispatchPreservesTypedRefusal(t *testing.T) {
@@ -92,7 +117,7 @@ func TestCallTool_ProfileV3_RestDispatchPreservesTypedRefusal(t *testing.T) {
 	var refusal *profile.ToolBlockedError
 	require.ErrorAs(t, err, &refusal)
 	require.Equal(t, profile.BlockReasonTier, refusal.Reason)
-	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", refusal.Error())
+	require.Equal(t, v3TierRefusal(t), refusal.Error())
 	require.Empty(t, up.dispatched(), "REST dispatch must refuse before upstream I/O")
 }
 
@@ -106,7 +131,7 @@ func TestCallTool_ProfileRefusalPrecedesTokenPermissionRefusal(t *testing.T) {
 	result, err := proxy.handleCallToolVariant(ctx, auditCallToolRequest("github:create_issue", nil), contracts.ToolVariantWrite)
 	require.NoError(t, err)
 	require.True(t, result.IsError)
-	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", resultText(t, result))
+	require.Equal(t, v3TierRefusal(t), resultText(t, result))
 }
 
 func TestCallTool_ProfileDenialWritesBlockedActivityReason(t *testing.T) {

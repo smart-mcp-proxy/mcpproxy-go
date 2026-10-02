@@ -44,7 +44,7 @@ community  acme/github-fork                   GitHub (community fork)  http
 Found 3 results. Add one with: mcpproxy catalog add <source>/<id>
 ```
 
-With no query the output has two blocks, `Official:` and `Popular:`. A source that did not answer prints `⚠ <source> unavailable: <reason>` after the table. `-o json` adds `official`, `verified`, `publisher` and `popularity` to every result.
+With no query the output has two blocks, `Popular:` first when any server has a popularity signal, then `Official:` (the curated reference servers first); an empty block is not printed. A source that did not answer prints `⚠ <source> unavailable: <reason>` after the table. When the daemon holds a recent listing of that source, its matches are shown instead, their SOURCE reads `<source> (cached)` and the line ends `; showing matches from its cached list`. The listing cache lives in the daemon, so `catalog search` without a running daemon has none. `-o json` adds `official`, `verified`, `publisher`, `popularity` and `from_cache` to every result, and `fallback` and `cached_at` to the `unavailable` entry.
 
 ## catalog show
 

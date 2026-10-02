@@ -247,12 +247,13 @@ No new route: the Web UI and macOS write each secret with the existing `POST /se
      "required_inputs": [{"name": "GITHUB_TOKEN", "secret_like": true}], "added": false}   // secret_like = the registry's isSecret OR the research D13 secret-like-name rule (data-model §9)
   ],
   "sections": null,
-  "unavailable": [{"source": "smithery", "reason": "timeout after 5s"}]
+  "unavailable": [{"source": "smithery", "reason": "timeout after 5s", "fallback": "cached_listing", "cached_at": "2026-10-02T10:00:00Z"}]
 }
 ```
 
 - Result objects are the `CatalogResult` **DTO** (data-model §9), built from the internal `CatalogHit` by `toCatalogResult`; the Spec 070 `registries.ServerEntry` JSON (`url`, `installCmd`, `registry`, `required_inputs[].secret`) is not renamed and keeps serving `GET /registries/{id}/servers` and MCP `search_servers` unchanged (codex round 3: embedding `ServerEntry` could not produce this example). Golden test T101a.
-- Empty `q` → `results: []`, `sections: {"official": [...], "popular": [...]}` (≤ 12 each).
+- Empty `q` → `results: []`, `sections: {"official": [...], "popular": [...]}` (≤ 12 each). The keys are not ordered; every surface renders Popular first when it is non-empty, then Official (curated reference servers first, then round-robin across sources, never popularity-ordered; research D35 A9).
+- **Cached fallback (D35).** A source whose live fetch fails (timeout or any error except a missing API key) is answered from its per-source listing cache when that holds a listing refreshed within 24 h: the hits match the trimmed query as a case-insensitive substring of name, description or id, carry `from_cache: true`, and rank like any other hit. The source stays in `unavailable[]` with `fallback: "cached_listing"` and `cached_at`, so a consumer that only reads `unavailable[]` is unchanged. A source with nothing cached has neither field. The cache is in memory, so a daemon restart empties it.
 - Ranking (pure `registries.Rank`): `official` desc, `verified` desc, popularity desc (missing = 0), relevance desc, `title` asc, `id` asc.
 - `added: true` when a configured server has `source_registry_id == source` **and** the same install target (`install.url`, or the command + args) as this result → surfaces render "Added ✓ · Open". The config does not store the registry's own server `id`, so `id` is not part of the join (data-model.md §9). A manually added server matches on the install target alone. When exactly one matching server is visible to the caller, the optional `added_server_name` identifies it; clients use that authoritative name before any comparison with redacted `GET /servers` URL/argv fields. It is omitted for ambiguous matches.
 - Adding stays `POST /registries/{id}/servers/{serverId}/add` (Spec 070), always quarantined.

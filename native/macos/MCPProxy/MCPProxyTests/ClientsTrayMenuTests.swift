@@ -205,21 +205,30 @@ final class ClientsTrayMenuTests: XCTestCase {
 
     /// A client without an active client credential cannot be bound: its whole
     /// submenu is the one way to get a credential.
-    func testAClientWithoutACredentialOffersOnlyTheUpgrade() {
+    func testAClientWithoutACredentialOffersOnlyTheFix() {
         let rows = TrayClientsMenu.build(clients: [
             client(id: "codex", name: "Codex", credential: "admin_key"),
             client(id: "gone", name: "Gone", credential: nil, connected: true),
         ], profiles: profiles)
-        for row in rows {
-            XCTAssertEqual(row.items, [.upgrade(title: "Upgrade to client credential…")], row.clientId)
-        }
+        XCTAssertEqual(rows.map(\.clientId), ["codex", "gone"])
+        XCTAssertEqual(rows[0].items, [.upgrade(title: "Upgrade to client credential…")], "an admin-key holder is an upgrade")
+        XCTAssertEqual(rows[1].items, [.upgrade(title: "Connect…")], "an unclassified client is simply connected")
     }
 
-    func testARevokedConnectedClientOffersTheUpgradeToo() {
+    /// Spec 108 D39 (T150): an installed client with no mcpproxy entry offers
+    /// "Connect…", not "Upgrade to client credential…".
+    func testInstalledClientWithoutCredentialShowsConnect() {
+        let row = TrayClientsMenu.build(clients: [
+            client(id: "claude-code", name: "Claude Code", credential: "none", connected: true),
+        ], profiles: profiles)[0]
+        XCTAssertEqual(row.items, [.upgrade(title: "Connect…")])
+    }
+
+    func testARevokedConnectedClientOffersReconnect() {
         let row = TrayClientsMenu.build(clients: [
             client(id: "c", name: "C", credential: "revoked", connected: true),
         ], profiles: profiles)[0]
-        XCTAssertEqual(row.items, [.upgrade(title: "Upgrade to client credential…")])
+        XCTAssertEqual(row.items, [.upgrade(title: "Reconnect…")])
     }
 
     // MARK: Tooltip (F11 kept)

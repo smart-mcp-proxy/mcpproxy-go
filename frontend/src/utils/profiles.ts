@@ -133,9 +133,19 @@ export function credentialLabel(state: string | undefined): string {
   }
 }
 
-// The fix-button text for a failed step.
+// The fix-button text for a row without a usable client credential
+// (labels.json credential_cta, identical on macOS). Only a client that holds
+// the admin key is an "upgrade"; a revoked or expired credential is a
+// "reconnect"; an installed client that never connected (none, or the
+// stat-only unknown) is simply "Connect". A client credential needs no button.
 export function credentialCta(state: string | undefined): string {
-  return state === 'revoked' || state === 'expired' ? 'Reconnect' : 'Upgrade to client credential'
+  switch (state) {
+    case 'client': return ''
+    case 'admin_key': return 'Upgrade to client credential'
+    case 'revoked':
+    case 'expired': return 'Reconnect'
+    default: return 'Connect'
+  }
 }
 
 // --- errors ----------------------------------------------------------------

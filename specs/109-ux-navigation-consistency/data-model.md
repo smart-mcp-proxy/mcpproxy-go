@@ -157,6 +157,8 @@ type CatalogHit struct {
     Entry      ServerEntry  // existing Spec 070 type; its JSON (url, installCmd, registry, required_inputs[].secret) is NOT changed
     Source, Title, Publisher string
     Verified, Official       bool
+    Curated    bool          // hit of the built-in reference source; listed first in the Official section (D35 A9)
+    FromCache  bool          // served from the source's cached listing because its live fetch failed (D35 A1/A2)
     Popularity *Popularity   // {stars?, installs?}
 }
 
@@ -176,7 +178,9 @@ type CatalogResult struct {
     SourceCodeURL  string          `json:"source_code_url,omitempty"`
     Added          bool            `json:"added"`
     AddedServerName string          `json:"added_server_name,omitempty"` // unique caller-visible installed match; omitted when ambiguous
+    FromCache       bool            `json:"from_cache,omitempty"`        // answered from the source's cached listing (D35)
 }
+// unavailable[] entry: {source, reason, fallback?: "cached_listing", cached_at?: RFC 3339}
 type SearchOptions struct{ SourceTimeout time.Duration } // default 5 s; only tests set another value (T109a)
 func SearchAll(ctx, q, tag string, limit int, opts SearchOptions) (results []CatalogHit, sections *CatalogSections, unavailable []SourceError)
 func Rank(a, b CatalogHit, q string) bool // pure, deterministic

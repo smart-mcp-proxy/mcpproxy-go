@@ -1,0 +1,26 @@
+{
+  "_comment": "Spec 109 D35 (T161). Resolved value of every nullable (*bool) config key that has a Settings toggle. Decoded by internal/config/settings_nullable_defaults_test.go (pins each value to the Go resolver) and frontend/tests/unit/settings-nullable-defaults.spec.ts (pins fields.ts to it). A plain value applies when the key is absent. The audit_log.* keys depend on whether the audit_log block is present, and for an absent block on the edition: the personal edition leaves audit logging off, the server edition (HTTP transport) turns it on with a stdout sink. not_in_settings lists *bool keys that have no Settings toggle.",
+  "defaults": {
+    "quarantine_enabled": true,
+    "telemetry.enabled": true,
+    "audit_log.enabled": {
+      "absent_block": { "personal": false, "server": true },
+      "present_block": true
+    },
+    "audit_log.stdout": {
+      "absent_block": { "personal": false, "server": true },
+      "present_block": false
+    },
+    "audit_log.compress": {
+      "absent_block": { "personal": true, "server": true },
+      "present_block": true
+    }
+  },
+  "not_in_settings": [
+    "forward_client_headers",
+    "security.auto_baseline_scan",
+    "security.deep_scan.fetch_package_source",
+    "security.scanner_fetch_package_source",
+    "update_check.enabled"
+  ]
+}
