@@ -19,7 +19,9 @@ Run this first when debugging any issue:
 mcpproxy doctor
 ```
 
-This checks for:
+The first section is the same needs-attention list `mcpproxy attention` prints (see [Attention Command](/cli/attention-command)); the diagnostics follow under `Diagnostics: N findings`.
+
+It checks for:
 - Upstream server connection errors
 - OAuth authentication requirements
 - Missing secrets
@@ -46,16 +48,50 @@ mcpproxy upstream list
 Output shows unified health status:
 - Server name and protocol type
 - Tool count
-- Health status with emoji indicator (✅ healthy, ⚠️ degraded, ❌ unhealthy, ⏸️ disabled, 🔒 quarantined)
-- Suggested action command when applicable
+- **STATUS**: the status label, the same word the Web UI card, the macOS row and the tray show (`Online`, `Connecting`, `Sign-in required`, `Needs review`, `Secret required`, `Needs configuration`, `Error`, `Disabled`). A server that is not usable never reads Online, healthy or connected
+- **ACTION**: the CLI command for the server's first suggested action, or `-`
 
 Example output:
 ```
 NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅    github-server           http       15         Connected (15 tools)           -
-❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
+✅    github-server           http       15         Online                         -
+❌    oauth-server            http       0          Sign-in required               auth login --server=oauth-server
 ```
+
+`-o json` is unchanged and carries `health.status`, `health.usable` and `health.actions` beside every older field.
+
+Filter by status with `--status`. The flag is repeatable, and a comma-separated value is the same as repeating it (union semantics):
+
+```bash
+mcpproxy upstream list --status needs_review,sign_in_required
+mcpproxy upstream list --status error --status connecting
+```
+
+The values are `ready`, `connecting`, `sign_in_required`, `needs_review`, `needs_secret`, `needs_config`, `error` and `disabled`.
+
+### Add a Server
+
+```bash
+mcpproxy upstream add notion https://mcp.notion.com/sse
+mcpproxy upstream add fs -- npx -y @modelcontextprotocol/server-filesystem /tmp
+mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --secret-header "Authorization: Bearer ghp_..."
+mcpproxy upstream add weather -- npx -y weather-mcp --secret-env WEATHER_API_KEY=abc123
+```
+
+`--secret-env KEY=VALUE` and `--secret-header "Name: value"` (both repeatable) write the value to the OS keyring and store `${keyring:<server>-env-<name>}` in the config instead of the value. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
+
+### Review and Approve
+
+New servers and new or changed tools wait for review. `mcpproxy review` is the one entry point (see [Review Commands](/cli/review-commands)); the older verbs stay as documented aliases:
+
+| Older command | Use instead |
+|---|---|
+| `mcpproxy upstream approve <server> [tools...]` | `mcpproxy review approve <server> --tools ...` |
+| `mcpproxy security approve <server>` / `security reject` | `mcpproxy review approve <server>` / `mcpproxy review reject <server>` |
+| `mcpproxy tools approve` / `tools reject` | `mcpproxy review approve` / `mcpproxy review reject` with `--tools` |
+
+`mcpproxy tools list --risk` is an alias of `--tier`.
 
 ### View Logs
 
