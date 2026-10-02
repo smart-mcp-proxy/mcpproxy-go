@@ -9,12 +9,42 @@
     <!-- Spec 109 FR-051/FR-001/FR-003: the ONE needs-attention list, replacing
          the two bespoke Dashboard.vue banners (servers needing attention,
          tools pending approval) that duplicated FR-001's logic locally. -->
-    <AttentionList data-test="home-attention-list" />
+    <AttentionList v-if="!showGettingStarted && !holdAllClear" data-test="home-attention-list" />
+
+    <!-- A fresh instance (no server configured) has nothing to be "all clear"
+         about: the green banner would be false reassurance. Any attention item
+         still wins (showGettingStarted needs an empty list). -->
+    <div
+      v-if="showGettingStarted"
+      class="card bg-base-100 border border-primary/30 shadow-sm"
+      data-test="home-getting-started"
+    >
+      <div class="card-body p-4 gap-3">
+        <div>
+          <h3 class="font-bold text-lg">Get started</h3>
+          <p class="text-sm text-base-content/70">MCPProxy has no servers yet. Add one and connect an AI client to start using tools through the proxy.</p>
+        </div>
+        <ol class="space-y-2 text-sm">
+          <li class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">1. Add a server</span>
+            <button type="button" class="btn btn-xs btn-primary" data-test="home-getting-started-add-server" @click="router.push('/add-server')">Add a server</button>
+          </li>
+          <li class="flex flex-wrap items-center gap-3">
+            <span class="font-medium">2. Connect a client</span>
+            <button type="button" class="btn btn-xs btn-primary btn-outline" data-test="home-getting-started-connect-client" @click="router.push('/clients')">Connect a client</button>
+            <span v-if="clientConnected" class="badge badge-success badge-sm" data-test="home-getting-started-client-done">&#10003; connected</span>
+          </li>
+        </ol>
+        <div>
+          <button type="button" class="link link-hover text-sm" data-test="home-getting-started-wizard" @click="onboardingStore.openWizard()">Run setup wizard</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Usage summary strip: normally sits below the topology, but moves
          above it when the attention list is empty (FR-051) so an otherwise-
          calm landing page still opens on something live. -->
-    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count === 0" data-test="home-usage-strip-top" />
+    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count === 0 && !showGettingStarted" data-test="home-usage-strip-top" />
 
     <!-- Topology (moved from Dashboard.vue's Overview panel). Always shown —
          Home no longer switches between an Overview and a Usage panel;
@@ -150,6 +180,12 @@
             </svg>
             <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
             <span class="text-xs font-medium">smaller tool context per request</span>
+            <span
+              v-if="tokenSavingsData.estimated"
+              class="badge badge-ghost badge-xs"
+              data-test="dashboard-token-savings-estimate"
+              :title="TOKEN_ESTIMATE_TITLE"
+            >estimate</span>
           </button>
         </div>
 
@@ -296,7 +332,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
         </svg>
         Token Savings Details
-        <span class="badge badge-success badge-sm ml-auto">{{ formatNumber(tokenSavingsData.saved_tokens) }} saved</span>
+        <span class="badge badge-success badge-sm ml-auto" data-test="dashboard-token-savings-saved-badge">{{ formatNumber(tokenSavingsData.saved_tokens) }} saved{{ tokenSavingsData.estimated ? ' · estimate' : '' }}</span>
       </div>
       <div class="collapse-content">
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-2">
@@ -305,7 +341,15 @@
             <div class="grid grid-cols-3 gap-4">
               <div :title="tokensSavedExplainer">
                 <div class="text-sm opacity-60">Tokens Saved / request</div>
-                <div class="text-2xl font-bold text-success">{{ formatNumber(tokenSavingsData.saved_tokens) }}</div>
+                <div class="text-2xl font-bold text-success">
+                  {{ formatNumber(tokenSavingsData.saved_tokens) }}
+                  <span
+                    v-if="tokenSavingsData.estimated"
+                    class="badge badge-ghost badge-sm align-middle"
+                    data-test="dashboard-token-savings-details-estimate"
+                    :title="TOKEN_ESTIMATE_TITLE"
+                  >estimate</span>
+                </div>
                 <div class="text-xs opacity-60">{{ tokenSavingsData.saved_tokens_percentage.toFixed(1) }}% reduction</div>
               </div>
               <div>
@@ -566,6 +610,11 @@ const tokensSavedExplainer =
   'returns for one query. It is a property of your current tool catalog, so it ' +
   'changes when you add, remove or reconnect servers — not with each call.'
 
+// Same wording as Usage.vue and the macOS Home. Kept local because hoisting it
+// into a shared constant touches Usage.vue (follow-up).
+const TOKEN_ESTIMATE_TITLE =
+  'No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average'
+
 const tokenDetailsOpen = ref(false)
 const tokenSavingsDetails = ref<HTMLElement | null>(null)
 
@@ -576,6 +625,35 @@ const openTokenSavingsDetails = () => {
     tokenSavingsDetails.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   })
 }
+
+// --- Fresh instance (no server configured) ---
+//
+// "All clear" with zero servers is false reassurance, so the getting-started
+// card takes its place. The trigger is "no server configured" alone; the client
+// state is a checklist step. Any attention item wins, and nothing renders until
+// both the server list and the attention list have loaded.
+const showGettingStarted = computed(
+  () =>
+    authStore.principalKind !== 'tenant' &&
+    serversStore.loaded &&
+    serversStore.serverCount.total === 0 &&
+    attentionStore.loaded &&
+    attentionStore.count === 0
+)
+
+// While the server count is still unknown an empty attention list would flash
+// "All clear" only to be replaced by the card, so hold the list back. A failed
+// server fetch does not hold it back forever.
+const holdAllClear = computed(
+  () =>
+    authStore.principalKind !== 'tenant' &&
+    attentionStore.loaded &&
+    attentionStore.count === 0 &&
+    !serversStore.loaded &&
+    !serversStore.loading.error
+)
+
+const clientConnected = computed(() => onboardingStore.hasConnectedClient || liveClients.value.length > 0)
 
 // --- Disabled server count ---
 //
