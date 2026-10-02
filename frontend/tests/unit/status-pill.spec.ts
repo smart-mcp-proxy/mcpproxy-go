@@ -46,6 +46,8 @@ describe('StatusPill (Spec 109-i FR-053)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useServersStore().servers = fixture as any
+    // The pill reads "Loading servers…" until the first list lands (T175).
+    useServersStore().loaded = true
     useSystemStore().$patch({ status: { running: true, listen_addr: '127.0.0.1:8080', routing_mode: 'retrieve_tools' } as any })
   })
 
