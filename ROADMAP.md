@@ -1036,6 +1036,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
 | [108-profiles-v3](./specs/108-profiles-v3/) | `shipped` | 180/181 (99%) |
-| [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `in-flight` | 166/181 (92%) |
+| [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `shipped` | 177/186 (95%) |
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |

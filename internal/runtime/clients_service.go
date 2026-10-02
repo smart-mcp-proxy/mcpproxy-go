@@ -261,6 +261,34 @@ func (s *ClientsService) Now() time.Time { return s.now() }
 // StateOf classifies a credential record (client | revoked | expired | none).
 func (s *ClientsService) StateOf(t *auth.AgentToken) profile.CredentialState { return s.stateOf(t) }
 
+// ObservedCredentialStates returns the credential states Warnings needs for the
+// admin-key warning: the persisted last observation (Spec 108-f F11) of every
+// connect-registry client that has no client credential record of its own.
+// It reads the credential store only, never a client config (Spec 075). Both
+// GET /clients and the needs-attention list call it, so they cannot disagree.
+func (s *ClientsService) ObservedCredentialStates(observed map[string]storage.ClientCredentialObservation) (map[string]profile.CredentialState, error) {
+	all, err := s.records()
+	if err != nil {
+		return nil, err
+	}
+	hasRecord := map[string]bool{}
+	for i := range all {
+		if all[i].Kind == auth.KindClient {
+			hasRecord[all[i].ClientID] = true
+		}
+	}
+	states := map[string]profile.CredentialState{}
+	for id, obs := range observed {
+		if hasRecord[id] || connect.FindClient(id) == nil {
+			continue
+		}
+		if profile.CredentialState(obs.State) == profile.CredentialStateAdminKey {
+			states[id] = profile.CredentialStateAdminKey
+		}
+	}
+	return states, nil
+}
+
 func (s *ClientsService) records() ([]auth.AgentToken, error) {
 	all, err := s.store.ListAgentTokens()
 	if err != nil {

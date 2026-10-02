@@ -261,7 +261,17 @@ func (s *Server) clientRows(ctx context.Context, withSessions bool, detailID str
 
 	var warnings []internalRuntime.Warning
 	if s.clientsService != nil {
-		states := map[string]profile.CredentialState{}
+		// The persisted observations are the same source the needs-attention
+		// list uses (Spec 109-l); an on-demand classification of this very read
+		// (the detail row) is overlaid on top.
+		var observed map[string]storage.ClientCredentialObservation
+		if pctx != nil && pctx.state != nil {
+			observed = pctx.state.ClientCredentialObserved
+		}
+		states, err := s.clientsService.ObservedCredentialStates(observed)
+		if err != nil {
+			return nil, nil, err
+		}
 		for _, row := range rows {
 			if row.CredentialState == profile.CredentialStateAdminKey {
 				states[row.ID] = profile.CredentialStateAdminKey

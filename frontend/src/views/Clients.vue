@@ -22,10 +22,11 @@
           <tr v-if="rowErrors[client.id]" :data-test="`client-row-error-${client.id}`"><td colspan="6" class="bg-base-200/40"><GuardRefusal v-if="isGuardRefusal(rowErrors[client.id])" :refusal="rowErrors[client.id] as any" @navigate="bindings.clearRowError(client.id)" /><div v-else role="alert" class="alert alert-error text-sm">{{ describeError(rowErrors[client.id]) }}</div></td></tr>
           <tr v-if="expanded === client.id"><td colspan="6" class="bg-base-200/40">
             <p v-if="client.reload_hint" class="text-sm mb-2">{{ client.reload_hint }}</p>
-            <div v-if="clientScopeAvailable" class="flex gap-3 mb-2 text-sm">
-              <router-link class="link" :to="scopeQuery.linkTo('activity', { view: 'calls', client: client.id })">Activity</router-link>
-              <router-link class="link" :to="scopeQuery.linkTo('tools', { client: client.id })">Tools</router-link>
-              <router-link class="link" :to="scopeQuery.linkTo('usage', { client: client.id })">Usage</router-link>
+            <div v-if="clientScopeAvailable" class="flex flex-wrap gap-x-3 gap-y-1 mb-2 text-sm">
+              <router-link class="link" :data-test="`clients-row-link-activity-${client.id}`" :aria-label="`Activity for ${client.display_name}`" :to="scopeQuery.linkTo('activity', { view: 'calls', client: client.id, token: '' })">Activity</router-link>
+              <router-link class="link" :data-test="`clients-row-link-sessions-${client.id}`" :aria-label="`Sessions for ${client.display_name}`" :to="scopeQuery.linkTo('activity', { view: 'sessions', client: client.id, token: '' })">Sessions</router-link>
+              <router-link class="link" :data-test="`clients-row-link-tools-${client.id}`" :aria-label="`Tools it sees for ${client.display_name}`" :to="scopeQuery.linkTo('tools', { client: client.id })">Tools it sees</router-link>
+              <router-link class="link" :data-test="`clients-row-link-usage-${client.id}`" :aria-label="`Usage for ${client.display_name}`" :to="scopeQuery.linkTo('usage', { client: client.id, token: '' })">Usage</router-link>
             </div>
             <ClientBindingControls class="mb-3" :client="client" @changed="refreshSilently" @forget="forgetTarget = $event" @credential="showCredential" />
             <p v-if="!client.sessions?.length" class="text-sm opacity-60">No sessions recorded.</p>

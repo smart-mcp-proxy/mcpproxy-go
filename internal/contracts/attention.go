@@ -5,7 +5,7 @@ import "time"
 // AttentionSubject identifies what an AttentionItem is about
 // (contracts/rest-api.md#attention, Spec 109 FR-001).
 type AttentionSubject struct {
-	Type string `json:"type"` // server|tool|client
+	Type string `json:"type"` // server|tool|client|setting
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }

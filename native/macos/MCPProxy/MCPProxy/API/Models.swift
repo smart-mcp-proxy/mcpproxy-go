@@ -246,7 +246,7 @@ struct HealthStatus: Codable, Equatable {
 
 /// What an `AttentionItem` is about. Matches the Go `contracts.AttentionSubject`.
 struct AttentionSubject: Codable, Equatable {
-    let type: String // "server" | "tool" | "client"
+    let type: String // "server" | "tool" | "client" | "setting"
     let id: String
     let name: String
 }

@@ -1219,8 +1219,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ? attentionItem.subject.name
                         : attentionDetailTarget(for: attentionItem)
                 }
-                // A client-subject item (109-h) has no native screen yet:
-                // shown for disclosure, not yet actionable from the tray.
+                // Spec 109-l: a Spec 108 warning (a client or the binding-guard
+                // setting) opens the screen that fixes it, through the same
+                // mapper Home uses. It only navigates; the tray never mutates
+                // config or a credential. Other client items (client_never_seen)
+                // stay disclosure rows.
+                if attentionItem.subject.type != "server", AttentionWarningAction.isActionable(attentionItem) {
+                    item.action = #selector(performAttentionWarningFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem
+                }
                 submenu.addItem(item)
             }
             parent.submenu = submenu
@@ -1850,6 +1858,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
+    }
+
+    /// Spec 109-l: a Spec 108 warning row (a client or the binding-guard
+    /// setting). Navigates to the fix's screen and brings the main window
+    /// forward; a Settings route opens its own window (`navigate` posts
+    /// `openSettings`). Never a mutation.
+    @objc private func performAttentionWarningFromMenu(_ sender: NSMenuItem) {
+        guard let item = sender.representedObject as? AttentionItem,
+              let route = AttentionWarningAction.route(for: item) else { return }
+        appState.navigate(route)
+        if let sidebar = route.sidebarItem {
+            showMainWindow(tab: sidebar)
+        }
     }
 
     /// Run the remediation a "Needs Attention" row offers — from the row's own

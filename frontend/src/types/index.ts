@@ -36,6 +36,12 @@ export type {
   AttentionResponse,
 } from './contracts'
 export {
+  AttentionKindAnonymousDeniedByBindingGuard,
+  AttentionKindClientHoldsAdminKey,
+  AttentionKindClientTokenNameConflict,
+  AttentionKindProfileMissing,
+  AttentionKindClientRotationPending,
+  AttentionKindClientCredentialExpiring,
   AttentionKindSignInRequired,
   AttentionKindMissingSecret,
   AttentionKindConfigError,

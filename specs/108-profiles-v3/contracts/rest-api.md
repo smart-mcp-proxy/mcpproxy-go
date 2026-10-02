@@ -48,7 +48,7 @@ Every mutating route writes one `profile_change` record and emits `profiles.chan
 
 ## Tokens (existing routes, extended)
 
-`POST /tokens` accepts `profile` (sets `profile_pin` on a regular `kind=agent` token — pinned, no `profile_mode`; `allowed_servers` defaults `["*"]` and `permissions` defaults all three when `profile` is given and they are omitted). Names starting with `client-` → `400 {error: "token names starting with \"client-\" are reserved for client credentials", field: "name"}` (checked before storage). `GET /tokens` rows add `kind, client_id, profile_mode, legacy_scope: bool` (true when `allowed_servers ≠ ["*"]` or `permissions` ≠ all). `GET /tokens?profile=&token=` (FR-031): `profile` = tokens whose **current** `profile_pin` is that profile (`-` = unpinned), `token` = exact name; server-side.
+`POST /tokens` accepts `profile` (sets `profile_pin` on a regular `kind=agent` token — pinned, no `profile_mode`; `allowed_servers` defaults `["*"]` and `permissions` defaults all three when `profile` is given and they are omitted). A name held by a revoked token → `409 {error: "A revoked token named \"x\" still holds this name for activity history; choose another name"}` (a live holder keeps `A token named \"x\" already exists`). Names starting with `client-` → `400 {error: "token names starting with \"client-\" are reserved for client credentials", field: "name"}` (checked before storage). `GET /tokens` rows add `kind, client_id, profile_mode, legacy_scope: bool` (true when `allowed_servers ≠ ["*"]` or `permissions` ≠ all). `GET /tokens?profile=&token=` (FR-031): `profile` = tokens whose **current** `profile_pin` is that profile (`-` = unpinned), `token` = exact name; server-side.
 
 ## Access explain
 
