@@ -65,6 +65,27 @@ func buildSetProfileTool() mcp.Tool {
 // the pre-105 payload byte-for-byte — the selected profile's servers, or every
 // configured server on clear — because SC-005 names no FR-003 exception for
 // them (an administrator is never pinned, so only the URL tier could differ).
+// setProfileRefusal is the refusal for a slug the caller may not select. A
+// Spec 108 client credential gets text chosen by its own profile mode alone
+// (locked: "this client's profile is locked"; switchable: "not a profile this
+// client may switch to"), so it can tell why the switch failed without learning
+// anything about the slug: the text never depends on whether the slug exists or
+// is in switchable_to, is byte-identical for every refused slug with the slug
+// substituted, and never names the bound profile (FR-018; the admission lookup
+// and its timing class are untouched). Every other scoped caller keeps the
+// Spec 105 uniform "unknown profile '<slug>'" — an agent token must never be
+// able to confirm from the wording that it is pinned (round 9 MUST-FIX 2).
+func setProfileRefusal(ctx context.Context, slug string) *mcp.CallToolResult {
+	if ac := auth.AuthContextFromContext(ctx); ac.IsClientCredential() {
+		format := profile.SetProfileNotSwitchableRefusalFormat
+		if ac.ProfileMode == auth.ProfileModeLocked {
+			format = profile.SetProfileLockedRefusalFormat
+		}
+		return mcp.NewToolResultError(fmt.Sprintf(format, slug))
+	}
+	return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug))
+}
+
 func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	slug := strings.TrimSpace(request.GetString("profile", ""))
 
@@ -88,7 +109,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		// to a fresh build instead. Fail closed with the exact uniform
 		// refusal every other non-selectable slug gets: no state change, no
 		// disclosure, no build (Spec 105 PR D review round 11, MUST-FIX).
-		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+		return setProfileRefusal(ctx, slug), nil
 	}
 	cfg := profiles.cfg
 	anonymousBindingGuard := anonymousProfileCaller(ctx) && p.bindingGuardActive(profiles)
@@ -127,7 +148,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	if slug != "" {
 		if !profiles.selectable(ctx, slug) {
 			if auth.IsScopedCaller(ctx) || anonymousProfileConfined {
-				return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+				return setProfileRefusal(ctx, slug), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profiles.selectableNames(ctx), ", "))), nil
 		}

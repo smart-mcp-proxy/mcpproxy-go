@@ -1,0 +1,7 @@
+{
+  "_comment": "Spec 108 (fix-usertest-cli, F-11, contracts/refusals.md): the MCP set_profile refusal texts by caller class, byte-for-byte after substituting <p> (the requested slug) and <list> (the administrator's available profile names). Client credentials get the first two (per-caller uniform: the text never depends on whether the slug exists or is in switchable_to, and never names the bound profile); every other caller keeps the Spec 105 text. TestSetProfileRefusalGolden (internal/profile) pins the constants to this file and TestSetProfileV3_ClientRefusalTextMatchesGolden (internal/server) pins the handler.",
+  "locked": "cannot switch to profile '<p>': this client's profile is locked",
+  "switchable": "cannot switch to profile '<p>': it is not a profile this client may switch to",
+  "scoped_unknown": "unknown profile '<p>'",
+  "admin_unknown": "unknown profile '<p>' (available: <list>)"
+}

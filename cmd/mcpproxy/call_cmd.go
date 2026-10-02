@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -147,7 +146,7 @@ func init() {
 	callToolCmd.Flags().StringVarP(&callToolName, "tool-name", "t", "", "Tool name in format server:tool_name (required)")
 	callToolCmd.Flags().StringVarP(&callJSONArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
 	callToolCmd.Flags().StringVarP(&callLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	callToolCmd.Flags().StringVarP(&callConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(callToolCmd.Flags(), &callConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	callToolCmd.Flags().DurationVar(&callTimeout, "timeout", 30*time.Second, "Tool call timeout")
 	callToolCmd.Flags().StringVarP(&callOutputFormat, "output", "o", "pretty", "Output format (pretty, json)")
 
@@ -179,7 +178,7 @@ func setupToolVariantFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&callToolName, "tool-name", "t", "", "Tool name in format server:tool_name (required)")
 	cmd.Flags().StringVarP(&callJSONArgs, "json_args", "j", "{}", "JSON arguments for the tool (default: {})")
 	cmd.Flags().StringVarP(&callLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	cmd.Flags().StringVarP(&callConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(cmd.Flags(), &callConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	cmd.Flags().DurationVar(&callTimeout, "timeout", 30*time.Second, "Tool call timeout")
 	cmd.Flags().StringVarP(&callOutputFormat, "output", "o", "pretty", "Output format (pretty, json)")
 
@@ -207,17 +206,12 @@ Example:
 
 // loadCallConfig loads the MCP configuration file for call command
 func loadCallConfig() (*config.Config, error) {
-	var configFilePath string
-
-	if callConfigPath != "" {
-		configFilePath = callConfigPath
-	} else {
-		// Use default path
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	configFilePath := resolveCLIConfigPath(callConfigPath)
+	if configFilePath == "" {
+		var err error
+		if configFilePath, err = defaultHomeConfigPath(); err != nil {
+			return nil, err
 		}
-		configFilePath = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 	}
 
 	// Check if config file exists
