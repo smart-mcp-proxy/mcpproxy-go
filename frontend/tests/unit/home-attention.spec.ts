@@ -34,7 +34,9 @@ vi.mock('@/services/api', () => {
   }
   const base: Record<string, unknown> = {
     getAttention: attentionSpy,
-    getServers: ok({ servers: [] }),
+    // One ready server: with none, Home shows the getting-started card
+    // instead of "All clear" (Spec 109 T170).
+    getServers: ok({ servers: [{ name: 'notes', enabled: true, connected: true, tool_count: 3 }] }),
     getActivitySummary: ok({ call_count: 5, blocked_count: 1, call_error_count: 2 }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => true),
