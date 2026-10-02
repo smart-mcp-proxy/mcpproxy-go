@@ -10020,8 +10020,9 @@ paths:
       - stats
   /api/v1/status:
     get:
-      description: Get comprehensive server status including running state, listen
-        address, upstream statistics, and timestamp
+      description: |-
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
           content:

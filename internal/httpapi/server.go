@@ -1438,6 +1438,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // handleGetStatus godoc
 // @Summary Get server status
 // @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Description telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
 // @Tags status
 // @Produce json
 // @Security ApiKeyAuth
@@ -1452,7 +1453,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// lives. It is not always ~/.mcpproxy — MCPPROXY_HOME relocates the whole
 	// instance root, tray and core together (GH #936).
 	autostartDataDir := ""
+	var runningCfg *config.Config
 	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		runningCfg = cfg
 		if cfg.RoutingMode != "" {
 			routingMode = cfg.RoutingMode
 		}
@@ -1523,6 +1526,17 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Spec 109 FR-044a (user-test F-03): the EFFECTIVE telemetry state, so the
+	// Web and macOS notices and the Settings toggle can say "off, disabled by
+	// MCPPROXY_TELEMETRY=false" instead of a fixed "sends anonymous usage
+	// statistics". Operator plane like `activation`: withheld from scoped
+	// callers. Resolved from the RUNNING config (telemetry.enabled hot-reloads;
+	// env is process-wide). GET /api/v1/config deliberately stays the stored
+	// value, because it is a GET-then-POST-back document.
+	if !auth.IsScopedCaller(r.Context()) && runningCfg != nil {
+		response["telemetry"] = telemetry.ResolveEffectiveState(runningCfg)
 	}
 
 	// Spec 044 (US3): expose launch_source + autostart_enabled. launch_source
