@@ -88,7 +88,7 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 		}
 		return runReviewWrite(server, "security/approve", body)
 	}}
-	approve.Flags().BoolVar(&all, "all", false, "Approve every tool (default: only read-only tools with a clean scan, as on the Web and macOS review screens)")
+	approve.Flags().BoolVar(&all, "all", false, "Approve every pending or changed tool; tools blocked earlier stay blocked (default: only read-only tools with a clean scan, as on the Web and macOS review screens)")
 	approve.Flags().StringSliceVar(&tools, "tools", nil, "Approve exactly these tools and block the rest (trusted server: only these pending or changed tools)")
 	approve.Flags().StringSliceVar(&except, "except", nil, "Block these tools while approving the server")
 	approve.Flags().BoolVar(&force, "force", false, "Force approval when the scan verdict is dangerous")

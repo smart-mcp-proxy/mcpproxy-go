@@ -109,6 +109,7 @@ enum ReviewPresentation {
     // helpers only read it. A missing field (an older core) reads as false, so a
     // mismatched core fails closed. Sentences match the Web screen.
 
+    static let approveAllHint = "Allows every pending or changed tool. Tools you blocked earlier on a re-quarantined server stay blocked."
     static let selectionHint = "Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab."
 
     /// What the user explicitly chose for one tool, with the payload they saw.
@@ -230,7 +231,7 @@ struct ReviewSheet: View {
                 HStack {
                     Button(ReviewPresentation.approveLabel(selected: allowed.count, total: review?.tools.count ?? 0, definitionsCaptured: review?.server.definitionsCaptured ?? false)) { requestApprove(everything: false) }.buttonStyle(.borderedProminent)
                     if let review, review.server.definitionsCaptured, !review.tools.isEmpty, allowed.count < review.tools.count {
-                        Button(ReviewPresentation.approveAllLabel(total: review.tools.count)) { requestApprove(everything: true) }
+                        Button(ReviewPresentation.approveAllLabel(total: review.tools.count)) { requestApprove(everything: true) }.help(ReviewPresentation.approveAllHint)
                     }
                     Button("Reject Server", role: .destructive) { Task { await rejectServer() } }
                 }.padding()

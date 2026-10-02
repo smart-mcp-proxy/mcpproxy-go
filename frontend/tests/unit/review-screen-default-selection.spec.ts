@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ReviewScreen from '@/components/ReviewScreen.vue'
 import api from '@/services/api'
 import {
+  APPROVE_ALL_HINT,
   REVIEW_SELECTION_HINT,
   approveAllLabel,
   approveLabel,
@@ -131,6 +132,8 @@ describe('ReviewScreen default selection (D41)', () => {
   it('Approve all sends an empty block list', async () => {
     const wrapper = await mountScreen()
     expect(wrapper.get('[data-test="review-approve-all"]').text()).toBe('Approve all (5 tools)')
+    expect(wrapper.get('[data-test="review-approve-all"]').attributes('title')).toBe(APPROVE_ALL_HINT)
+    expect(APPROVE_ALL_HINT).toContain('stay blocked')
     await wrapper.get('[data-test="review-approve-all"]').trigger('click')
     await flushPromises()
     expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, [])
@@ -181,6 +184,45 @@ describe('ReviewScreen default selection (D41)', () => {
     await flushPromises()
     // Never fail open: the forced call uses the new server's own default block list, not [] from the old attempt.
     expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', true, ['write_x'])
+  })
+
+  it('a late dangerous 409 for the previous server does not open the force dialog on the next one', async () => {
+    let resolveA: (v: { success: boolean; error?: string }) => void = () => {}
+    ;(api.securityApprove as any).mockReturnValueOnce(new Promise(r => { resolveA = r }))
+    const wrapper = await mountScreen()
+    const forceDialog = wrapper.findAll('dialog')[1].element as HTMLDialogElement & { showModal: () => void; close: () => void }
+    forceDialog.showModal = vi.fn()
+    forceDialog.close = vi.fn()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    // Component reuse while the approve call for "fixture" is still in flight.
+    ;(api.getServerReview as any).mockResolvedValue(payload([tool('read_x'), tool('write_x', { tier: 'write', default_allowed: false })]))
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    resolveA({ success: false, error: 'dangerous baseline finding' })
+    await flushPromises()
+    expect(forceDialog.showModal).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('dangerous baseline finding')
+    // The new server's own buttons are usable again and no force retry is armed.
+    expect((wrapper.get('[data-test="review-approve-server"]').element as HTMLButtonElement).disabled).toBe(false)
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: true })
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenLastCalledWith('other', false, ['write_x'])
+  })
+
+  it('a late rescan failure for the previous server does not set an error on the next one', async () => {
+    let resolveScan: (v: { success: boolean; error?: string }) => void = () => {}
+    ;(api.startScan as any).mockReturnValueOnce(new Promise(r => { resolveScan = r }))
+    const wrapper = await mountScreen()
+    ;(wrapper.vm as any).rescan()
+    await flushPromises()
+    ;(api.getServerReview as any).mockResolvedValue(payload([tool('read_x')]))
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    resolveScan({ success: false, error: 'scan exploded for fixture' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('scan exploded for fixture')
   })
 
   it('a review-changed reload keeps an explicit uncheck and an explicit check of an unchanged tool', async () => {

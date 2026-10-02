@@ -48,7 +48,7 @@
       <p v-if="review.server.quarantined && review.server.definitions_captured && review.tools.length > 0" class="text-sm text-base-content/70" data-test="review-selection-hint">{{ REVIEW_SELECTION_HINT }}</p>
       <div v-if="review.server.quarantined" class="flex flex-wrap gap-2">
         <button class="btn btn-primary" :disabled="approving" data-test="review-approve-server" @click="requestApprove(false)">{{ primaryLabel }}</button>
-        <button v-if="showApproveAll" class="btn btn-outline" :disabled="approving" data-test="review-approve-all" @click="requestApprove(true)">{{ approveAllLabel(review.tools.length) }}</button>
+        <button v-if="showApproveAll" class="btn btn-outline" :disabled="approving" :title="APPROVE_ALL_HINT" data-test="review-approve-all" @click="requestApprove(true)">{{ approveAllLabel(review.tools.length) }}</button>
         <button class="btn btn-outline btn-error" :disabled="approving" @click="rejectServer">Reject server</button>
       </div>
       <div v-if="headline.state === 'approved'" class="flex flex-wrap items-center gap-2" data-test="review-approved-actions">
@@ -71,7 +71,7 @@ import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import { scanReportPath } from '@/utils/serverRoute'
-import { REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
+import { APPROVE_ALL_HINT, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
 
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
@@ -99,8 +99,10 @@ function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
 async function load() { if (typeof api.getServerReview !== 'function') return; loading.value = true; error.value = ''; const res = await api.getServerReview(props.serverName); loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed') }
 async function rescan() {
+  const server = props.serverName
   rescanning.value = true
-  const res = await api.startScan(props.serverName)
+  const res = await api.startScan(server)
+  if (server !== props.serverName) return // late response for a server the screen no longer shows
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
 }
 function requestRequarantine() { requarantineDialog.value?.showModal?.() }
@@ -123,11 +125,13 @@ function requestApprove(everything: boolean) { if (!review.value?.server.definit
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
 // The force retry re-sends the block list of the attempt that triggered it (D41.5).
 async function approve(force: boolean, block?: string[]) {
+  const server = props.serverName // a response for a server the screen no longer shows is dropped below
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
-  const res = await api.securityApprove(props.serverName, force, blocked)
+  const res = await api.securityApprove(server, force, blocked)
+  if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) { error.value = res.error || 'Approval failed'; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return }
   choices.clear(); emit('approved'); await load()
@@ -144,7 +148,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

@@ -275,7 +275,8 @@ mcpproxy review show github [--full]
    approval decision and stay blocked until you enable them on the Tools tab.
 3. Choose **Approve server**; the button names the exact count (for example
    "Approve server (3 of 9 tools)"). **Approve all** is a separate action that
-   allows every tool. If no tool definitions have been captured, the button
+   allows every pending or changed tool (tools you blocked earlier on a
+   re-quarantined server stay blocked). If no tool definitions have been captured, the button
    reads "Approve without seeing tools" and the UI asks for a separate
    confirmation before a blind approval can proceed.
 

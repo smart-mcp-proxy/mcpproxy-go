@@ -127,9 +127,10 @@ final class ReviewPresentationTests: XCTestCase {
 
     // MARK: Default selection (Spec 109 fix-review-defaults, D41)
 
-    private func selectionTool(_ name: String, defaultAllowed: Bool?, description: String = "d", verdict: String = "clean") throws -> ReviewTool {
+    private func selectionTool(_ name: String, defaultAllowed: Bool?, description: String = "d", verdict: String = "clean", heldReason: String? = nil, heldSignals: [String]? = nil) throws -> ReviewTool {
         let field = defaultAllowed.map { ",\"default_allowed\":\($0)" } ?? ""
-        let json = "{\"name\":\"\(name)\",\"description\":\"\(description)\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"\(verdict)\"\(field)}"
+        let held = (heldReason.map { ",\"held_reason\":\"\($0)\"" } ?? "") + (heldSignals.map { ",\"held_signals\":[" + $0.map { "\"\($0)\"" }.joined(separator: ",") + "]" } ?? "")
+        let json = "{\"name\":\"\(name)\",\"description\":\"\(description)\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"\(verdict)\"\(held)\(field)}"
         return try JSONDecoder().decode(ReviewTool.self, from: Data(json.utf8))
     }
 
@@ -158,6 +159,13 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertEqual(ReviewPresentation.mergeSelection([redefined], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
         let rescanned = try selectionTool("write_a", defaultAllowed: false, verdict: "warnings")
         XCTAssertEqual(ReviewPresentation.mergeSelection([rescanned], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        // A hold that appears after the click (held_reason / held_signals only) is a changed payload too.
+        let held = try selectionTool("write_a", defaultAllowed: false, heldReason: "scan_findings", heldSignals: ["tpa.x"])
+        XCTAssertEqual(held.heldReason, "scan_findings")
+        XCTAssertEqual(held.heldSignals, ["tpa.x"])
+        XCTAssertEqual(ReviewPresentation.mergeSelection([held], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        let reheld = try selectionTool("write_a", defaultAllowed: false, heldReason: "scan_coverage", heldSignals: ["tpa.x"])
+        XCTAssertEqual(ReviewPresentation.mergeSelection([reheld], choices: ["write_a": .init(allowed: true, tool: held)]), [])
         // A choice for a tool that is gone is ignored.
         XCTAssertEqual(ReviewPresentation.mergeSelection([readA], choices: ["gone": .init(allowed: true, tool: writeA)]), ["read_a"])
     }

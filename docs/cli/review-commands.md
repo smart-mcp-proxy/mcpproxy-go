@@ -73,7 +73,7 @@ On a quarantined server the command allows the same default selection as the Web
 
 | Flag | Meaning |
 |------|---------|
-| `--all` | Approve every tool (the Web and macOS "Approve all"). On a trusted server this is the default and changes nothing |
+| `--all` | Approve every pending or changed tool (the Web and macOS "Approve all"); tools blocked earlier on a re-quarantined server stay blocked. On a trusted server this is the default and changes nothing |
 | `--tools a,b` | Quarantined server: allow exactly these tools and block the rest. Trusted server: approve only these pending or changed tools |
 | `--except a,b` | Quarantined server only: block these tools as well, whichever base was chosen |
 | `--force` | Approve although the scan verdict is dangerous (use only after reading the findings) |

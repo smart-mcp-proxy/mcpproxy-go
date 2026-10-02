@@ -149,6 +149,9 @@ export function approveLabel(selected: number, total: number, definitionsCapture
   return `Approve server (${selected} of ${total} ${plural(total, 'tool', 'tools')})`
 }
 
+/** Tooltip of the approve-everything action: it does not re-enable tools blocked earlier. */
+export const APPROVE_ALL_HINT = 'Allows every pending or changed tool. Tools you blocked earlier on a re-quarantined server stay blocked.'
+
 /** The explicit approve-everything action. */
 export function approveAllLabel(total: number): string {
   return `Approve all (${total} ${plural(total, 'tool', 'tools')})`
