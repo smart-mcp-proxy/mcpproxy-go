@@ -61,9 +61,20 @@ describe('lockedKeysChanged', () => {
     expect(lockedKeysChanged({ TELEMETRY: { Enabled: true } }, stored, locks)).toEqual([])
   })
 
-  it('catches a miscased duplicate that overrides an unchanged lowercase key (last one wins, like the decoder)', () => {
+  it('catches a miscased duplicate that overrides an unchanged lowercase key', () => {
     const doc = JSON.parse('{"telemetry":{"enabled":true},"Telemetry":{"Enabled":false}}')
     expect(lockedKeysChanged(doc, stored, locks)).toEqual(['telemetry.enabled'])
+  })
+
+  // The backend round-trips the document through a map (sorted keys), so the
+  // winner among case variants is decided by byte order, not document order.
+  // Here the document-order "last" key matches the stored value but the sorted
+  // winner ("telemetry" > "Telemetry") would turn telemetry off.
+  it('refuses case-variant duplicates even when the document-order last one matches the stored value', () => {
+    const doc = JSON.parse('{"telemetry":{"enabled":false},"Telemetry":{"enabled":true}}')
+    expect(lockedKeysChanged(doc, stored, locks)).toEqual(['telemetry.enabled'])
+    const leaf = JSON.parse('{"telemetry":{"enabled":false,"Enabled":true}}')
+    expect(lockedKeysChanged(leaf, stored, locks)).toEqual(['telemetry.enabled'])
   })
 
   it('leaves an unchanged document alone', () => {

@@ -44,18 +44,33 @@ export function telemetrySettingLock(s?: TelemetryState | null): { reason: strin
  * whose value in `doc` differs from `stored`.
  */
 export function lockedKeysChanged(doc: unknown, stored: unknown, locks: Record<string, unknown>): string[] {
-  // The backend decodes the Raw JSON document case-insensitively and the last
-  // matching key wins (encoding/json), so a miscased or duplicated key must be
-  // read the same way or it would slip past the lock.
-  const read = (root: unknown, key: string): unknown =>
-    key.split('.').reduce<unknown>((node, part) => {
-      if (!node || typeof node !== 'object') return undefined
-      const want = part.toLowerCase()
-      let found: unknown
-      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-        if (k.toLowerCase() === want) found = v
-      }
-      return found
-    }, root)
-  return Object.keys(locks).filter((key) => JSON.stringify(read(doc, key)) !== JSON.stringify(read(stored, key)))
+  // The backend decodes the Raw JSON document case-insensitively. It first
+  // round-trips the document through a map (sorted keys), so which of several
+  // case-variant keys wins is decided by byte order, not by document order, and
+  // same-named objects merge. Rather than mirror that, every case-variant
+  // reading of a key is collected and the document is refused when ANY of them
+  // differs from the stored value: ambiguous input fails toward refusal.
+  const readAll = (root: unknown, key: string): unknown[] =>
+    key.split('.').reduce<unknown[]>(
+      (nodes, part) => {
+        const want = part.toLowerCase()
+        const next: unknown[] = []
+        for (const node of nodes) {
+          if (!node || typeof node !== 'object') {
+            next.push(undefined)
+            continue
+          }
+          const hits = Object.entries(node as Record<string, unknown>).filter(([k]) => k.toLowerCase() === want)
+          if (hits.length === 0) next.push(undefined)
+          for (const [, v] of hits) next.push(v)
+        }
+        return next
+      },
+      [root],
+    )
+  return Object.keys(locks).filter((key) => {
+    const storedAll = readAll(stored, key)
+    const want = JSON.stringify(storedAll[storedAll.length - 1])
+    return readAll(doc, key).some((v) => JSON.stringify(v) !== want)
+  })
 }
