@@ -557,6 +557,7 @@ func TestCallTool_PersistedServerVerdictOutranksLaggingStateView(t *testing.T) {
 				// the StateView ever caught up. The never-listed name is
 				// Unresolved again on both paths; the listed sibling
 				// dispatches, certified on the live generation.
+				stored.MarkQuarantineExplicitlySet(true) // the fixture's revert is an explicit decision; SaveUpstreamServer otherwise keeps a recorded quarantine
 				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
 				require.True(t, proxy.resolveExactToolIdentity("a", "ghost").Unresolved(), "control: ghost is unresolved once the record is restored")
 				_, text := callToolReadResult(t, proxy, ctx, "a:ghost")
@@ -753,6 +754,7 @@ func TestCallTool_GateRecordIsTheOnlyPersistedReadOfADispatch(t *testing.T) {
 				// Nested: same invariant on the sandbox bridge. Reset the
 				// record so the bridge's gate admits, and flip it again in
 				// the seam.
+				stored.MarkQuarantineExplicitlySet(true) // the fixture's revert is an explicit decision; SaveUpstreamServer otherwise keeps a recorded quarantine
 				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
 				st, ok := rt.Supervisor().StateView().GetServer("a")
 				require.True(t, ok)
@@ -863,6 +865,7 @@ func TestCodeExecution_PreflightGateIsTheDispatchGate(t *testing.T) {
 				// the captured gate's verdict — unresolved identity — and the
 				// NEXT call answers the server-level verdict for the same name
 				// (SC-005 parity with its listed sibling), zero upstream calls.
+				stored.MarkQuarantineExplicitlySet(true) // the fixture's revert is an explicit decision; SaveUpstreamServer otherwise keeps a recorded quarantine
 				require.NoError(t, proxy.storage.SaveUpstreamServer(stored))
 				paused.Store(0)
 				proxy.sandboxPreflightPause = func(string, string) {

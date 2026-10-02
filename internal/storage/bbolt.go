@@ -227,6 +227,39 @@ func (b *BoltDB) SaveUpstream(record *UpstreamRecord) error {
 	})
 }
 
+// SaveUpstreamKeepingQuarantine is SaveUpstream with the quarantine-lowering
+// guard: if a record already exists with Quarantined=true and the incoming
+// record would clear it without an explicit decision (explicit=false), the
+// stored quarantine is kept. The read-check-write runs in one bbolt Update
+// transaction so a concurrent QuarantineUpstreamServer cannot be lost between
+// the read and the write. It reports whether the guard kept the quarantine.
+// An undecodable previous record is overwritten, as SaveUpstream would.
+func (b *BoltDB) SaveUpstreamKeepingQuarantine(record *UpstreamRecord, explicit bool) (kept bool, err error) {
+	record.Updated = time.Now()
+
+	err = b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(UpstreamsBucket))
+		if !record.Quarantined && !explicit {
+			if prevData := bucket.Get([]byte(record.ID)); prevData != nil {
+				prev := &UpstreamRecord{}
+				if prev.UnmarshalBinary(prevData) == nil && prev.Quarantined {
+					record.Quarantined = true
+					kept = true
+				}
+			}
+		}
+		data, marshalErr := record.MarshalBinary()
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return bucket.Put([]byte(record.ID), data)
+	})
+	if err != nil {
+		kept = false
+	}
+	return kept, err
+}
+
 // GetUpstream retrieves an upstream server record by ID
 func (b *BoltDB) GetUpstream(id string) (*UpstreamRecord, error) {
 	var record *UpstreamRecord

@@ -2815,6 +2815,9 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Quarantined != nil {
 		updates.Quarantined = *req.Quarantined
+		// Only a body that carries the field is an operator decision; UpdateServer
+		// and the storage guard lower a recorded quarantine only for this case.
+		updates.MarkQuarantineExplicitlySet(true)
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.Quarantined = existingSrv.Quarantined

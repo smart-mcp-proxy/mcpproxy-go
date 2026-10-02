@@ -400,6 +400,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -508,6 +509,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("echoserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -1573,6 +1575,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("dataserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2782,6 +2785,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2966,6 +2970,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3090,6 +3095,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfigB, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfigB.Quarantined = false
+	serverConfigB.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfigB)
 	require.NoError(t, err)
 
@@ -3270,6 +3276,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("annotated")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3420,6 +3427,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
@@ -3569,6 +3577,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
