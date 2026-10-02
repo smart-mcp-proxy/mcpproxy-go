@@ -2417,7 +2417,12 @@ const displayRows = computed((): ActivityDisplayRow[] => {
 
 /** The three REST names the page applies right now (rule 7: none while the build
  * does not advertise them; a server/tool conflict is null, so none either). */
-const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest()))
+// profile/client/token do not depend on the server/tool pair, so read them past
+// a conflict: while the URL still carries one (a chip just removed, the
+// router.replace not settled) the scope must not drop out and back in, which
+// would send a second request (review F1.1). loadActivities() itself still
+// issues nothing while `scopeConflict` is set.
+const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest({ ignoreConflict: true })))
 const scopeApplied = computed(() => Object.keys(activityScopeParams.value).length > 0)
 const scopeKey = computed(() => scopeParamsKey(activityScopeParams.value))
 
