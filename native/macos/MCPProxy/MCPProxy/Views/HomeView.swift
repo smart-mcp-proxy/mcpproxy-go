@@ -23,6 +23,31 @@ enum DashboardConnectControl {
     }
 }
 
+// MARK: - Token Savings Badge
+
+/// The Home hub's token-savings badge presentation (Spec 109 FR-073/T166).
+/// The figure is a structural estimate until a real `retrieve_tools` call has
+/// completed, so the hub badge says "estimate" exactly as the Token Savings
+/// card below it and the Web Home chip do. Kept as a plain value so the
+/// formatting and the shared wording are testable without rendering the view.
+struct HomeTokenSavingsBadge {
+    let metrics: TokenMetrics
+
+    static let estimateLabel = "estimate"
+    static let estimateHelp = "No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average"
+
+    var percentText: String {
+        let percent = metrics.savedTokensPercentage
+        return "\(percent >= 99.995 ? "99.99" : String(format: "%.1f", percent))%"
+    }
+
+    var showsEstimate: Bool { metrics.estimated }
+
+    var accessibilityLabel: String {
+        "\(percentText) tokens saved" + (showsEstimate ? ", \(Self.estimateLabel)" : "")
+    }
+}
+
 // MARK: - Home View
 
 struct HomeView: View {
@@ -218,15 +243,28 @@ struct HomeView: View {
         VStack(spacing: 12) {
             // Token savings badge — top center
             if let stats = appState.tokenMetrics {
+                let badge = HomeTokenSavingsBadge(metrics: stats)
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.right")
                         .font(.system(size: 10 * fontScale))
-                    Text("\(stats.savedTokensPercentage >= 99.995 ? "99.99" : String(format: "%.1f", stats.savedTokensPercentage))%")
+                    Text(badge.percentText)
                         .font(.scaled(.title2, scale: fontScale))
                         .fontWeight(.bold)
                     Text("tokens saved")
                         .font(.scaled(.caption, scale: fontScale))
+                    if badge.showsEstimate {
+                        Text(HomeTokenSavingsBadge.estimateLabel)
+                            .font(.scaled(.caption2, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.15))
+                            .clipShape(Capsule())
+                            .help(HomeTokenSavingsBadge.estimateHelp)
+                    }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(badge.accessibilityLabel)
                 .foregroundStyle(.green)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
@@ -538,14 +576,14 @@ struct HomeView: View {
                             // showed the same simulated figure with no such
                             // indication at all.
                             if stats.estimated {
-                                Text("estimate")
+                                Text(HomeTokenSavingsBadge.estimateLabel)
                                     .font(.scaled(.caption2, scale: fontScale))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(Color.secondary.opacity(0.15))
                                     .clipShape(Capsule())
-                                    .help("No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average")
+                                    .help(HomeTokenSavingsBadge.estimateHelp)
                             }
                         }
                         Text(formatTokenCount(stats.savedTokens))

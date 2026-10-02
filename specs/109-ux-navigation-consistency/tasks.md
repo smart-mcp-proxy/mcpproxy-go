@@ -373,6 +373,17 @@ Not new requirements: nine findings from a live demo of `main` at `b3191a059`, f
 - [x] T164 [P] #6 useful browse order (FR-060; amends Spec 110 FR-005): Official is curated-first, then round-robin across sources, never popularity-ordered (`internal/registries/catalog_browse_order_test.go`); Popular renders before Official when non-empty on the Web UI (`frontend/tests/unit/catalog-browse-order.spec.ts`), macOS (`CatalogTests.swift`) and the CLI table (`cmd/mcpproxy/catalog_cmd_test.go`)
 - [x] T165 [P] Docs and bookkeeping for T160–T164: `docs/api/rest-api.md`, `docs/cli/catalog-commands.md`, `specs/109-ux-navigation-consistency/parity-matrix.json`, `quickstart.md` recipe `demo-ux-fixes`, research D35
 
+## Phase 16: PR fix-ux-residuals — final done-check residuals (2026-10-02)
+
+Not new requirements: the last open items of the done check, fixed test-first inside Spec 109's own surfaces (Home, Activity, health vocabulary). No backend change, no new dependency, no golden change. Decisions: research D36.
+
+- [x] T166 [P] FR-073 / #1394 item 1: the Home hub chip, the Token Savings Details stat and its title badge say "estimate" while `ServerTokenMetrics.estimated` (`frontend/tests/unit/home-token-savings-estimate.spec.ts`); the macOS hub badge shows the same capsule through the shared `HomeTokenSavingsBadge`, which the Token Savings card reuses (`HomeTokenSavingsBadgeTests.swift`)
+- [x] T167 [P] #1394 item 2 / rule 8: Activity "Clear filters" on the server/tool conflict banner, and removing either conflicting chip, issue exactly one request for what remains (`scopeConflict` joins the refetch watch; `frontend/tests/unit/activity-scope-conflict-clear.spec.ts`)
+- [x] T168 FR-070: the Tool calls "N blocked" chip names refused attempts and opens `status=blocked`; an empty Tool calls table with blocked attempts offers "Show N blocked attempts"; the Events tile reads "1 call" (`frontend/tests/unit/activity-blocked-in-calls-view.spec.ts`)
+- [x] T169 [P] health-vocabulary "Colors": Server Detail's header badge, Health tile and Configuration → Health badge colour by `health.status`, and the tile takes its word from the status label when `status` is present (`frontend/tests/unit/server-detail-health-status-colour.spec.ts`)
+- [x] T170 [P] FR-051 / US1-4: a fresh instance (no server configured) shows a "Get started" card instead of "All clear" and hides the top usage strip; any attention item wins; `mcpproxy attention` is unchanged (`frontend/tests/unit/home-getting-started.spec.ts`)
+- [x] T171 Docs and bookkeeping for T166–T170: `spec.md` (US1-4, FR-051, FR-070, FR-073), `contracts/url-filter-contract.md`, `contracts/health-vocabulary.md`, `parity-matrix.json` row 22, `acceptance-index.json`, `quickstart.md` recipe `fix-ux-residuals`, research D36, `docs/web-ui/dashboard.md`
+
 ---
 
 ## Dependencies & Execution Order
@@ -421,4 +432,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-201 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+207 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 201 before fix-ux-residuals, which added T166–T171; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
