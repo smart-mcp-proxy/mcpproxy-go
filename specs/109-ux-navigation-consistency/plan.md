@@ -77,7 +77,7 @@ specs/109-ux-navigation-consistency/
 internal/health/calculator.go, constants.go            # status, usable, actions (FR-010–012)
 internal/contracts/types.go, tier.go (NEW)             # HealthStatus fields; AnnotationTier (FR-028); ServerTokenMetrics.estimated
 internal/runtime/attention.go, attention_contract.go (NEW)   # Compute (+ minimal AttentionClient input) + subscriber + SSE (FR-001–002)
-internal/runtime/review.go, review_diff.go (NEW)       # review queue + server review composer (FR-021)
+internal/runtime/review.go, review_diff.go (NEW)       # review queue + server review composer (FR-021); scan coverage reads ScanContext.ToolNames and the approval record's definition_changed_at (fix-review-screen)
 internal/runtime/clients_presence.go (NEW)             # presence join (FR-030); AttentionClient() feeds client_never_seen (109-h)
 internal/runtime/tool_quarantine.go                    # write current/previous annotations (FR-020)
 internal/runtime/events.go                             # attention.changed, review.changed

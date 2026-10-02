@@ -947,7 +947,8 @@ The review payload of one server: a summary of the server (secrets in the URL, h
   "success": true,
   "data": {
     "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
-               "scan": {"verdict": "clean", "risk_score": 0}, "definitions_captured": true},
+               "scan": {"verdict": "clean", "risk_score": 0, "coverage": "current", "tools_scanned": 2},
+               "definitions_captured": true},
     "tools": [
       {"name": "edit_file", "description": "Make line-based edits to a text file", "input_schema": {"type": "object"},
        "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending",
@@ -963,8 +964,9 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 
 - `tier` is `read`, `write`, `destructive`, `unannotated` (annotations captured, no hints) or `unknown` (nothing captured, a record from before the review screen). It comes from one function, so the Web UI, macOS, `mcpproxy tools list --tier` and the MCP `quarantine_security` inspect operations show the same value.
 - `approval_status` is `approved`, `pending` (shown as "New, needs review") or `changed` ("Changed, needs review").
-- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`.
-- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them.
+- `scan.coverage` says whether the scan verdict describes the definitions in the payload: `current` (the latest completed scan analysed every captured definition as it is now), `stale` (some definitions were added or changed after that scan; `scan.unscanned_tools` lists them), `not_captured` (no definitions captured), `tools_not_scanned` (the scan completed but exported no tool definitions), `scanning` (a scan is running) or `none` (no completed scan). Show `risk_score` only for `current`. `scan.tools_scanned` is the number of definitions that scan exported.
+- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
+- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
 - Descriptions are returned verbatim and must be rendered as inert text.
 
 The review decisions use these routes (all existing):

@@ -262,18 +262,20 @@ type ScanJobSummary struct {
 // ScanContext describes what was scanned and how the source was resolved.
 // This gives users full transparency into what the scanners actually checked.
 type ScanContext struct {
-	SourceMethod    string   `json:"source_method"`             // "docker_extract", "working_dir", "local_path", "url", "none"
-	SourcePath      string   `json:"source_path"`               // Actual path/URL that was scanned
-	DockerIsolation bool     `json:"docker_isolation"`          // Whether server runs in Docker
-	ContainerID     string   `json:"container_id,omitempty"`    // Docker container ID (if applicable)
-	ContainerOwner  string   `json:"container_owner,omitempty"` // Server name that owns ContainerID (verified via com.mcpproxy.server label)
-	ContainerImage  string   `json:"container_image,omitempty"` // Docker image used
-	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
-	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server
-	ToolsExported   int      `json:"tools_exported,omitempty"`  // Number of tool definitions exported for scanning
-	ScannedFiles    []string `json:"scanned_files,omitempty"`   // List of files that were scanned (capped at MaxScannedFiles)
-	TotalFiles      int      `json:"total_files"`               // Total file count (may be > len(ScannedFiles) if capped)
-	TotalSizeBytes  int64    `json:"total_size_bytes"`          // Total size of scanned source
+	SourceMethod    string    `json:"source_method"`              // "docker_extract", "working_dir", "local_path", "url", "none"
+	SourcePath      string    `json:"source_path"`                // Actual path/URL that was scanned
+	DockerIsolation bool      `json:"docker_isolation"`           // Whether server runs in Docker
+	ContainerID     string    `json:"container_id,omitempty"`     // Docker container ID (if applicable)
+	ContainerOwner  string    `json:"container_owner,omitempty"`  // Server name that owns ContainerID (verified via com.mcpproxy.server label)
+	ContainerImage  string    `json:"container_image,omitempty"`  // Docker image used
+	ServerProtocol  string    `json:"server_protocol"`            // stdio, http, sse
+	ServerCommand   string    `json:"server_command,omitempty"`   // Command used to start server
+	ToolsExported   int       `json:"tools_exported,omitempty"`   // Number of tool definitions exported for scanning
+	ToolsExportedAt time.Time `json:"tools_exported_at,omitzero"` // When the exported definitions were read; a definition changed after this was not analysed
+	ToolNames       []string  `json:"tool_names,omitempty"`       // Sorted, de-duplicated names of the exported tool definitions (Pass 1)
+	ScannedFiles    []string  `json:"scanned_files,omitempty"`    // List of files that were scanned (capped at MaxScannedFiles)
+	TotalFiles      int       `json:"total_files"`                // Total file count (may be > len(ScannedFiles) if capped)
+	TotalSizeBytes  int64     `json:"total_size_bytes"`           // Total size of scanned source
 }
 
 // ScannerJobStatus tracks a single scanner's execution within a scan job

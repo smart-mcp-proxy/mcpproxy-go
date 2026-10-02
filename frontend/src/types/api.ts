@@ -1396,6 +1396,11 @@ export interface ReviewScan {
   risk_score?: number
   report_id?: string
   scanned_at?: string
+  /** Whether the verdict describes the definitions on screen (Spec 109 fix-review-screen). */
+  coverage?: 'current' | 'stale' | 'not_captured' | 'tools_not_scanned' | 'scanning' | 'none' | string
+  tools_scanned?: number
+  /** Captured tools whose current definition the scan did not cover (coverage `stale`). */
+  unscanned_tools?: string[]
 }
 
 export interface ReviewQueueRow {

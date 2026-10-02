@@ -5,7 +5,7 @@ import api from '@/services/api'
 
 vi.mock('@/services/api', () => ({ default: {
   getServerReview: vi.fn(), securityApprove: vi.fn(), securityReject: vi.fn(),
-  approveTools: vi.fn(), blockTools: vi.fn(), discoverServerTools: vi.fn(), listScanHistory: vi.fn(), scanAll: vi.fn(), getQueueProgress: vi.fn(), cancelAllScans: vi.fn(),
+  approveTools: vi.fn(), blockTools: vi.fn(), discoverServerTools: vi.fn(), listScanHistory: vi.fn(), scanAll: vi.fn(), getQueueProgress: vi.fn(), cancelAllScans: vi.fn(), startScan: vi.fn(), quarantineServer: vi.fn(),
 } }))
 
 const review = (definitionsCaptured = true) => ({
