@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Spec 109 fix-catalog-rank (T166, D36.12): the registry-shaped SC-008 fixture
+// Spec 109 fix-catalog-rank (T172, D37.12): the registry-shaped SC-008 fixture
 // and the fake registry that serves it. The corpus in
 // testdata/catalog_github_order.json is the union of three REAL responses of
 // registry.modelcontextprotocol.io recorded on 2026-10-02, so the live bug
@@ -222,7 +222,7 @@ func TestCatalogGithubFixture_ExpansionQueriesFindIt(t *testing.T) {
 
 var recordedQueries = []string{"github", ".github/", "/github"}
 
-// sanitizeRegistryItem keeps only the fields the catalog reads (D36.12).
+// sanitizeRegistryItem keeps only the fields the catalog reads (D37.12).
 func sanitizeRegistryItem(item map[string]interface{}) map[string]interface{} {
 	server, _ := item["server"].(map[string]interface{})
 	out := map[string]interface{}{}

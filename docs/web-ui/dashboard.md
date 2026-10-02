@@ -31,9 +31,9 @@ The tray application opens the Web UI with the API key automatically.
 
 Home answers one question first: **what needs me?**
 
-- **Needs attention** is the one list MCPProxy computes for every surface: sign-in prompts, servers waiting for review, missing secrets, configuration problems and clients that connected but were never seen. Items are ordered by rank, each with one button that goes to the screen that fixes it (Sign in, Review, Add secret). With nothing to do Home reads "All clear" and the usage strip moves to the top. See [Needs Attention](/features/needs-attention).
-- The **usage strip** shows calls today, blocked calls, errors and the estimated tokens kept out of every request; each number links to the matching [Activity](/web-ui/activity-log) view.
-- The **topology** shows your clients, MCPProxy and your servers.
+- **Needs attention** is the one list MCPProxy computes for every surface: sign-in prompts, servers waiting for review, missing secrets, configuration problems and clients that connected but were never seen. Items are ordered by rank, each with one button that goes to the screen that fixes it (Sign in, Review, Add secret). With nothing to do Home reads "All clear" and the usage strip moves to the top, except on a fresh instance with no servers, where a "Get started" card (Add a server, Connect a client, Run setup wizard) replaces it. See [Needs Attention](/features/needs-attention).
+- The **usage strip** shows calls, blocked calls and errors; each number links to the matching [Activity](/web-ui/activity-log) view.
+- The **topology** shows your clients, MCPProxy and your servers. The chip above the hub shows the estimated per-request token saving, marked "estimate" until a real `retrieve_tools` call has been observed.
 
 The same count appears on the **header pill** (hidden at 0) and as the **badge** on the sidebar's Home entry. `mcpproxy attention` and the macOS tray show the same list; see [Attention Command](/cli/attention-command).
 

@@ -22,7 +22,7 @@ final class CatalogTests: XCTestCase {
         """)
     }
 
-    // MARK: - Card trust badge (Spec 109 fix-catalog-rank, D36.6)
+    // MARK: - Card trust badge (Spec 109 fix-catalog-rank, D37.6)
 
     /// A card shows Verified, never a per-card Official badge: every default
     /// source is official, so the badge carried no signal. Mirrors the Web card.

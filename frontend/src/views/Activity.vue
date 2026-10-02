@@ -110,6 +110,7 @@
                   filterStatus === part.status && part.status !== '' ? 'font-semibold underline' : '',
                 ]"
                 :aria-pressed="filterStatus === part.status"
+                :title="part.key === 'blocked' && activeView === 'calls' ? BLOCKED_CALLS_TITLE : undefined"
                 @click="applySummaryFilter(part)"
               >
                 {{ part.label }}
@@ -260,7 +261,7 @@
         -->
         <div class="stat-title">Events (24h)</div>
         <div class="stat-value text-2xl">{{ summary.total_count }}</div>
-        <div class="stat-desc">{{ summary.call_count }} calls</div>
+        <div class="stat-desc">{{ summary.call_count }} {{ summary.call_count === 1 ? 'call' : 'calls' }}</div>
       </button>
       <button
         v-for="tile in statusTiles"
@@ -543,6 +544,20 @@
           </svg>
           <p class="text-lg">{{ hasActiveFilters || scopeApplied ? 'No matching activities' : 'No activity records found' }}</p>
           <p class="text-sm mt-1">{{ hasActiveFilters || scopeApplied ? 'Try adjusting your filters, or remove a profile, client or token chip above' : 'Activity will appear here as tools are called and actions are taken' }}</p>
+          <!-- T168: a refused attempt is a `policy_decision` row, which the Tool
+               calls view lists only under status=blocked. When the window holds
+               some, say so instead of leaving a bare empty table. -->
+          <div v-if="showBlockedOffer" class="mt-3" data-test="activity-empty-blocked-offer">
+            <p class="text-sm">Refused attempts are not tool calls that ran; they are listed under Blocked.</p>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline mt-2"
+              data-test="activity-empty-show-blocked"
+              @click="filterStatus = 'blocked'"
+            >
+              Show {{ blockedAttemptCount }} blocked attempt{{ blockedAttemptCount === 1 ? '' : 's' }}
+            </button>
+          </div>
         </div>
 
         <!-- Activity Table.
@@ -2038,6 +2053,15 @@ watch(showFilterPanel, expanded => {
 /** "54 calls · 6 errors · 1 blocked" — zeros omitted. */
 const summaryParts = computed(() => compactSummaryParts(summary.value))
 
+// T168: refused attempts (`policy_decision`, status `blocked`) are listed in the
+// Tool calls view only under status=blocked, so the blocked chip says so there.
+const BLOCKED_CALLS_TITLE =
+  'Blocked call attempts in the last 24 h, including calls a profile or token refused. Click to list them.'
+const blockedAttemptCount = computed(() => summary.value?.blocked_count ?? 0)
+const showBlockedOffer = computed(
+  () => activeView.value === 'calls' && !filterStatus.value && blockedAttemptCount.value > 0
+)
+
 /**
  * The status tiles, as a partition of the Events total beside them (F2, #1046).
  * The list — including whether the "Other / internal" tile is warranted — is
@@ -2109,10 +2133,22 @@ const clearChip = (chip: ActiveFilterChip) => {
       void clearParentFilter()
       break
     case 'server':
-      filterServer.value = ''
+      // Removing either side of a server/tool conflict resolves the
+      // contradiction (contract rule 8). The conflicting `tool` is the raw
+      // "server:tool" value, so split it the way the URL round trip would:
+      // one request for what remains, not a stuck empty state.
+      if (scopeConflict.value) {
+        const split = splitScopeTool(filterTool.value, undefined)
+        filterServer.value = split.server ?? ''
+        filterTool.value = split.tool ?? ''
+        scopeConflict.value = false
+      } else {
+        filterServer.value = ''
+      }
       break
     case 'tool':
       filterTool.value = ''
+      scopeConflict.value = false
       break
     case 'status':
       filterStatus.value = ''
@@ -2381,7 +2417,12 @@ const displayRows = computed((): ActivityDisplayRow[] => {
 
 /** The three REST names the page applies right now (rule 7: none while the build
  * does not advertise them; a server/tool conflict is null, so none either). */
-const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest()))
+// profile/client/token do not depend on the server/tool pair, so read them past
+// a conflict: while the URL still carries one (a chip just removed, the
+// router.replace not settled) the scope must not drop out and back in, which
+// would send a second request (review F1.1). loadActivities() itself still
+// issues nothing while `scopeConflict` is set.
+const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest({ ignoreConflict: true })))
 const scopeApplied = computed(() => Object.keys(activityScopeParams.value).length > 0)
 const scopeKey = computed(() => scopeParamsKey(activityScopeParams.value))
 
@@ -2605,6 +2646,10 @@ const loadActivities = async () => {
 
 // Clear filters
 const clearFilters = () => {
+  // First, so the conflict banner leaves in the same tick and the refetch
+  // watch (which also tracks scopeConflict) runs loadActivities() once, past
+  // its conflict guard.
+  scopeConflict.value = false
   selectedTypes.value = []
   filterServer.value = ''
   filterTool.value = ''
@@ -2947,7 +2992,10 @@ watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveDa
 // applyRouteFilters() already ran during setup (top of this file), so the
 // initial values it wrote never trigger this watch — only a later, genuine
 // change does; the first fetch is onMounted's explicit call below.
-watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate], () => {
+// `scopeConflict` is a source too: a conflict that resolves without any other
+// filter ref changing (a URL edit, or "Clear filters" setting everything in one
+// tick) must refetch, and a callback runs once per flush so it never doubles up.
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate, scopeConflict], () => {
   void loadActivities()
 }, { deep: true })
 

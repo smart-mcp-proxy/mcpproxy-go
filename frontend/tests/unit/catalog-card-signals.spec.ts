@@ -3,7 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 import CatalogSearch from '@/components/CatalogSearch.vue'
 
-// Spec 109 fix-catalog-rank T173 (D36.6, FR-061): a catalog card shows Verified
+// Spec 109 fix-catalog-rank T179 (D37.6, FR-061): a catalog card shows Verified
 // (not a per-card "Official" badge: the Official section carries that meaning),
 // the publisher, and a popularity signal.
 

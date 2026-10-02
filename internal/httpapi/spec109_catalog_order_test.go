@@ -95,8 +95,8 @@ func TestCatalogOrderParity_RESTWritesTheGolden(t *testing.T) {
 	require.NotEmpty(t, got)
 
 	// SC-008: GitHub's own server, from the official registry, is first. It
-	// is Official (a built-in source, D36.6) and Verified (its publisher
-	// owns the repository, D36.5), titled by its own server.json title.
+	// is Official (a built-in source, D37.6) and Verified (its publisher
+	// owns the repository, D37.5), titled by its own server.json title.
 	assert.Equal(t, "official:io.github.github/github-mcp-server", got[0].Source+":"+got[0].ID)
 	assert.True(t, got[0].Official)
 	assert.True(t, got[0].Verified)

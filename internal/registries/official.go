@@ -105,7 +105,7 @@ func fetchOfficialPage(ctx context.Context, reg *RegistryEntry, query, cursor st
 var officialExpansionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$`)
 
 // officialExpansionQueries returns the extra registry-side queries a typed q
-// is expanded into (Spec 109 D36.2). The official registry's `search` is a
+// is expanded into (Spec 109 D37.2). The official registry's `search` is a
 // substring of server.name only and returns names in byte order, so a plain
 // `github` page is 100 alphabetical `io.github.*` entries and never reaches
 // io.github.github/github-mcp-server. Two anchored queries recover it:
@@ -129,7 +129,7 @@ func officialExpansionQueries(q string) []string {
 }
 
 // fetchOfficialCatalog is the typed-query fetch for the official protocol
-// (D36.2): the main query plus its expansions, ONE page (100) each, requested
+// (D37.2): the main query plus its expansions, ONE page (100) each, requested
 // concurrently. Entries merge in this order: owner hits, segment hits, phrase
 // hits, main hits, version-collapsed by name. The MAIN query decides whether
 // the source is available: its error is returned (with whatever the
@@ -143,7 +143,7 @@ func fetchOfficialCatalog(ctx context.Context, reg *RegistryEntry, q string) ([]
 // each time one lands (mainLanded says the main query is among them), so a
 // caller that gives up waiting can still use them: expansion hits while the
 // main query is slow, and a landed main query's hits, which keep the source
-// available (D36.2), while an expansion is slow. onProgress may be nil.
+// available (D37.2), while an expansion is slow. onProgress may be nil.
 func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q string, onProgress func(entries []ServerEntry, mainLanded bool)) ([]ServerEntry, error) {
 	expansions := officialExpansionQueries(q)
 	// Merge order: owner (".x/"), segment ("/x"), phrase ("x-y"), then main.
@@ -204,7 +204,7 @@ func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q str
 }
 
 // collapseOfficialVersions keeps ONE entry per server name, at the position of
-// the name's first occurrence (D36.4). Without version=latest, or on a generic
+// the name's first occurrence (D37.4). Without version=latest, or on a generic
 // endpoint with no publication metadata, one name arrives once per published
 // version. The kept entry is the one with an explicit isLatest:true, else the
 // highest dotted-numeric version (a prerelease suffix is ignored), else the

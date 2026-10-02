@@ -58,7 +58,7 @@ type ServerEntry struct {
 	// Title is the source's own display title (server.json "title" for the
 	// official protocol), and Version the entry's published version. Both are
 	// `json:"-"` like Popularity: ServerEntry's wire JSON is unchanged. The
-	// catalog reads Title for display and matching (Spec 109 D36.10) and
+	// catalog reads Title for display and matching (Spec 109 D37.10) and
 	// collapseOfficialVersions reads Version.
 	Title   string `json:"-"`
 	Version string `json:"-"`

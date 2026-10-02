@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Spec 109 fix-catalog-rank T168 (D36.3): a typed catalog query fetches the
+// Spec 109 fix-catalog-rank T174 (D37.3): a typed catalog query fetches the
 // whole filtered result for ranking instead of truncating to `limit` in the
 // registry's own order. The exported per-registry SearchServers contract is
 // unchanged.
@@ -38,7 +38,7 @@ func TestSearchCatalogSource_NoTruncationBeforeRank(t *testing.T) {
 		}
 	}
 	if typedFetchCap != 300 {
-		t.Errorf("typedFetchCap = %d, want 300 (D36.3)", typedFetchCap)
+		t.Errorf("typedFetchCap = %d, want 300 (D37.3)", typedFetchCap)
 	}
 }
 

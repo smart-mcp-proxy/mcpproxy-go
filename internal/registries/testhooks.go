@@ -75,7 +75,7 @@ func ResetListingCacheForTest() {
 }
 
 // SetCatalogWarmBehindForTest overrides the warm-behind background timeout and
-// the per-source slot count (Spec 109 D36.11) and returns a restore func.
+// the per-source slot count (Spec 109 D37.11) and returns a restore func.
 func SetCatalogWarmBehindForTest(timeout time.Duration, slots int) (restore func()) {
 	warmBehind.mu.Lock()
 	prevTimeout, prevSlots := warmBehind.timeout, warmBehind.slots
@@ -90,7 +90,7 @@ func SetCatalogWarmBehindForTest(timeout time.Duration, slots int) (restore func
 
 // RecordedRegistryHandlerForTest serves an official-protocol v0.1 registry
 // (GET /v0.1/servers) from a recorded corpus of wrapped {server, _meta} items
-// (Spec 109 D36.12). It reproduces the live registry's search semantics, which
+// (Spec 109 D37.12). It reproduces the live registry's search semantics, which
 // is what makes the catalog bug reproducible offline: `search` is a
 // case-insensitive substring of server.name only, results are in byte order of
 // the name, `version=latest` keeps only isLatest entries, `limit` defaults to

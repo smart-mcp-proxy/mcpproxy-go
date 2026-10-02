@@ -30,6 +30,7 @@
       "summary": "All clear on Home, pill and badge hidden, CLI prints All clear",
       "tests": [
         "vitest:frontend/tests/unit/home-attention.spec.ts",
+        "vitest:frontend/tests/unit/home-getting-started.spec.ts",
         "go:cmd/mcpproxy/attention_cmd_test.go#TestAttentionCmd_AllClear"
       ]
     },
@@ -150,6 +151,7 @@
         "vitest:frontend/tests/unit/health-status-labels.spec.ts",
         "vitest:frontend/tests/unit/sc003-forbidden-renderings.spec.ts",
         "vitest:frontend/tests/unit/server-detail-health-admin-state.spec.ts",
+        "vitest:frontend/tests/unit/server-detail-health-status-colour.spec.ts",
         "go:cmd/mcpproxy/upstream_list_forbidden_words_test.go#TestUpstreamListForbiddenWords",
         "xctest:native/macos/MCPProxy/MCPProxyTests/CrossSurfaceRenderedLabelParityTests.swift#testTrayFirstLineNeverReadsHealthyForUnusableStatuses"
       ]
@@ -268,6 +270,7 @@
         "vitest:frontend/tests/unit/activity-views.spec.ts",
         "vitest:frontend/tests/unit/activity-system-folding.spec.ts",
         "vitest:frontend/tests/unit/activity-empty-columns.spec.ts",
+        "vitest:frontend/tests/unit/activity-blocked-in-calls-view.spec.ts",
         "xctest:native/macos/MCPProxy/MCPProxyTests/ActivityFoldingTests.swift"
       ]
     },
@@ -275,7 +278,9 @@
       "summary": "Usage shows an indexed-tools savings estimate and integer ticks",
       "tests": [
         "vitest:frontend/tests/unit/usage-tokens-saved-estimate.spec.ts",
-        "vitest:frontend/tests/unit/usage-chart-ticks.spec.ts"
+        "vitest:frontend/tests/unit/usage-chart-ticks.spec.ts",
+        "vitest:frontend/tests/unit/home-token-savings-estimate.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/HomeTokenSavingsBadgeTests.swift"
       ]
     },
     "US6-8": {
@@ -284,6 +289,7 @@
         "vitest:frontend/tests/unit/scope-query.spec.ts",
         "vitest:frontend/tests/unit/scope-chips.spec.ts",
         "vitest:frontend/tests/unit/scope-filters-url-writeback.spec.ts",
+        "vitest:frontend/tests/unit/activity-scope-conflict-clear.spec.ts",
         "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift",
         "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts"
       ]

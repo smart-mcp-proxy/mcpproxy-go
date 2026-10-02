@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Spec 109 fix-catalog-rank T172 (D36.11): a fetch that outlives the 5s source
+// Spec 109 fix-catalog-rank T178 (D37.11): a fetch that outlives the 5s source
 // budget finishes in the background and warms the listing cache; the budget,
 // the unavailable[] wording and the FR-060 contract do not change.
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// Spec 109 fix-catalog-rank T167 (D36.2, D36.4, D36.10): the official
+// Spec 109 fix-catalog-rank T173 (D37.2, D37.4, D37.10): the official
 // protocol's typed-query fetch (one page per query, concurrent), title and
 // version parsing, and version collapse.
 

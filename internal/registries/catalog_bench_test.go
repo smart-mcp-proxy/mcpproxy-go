@@ -42,7 +42,7 @@ func TestSearchAll_PerformanceBudget(t *testing.T) {
 	}))
 	defer hung.Close()
 	// Registered AFTER hung.Close so it runs first: the timed-out fetches keep
-	// running in the background (warm-behind, Spec 109 D36.11) and hold their
+	// running in the background (warm-behind, Spec 109 D37.11) and hold their
 	// connections until released, which Close would otherwise wait out.
 	defer close(block)
 

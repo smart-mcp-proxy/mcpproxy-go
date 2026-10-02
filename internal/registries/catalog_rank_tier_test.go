@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Spec 109 fix-catalog-rank T170 (D36.1): the relevance tier ranks first.
+// Spec 109 fix-catalog-rank T176 (D37.1): the relevance tier ranks first.
 
 func tierHit(id, title, desc string) CatalogHit {
 	pub := derivePublisher(id, "Reg")

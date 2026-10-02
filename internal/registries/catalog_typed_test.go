@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Spec 109 fix-catalog-rank T171 (D36.3, D36.7, D36.8): a typed catalog query
+// Spec 109 fix-catalog-rank T177 (D37.3, D37.7, D37.8): a typed catalog query
 // is fetched wide, ranked, then truncated, and the GitHub star budget is spent
 // only on the hits that survive.
 
@@ -155,7 +155,7 @@ func TestSearchAll_MainTimesOutExpansionHitsStillShown(t *testing.T) {
 	}
 }
 
-// R3.1: the MAIN query decides availability (D36.2). A main query that lands
+// R3.1: the MAIN query decides availability (D37.2). A main query that lands
 // inside the budget while an expansion is still running must not turn the
 // source unavailable: the hits that arrived are shown, with no timeout error.
 func TestSearchAll_MainLandsExpansionSlowSourceStaysAvailable(t *testing.T) {

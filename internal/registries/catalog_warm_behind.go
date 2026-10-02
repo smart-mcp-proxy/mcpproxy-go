@@ -8,7 +8,7 @@ import (
 )
 
 // catalog_warm_behind.go: "warm behind" for a slow catalog source (Spec 109
-// D36.11, FR-060).
+// D37.11, FR-060).
 //
 // The official registry answers a cold ?search= in 4-25 s, longer than the 5 s
 // per-source budget (FR-060). A timed-out fetch used to be cancelled, so nothing
@@ -148,7 +148,7 @@ func fetchSourceWithinBudget(ctx context.Context, reg RegistryEntry, budget time
 		}
 		entries, mainLanded := partial.get()
 		if mainLanded {
-			// The main query decides availability (D36.2): it answered, only
+			// The main query decides availability (D37.2): it answered, only
 			// an expansion is still running, so the source is not unavailable.
 			// The fetch keeps going in the background and caches the full
 			// listing when it lands.

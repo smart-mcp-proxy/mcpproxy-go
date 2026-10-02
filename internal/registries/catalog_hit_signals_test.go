@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// Spec 109 fix-catalog-rank T169 (D36.5, D36.7, D36.9, D36.10): what the
+// Spec 109 fix-catalog-rank T175 (D37.5, D37.7, D37.9, D37.10): what the
 // catalog hit says about itself. Verified is no longer "any built-in source".
 
 func officialReg() *RegistryEntry {
@@ -71,7 +71,7 @@ func TestBuildCatalogHit_VerifiedMeansPublisherOwnsRepo(t *testing.T) {
 			t.Errorf("%s: Verified = %v, want %v", c.name, hit.Verified, c.wants)
 		}
 		if hit.Official != c.reg.IsTrusted() {
-			t.Errorf("%s: Official = %v must stay IsTrusted (D36.6)", c.name, hit.Official)
+			t.Errorf("%s: Official = %v must stay IsTrusted (D37.6)", c.name, hit.Official)
 		}
 	}
 }
@@ -100,7 +100,7 @@ func TestBuildCatalogHit_TitleOrder(t *testing.T) {
 func TestBuildCatalogHit_PlaceholderDescriptionBecomesEmpty(t *testing.T) {
 	hit := BuildCatalogHit(officialReg(), ServerEntry{ID: "a.b/c", Name: "a.b/c", Description: noDescAvailable})
 	if hit.Entry.Description != "" {
-		t.Fatalf("Entry.Description = %q, want empty (D36.9)", hit.Entry.Description)
+		t.Fatalf("Entry.Description = %q, want empty (D37.9)", hit.Entry.Description)
 	}
 	real := BuildCatalogHit(officialReg(), ServerEntry{ID: "a.b/c", Name: "a.b/c", Description: "real"})
 	if real.Entry.Description != "real" {

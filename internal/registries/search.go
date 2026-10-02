@@ -121,12 +121,12 @@ func searchRegistry(ctx context.Context, reg *RegistryEntry, tag, query string, 
 }
 
 // typedFetchCap bounds how many entries one source contributes to a typed
-// catalog query before ranking (Spec 109 D36.3): the fetch is one page per
+// catalog query before ranking (Spec 109 D37.3): the fetch is one page per
 // query (3 on the official protocol), so this is a ceiling, not a target.
 const typedFetchCap = 300
 
 // searchCatalogSource is the typed-query fetch behind catalog search (Spec 109
-// D36.3). Unlike SearchServers it does NOT truncate to a limit in the
+// D37.3). Unlike SearchServers it does NOT truncate to a limit in the
 // registry's own order: the official registry's search returns names in byte
 // order, so truncating first decided what the user could ever see. It returns
 // every match (capped at typedFetchCap) and lets Rank order them. The official
@@ -141,7 +141,7 @@ func searchCatalogSource(ctx context.Context, reg *RegistryEntry, q string) ([]S
 // onPartial, the already-filtered hits of the official protocol's expansion
 // queries as they arrive. A caller that stops waiting (the 5s source budget)
 // can then still show them while the slow main query finishes in the
-// background (Spec 109 D36.2/D36.11). onPartial may be nil.
+// background (Spec 109 D37.2/D37.11). onPartial may be nil.
 func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q string, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
 	// FR-008: skip a key-requiring registry when no key is configured.
 	if err := checkRegistryKey(reg); err != nil {

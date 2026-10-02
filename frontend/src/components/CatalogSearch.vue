@@ -394,10 +394,10 @@ const CatalogResultCard = defineComponent({
                   : null,
               ]),
               h('div', { class: 'flex gap-1 shrink-0' }, [
-                // Spec 109 D36.6: no per-card "Official" badge. Every default
+                // Spec 109 D37.6: no per-card "Official" badge. Every default
                 // source is official, so it carried no signal; the Official
                 // section heading says it once. Verified means the publisher
-                // owns the source repository (D36.5).
+                // owns the source repository (D37.5).
                 r.verified ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
                 r.from_cache
                   ? h('span', { class: 'badge badge-sm badge-warning badge-outline', title: 'The source\u2019s live search is unavailable; this entry is from its cached list.', 'data-test': `catalog-from-cache-${r.source}-${r.id}` }, 'From cached list')
