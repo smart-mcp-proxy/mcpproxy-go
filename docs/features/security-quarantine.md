@@ -203,6 +203,23 @@ Every surface offers the same four decisions. Only the scan-gated approval can r
 | Tray on Windows and Linux (Go tray) | A server in the "Security Quarantine" submenu opens the Web UI at `/review/<name>` |
 | MCP | `quarantine_security` with `list_quarantined`, `inspect_quarantined`, `inspect_tools`, `approve_tool`, `approve_all_tools`, `block_tool`, `block_all_tools` (admin only). There is no server-level approve over MCP by design: an agent cannot release a quarantined server |
 
+### Scan coverage on the review screen
+
+The scan line of the review screen says whether the baseline scan describes the definitions you are looking at:
+
+| Coverage | What the screen shows |
+|----------|-----------------------|
+| current | `Baseline scan: clean · risk 0/100 · covers all 5 tools`, in the colour of the verdict. The risk score appears only here |
+| stale | A warning: a tool definition changed or was added after the last scan. It names the tools and the last result, and offers **Rescan**. A rug pull after the scan therefore never reads as clean |
+| not captured | A warning that the scan was not checked against tool definitions, with **Fetch tool definitions** |
+| no tools scanned | A warning that the last scan did not analyse tool definitions, with **Rescan** |
+| scanning | `Scan in progress…` |
+| none | `Not scanned yet.` with **Scan now** |
+
+Each tool's scan verdict follows the same rule: `clean` only when the scan covered that tool's current definition. After a baseline scan has listed a quarantined server's tools, MCPProxy captures the definitions itself, so the review list is not empty until someone clicks **Fetch tool definitions**. With `security.auto_baseline_scan: false` and no manual scan nothing is started automatically.
+
+On a server that is not quarantined, the review tab shows approved state: approved tools read **Approved** or **Blocked** (no Approve or Reject), the heading says the server is approved, and **Manage tools** and **Quarantine to review again…** are offered. The second is the existing quarantine action behind a confirmation. Only a new or changed tool shows Approve and Reject.
+
 ### Scan a Server for TPAs (MCP)
 
 The `quarantine_security` tool can also run and read the TPA scan, so an agent

@@ -25,6 +25,8 @@ type p109CatalogOrder struct {
 		ID         string            `json:"id"`
 		Name       string            `json:"name"`
 		Provenance string            `json:"provenance"`
+		Protocol   string            `json:"protocol"`
+		Corpus     []json.RawMessage `json:"corpus"`
 		Servers    []json.RawMessage `json:"servers"`
 	} `json:"sources"`
 	IDs []string `json:"ids"`
@@ -42,21 +44,27 @@ func TestSearchServers_CatalogOrderMatchesTheRESTGolden(t *testing.T) {
 
 	var entries []registries.RegistryEntry
 	for _, src := range f.Sources {
-		body, err := json.Marshal(src.Servers)
-		require.NoError(t, err)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		}))
+		var h http.Handler
+		if src.Protocol == "modelcontextprotocol/registry" {
+			h = registries.RecordedRegistryHandlerForTest(src.Corpus)
+		} else {
+			body, err := json.Marshal(src.Servers)
+			require.NoError(t, err)
+			h = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			})
+		}
+		srv := httptest.NewServer(h)
 		t.Cleanup(srv.Close)
-		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL, Provenance: src.Provenance})
+		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL + "/v0.1/servers", Protocol: src.Protocol, Provenance: src.Provenance})
 	}
 	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
 	t.Cleanup(registries.SetRegistriesForTest(entries))
 
 	proxy := createTestMCPProxyServer(t)
 	result, err := proxy.handleSearchServers(context.Background(), mcp.CallToolRequest{Params: mcp.CallToolParams{
-		Name: "search_servers", Arguments: map[string]interface{}{"search": f.Query},
+		Name: "search_servers", Arguments: map[string]interface{}{"search": f.Query, "limit": 20},
 	}})
 	require.NoError(t, err)
 	require.False(t, result.IsError, "%+v", result.Content)
@@ -65,6 +73,7 @@ func TestSearchServers_CatalogOrderMatchesTheRESTGolden(t *testing.T) {
 		Servers []struct {
 			ID     string `json:"id"`
 			Source string `json:"source"`
+			Title  string `json:"title"`
 		} `json:"servers"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &payload))
@@ -75,4 +84,5 @@ func TestSearchServers_CatalogOrderMatchesTheRESTGolden(t *testing.T) {
 	assert.Equal(t, f.IDs, got, "MCP search_servers order must equal the REST golden")
 	require.NotEmpty(t, got)
 	assert.Equal(t, "official:io.github.github/github-mcp-server", got[0], "SC-008: the official GitHub server is first")
+	assert.Equal(t, "GitHub", payload.Servers[0].Title, "the server.json title, not the reverse-DNS name")
 }

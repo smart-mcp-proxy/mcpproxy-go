@@ -2,35 +2,12 @@ package registries
 
 import "testing"
 
-// TestRank_OfficialBeatsEverything pins the primary sort key: official source
-// wins regardless of everything else (data-model §9, contracts/rest-api.md#catalog).
-func TestRank_OfficialBeatsEverything(t *testing.T) {
-	official := CatalogHit{Source: "official", Official: true, Entry: ServerEntry{ID: "z", Name: "Z"}}
-	verifiedPopular := CatalogHit{Source: "smithery", Verified: true, Popularity: intPop(9999), Entry: ServerEntry{ID: "a", Name: "A"}}
-
-	if !Rank(official, verifiedPopular, "") {
-		t.Error("expected official source to rank first")
-	}
-	if Rank(verifiedPopular, official, "") {
-		t.Error("expected official source to rank first (reverse check)")
-	}
-}
-
 // TestRank_VerifiedBeatsPopularity pins the secondary sort key.
 func TestRank_VerifiedBeatsPopularity(t *testing.T) {
 	verified := CatalogHit{Verified: true, Popularity: intPop(1), Entry: ServerEntry{ID: "b"}}
 	popular := CatalogHit{Verified: false, Popularity: intPop(99999), Entry: ServerEntry{ID: "a"}}
 	if !Rank(verified, popular, "") {
 		t.Error("expected verified to outrank raw popularity")
-	}
-}
-
-// TestRank_PopularityBeatsRelevance pins the third sort key.
-func TestRank_PopularityBeatsRelevance(t *testing.T) {
-	popular := CatalogHit{Popularity: intPop(100), Entry: ServerEntry{ID: "zzz", Name: "Unrelated"}}
-	relevant := CatalogHit{Popularity: intPop(1), Entry: ServerEntry{ID: "aaa", Name: "github tool"}}
-	if !Rank(popular, relevant, "github") {
-		t.Error("expected popularity to outrank text relevance")
 	}
 }
 

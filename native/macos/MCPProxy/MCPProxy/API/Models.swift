@@ -376,7 +376,18 @@ struct ReviewQueueRow: Codable, Equatable, Identifiable {
     var id: String { server }
 }
 struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }
-struct ReviewScan: Codable, Equatable { let verdict: String; let riskScore: Int?; let reportID: String?; enum CodingKeys: String, CodingKey { case verdict; case riskScore = "risk_score"; case reportID = "report_id" } }
+/// Baseline scan summary of a review. `coverage` (current, stale, not_captured,
+/// tools_not_scanned, scanning, none) says whether the verdict describes the
+/// definitions on screen; a payload from an older core omits it and is read as `none`.
+struct ReviewScan: Codable, Equatable {
+    let verdict: String; let riskScore: Int?; let reportID: String?
+    let coverage: String?; let toolsScanned: Int?; let unscannedTools: [String]?
+    enum CodingKeys: String, CodingKey {
+        case verdict, coverage
+        case riskScore = "risk_score"; case reportID = "report_id"
+        case toolsScanned = "tools_scanned"; case unscannedTools = "unscanned_tools"
+    }
+}
 struct ReviewServerSummary: Codable, Equatable { let name: String; let transport: String?; let command: String?; let url: String?; let quarantined: Bool; let trustMode: String?; let sourceRegistryID: String?; let sourceRegistryProvenance: String?; let definitionsCaptured: Bool; let scan: ReviewScan?; enum CodingKeys: String, CodingKey { case name, transport, command, url, quarantined, scan; case trustMode = "trust_mode"; case sourceRegistryID = "source_registry_id"; case sourceRegistryProvenance = "source_registry_provenance"; case definitionsCaptured = "definitions_captured" } }
 struct ReviewToolPrevious: Codable, Equatable { let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
 struct ReviewToolDiff: Codable, Equatable { let description: String?; let inputSchema: String?; let outputSchema: String?; let annotations: String?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
