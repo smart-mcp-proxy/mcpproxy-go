@@ -160,7 +160,12 @@ type CatalogHit struct {
     Curated    bool          // hit of the built-in reference source; listed first in the Official section (D35 A9)
     FromCache  bool          // served from the source's cached listing because its live fetch failed (D35 A1/A2)
     Popularity *Popularity   // {stars?, installs?}
+    // unexported starsBorrowed: the publisher does not own the repository the entry names, so GitHub stars are not attributed to it (D37.7)
 }
+// Title: server.json title, then the name segment after the namespace, then the name, then the id (D37.10).
+// Verified: for a built-in official-protocol entry, the namespace owns the repository (D37.5); built-in reference/Docker entries stay "trusted source".
+// Description: "" when the source only had the "No description available" placeholder (D37.9).
+// ServerEntry gains Title and Version, both json:"-" (the Popularity precedent), so its wire JSON is unchanged.
 
 // REST response DTO of GET /catalog/search — a distinct type, built by toCatalogResult(hit, added).
 type CatalogResult struct {
@@ -183,7 +188,7 @@ type CatalogResult struct {
 // unavailable[] entry: {source, reason, fallback?: "cached_listing", cached_at?: RFC 3339}
 type SearchOptions struct{ SourceTimeout time.Duration } // default 5 s; only tests set another value (T109a)
 func SearchAll(ctx, q, tag string, limit int, opts SearchOptions) (results []CatalogHit, sections *CatalogSections, unavailable []SourceError)
-func Rank(a, b CatalogHit, q string) bool // pure, deterministic
+func Rank(a, b CatalogHit, q string) bool // pure, deterministic: match tier desc (matchTier, D37.1), official desc, verified desc, popularity desc, title asc, id asc; empty q is tier 0 for every hit
 func toCatalogResult(h CatalogHit, added bool) CatalogResult // REST only; golden-tested against the contracts/rest-api.md#catalog example
 ```
 

@@ -25,6 +25,8 @@ type p109CatalogOrderFile struct {
 		ID         string            `json:"id"`
 		Name       string            `json:"name"`
 		Provenance string            `json:"provenance"`
+		Protocol   string            `json:"protocol"`
+		Corpus     []json.RawMessage `json:"corpus"`
 		Servers    []json.RawMessage `json:"servers"`
 	} `json:"sources"`
 	IDs []string `json:"ids"`
@@ -45,13 +47,19 @@ func TestCatalogOrderParityCLI(t *testing.T) {
 
 	var entries []registries.RegistryEntry
 	for _, src := range f.Sources {
-		body, _ := json.Marshal(src.Servers)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		}))
+		var h http.Handler
+		if src.Protocol == "modelcontextprotocol/registry" {
+			h = registries.RecordedRegistryHandlerForTest(src.Corpus)
+		} else {
+			body, _ := json.Marshal(src.Servers)
+			h = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			})
+		}
+		srv := httptest.NewServer(h)
 		t.Cleanup(srv.Close)
-		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL, Provenance: src.Provenance})
+		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL + "/v0.1/servers", Protocol: src.Protocol, Provenance: src.Provenance})
 	}
 	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
 	t.Cleanup(registries.SetRegistriesForTest(entries))

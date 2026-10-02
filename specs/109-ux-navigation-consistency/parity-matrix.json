@@ -769,7 +769,8 @@
             "vitest:frontend/tests/unit/add-server-catalog.spec.ts",
             "vitest:frontend/tests/unit/catalog-order-parity.spec.ts",
             "vitest:frontend/tests/unit/catalog-cached-fallback.spec.ts",
-            "vitest:frontend/tests/unit/catalog-browse-order.spec.ts"
+            "vitest:frontend/tests/unit/catalog-browse-order.spec.ts",
+            "vitest:frontend/tests/unit/catalog-card-signals.spec.ts"
           ]
         },
         "macos": {
@@ -813,7 +814,10 @@
           ],
           "tests": [
             "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden",
-            "go:internal/httpapi/spec109_catalog_cached_fallback_test.go#TestCatalogCachedFallback_RESTWritesTheGolden"
+            "go:internal/httpapi/spec109_catalog_cached_fallback_test.go#TestCatalogCachedFallback_RESTWritesTheGolden",
+            "go:internal/registries/recorded_registry_test.go",
+            "go:internal/registries/catalog_rank_tier_test.go",
+            "go:internal/registries/catalog_typed_test.go"
           ]
         }
       }

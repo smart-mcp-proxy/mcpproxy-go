@@ -134,7 +134,7 @@ func pruneListingCache(regs []RegistryEntry) {
 }
 
 // matchCachedEntry is the fallback filter: a case-insensitive substring of the
-// trimmed query in the entry's name, description OR id. The live path's
+// trimmed query in the entry's name, title, description OR id. The live path's
 // filterServers skips the id, but the official registry's own search matches
 // names, so including the id is what lets "github" find "io.github.*". An empty
 // query matches everything (browse).
@@ -144,6 +144,7 @@ func matchCachedEntry(e *ServerEntry, q string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(e.Name), q) ||
+		strings.Contains(strings.ToLower(e.Title), q) ||
 		strings.Contains(strings.ToLower(e.Description), q) ||
 		strings.Contains(strings.ToLower(e.ID), q)
 }
