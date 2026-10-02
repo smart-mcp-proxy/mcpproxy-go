@@ -90,6 +90,18 @@ For each server named, either:
 
 Adding the key by hand is enough — the gate obeys an explicit value either way.
 
+**Restarts also cleared the quarantine.** In the same affected releases,
+restarting a server that the gate had quarantined silently cleared its
+quarantine: a restart from the REST API, the CLI, the tray or an MCP client,
+"restart all", a secret change that restarts the servers using it, and a security
+scan (including the baseline scan that runs shortly after startup) all re-read the
+server from `mcp_config.json` and wrote the un-gated entry over the recorded
+quarantine. Such a server shows up in the same "predate the config-load admission
+gate" warning and should be reviewed the same way. From this fix on, a restart
+runs the file entry through the admission gate, and `config.db` refuses to lower a
+recorded quarantine unless the operator states `"quarantined": false` or the
+server is released from the quarantine review.
+
 ### Tool Discovery and Search Isolation
 
 **Quarantined servers are completely isolated from the tool discovery and search system:**
