@@ -151,6 +151,28 @@ func TestSpec109DocsPublished(t *testing.T) {
 		}
 	})
 
+	t.Run("--secret-env and --secret-header examples put the flag before the -- separator", func(t *testing.T) {
+		// Cobra treats everything after `--` as positional stdio args, so a flag
+		// written after it is never parsed (the value would land in the config
+		// as a plain child-process argument instead of the keyring).
+		for _, id := range []string{"cli/management-commands", "cli/catalog-commands"} {
+			for i, line := range strings.Split(readDocByID(t, id), "\n") {
+				if !strings.Contains(line, "mcpproxy upstream add") {
+					continue
+				}
+				dash := strings.Index(line, " -- ")
+				if dash < 0 {
+					continue
+				}
+				for _, flag := range []string{"--secret-env", "--secret-header"} {
+					if strings.Contains(line[dash:], flag) {
+						t.Errorf("%s.md:%d puts %s after the `--` separator, where Cobra does not parse it: %s", id, i+1, flag, line)
+					}
+				}
+			}
+		}
+	})
+
 	t.Run("mutation: a missing command, a root-variant link and an unsidebarred id are caught", func(t *testing.T) {
 		if strings.Contains(readDocByID(t, "cli/attention-command"), "mcpproxy no-such-command") {
 			t.Error("the command check is vacuous")

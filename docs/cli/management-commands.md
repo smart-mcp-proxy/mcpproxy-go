@@ -76,7 +76,7 @@ The values are `ready`, `connecting`, `sign_in_required`, `needs_review`, `needs
 mcpproxy upstream add notion https://mcp.notion.com/sse
 mcpproxy upstream add fs -- npx -y @modelcontextprotocol/server-filesystem /tmp
 mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --secret-header "Authorization: Bearer ghp_..."
-mcpproxy upstream add weather -- npx -y weather-mcp --secret-env WEATHER_API_KEY=abc123
+mcpproxy upstream add weather --secret-env WEATHER_API_KEY=abc123 -- npx -y weather-mcp
 ```
 
 `--secret-env KEY=VALUE` and `--secret-header "Name: value"` (both repeatable) write the value to the OS keyring and store `${keyring:<server>-env-<name>}` in the config instead of the value. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
