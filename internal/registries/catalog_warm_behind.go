@@ -62,8 +62,9 @@ func releaseWarmBehind(key string) {
 
 // sourceFetchFunc fetches one source's entries. onPartial receives hits that
 // are already known while the fetch is still running (see
-// searchCatalogSourceProgress); it may be ignored.
-type sourceFetchFunc func(ctx context.Context, onPartial func([]ServerEntry)) ([]ServerEntry, error)
+// searchCatalogSourceProgress), and whether the main query is among them; it
+// may be ignored.
+type sourceFetchFunc func(ctx context.Context, onPartial func(entries []ServerEntry, mainLanded bool)) ([]ServerEntry, error)
 
 // sourceFetchOutcome is what SearchAll gets back for one source. entries is the
 // fetch's result (on error: whatever hits arrived anyway, e.g. the official
@@ -76,20 +77,22 @@ type sourceFetchOutcome struct {
 }
 
 type partialEntries struct {
-	mu      sync.Mutex
-	entries []ServerEntry
+	mu         sync.Mutex
+	entries    []ServerEntry
+	mainLanded bool
 }
 
-func (p *partialEntries) set(entries []ServerEntry) {
+func (p *partialEntries) set(entries []ServerEntry, mainLanded bool) {
 	p.mu.Lock()
 	p.entries = entries
+	p.mainLanded = p.mainLanded || mainLanded
 	p.mu.Unlock()
 }
 
-func (p *partialEntries) get() []ServerEntry {
+func (p *partialEntries) get() ([]ServerEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.entries
+	return p.entries, p.mainLanded
 }
 
 // fetchSourceWithinBudget runs fetch for one source and waits at most budget
@@ -143,6 +146,14 @@ func fetchSourceWithinBudget(ctx context.Context, reg RegistryEntry, budget time
 			return out
 		default:
 		}
-		return sourceFetchOutcome{entries: partial.get(), err: errors.New("source budget exceeded"), timedOut: true}
+		entries, mainLanded := partial.get()
+		if mainLanded {
+			// The main query decides availability (D36.2): it answered, only
+			// an expansion is still running, so the source is not unavailable.
+			// The fetch keeps going in the background and caches the full
+			// listing when it lands.
+			return sourceFetchOutcome{entries: entries}
+		}
+		return sourceFetchOutcome{entries: entries, err: errors.New("source budget exceeded"), timedOut: true}
 	}
 }

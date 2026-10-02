@@ -215,7 +215,7 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 			defer wg.Done()
 			reg := sources[i]
 
-			fetch := func(c context.Context, onPartial func([]ServerEntry)) ([]ServerEntry, error) {
+			fetch := func(c context.Context, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
 				if empty {
 					return searchRegistry(c, &reg, tag, "", fetchLimit, nil)
 				}
@@ -473,8 +473,9 @@ func catalogHitTitle(reg *RegistryEntry, entry ServerEntry) string {
 // publisherOwnsRepo reports whether the namespace of an official-protocol id
 // owns the GitHub repository it names as its source (Spec 109 D36.5): an
 // `io.github.<x>` namespace needs repo owner x; a domain namespace needs its
-// owner label (≥ 3 characters, e.g. "notion" of com.notion) to appear in the
-// repo owner (e.g. "makenotion"). A re-publisher of someone else's server, a
+// owner label (≥ 3 characters, e.g. "notion" of com.notion) to equal the repo
+// owner, be a whole token of it, or be a ≥ 5 character brand with a ≤ 4
+// character prefix/suffix on it (e.g. "makenotion"). A re-publisher of someone else's server, a
 // borrowed repo URL or a missing repository never verifies.
 func publisherOwnsRepo(id, sourceCodeURL string) bool {
 	key, ok := GitHubRepoKey(sourceCodeURL)
@@ -492,7 +493,37 @@ func publisherOwnsRepo(id, sourceCodeURL string) bool {
 	}
 	label, ok := namespaceOwner(id)
 	label = strings.ToLower(label)
-	return ok && len(label) >= 3 && strings.Contains(repoOwner, label)
+	return ok && domainLabelMatchesOwner(label, repoOwner)
+}
+
+// domainLabelMatchesOwner is the domain-namespace half of publisherOwnsRepo.
+// A bare substring test let any short label verify against an unrelated owner
+// ("hub" inside "github"), so the label must be the owner itself, a whole
+// "-"/"_"-separated token of it ("acme" of acme-corp), or a brand of at least
+// 5 characters with a short (at most 4 characters) prefix or suffix on the
+// owner ("notion" of makenotion).
+func domainLabelMatchesOwner(label, repoOwner string) bool {
+	if len(label) < 3 {
+		return false
+	}
+	if label == repoOwner {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(repoOwner, func(r rune) bool { return r == '-' || r == '_' }) {
+		if tok == label {
+			return true
+		}
+	}
+	if len(label) < 5 {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(repoOwner, label); ok && len(rest) <= 4 {
+		return true
+	}
+	if rest, ok := strings.CutSuffix(repoOwner, label); ok && len(rest) <= 4 {
+		return true
+	}
+	return false
 }
 
 // applyCachedStars fills in hit.Popularity.Stars from the installed

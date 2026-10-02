@@ -142,7 +142,7 @@ func searchCatalogSource(ctx context.Context, reg *RegistryEntry, q string) ([]S
 // queries as they arrive. A caller that stops waiting (the 5s source budget)
 // can then still show them while the slow main query finishes in the
 // background (Spec 109 D36.2/D36.11). onPartial may be nil.
-func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q string, onPartial func([]ServerEntry)) ([]ServerEntry, error) {
+func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q string, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
 	// FR-008: skip a key-requiring registry when no key is configured.
 	if err := checkRegistryKey(reg); err != nil {
 		return nil, err
@@ -156,9 +156,11 @@ func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q stri
 		err     error
 	)
 	if reg.Protocol == protocolOfficial {
-		var progress func([]ServerEntry)
+		var progress func([]ServerEntry, bool)
 		if onPartial != nil {
-			progress = func(expansion []ServerEntry) { onPartial(finishCatalogEntries(reg, q, expansion)) }
+			progress = func(landed []ServerEntry, mainLanded bool) {
+				onPartial(finishCatalogEntries(reg, q, landed), mainLanded)
+			}
 		}
 		servers, err = fetchOfficialCatalogProgress(ctx, reg, q, progress)
 	} else {

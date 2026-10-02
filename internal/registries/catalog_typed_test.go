@@ -155,6 +155,44 @@ func TestSearchAll_MainTimesOutExpansionHitsStillShown(t *testing.T) {
 	}
 }
 
+// R3.1: the MAIN query decides availability (D36.2). A main query that lands
+// inside the budget while an expansion is still running must not turn the
+// source unavailable: the hits that arrived are shown, with no timeout error.
+func TestSearchAll_MainLandsExpansionSlowSourceStaysAvailable(t *testing.T) {
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	installCatalogFixtureSources(t, func(h http.Handler, id string) http.Handler {
+		if id != "official" {
+			return h
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("search") != "github" { // every expansion is slow
+				select {
+				case <-released:
+				case <-r.Context().Done():
+				}
+				http.Error(w, "late", http.StatusGatewayTimeout)
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	t.Cleanup(SetCatalogWarmBehindForTest(2*time.Second, 2))
+
+	hits, _, unavailable := SearchAll(context.Background(), "github", "", 20, SearchOptions{SourceTimeout: 400 * time.Millisecond, PopularityWait: -1})
+	if len(unavailable) != 0 {
+		t.Fatalf("unavailable = %+v, want none: the main query answered", unavailable)
+	}
+	if len(hits) == 0 {
+		t.Fatal("the main query's hits must be shown")
+	}
+	for _, h := range hits {
+		if h.FromCache {
+			t.Errorf("%s: main-query hits are live, not from the cache", h.Entry.ID)
+		}
+	}
+}
+
 // recordingProvider is a PopularityProvider that holds no stars and records
 // every key SearchAll asks it to resolve.
 type recordingProvider struct {

@@ -185,7 +185,7 @@ func TestSearchAll_ReferenceSourceNeverRunsInBackground(t *testing.T) {
 
 	reg := RegistryEntry{ID: "reference", Name: "Reference", Protocol: protocolReference, ServersURL: "builtin://reference"}
 	key := listingKey(&reg)
-	out := fetchSourceWithinBudget(context.Background(), reg, time.Second, func(context.Context, func([]ServerEntry)) ([]ServerEntry, error) {
+	out := fetchSourceWithinBudget(context.Background(), reg, time.Second, func(context.Context, func([]ServerEntry, bool)) ([]ServerEntry, error) {
 		warmBehind.mu.Lock()
 		held := warmBehind.inflight[key]
 		warmBehind.mu.Unlock()

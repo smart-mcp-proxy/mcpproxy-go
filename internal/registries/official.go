@@ -139,10 +139,12 @@ func fetchOfficialCatalog(ctx context.Context, reg *RegistryEntry, q string) ([]
 }
 
 // fetchOfficialCatalogProgress is fetchOfficialCatalog that also calls
-// onExpansion, serialized, with the merged hits of the expansion queries
-// finished so far each time one lands, so a caller that gives up waiting for
-// the (slower) main query can still use them. onExpansion may be nil.
-func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q string, onExpansion func([]ServerEntry)) ([]ServerEntry, error) {
+// onProgress, serialized, with the merged hits of the queries finished so far
+// each time one lands (mainLanded says the main query is among them), so a
+// caller that gives up waiting can still use them: expansion hits while the
+// main query is slow, and a landed main query's hits, which keep the source
+// available (D36.2), while an expansion is slow. onProgress may be nil.
+func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q string, onProgress func(entries []ServerEntry, mainLanded bool)) ([]ServerEntry, error) {
 	expansions := officialExpansionQueries(q)
 	// Merge order: owner (".x/"), segment ("/x"), phrase ("x-y"), then main.
 	var queries []string
@@ -166,6 +168,7 @@ func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q str
 		err     error
 	}
 	var mu sync.Mutex
+	mainLanded := false
 	results := make([]pageResult, len(queries))
 	var wg sync.WaitGroup
 	for i, query := range queries {
@@ -176,14 +179,19 @@ func fetchOfficialCatalogProgress(ctx context.Context, reg *RegistryEntry, q str
 			mu.Lock()
 			defer mu.Unlock()
 			results[i] = pageResult{entries: entries, err: err}
-			if onExpansion == nil || i == mainIdx || err != nil {
+			if i == mainIdx && err == nil {
+				mainLanded = true
+			}
+			if onProgress == nil || err != nil {
 				return
 			}
 			var merged []ServerEntry
-			for j := 0; j < mainIdx; j++ {
-				merged = append(merged, results[j].entries...)
+			for j := 0; j <= mainIdx; j++ {
+				if results[j].err == nil {
+					merged = append(merged, results[j].entries...)
+				}
 			}
-			onExpansion(collapseOfficialVersions(merged))
+			onProgress(collapseOfficialVersions(merged), mainLanded)
 		}(i, query)
 	}
 	wg.Wait()
