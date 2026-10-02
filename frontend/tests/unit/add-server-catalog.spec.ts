@@ -79,6 +79,10 @@ describe('CatalogSearch', () => {
     vi.mocked(api.addServerFromRegistry).mockResolvedValue({ success: true, server: { name: 'github' } as never })
     const wrapper = await mountCatalog()
 
+    expect(wrapper.find('[data-test="catalog-result-title"]').text()).toBe('GitHub')
+    expect(wrapper.text()).toContain('io.github.github/github-mcp-server')
+    expect(wrapper.find('[data-test="catalog-result-publisher"]').text()).toBe('by github')
+
     const button = wrapper.find(githubAddSelector)
     expect(button.text()).toBe('Add to MCPProxy')
     await button.trigger('click')

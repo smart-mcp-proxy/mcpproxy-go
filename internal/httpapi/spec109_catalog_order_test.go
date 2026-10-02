@@ -22,19 +22,25 @@ import (
 
 const p109CatalogOrderFixture = "internal/registries/testdata/catalog_github_order.json"
 
+// A source is either flat (servers, the community fork) or registry-shaped
+// (protocol + corpus: wrapped {server,_meta} items recorded from the live
+// official registry and served by registries.RecordedRegistryHandlerForTest).
 type p109CatalogOrderSource struct {
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
 	Provenance string            `json:"provenance"`
-	Servers    []json.RawMessage `json:"servers"`
+	Protocol   string            `json:"protocol,omitempty"`
+	Corpus     []json.RawMessage `json:"corpus,omitempty"`
+	Servers    []json.RawMessage `json:"servers,omitempty"`
 }
 
 type p109CatalogOrderFile struct {
-	Comment string                     `json:"_comment"`
-	Query   string                     `json:"query"`
-	Sources []p109CatalogOrderSource   `json:"sources"`
-	IDs     []string                   `json:"ids"`
-	Results []registries.CatalogResult `json:"results"`
+	Comment  string                     `json:"_comment"`
+	Recorded json.RawMessage            `json:"recorded"`
+	Query    string                     `json:"query"`
+	Sources  []p109CatalogOrderSource   `json:"sources"`
+	IDs      []string                   `json:"ids"`
+	Results  []registries.CatalogResult `json:"results"`
 }
 
 // p109InstallCatalogFixture serves each source from httptest and installs the
@@ -43,14 +49,20 @@ func p109InstallCatalogFixture(t *testing.T, f p109CatalogOrderFile) {
 	t.Helper()
 	var entries []registries.RegistryEntry
 	for _, src := range f.Sources {
-		body, err := json.Marshal(src.Servers)
-		require.NoError(t, err)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		}))
+		var h http.Handler
+		if src.Protocol == "modelcontextprotocol/registry" {
+			h = registries.RecordedRegistryHandlerForTest(src.Corpus)
+		} else {
+			body, err := json.Marshal(src.Servers)
+			require.NoError(t, err)
+			h = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			})
+		}
+		srv := httptest.NewServer(h)
 		t.Cleanup(srv.Close)
-		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL, Provenance: src.Provenance})
+		entries = append(entries, registries.RegistryEntry{ID: src.ID, Name: src.Name, ServersURL: srv.URL + "/v0.1/servers", Protocol: src.Protocol, Provenance: src.Provenance})
 	}
 	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
 	t.Cleanup(registries.SetRegistriesForTest(entries))
@@ -71,7 +83,7 @@ func TestCatalogOrderParity_RESTWritesTheGolden(t *testing.T) {
 
 	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: nil, withManagement: true}
 	srv, _ := scopedAgentServer(t, ctrl, []string{"alpha"})
-	rec := scopeGet(t, srv, "/api/v1/catalog/search?q="+f.Query, scopeAdminAPIKey)
+	rec := scopeGet(t, srv, "/api/v1/catalog/search?limit=20&q="+f.Query, scopeAdminAPIKey)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	var body struct {
 		Data struct {
@@ -82,10 +94,25 @@ func TestCatalogOrderParity_RESTWritesTheGolden(t *testing.T) {
 	got := body.Data.Results
 	require.NotEmpty(t, got)
 
-	// SC-008: the official, verified GitHub server is first.
+	// SC-008: GitHub's own server, from the official registry, is first. It
+	// is Official (a built-in source, D37.6) and Verified (its publisher
+	// owns the repository, D37.5), titled by its own server.json title.
 	assert.Equal(t, "official:io.github.github/github-mcp-server", got[0].Source+":"+got[0].ID)
 	assert.True(t, got[0].Official)
 	assert.True(t, got[0].Verified)
+	assert.Equal(t, "GitHub", got[0].Title)
+	assert.Equal(t, "github", got[0].Publisher)
+
+	// Every id once, and no namespace-only match (io.github.06ketan/slideshot)
+	// anywhere in the 20: those are tier 0 and rank last.
+	seen := map[string]bool{}
+	for _, r := range got {
+		key := r.Source + ":" + r.ID
+		assert.False(t, seen[key], "%s repeats", key)
+		seen[key] = true
+		assert.NotContains(t, r.ID, "slideshot")
+		assert.NotEqual(t, "No description available", r.Description)
+	}
 
 	golden := filepath.Join(p109Root(t), p109CatalogOrderFixture)
 	if os.Getenv("UPDATE_GOLDEN") == "1" {
