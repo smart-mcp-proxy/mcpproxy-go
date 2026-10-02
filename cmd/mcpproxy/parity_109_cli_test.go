@@ -60,7 +60,7 @@ func p109HelpRoot() *cobra.Command {
 		GetAttentionCommand(), GetStatusCommand(), GetDoctorCommand(), GetUpstreamCommand(),
 		GetReviewCommand(), GetSecurityCommand(), GetToolsCommand(), GetClientCommand(),
 		GetConnectCommand(), GetTokenCommand(), GetCatalogCommand(), GetRegistryCommand(),
-		GetActivityCommand(),
+		GetActivityCommand(), GetTelemetryCommand(),
 	)
 	clioutput.SetupHelpJSON(root)
 	return root
@@ -188,6 +188,7 @@ func TestParity109CLIGroupsAreRegisteredInMain(t *testing.T) {
 		"upstream": "GetUpstreamCommand", "review": "GetReviewCommand", "tools": "GetToolsCommand",
 		"client": "GetClientCommand", "connect": "GetConnectCommand", "token": "GetTokenCommand",
 		"catalog": "GetCatalogCommand", "registry": "GetRegistryCommand", "activity": "GetActivityCommand",
+		"telemetry": "GetTelemetryCommand",
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "specs", "109-ux-navigation-consistency", "parity-matrix.json"))
 	require.NoError(t, err)

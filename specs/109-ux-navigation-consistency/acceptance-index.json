@@ -1,5 +1,5 @@
 {
-  "_comment": "Spec 109 SC-001 acceptance index (T148c): every one of the 43 acceptance scenarios (US1-1 to US7-6, in spec.md order) and SC-002 to SC-012 maps to automated tests. Refs: go:<repo path>[#<Test>], vitest:<path>, xctest:<path>[#<method>], pw:<path>, sh:<path>, golden:<path>. TestSpec109Traceability resolves every ref (a #name must be a func in the file) and fails on a scenario without a ref. live_only is allowed only with a reason.",
+  "_comment": "Spec 109 SC-001 acceptance index (T148c): every one of the 45 acceptance scenarios (US1-1 to US7-8, in spec.md order) and SC-002 to SC-012 maps to automated tests. Refs: go:<repo path>[#<Test>], vitest:<path>, xctest:<path>[#<method>], pw:<path>, sh:<path>, golden:<path>. TestSpec109Traceability resolves every ref (a #name must be a func in the file) and fails on a scenario without a ref. live_only is allowed only with a reason.",
   "scenarios": {
     "US1-1": {
       "summary": "Home shows the needs-attention list ordered by rank",
@@ -336,6 +336,27 @@
       "summary": "The telemetry notice is not rendered behind the wizard backdrop",
       "tests": [
         "vitest:frontend/tests/unit/telemetry-banner-wizard.spec.ts"
+      ]
+    },
+    "US7-7": {
+      "summary": "An environment telemetry opt-out is stated, not disclosed, on the wizard, Home and macOS welcome, and locks the Settings toggle; status reports the effective state",
+      "tests": [
+        "go:internal/telemetry/effective_state_test.go#TestResolveEffectiveState_Cases",
+        "go:internal/telemetry/env_gate_send_test.go#TestEnvOptOut_SendsNothing",
+        "go:internal/httpapi/status_telemetry_test.go#TestStatusTelemetry_EnvOptOutOverridesConfig",
+        "vitest:frontend/tests/unit/telemetry-state.spec.ts",
+        "vitest:frontend/tests/unit/telemetry-banner-wizard.spec.ts",
+        "vitest:frontend/tests/unit/settings-telemetry-env-lock.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/TelemetryNoticeTests.swift",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testTelemetryLockedByEnv"
+      ]
+    },
+    "US7-8": {
+      "summary": "macOS Settings names the connected core, adopts its running listen address and notes a pending restart",
+      "tests": [
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testLoadShowsTheConnectedCoresListenAddress",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testBlankListenAdoptsTheRunningAddressWithoutDirtying",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testListenNoteNamesTheConnectedCore"
       ]
     }
   },

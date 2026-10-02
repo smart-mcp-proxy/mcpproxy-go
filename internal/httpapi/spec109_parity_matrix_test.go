@@ -163,7 +163,7 @@ func p109CloneMatrix(m p109Matrix) p109Matrix {
 
 func TestSpec109ParityMatrixMatchesSpec(t *testing.T) {
 	spec := p109ParseSpecTable(t)
-	require.Len(t, spec, 32, "the spec parity table has rows 1 to 30 including 8a and 22a")
+	require.Len(t, spec, 34, "the spec parity table has rows 1 to 30 including 8a, 22a, 28a and 29a")
 	m := p109LoadMatrix(t)
 	require.Equal(t, "parity-matrix/v1", m.Schema)
 	require.Equal(t, "109", m.Spec)

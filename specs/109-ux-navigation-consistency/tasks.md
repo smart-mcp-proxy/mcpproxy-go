@@ -384,6 +384,17 @@ Not new requirements: the last open items of the done check, fixed test-first in
 - [x] T170 [P] FR-051 / US1-4: a fresh instance (no server configured) shows a "Get started" card instead of "All clear" and hides the top usage strip; any attention item wins; `mcpproxy attention` is unchanged (`frontend/tests/unit/home-getting-started.spec.ts`)
 - [x] T171 Docs and bookkeeping for T166–T170: `spec.md` (US1-4, FR-051, FR-070, FR-073), `contracts/url-filter-contract.md`, `contracts/health-vocabulary.md`, `parity-matrix.json` row 22, `acceptance-index.json`, `quickstart.md` recipe `fix-ux-residuals`, research D36, `docs/web-ui/dashboard.md`
 
+## Phase 17: PR fix-usertest-telemetry-macos — codex first-run user test F-03, F-10 (2026-10-02)
+
+Not new requirements: two medium findings of the codex first-run user test, fixed test-first on every surface that shows them. Both fall on the Spec 109 side of the ownership rule (onboarding and the telemetry notice, Settings, macOS Settings); nothing here touches Spec 108 surfaces. Decisions: research D37.
+
+- [x] T172 [P] F-03 / FR-044a: Go `telemetry.ResolveEffectiveState` and the shared fixture `internal/telemetry/testdata/effective_state_cases.json` (`internal/telemetry/effective_state_test.go`), `GET /api/v1/status` `telemetry {enabled, source, disabled_by}` withheld from scoped callers (`internal/httpapi/status_telemetry_test.go`), and the send-nothing proof for `MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK` and `CI` over `Start`, the shutdown flush and the opt-out beacon, with a positive control (`internal/telemetry/env_gate_send_test.go`)
+- [x] T173 [P] F-03 / FR-044a: Web helper `frontend/src/utils/telemetryState.ts`, the store's shared in-flight `loadTelemetryState`, and `TelemetryBanner.vue` rendering the three notice modes in both the banner and the wizard's inline variant (`frontend/tests/unit/telemetry-state.spec.ts`, `frontend/tests/unit/telemetry-banner-wizard.spec.ts`)
+- [x] T174 [P] F-03 / FR-044a: Web Settings lock, `SettingField.vue` and `SettingsSection.vue` take a `lock`, `Settings.vue` locks `telemetry.enabled` from the effective state and never counts it as dirty (`frontend/tests/unit/settings-telemetry-env-lock.spec.ts`)
+- [x] T175 [P] F-03 / FR-044a: macOS `TelemetryNotice`, the first-run welcome reading the app's own environment, and the Settings telemetry lock (`native/macos/MCPProxy/MCPProxyTests/TelemetryNoticeTests.swift`)
+- [x] T176 [P] F-10 / FR-044b: macOS Settings names the connected core, adopts a blank `listen` from the running address and notes a pending restart (`native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift`); `docs/development/macos-tray.md` documents the dev-rig trap that caused the finding
+- [x] T177 Docs and bookkeeping for T172–T176: `spec.md` (US7-7, US7-8, FR-044, FR-044a, FR-044b, parity rows 28a and 29a), `parity-matrix.json`, `acceptance-index.json`, `plan.md`, `quickstart.md` recipe `fix-usertest-telemetry-macos`, research D37, `docs/api/rest-api.md`, `docs/features/telemetry.md`, `oas/swagger.yaml`
+
 ---
 
 ## Dependencies & Execution Order
@@ -432,4 +443,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-207 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 201 before fix-ux-residuals, which added T166–T171; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+213 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 207 before fix-usertest-telemetry-macos, which added T172–T177; 201 before fix-ux-residuals, which added T166–T171; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
