@@ -493,6 +493,9 @@ async function applyConfig() {
       })
       if (response.data.applied_immediately) await serversStore.fetchServers()
       await loadConfig()
+      // The document may have changed telemetry.enabled; the banner and the
+      // lock follow the effective state, like after a section save.
+      void onboarding.loadTelemetryState(true)
     } else {
       configErrors.value = [{ field: 'apply', message: response.error || 'Failed to apply configuration' }]
     }

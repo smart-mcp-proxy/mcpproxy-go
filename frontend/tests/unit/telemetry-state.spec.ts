@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { TelemetryState } from '@/types'
-import { telemetryNoticeMode, telemetryOffLine, telemetrySettingLock } from '@/utils/telemetryState'
+import { lockedKeysChanged, telemetryNoticeMode, telemetryOffLine, telemetrySettingLock } from '@/utils/telemetryState'
 
 // Spec 109 FR-044a. The same fixture drives the Go resolver test
 // (internal/telemetry/effective_state_test.go) and the macOS XCTest
@@ -45,5 +45,28 @@ describe('telemetry state helpers match the shared fixture', () => {
     expect(telemetryNoticeMode(undefined)).toBe('notice')
     expect(telemetryNoticeMode(null)).toBe('notice')
     expect(telemetrySettingLock(undefined)).toBeNull()
+  })
+})
+
+describe('lockedKeysChanged', () => {
+  const locks = { 'telemetry.enabled': { reason: 'r' } }
+  const stored = { telemetry: { enabled: true } }
+
+  it('flags a changed locked key', () => {
+    expect(lockedKeysChanged({ telemetry: { enabled: false } }, stored, locks)).toEqual(['telemetry.enabled'])
+  })
+
+  it('matches key names case-insensitively, as the backend decodes them', () => {
+    expect(lockedKeysChanged({ Telemetry: { ENABLED: false } }, stored, locks)).toEqual(['telemetry.enabled'])
+    expect(lockedKeysChanged({ TELEMETRY: { Enabled: true } }, stored, locks)).toEqual([])
+  })
+
+  it('catches a miscased duplicate that overrides an unchanged lowercase key (last one wins, like the decoder)', () => {
+    const doc = JSON.parse('{"telemetry":{"enabled":true},"Telemetry":{"Enabled":false}}')
+    expect(lockedKeysChanged(doc, stored, locks)).toEqual(['telemetry.enabled'])
+  })
+
+  it('leaves an unchanged document alone', () => {
+    expect(lockedKeysChanged({ telemetry: { enabled: true }, listen: 'x' }, stored, locks)).toEqual([])
   })
 })

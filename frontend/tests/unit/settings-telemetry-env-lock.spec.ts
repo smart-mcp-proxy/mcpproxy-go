@@ -155,6 +155,25 @@ describe('Raw JSON apply never saves a locked setting (FR-044a)', () => {
     wrapper.unmount()
   })
 
+  it('refuses a miscased key: the backend decodes Raw JSON case-insensitively', async () => {
+    const wrapper = await mountRaw(envOff)
+    // Keeps the stored lowercase value and appends a miscased override: the
+    // backend's last-wins decode would turn it off.
+    await edit(wrapper, JSON.parse('{"telemetry":{"enabled":true},"Telemetry":{"ENABLED":false}}'))
+    expect(mocks.applyConfig).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('telemetry.enabled')
+    wrapper.unmount()
+  })
+
+  it('refreshes the effective telemetry state after an applied document', async () => {
+    const wrapper = await mountRaw(envOff)
+    const before = mocks.getStatus.mock.calls.length
+    await edit(wrapper, { telemetry: { enabled: true }, listen: '127.0.0.1:9' })
+    expect(mocks.applyConfig).toHaveBeenCalledTimes(1)
+    expect(mocks.getStatus.mock.calls.length).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+
   it('control: with no env lock the key is editable', async () => {
     const wrapper = await mountRaw({ telemetry: { enabled: true, source: 'config' } })
     await edit(wrapper, { telemetry: { enabled: false } })

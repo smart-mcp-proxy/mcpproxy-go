@@ -112,13 +112,23 @@ final class ConfigStore: ObservableObject {
     /// reader (and an accessibility client) takes for a value. Show the address
     /// the core is really bound to instead, in both `working` and `original` so
     /// the field is not dirty and a Save never PATCHes `listen`.
+    ///
+    /// The adopted value is a mirror of the running core, not a saved setting:
+    /// while the config still omits `listen` it follows the running address on
+    /// every status refresh (a restart onto another address must not leave the
+    /// old one in the field), unless the user has typed their own value into it.
     private func adoptRunningListenIfBlank() {
-        guard loaded, let running = runningListenAddr,
-              isBlankValue(configGet(working, "listen")), isBlankValue(configGet(original, "listen"))
-        else { return }
-        configSet(&working, "listen", running)
+        guard loaded, let running = runningListenAddr, isBlankValue(configGet(raw, "listen")) else { return }
+        let unedited = isBlankValue(configGet(working, "listen"))
+            || (configGet(working, "listen") as? String) == adoptedListen
+        if unedited { configSet(&working, "listen", running) }
         configSet(&original, "listen", running)
+        adoptedListen = running
     }
+
+    /// The value `adoptRunningListenIfBlank` last put in the field, so a refresh
+    /// can tell an untouched field from one the user edited.
+    private var adoptedListen: String?
 
     func lockReason(_ key: String) -> String? { locks[key] }
 
@@ -129,7 +139,9 @@ final class ConfigStore: ObservableObject {
         let version = appState.version.trimmingCharacters(in: .whitespaces)
         let core = version.isEmpty ? "Connected core" : "Connected core \(version)"
         var note = "\(core) is listening on \(running)."
-        if let saved = (configGet(original, "listen") as? String)?.trimmingCharacters(in: .whitespaces),
+        // "Saved" is what the config file holds (`raw`), never an adopted mirror
+        // of the running address.
+        if let saved = (configGet(raw, "listen") as? String)?.trimmingCharacters(in: .whitespaces),
            !saved.isEmpty, saved != running {
             note += " The saved address \(saved) takes effect after a restart."
         }
@@ -147,6 +159,7 @@ final class ConfigStore: ObservableObject {
     /// make an untouched field read as an unsaved change.
     func hydrate(from cfg: [String: Any]) {
         raw = cfg
+        adoptedListen = nil
         let normalized = SettingsCatalog.normalizeDefaults(cfg)
         working = normalized
         original = normalized

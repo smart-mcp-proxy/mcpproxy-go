@@ -44,10 +44,18 @@ export function telemetrySettingLock(s?: TelemetryState | null): { reason: strin
  * whose value in `doc` differs from `stored`.
  */
 export function lockedKeysChanged(doc: unknown, stored: unknown, locks: Record<string, unknown>): string[] {
+  // The backend decodes the Raw JSON document case-insensitively and the last
+  // matching key wins (encoding/json), so a miscased or duplicated key must be
+  // read the same way or it would slip past the lock.
   const read = (root: unknown, key: string): unknown =>
-    key.split('.').reduce<unknown>(
-      (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
-      root
-    )
+    key.split('.').reduce<unknown>((node, part) => {
+      if (!node || typeof node !== 'object') return undefined
+      const want = part.toLowerCase()
+      let found: unknown
+      for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+        if (k.toLowerCase() === want) found = v
+      }
+      return found
+    }, root)
   return Object.keys(locks).filter((key) => JSON.stringify(read(doc, key)) !== JSON.stringify(read(stored, key)))
 }

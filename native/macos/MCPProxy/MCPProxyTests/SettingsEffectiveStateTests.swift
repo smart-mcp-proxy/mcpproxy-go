@@ -156,6 +156,46 @@ final class SettingsEffectiveStateTests: XCTestCase {
         XCTAssertEqual(store.runningListenAddr, "127.0.0.1:9090")
     }
 
+    /// FR-044b: with `listen` omitted from the config, the field mirrors the
+    /// running core. After the core restarts on another address the field and
+    /// the note must follow it, and no adopted address is ever called "saved".
+    func testAdoptedListenFollowsTheRunningAddressAfterARestart() async {
+        let store = makeStore(
+            configJSON: #"{"quarantine_enabled":true}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:8080"}"#)
+        await store.load()
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "127.0.0.1:8080")
+
+        SettingsStubURLProtocol.bodies["/api/v1/status"] =
+            envelope(#"{"running":true,"listen_addr":"127.0.0.1:18666"}"#)
+        await store.refreshStatus()
+
+        XCTAssertEqual(store.runningListenAddr, "127.0.0.1:18666")
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "127.0.0.1:18666",
+                       "an unedited adopted field follows the running core")
+        XCTAssertFalse(store.isDirty("listen"))
+        XCTAssertEqual(store.listenNote, "Connected core v0.1.0 is listening on 127.0.0.1:18666.",
+                       "an address nobody saved is never presented as saved")
+    }
+
+    func testEditedListenSurvivesARefreshAndTheNoteDoesNotCallAnAdoptedValueSaved() async {
+        let store = makeStore(
+            configJSON: #"{"quarantine_enabled":true}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:8080"}"#)
+        await store.load()
+        store.stringBinding("listen").wrappedValue = "127.0.0.1:9999"
+        XCTAssertTrue(store.isDirty("listen"))
+
+        SettingsStubURLProtocol.bodies["/api/v1/status"] =
+            envelope(#"{"running":true,"listen_addr":"127.0.0.1:18666"}"#)
+        await store.refreshStatus()
+
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "127.0.0.1:9999",
+                       "the user's own edit is never overwritten")
+        XCTAssertEqual(store.listenNote, "Connected core v0.1.0 is listening on 127.0.0.1:18666.",
+                       "nothing was saved, so no pending-restart claim")
+    }
+
     func testListenNoteOmitsAnEmptyVersion() async {
         let store = makeStore(
             configJSON: #"{"listen":"127.0.0.1:18666"}"#,
