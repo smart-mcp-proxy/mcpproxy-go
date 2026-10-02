@@ -129,8 +129,8 @@ final class ClientBindingModelTests: XCTestCase {
 
     func testEveryNonClientCredentialStateDisablesTheControlsAndOffersACTA() {
         let expected: [(String?, ClientBindingControlsState.CTA, String)] = [
-            ("none", .upgrade, "No credential"), ("admin_key", .upgrade, "Admin key"),
-            ("unknown", .upgrade, "Unknown"), (nil, .upgrade, "Unknown"),
+            ("none", .connect, "No credential"), ("admin_key", .upgrade, "Admin key"),
+            ("unknown", .connect, "Unknown"), (nil, .connect, "Unknown"),
             ("revoked", .reconnect, "Revoked"), ("expired", .reconnect, "Expired"),
         ]
         for (credential, cta, badge) in expected {
@@ -140,8 +140,21 @@ final class ClientBindingModelTests: XCTestCase {
             XCTAssertEqual(state.credentialBadge, badge)
             XCTAssertFalse(state.lockEnabled)
         }
+        XCTAssertEqual(ClientBindingControlsState.CTA.connect.title, "Connect…")
         XCTAssertEqual(ClientBindingControlsState.CTA.upgrade.title, "Upgrade to client credential…")
         XCTAssertEqual(ClientBindingControlsState.CTA.reconnect.title, "Reconnect…")
+    }
+
+    /// Spec 108 D39 (T150): a client that never connected has nothing to
+    /// upgrade; only a known admin-key holder reads "Upgrade".
+    func testNoneAndUnknownShowConnect() {
+        for credential in ["none", "unknown", nil] as [String?] {
+            let state = ClientBindingControlsState(Self.record(credential: credential))
+            XCTAssertEqual(state.cta?.title, "Connect…", "\(String(describing: credential))")
+        }
+        XCTAssertEqual(ClientBindingControlsState(Self.record(credential: "admin_key")).cta?.title,
+                       "Upgrade to client credential…")
+        XCTAssertEqual(ClientBindingControlsState(Self.record(credential: "revoked")).cta?.title, "Reconnect…")
     }
 
     func testTheAccessibilityLabelCarriesTheState() {

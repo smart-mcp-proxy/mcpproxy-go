@@ -89,7 +89,6 @@ enum TrayClientsMenu {
 
     /// The top-level menu title.
     static let title = "Clients"
-    static let upgradeTitle = "Upgrade to client credential…"
     static let allServersTitle = "All servers"
 
     /// Clients that hold an active client credential OR are connected, sorted by
@@ -129,7 +128,10 @@ enum TrayClientsMenu {
         let title = "\(client.displayName) — \(profileLabel(for: client, profiles: profiles))"
             + (client.isLocked ? " 🔒" : "")
         guard client.hasClientCredential else {
-            return TrayClientMenuRow(clientId: client.id, title: title, items: [.upgrade(title: upgradeTitle)])
+            // The same words as the row's button on the Clients page: only an
+            // admin-key holder is an "upgrade".
+            let cta = ClientBindingControlsState(client).cta ?? .connect
+            return TrayClientMenuRow(clientId: client.id, title: title, items: [.upgrade(title: cta.title)])
         }
         let current = client.boundProfile
         let missing = client.profileMissing == true

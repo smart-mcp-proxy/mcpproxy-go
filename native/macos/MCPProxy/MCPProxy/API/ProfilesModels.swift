@@ -65,6 +65,21 @@ enum CredentialState: TolerantStringEnum {
     /// Only an active client credential can be rebound (FR-026).
     var canBind: Bool { self == .client }
 
+    /// The words of the fix button for a row without a usable client credential
+    /// (`credential_cta` table of labels.json, identical on the Web UI). Empty
+    /// for a client credential, which needs no button. Only a known admin-key
+    /// holder is an "upgrade"; a revoked or expired credential is a
+    /// "reconnect"; a client that never connected (none, or the stat-only
+    /// unknown) is simply "Connect".
+    var ctaWord: String {
+        switch self {
+        case .client: return ""
+        case .adminKey: return "Upgrade to client credential"
+        case .revoked, .expired: return "Reconnect"
+        case .none, .unknown: return "Connect"
+        }
+    }
+
     /// The badge text of a Clients row.
     var badgeLabel: String {
         switch self {

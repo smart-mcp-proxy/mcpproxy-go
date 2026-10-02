@@ -498,7 +498,7 @@ final class ConnectClientModel: ObservableObject {
     }
 
     /// Select a client from an entry point that carries the profile the client
-    /// was last bound to ("Reconnect…", "Upgrade to client credential…"), so the
+    /// was last bound to ("Connect…", "Reconnect…", "Upgrade to client credential…"), so the
     /// picker opens on it instead of silently widening to All servers (K9).
     func preselect(_ clientId: String, profile: String?) async {
         if let profile, !profile.isEmpty { initialProfile = profile }

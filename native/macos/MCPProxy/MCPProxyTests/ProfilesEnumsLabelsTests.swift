@@ -115,6 +115,27 @@ final class ProfilesEnumsLabelsTests: XCTestCase {
         }
     }
 
+    /// Spec 108 D39 (T150): the fix-button words of a row without a usable client
+    /// credential are the `credential_cta` table, identical on the Web UI. The
+    /// button and menu titles add a trailing "…" (a dialog follows).
+    func testCredentialCTAWordsEqualLabels() throws {
+        let words = try labelFamily("credential_cta")
+        let states = try XCTUnwrap(try enums()["credential_state"])
+        XCTAssertEqual(Set(words.keys), Set(states))
+        for wire in states {
+            let state = CredentialState(wire: wire)
+            XCTAssertEqual(state.ctaWord, words[wire], "credential_cta.\(wire)")
+            let cta = ClientBindingControlsState(ClientBindingModelTests.record(credential: wire)).cta
+            if wire == "client" {
+                XCTAssertNil(cta)
+            } else {
+                let title = try XCTUnwrap(cta).title
+                XCTAssertTrue(title.hasSuffix("…"), title)
+                XCTAssertEqual(String(title.dropLast()), words[wire], "title of \(wire) minus the ellipsis")
+            }
+        }
+    }
+
     func testBindingModeWordsAreTheSharedTable() throws {
         let words = try labelFamily("binding_mode")
         for mode in try XCTUnwrap(try enums()["binding_mode"]) {

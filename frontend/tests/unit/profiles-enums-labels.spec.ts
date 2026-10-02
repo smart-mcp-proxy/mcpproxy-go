@@ -5,6 +5,7 @@ import {
   MAX_TIER_OPTIONS,
   STEP_LABELS,
   UNANNOTATED_OPTIONS,
+  credentialCta,
   credentialLabel,
   modeLabel,
   profileSourceLabel,
@@ -104,6 +105,19 @@ describe('the Web UI words equal labels.json (L6, US3-3)', () => {
     for (const state of enums.credential_state) {
       expect(credentialLabel(state), state).toBe(labels.credential_state[state])
     }
+  })
+
+  it('credential CTA: credentialCta returns the table for every state, empty only for a client credential', () => {
+    expect(Object.keys(labels.credential_cta).sort()).toEqual([...enums.credential_state].sort())
+    for (const state of enums.credential_state) {
+      if (state === 'client') {
+        expect(labels.credential_cta[state]).toBe('')
+        continue
+      }
+      expect(credentialCta(state), state).toBe(labels.credential_cta[state])
+    }
+    // a state the Web UI has never heard of is not an upgrade either
+    expect(credentialCta(undefined)).toBe(labels.credential_cta.unknown)
   })
 
   it('binding modes: modeLabel returns the table for every value', () => {

@@ -56,13 +56,19 @@ func TestProfilesV3LabelsCoverEnums(t *testing.T) {
 	var labels map[string]json.RawMessage
 	p108ReadJSON(t, "internal/profile/testdata/contract/labels.json", &labels)
 
-	for _, family := range []string{"access_reason", "source", "explain_step", "credential_state", "binding_mode", "unannotated", "max_tier"} {
+	// credential_cta is keyed by the credential_state enum (the button a row
+	// shows to fix its credential), so it is compared with that family.
+	for _, family := range []string{"access_reason", "source", "explain_step", "credential_state", "credential_cta", "binding_mode", "unannotated", "max_tier"} {
 		raw, ok := labels[family]
 		require.True(t, ok, "labels.json has no %q family", family)
 		var words map[string]string
 		require.NoError(t, json.Unmarshal(raw, &words), family)
-		values, ok := enums[family]
-		require.True(t, ok, "enums.json has no %q family", family)
+		enumFamily := family
+		if family == "credential_cta" {
+			enumFamily = "credential_state"
+		}
+		values, ok := enums[enumFamily]
+		require.True(t, ok, "enums.json has no %q family", enumFamily)
 
 		want := append([]string(nil), values...)
 		sort.Strings(want)
@@ -71,6 +77,10 @@ func TestProfilesV3LabelsCoverEnums(t *testing.T) {
 		for key, word := range words {
 			if family == "source" && key == "none" {
 				require.Empty(t, word, "source none carries no suffix")
+				continue
+			}
+			if family == "credential_cta" && key == "client" {
+				require.Empty(t, word, "a client credential needs no fix button")
 				continue
 			}
 			require.NotEmpty(t, word, "%s.%s has an empty label", family, key)
