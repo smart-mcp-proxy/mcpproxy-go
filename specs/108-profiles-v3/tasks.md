@@ -338,6 +338,13 @@ Four findings from a live demo of `main` at `b3191a059`; Spec 109's T160–T165 
 - [x] T151 [US2] #9 radio and checkbox labels sit next to their control: one unlayered rule in `frontend/src/assets/main.css`, pinned by `frontend/tests/unit/form-control-label-shim.spec.ts` and the Playwright sweep `e2e/web-ui-sweep/demo-ux-fixes.spec.ts`
 - [x] T152 [US2] Docs and bookkeeping for T148–T151: `docs/features/profiles.md`, `contracts/refusals.md`, `contracts/mcp-tools.md`, FR-011, FR-042, FR-048, `parity-matrix.json`, research D39
 
+## Phase 17: PR fix-usertest-web — profile editor finding F-05 (2026-10-02)
+
+One Web finding from a codex first-run user test of `main` at `d7efa80d8`; Spec 109's T172–T177 own the others. Decisions: research D40.
+
+- [x] T153 [US4] F-05 / FR-041: Try it reads the real `{score, tool: {name, server_name, description}}` hit (`tryHitRow`, no more `[object Object]`) and says "Uses your unsaved edits" / "Uses the saved profile"; the tool table's counts read "Saved profile: N visible · M hidden" with a pointer to Try it while the draft differs (`frontend/tests/unit/profile-try-unsaved.spec.ts`, `profile-policy-editor.spec.ts`; `ProfileTryPanel.vue`, `ProfileToolTable.vue`, `ProfileEditor.vue`, `utils/profiles.ts`; Playwright `e2e/web-ui-sweep/usertest-web-fixes.spec.ts`)
+- [x] T154 [US4] Docs and bookkeeping for T153: FR-041, `contracts/rest-api.md` try row, `parity-matrix.json` row 6, `docs/features/profiles.md`, research D40, quickstart row
+
 ---
 
 ## Dependencies & Execution Order
@@ -373,4 +380,4 @@ MVP = 108-a + 108-b (US1 discovery via config + `/mcp/p/<slug>` or pinned tokens
 
 ## Task Count
 
-186 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 · demo-ux-fixes 5 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147; demo-ux-fixes added T148–T152.
+188 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 · demo-ux-fixes 5 · fix-usertest-web 2 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147; demo-ux-fixes added T148–T152; fix-usertest-web added T153–T154.
