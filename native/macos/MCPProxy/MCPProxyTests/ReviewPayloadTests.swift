@@ -48,6 +48,7 @@ final class ReviewPayloadTests: XCTestCase {
             "NotificationCenter.default.publisher(for: .scanSettled)",
 			"prettyString", "diff.description", "input schema:\\n",
 			"server.command", "server.trustMode", "server.sourceRegistryID",
+			"startSecurityScan(serverName)", "quarantineServer(serverName)",
         ] {
             XCTAssertTrue(source.contains(expected), "Review sheet is missing \(expected)")
         }

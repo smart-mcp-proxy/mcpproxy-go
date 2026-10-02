@@ -284,7 +284,7 @@ actor APIClient {
 
     /// Quarantine a server via `POST /api/v1/servers/{id}/quarantine`.
     func quarantineServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/quarantine")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/quarantine")
     }
 
     /// Approve a quarantined server through the scan gate. This is the only

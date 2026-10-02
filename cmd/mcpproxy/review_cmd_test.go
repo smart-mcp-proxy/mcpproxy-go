@@ -229,6 +229,39 @@ func TestReviewShowJSONNeverRevealsComposerRedaction(t *testing.T) {
 	require.Contains(t, output, "••••23")
 }
 
+func TestFormatReviewShowPrintsScanCoverage(t *testing.T) {
+	show := func(scan string) string {
+		payload := `{"data":{"server":{"name":"notes"` + scan + `},"tools":[]}}`
+		return captureReviewOutput(t, func() error { return formatReviewResponse("table", []byte(payload), false) })
+	}
+
+	stale := show(`,"scan":{"verdict":"clean","risk_score":0,"coverage":"stale","tools_scanned":5,"unscanned_tools":["notes"]}`)
+	require.Contains(t, stale, "Scan: out of date (1 tool changed or added after the last scan: notes); run: mcpproxy security rescan notes")
+	require.NotContains(t, stale, "risk 0/100")
+
+	staleMany := show(`,"scan":{"verdict":"warnings","coverage":"stale","tools_scanned":5,"unscanned_tools":["a","b"]}`)
+	require.Contains(t, staleMany, "Scan: out of date (2 tools changed or added after the last scan: a, b); run: mcpproxy security rescan notes")
+
+	current := show(`,"scan":{"verdict":"clean","risk_score":0,"coverage":"current","tools_scanned":5}`)
+	require.Contains(t, current, "Scan: clean · risk 0/100 · covers all 5 tools")
+	require.Less(t, strings.Index(current, "Server: notes"), strings.Index(current, "Scan: clean"))
+
+	notCaptured := show(`,"scan":{"verdict":"not_scanned","coverage":"not_captured"}`)
+	require.Contains(t, notCaptured, "Scan: not checked against tool definitions: they have not been captured yet")
+	require.Contains(t, notCaptured, "Fetch tool definitions")
+	require.NotContains(t, notCaptured, "clean")
+
+	require.Contains(t, show(`,"scan":{"verdict":"clean","coverage":"tools_not_scanned"}`),
+		"Scan: the last scan did not analyse tool definitions (0 exported); run: mcpproxy security rescan notes")
+	require.Contains(t, show(`,"scan":{"verdict":"not_scanned","coverage":"none"}`),
+		"Scan: not scanned yet; run: mcpproxy security rescan notes")
+	require.Contains(t, show(`,"scan":{"verdict":"not_scanned","coverage":"scanning"}`), "Scan: in progress")
+
+	// No scan key (or a daemon that predates coverage): no Scan line at all.
+	require.NotContains(t, show(``), "Scan:")
+	require.NotContains(t, show(`,"scan":{"verdict":"clean"}`), "Scan:")
+}
+
 func captureReviewOutput(t *testing.T, fn func() error) string {
 	t.Helper()
 	previous := os.Stdout

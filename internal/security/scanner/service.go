@@ -1112,7 +1112,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+			scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 
 			// If export failed, retry once. Reconnect ONLY when the server is
 			// actually disconnected (that path handles quarantined servers
@@ -1125,7 +1125,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				if s.serverInfo.IsConnected(serverName) {
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
-					scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+					scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))
@@ -1134,7 +1134,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 							zap.String("server", serverName), zap.Error(err))
 					} else {
 						s.waitForConnection(serverName, 30*time.Second)
-						scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+						scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 					}
 				}
 			}
@@ -1256,7 +1256,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		// Export tool definitions for Cisco scanner (only when there is a real
 		// source dir to write tools.json into — image-only servers have none).
 		if s.serverInfo != nil && req.SourceDir != "" {
-			s.exportToolDefinitions(serverName, req.SourceDir)
+			_, _ = s.exportToolDefinitions(serverName, req.SourceDir)
 		}
 	} else {
 		s.logger.Warn("No server info available for Pass 2, skipping",
@@ -2349,18 +2349,28 @@ func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
 		zap.Duration("timeout", timeout))
 }
 
+// exportToolDefinitionsStamped runs exportToolDefinitions and also returns the
+// instant just before the definitions were read. Taking the stamp first means a
+// definition change racing the read is judged not covered rather than covered.
+func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) (int, []string, time.Time) {
+	at := time.Now().UTC()
+	count, names := s.exportToolDefinitions(serverName, sourceDir)
+	return count, names, at
+}
+
 // exportToolDefinitions writes a tools.json file to the source directory
 // so the Cisco MCP Scanner can analyze tool descriptions for poisoning attacks.
-// Returns the number of tools exported.
-func (s *Service) exportToolDefinitions(serverName, sourceDir string) int {
+// Returns the number of tools exported and their sorted, de-duplicated names,
+// so a scan records which definitions it actually saw.
+func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []string) {
 	tools, err := s.serverInfo.GetServerTools(serverName)
 	if err != nil {
 		s.logger.Warn("Could not export tool definitions for scanning",
 			zap.String("server", serverName), zap.Error(err))
-		return 0
+		return 0, nil
 	}
 	if len(tools) == 0 {
-		return 0
+		return 0, nil
 	}
 
 	// Format as MCP tools/list output
@@ -2369,20 +2379,40 @@ func (s *Service) exportToolDefinitions(serverName, sourceDir string) int {
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return 0
+		return 0, nil
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
 		s.logger.Debug("Failed to write tools.json", zap.Error(err))
-		return 0
+		return 0, nil
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
 		zap.Int("tools", len(tools)),
 		zap.String("path", toolsPath),
 	)
-	return len(tools)
+	return len(tools), toolDefinitionNames(tools)
+}
+
+// toolDefinitionNames returns the sorted, de-duplicated non-empty "name"
+// values of exported tool definitions.
+func toolDefinitionNames(tools []map[string]interface{}) []string {
+	seen := make(map[string]struct{}, len(tools))
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer

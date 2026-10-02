@@ -224,6 +224,9 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	server, _ := value["server"].(map[string]interface{})
 	fmt.Printf("Server: %v\n", server["name"])
+	if line := reviewScanLine(server); line != "" {
+		fmt.Println(line)
+	}
 	rows := make([][]string, 0)
 	if tools, ok := value["tools"].([]interface{}); ok {
 		for _, item := range tools {
@@ -248,6 +251,44 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	fmt.Print(out)
 	return nil
+}
+
+// reviewScanLine renders the scan coverage of `review show` in the same words
+// as the Web and macOS review screens. It returns "" when the payload carries
+// no scan or predates coverage.
+func reviewScanLine(server map[string]interface{}) string {
+	scan, _ := server["scan"].(map[string]interface{})
+	coverage, _ := scan["coverage"].(string)
+	if coverage == "" {
+		return ""
+	}
+	rescan := "run: mcpproxy security rescan " + fmt.Sprint(server["name"])
+	switch coverage {
+	case "current":
+		risk, _ := scan["risk_score"].(float64)
+		scanned, _ := scan["tools_scanned"].(float64)
+		return fmt.Sprintf("Scan: %v · risk %d/100 · covers all %d tools", scan["verdict"], int(risk), int(scanned))
+	case "stale":
+		var tools []string
+		if list, ok := scan["unscanned_tools"].([]interface{}); ok {
+			for _, item := range list {
+				tools = append(tools, fmt.Sprint(item))
+			}
+		}
+		noun := "tools"
+		if len(tools) == 1 {
+			noun = "tool"
+		}
+		return fmt.Sprintf("Scan: out of date (%d %s changed or added after the last scan: %s); %s", len(tools), noun, strings.Join(tools, ", "), rescan)
+	case "not_captured":
+		return "Scan: not checked against tool definitions: they have not been captured yet; fetch them with Fetch tool definitions on the Web or macOS review screen"
+	case "tools_not_scanned":
+		return "Scan: the last scan did not analyse tool definitions (0 exported); " + rescan
+	case "scanning":
+		return "Scan: in progress"
+	default:
+		return "Scan: not scanned yet; " + rescan
+	}
 }
 
 func reviewSchemaText(label string, schema interface{}) string {
