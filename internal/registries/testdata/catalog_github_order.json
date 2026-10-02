@@ -1,0 +1,135 @@
+{
+  "_comment": "Spec 109-m SC-008 (M12): catalog search \"github\" ranks the official, verified GitHub server first, with identical order on REST, MCP, CLI, Web and macOS. sources + query are the INPUT (served by httptest registry fixtures in each Go test); ids + results are the golden OUTPUT written by internal/httpapi/spec109_catalog_order_test.go with UPDATE_GOLDEN=1 (REST GET /catalog/search data.results). ids are \"<source>:<entry id>\".",
+  "query": "github",
+  "sources": [
+    {
+      "id": "official",
+      "name": "Official",
+      "provenance": "official",
+      "servers": [
+        {
+          "id": "io.github.example/github-notes",
+          "name": "GitHub Notes",
+          "description": "Notes for GitHub issues",
+          "installCmd": "npx github-notes-mcp"
+        },
+        {
+          "id": "io.github.github/github-mcp-server",
+          "name": "GitHub",
+          "description": "GitHub's official MCP server",
+          "url": "https://api.githubcopilot.com/mcp/"
+        }
+      ]
+    },
+    {
+      "id": "community",
+      "name": "Community",
+      "provenance": "custom",
+      "servers": [
+        {
+          "id": "acme/github-fork",
+          "name": "GitHub (community fork)",
+          "description": "A fork of the GitHub server",
+          "url": "https://fork.example.com/mcp"
+        },
+        {
+          "id": "acme/weather",
+          "name": "Weather",
+          "description": "Forecasts; mentions github once",
+          "url": "https://weather.example.com/mcp"
+        },
+        {
+          "id": "acme/github-bridge",
+          "name": "Issue Bridge",
+          "description": "Syncs github issues",
+          "installCmd": "npx issue-bridge"
+        }
+      ]
+    }
+  ],
+  "ids": [
+    "official:io.github.github/github-mcp-server",
+    "official:io.github.example/github-notes",
+    "community:acme/github-fork",
+    "community:acme/github-bridge",
+    "community:acme/weather"
+  ],
+  "results": [
+    {
+      "source": "official",
+      "id": "io.github.github/github-mcp-server",
+      "title": "GitHub",
+      "publisher": "github",
+      "verified": true,
+      "official": true,
+      "description": "GitHub's official MCP server",
+      "transport": "http",
+      "install": {
+        "url": "https://api.githubcopilot.com/mcp/"
+      },
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.example/github-notes",
+      "title": "GitHub Notes",
+      "publisher": "example",
+      "verified": true,
+      "official": true,
+      "description": "Notes for GitHub issues",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "github-notes-mcp"
+        ]
+      },
+      "added": false
+    },
+    {
+      "source": "community",
+      "id": "acme/github-fork",
+      "title": "GitHub (community fork)",
+      "publisher": "Community",
+      "verified": false,
+      "official": false,
+      "description": "A fork of the GitHub server",
+      "transport": "http",
+      "install": {
+        "url": "https://fork.example.com/mcp"
+      },
+      "added": false
+    },
+    {
+      "source": "community",
+      "id": "acme/github-bridge",
+      "title": "Issue Bridge",
+      "publisher": "Community",
+      "verified": false,
+      "official": false,
+      "description": "Syncs github issues",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "issue-bridge"
+        ]
+      },
+      "added": false
+    },
+    {
+      "source": "community",
+      "id": "acme/weather",
+      "title": "Weather",
+      "publisher": "Community",
+      "verified": false,
+      "official": false,
+      "description": "Forecasts; mentions github once",
+      "transport": "http",
+      "install": {
+        "url": "https://weather.example.com/mcp"
+      },
+      "added": false
+    }
+  ]
+}

@@ -25,6 +25,18 @@ import (
 
 const p109TerminologyGolden = "internal/contracts/testdata/terminology.json"
 
+// p109MarshalGolden renders a golden file: indented, no HTML escaping, one
+// trailing newline.
+func p109MarshalGolden(t testing.TB, v any) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	require.NoError(t, enc.Encode(v))
+	return buf.Bytes()
+}
+
 // p109Family is one enum family of terminology.json. Field order is the order
 // the file is written in.
 type p109Family struct {
@@ -126,10 +138,7 @@ func TestSpec109TerminologyGolden(t *testing.T) {
 			f.family.Values = goValues[f.name]
 		}
 		g.AttentionKind.Rank = p109AttentionRanks()
-		out, err := json.MarshalIndent(&g, "", "  ")
-		require.NoError(t, err)
-		out = bytes.ReplaceAll(out, []byte(`&`), []byte("&"))
-		require.NoError(t, os.WriteFile(filepath.Join(p109Root(t), p109TerminologyGolden), append(out, '\n'), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(p109Root(t), p109TerminologyGolden), p109MarshalGolden(t, &g), 0o644))
 		t.Log("terminology.json rewritten from Go; review the diff")
 		return
 	}

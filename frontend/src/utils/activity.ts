@@ -4,6 +4,13 @@
  */
 
 import { formatDateTime } from './datetime'
+import {
+  ActivityViewAll,
+  ActivityViewCalls,
+  ActivityViewSessions,
+  ActivityViewSystem,
+  type ActivityView,
+} from '@/types/contracts'
 
 // Activity type labels.
 //
@@ -36,6 +43,16 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
+
+// Spec 109 FR-090: the Activity view tab labels, keyed by the generated
+// ActivityView enum (contracts.ts) so a new Go view cannot ship without a word.
+// The same words are pinned for macOS (ActivityViewMode) by terminology.json.
+export const ACTIVITY_VIEW_LABELS: Record<ActivityView, string> = {
+  [ActivityViewCalls]: 'Tool calls',
+  [ActivityViewSessions]: 'Sessions',
+  [ActivityViewSystem]: 'System events',
+  [ActivityViewAll]: 'All',
+}
 
 // Spec 109-k (activity-scope-filters): the activity types the `view=calls`
 // Activity filter selects (url-filter-contract.md `view` -> REST `type`
