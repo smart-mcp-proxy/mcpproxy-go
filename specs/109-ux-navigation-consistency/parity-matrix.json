@@ -1,0 +1,1615 @@
+{
+  "schema": "parity-matrix/v1",
+  "spec": "109",
+  "comment": "One entry per row of the spec.md parity table (FR-091), same schema as specs/108-profiles-v3/parity-matrix.json; row ids are strings (\"8a\", \"22a\"). Status: must = a tick in the spec, out = a dash (reason required), na = n/a, spec108 = delivered by Spec 108 (ref names the 108 matrix row whose same-surface cell is a must). Identifiers: route:<vue route name>, component:<repo path>, symbol:<repo path>#<text the file must contain>, nav:<SidebarItem case>, add:<AddMenuItem case>, approute:<AppRoute case>, cmd:<command path>, mcp:<tool>[.<operation>], rest:<METHOD> <swagger path>. fields: MCP argument names that must exist on the tool; for a CLI cell, flags (snake_case, matched as the kebab-case flag) on at least one of its commands. tests: go:<path>[#<Test>], vitest:<path>, xctest:<path>[#<method>], pw:<path>.",
+  "rows": [
+    {
+      "row": "1",
+      "capability": "Needs-attention list + count",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:home",
+            "component:frontend/src/components/AttentionList.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/home-attention.spec.ts",
+            "vitest:frontend/tests/unit/attention-parity.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:home",
+            "symbol:native/macos/MCPProxy/MCPProxy/State/AppState.swift#updateAttention"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/AttentionTests.swift#testHomeSectionModelIsTheSameListTheTrayReads",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/AttentionParityTests.swift#testTrayGroupListsTheSameItemsInTheSameOrder"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:attention",
+            "cmd:status",
+            "cmd:doctor"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/attention_cmd_test.go#TestAttentionCmd_TableOutput",
+            "go:cmd/mcpproxy/attention_parity_test.go#TestAttentionParityCLI"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: every fix is an operator action (browser sign-in, human review, secret entry); agents already see per-server `health` in `upstream_servers list`",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/attention"
+          ],
+          "tests": [
+            "go:internal/httpapi/attention_test.go#TestGetAttention_Shape",
+            "go:internal/httpapi/spec109_attention_parity_test.go#TestAttentionParity_SSECarriesTheSameIDs"
+          ]
+        }
+      }
+    },
+    {
+      "row": "2",
+      "capability": "Health status label + `usable` + ordered actions",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ServerCard.vue",
+            "symbol:frontend/src/utils/health.ts#healthStatusLabel"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/health-status-labels.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Menu/TrayPresentation.swift#ServerStatusLinePresentation"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ServerStatusLineTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/HealthVocabularyTests.swift#testForbiddenWordsForUnusableRows"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/upstream_list_status_test.go#TestUpstreamServerRows_StatusLabelAndActionHint"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:upstream_servers.list"
+          ],
+          "tests": [
+            "go:internal/server/upstream_servers_health_status_test.go#TestUpstreamServersList_HealthCarriesStatusVocabulary",
+            "go:internal/server/spec109_mcp_rest_names_test.go#TestSpec109MCPRESTNames_Health"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/servers",
+            "symbol:internal/contracts/types.go#Usable"
+          ],
+          "tests": [
+            "go:internal/httpapi/get_servers_health_vocabulary_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "3",
+      "capability": "Single primary action per server",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ServerCard.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/server-card-next-action.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Menu/TrayPresentation.swift#TrayPrimaryPresentation"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/TrayPrimaryItemTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ServerRowActionTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/upstream_list_status_test.go#TestUpstreamServerRows_StatusLabelAndActionHint"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP returns the data; there is no UI to render",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/servers"
+          ],
+          "tests": [
+            "go:internal/httpapi/get_servers_health_vocabulary_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "4",
+      "capability": "Review screen with captured definitions",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:review-server",
+            "component:frontend/src/components/ReviewScreen.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/review-screen.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift#ReviewSheet"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPayloadTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:review show"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/review_cmd_test.go"
+          ],
+          "fields": [
+            "full"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:quarantine_security.inspect_quarantined",
+            "mcp:quarantine_security.inspect_tools"
+          ],
+          "tests": [
+            "go:internal/server/quarantine_inspect_review_parity_test.go#TestInspectToolsIncludesCanonicalReviewFields",
+            "go:internal/server/spec109_mcp_rest_names_test.go#TestSpec109MCPRESTNames_ReviewTools"
+          ],
+          "fields": [
+            "name"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/servers/{id}/review"
+          ],
+          "tests": [
+            "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes"
+          ]
+        }
+      }
+    },
+    {
+      "row": "5",
+      "capability": "Review queue",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:review",
+            "component:frontend/src/components/ReviewQueueList.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/review-queue.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:review",
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift#ReviewQueueView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewQueueMenuTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:review list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/review_cmd_test.go#TestFormatReviewResponseTableQueueColumns"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:quarantine_security.list_quarantined",
+            "mcp:quarantine_security.inspect_tools"
+          ],
+          "tests": [
+            "go:internal/server/quarantine_inspect_review_parity_test.go#TestInspectQuarantinedTools_UsesComposerWhenDefinitionsCaptured"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/review"
+          ],
+          "tests": [
+            "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes"
+          ]
+        }
+      }
+    },
+    {
+      "row": "6",
+      "capability": "Approve / reject server (scan-gated)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ReviewScreen.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/review-screen.spec.ts",
+            "vitest:frontend/tests/unit/server-detail-approve-dialog.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift#ReviewSheet"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ApproveServerPathTests.swift#testSecurityApprovalUsesScanGateAndForcePayload"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:review approve",
+            "cmd:review reject"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/review_cmd_test.go"
+          ],
+          "fields": [
+            "except",
+            "force"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: agents must never lift quarantine (constitution IV; tool description)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/servers/{id}/security/approve",
+            "symbol:internal/httpapi/server.go#/security/reject"
+          ],
+          "tests": [
+            "go:internal/httpapi/security_scanner_test.go#TestSecurityHandlerApproveServerWithBlocks"
+          ]
+        }
+      }
+    },
+    {
+      "row": "7",
+      "capability": "Approve / reject (block) tool",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ReviewScreen.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/review-screen.spec.ts",
+            "vitest:frontend/tests/unit/quarantine-block-api.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift#ReviewSheet"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPayloadTests.swift#testReviewPayloadDecodesQueueAndToolSelectionFields"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:review approve",
+            "cmd:review reject"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/review_cmd_test.go"
+          ],
+          "fields": [
+            "tools"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:quarantine_security.approve_tool",
+            "mcp:quarantine_security.block_tool"
+          ],
+          "tests": [
+            "go:internal/server/mcp_quarantine_discovery_test.go"
+          ],
+          "fields": [
+            "tool_name"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/httpapi/server.go#/tools/approve",
+            "rest:POST /api/v1/servers/{id}/tools/block"
+          ],
+          "tests": [
+            "go:internal/httpapi/tool_quarantine_test.go#TestHandleBlockTools_SpecificTools"
+          ]
+        }
+      }
+    },
+    {
+      "row": "8",
+      "capability": "Tool review state labels",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/utils/toolQuarantine.ts#TOOL_APPROVAL_LABELS"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/tools-approval-filter.spec.ts",
+            "vitest:frontend/tests/unit/spec109-terminology.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Models/ToolLabels.swift#approvalStatusLabel"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ToolLabelsTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/Spec109TerminologyTests.swift#testToolApprovalLabelsEqualTheGoldenAndRetiredNamesAreGone"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:tools list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/tools_approval_help_test.go"
+          ],
+          "fields": [
+            "approval"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:quarantine_security.inspect_tools"
+          ],
+          "tests": [
+            "go:internal/server/quarantine_inspect_review_parity_test.go#TestInspectToolsIncludesCanonicalReviewFields"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/contracts/terminology.go#ToolApprovalPending"
+          ],
+          "tests": [
+            "go:internal/httpapi/spec109_parity_test.go#TestSpec109TerminologyGolden"
+          ]
+        }
+      }
+    },
+    {
+      "row": "8a",
+      "capability": "Tool tier from one function",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:tools",
+            "symbol:frontend/src/utils/toolQuarantine.ts#TIER_LABELS"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/tools-tier.spec.ts",
+            "vitest:frontend/tests/unit/spec109-terminology.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Models/ToolLabels.swift#tierLabel"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ToolLabelsTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/Spec109TerminologyTests.swift#testTierLabelsEqualTheGolden"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:tools list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/tools_tier_test.go"
+          ],
+          "fields": [
+            "tier"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:quarantine_security.inspect_tools"
+          ],
+          "tests": [
+            "go:internal/server/spec109_mcp_rest_names_test.go#TestSpec109MCPRESTNames_ReviewTools"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/tools"
+          ],
+          "tests": [
+            "go:internal/httpapi/tools_tier_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "9",
+      "capability": "Clients page with presence rows",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:clients",
+            "component:frontend/src/views/Clients.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/clients-page.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:clients",
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ClientsView.swift#ClientsView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsPresenceTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client list",
+            "cmd:client show"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: presence reveals local install paths; 108 adds a path-free operator op",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/clients"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_presence_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "10",
+      "capability": "Connect with diff preview + reload hint + short path",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ClientConnectList.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/client-connect-list.spec.ts",
+            "vitest:frontend/tests/unit/connect-preview.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ConnectClientView.swift#ConnectClientView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ConnectClientModelTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ConnectResultHintTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:connect"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/connect_hint_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: writing local client configs is an operator action (issue #878 class, same as 108 row 10)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/connect/{client}",
+            "rest:GET /api/v1/connect/{client}/preview"
+          ],
+          "tests": [
+            "go:internal/httpapi/connect_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "11",
+      "capability": "Endpoint & mode",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/views/Clients.vue",
+            "component:frontend/src/components/ModeSwitcher.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/connect-endpoint-truth.spec.ts",
+            "vitest:frontend/tests/unit/mode-switcher.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ClientsView.swift#Endpoint & Mode"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsPresenceTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:status"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/status_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: routing mode is restart-bound operator config",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/routing",
+            "rest:PATCH /api/v1/config"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "12",
+      "capability": "Agent tokens under Clients",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:tokens",
+            "component:frontend/src/views/AgentTokens.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/tokens-redirect.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/TokensView.swift#TokensView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsPresenceTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:token list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/token_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: minting credentials from an agent is refused (Spec 028)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/httpapi/server.go#/tokens"
+          ],
+          "tests": [
+            "go:internal/httpapi/agent_token_gating_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "13",
+      "capability": "Import servers (shared component)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/ImportServers.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/import-servers-shared.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift#import"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/APIClientApplyImportContentTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream import"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/upstream_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: `upstream_servers add` covers agent adds; bulk import reads local client files (operator action)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/servers/import"
+          ],
+          "tests": [
+            "go:internal/httpapi/import_preview_fields_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "14",
+      "capability": "Catalog search across sources, ranked",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/CatalogSearch.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/add-server-catalog.spec.ts",
+            "vitest:frontend/tests/unit/catalog-order-parity.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/CatalogView.swift#CatalogView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:catalog search"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:search_servers"
+          ],
+          "tests": [
+            "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden"
+          ],
+          "fields": [
+            "search"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/catalog/search"
+          ],
+          "tests": [
+            "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden"
+          ]
+        }
+      }
+    },
+    {
+      "row": "15",
+      "capability": "Add to MCPProxy (from catalog)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/CatalogSearch.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/add-server-catalog.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/CatalogView.swift#Add to MCPProxy"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogViewOpenFeedbackTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:catalog add"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/catalog_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:upstream_servers.add_from_registry"
+          ],
+          "tests": [
+            "go:internal/server/mcp_add_from_registry_test.go"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/registries/{id}/servers/{serverId}/add"
+          ],
+          "tests": [
+            "go:internal/httpapi/registry_add_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "16",
+      "capability": "Paste snippet / URL / command",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/PasteServer.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/add-server-paste.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/PasteServerView.swift#PasteServerView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/PasteServerFieldsTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream add",
+            "cmd:upstream add-json",
+            "cmd:upstream import"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/upstream_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: agents pass structured args to `upstream_servers add`; parsing free text adds nothing",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/servers/import/json"
+          ],
+          "tests": [
+            "go:internal/httpapi/import_preview_fields_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "17",
+      "capability": "Secret toggle for env/header values",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/SecretToggle.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/secret-toggle.spec.ts",
+            "vitest:frontend/tests/unit/use-secret-fields.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/SecretFieldToggleView.swift#SecretFieldToggleView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift#testRefNameMatchesSharedFixture"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream add"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/upstream_cmd_test.go"
+          ],
+          "fields": [
+            "secret_env",
+            "secret_header"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: agents must not handle user secrets; `add` stays quarantined, and the user converts values with `config-to-secret`",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/secrets"
+          ],
+          "tests": [
+            "go:internal/secret/refname_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "18",
+      "capability": "Catalog sources management",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/CatalogSourcesSettings.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/settings-catalog-sources.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/RegistriesView.swift#RegistriesView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/RegistryModelsTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:registry list",
+            "cmd:registry add-source"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/catalog_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:list_registries"
+          ],
+          "tests": [
+            "go:internal/server/search_servers_all_sources_test.go"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/registries"
+          ],
+          "tests": [
+            "go:internal/httpapi/catalog_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "19",
+      "capability": "Activity views (calls/sessions/system/all)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:activity",
+            "component:frontend/src/views/Activity.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/activity-views.spec.ts",
+            "vitest:frontend/tests/unit/spec109-terminology.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/ScopeFilter.swift#ActivityViewMode"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/Spec109TerminologyTests.swift#testActivityViewsEqualTheGolden"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:activity list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/activity_cmd_test.go"
+          ],
+          "fields": [
+            "view"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "CLI default differs (research D11). CLI has no `sessions` view: there is no CLI sessions listing (Spec 108 parity row 17), and per-session history is `activity list --session <id>` (contracts/cli.md). MCP: agents do not query history (108 row 15)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/activity"
+          ],
+          "tests": [
+            "go:internal/httpapi/activity_scope_params_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "20",
+      "capability": "System-event folding",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/utils/activity.ts#fold"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/activity-system-folding.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/ActivityFolding.swift#ActivityFolding"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ActivityFoldingTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "out",
+          "reason": "CLI and export stay unfolded for scripts",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "CLI and export stay unfolded for scripts",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "CLI and export stay unfolded for scripts",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "21",
+      "capability": "Time range + tool filters",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:activity",
+            "component:frontend/src/views/Activity.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/activity-scope-params.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/ScopeFilter.swift#ScopeFilter"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:activity list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/activity_cmd_test.go"
+          ],
+          "fields": [
+            "from",
+            "to",
+            "tool"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "Agents do not query activity history (Spec 108 parity row 15); the filters are an operator view.",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/activity"
+          ],
+          "tests": [
+            "go:internal/httpapi/activity_scope_params_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "22",
+      "capability": "Token-savings estimate",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/UsageSummaryStrip.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/usage-tokens-saved-estimate.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/HomeView.swift#HomeView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/HomeRoutingTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:status"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/status_token_savings_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP: not agent-facing",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/contracts/types.go#Estimated"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/status_token_savings_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "22a",
+      "capability": "Usage page",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:usage",
+            "component:frontend/src/views/Usage.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/usage-scope.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "out",
+          "reason": "macOS: the native Home already shows token savings, distribution and calls; a separate native Usage view is a follow-up (navigation-map.md)",
+          "ids": [],
+          "tests": []
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:activity summary"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/activity_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "macOS: the native Home already shows token savings, distribution and calls; a separate native Usage view is a follow-up (navigation-map.md)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/activity/usage"
+          ],
+          "tests": [
+            "go:internal/httpapi/activity_scope_params_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "23",
+      "capability": "URL filter contract + deep links",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/composables/useScopeQuery.ts#useScopeQuery"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/scope-query.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/ScopeFilter.swift#ScopeFilter"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "out",
+          "reason": "CLI/MCP have no navigation",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "CLI/MCP have no navigation",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "CLI/MCP have no navigation",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "24",
+      "capability": "Sidebar IA (Home/Connect/Protect/Monitor)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/SidebarNav.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/sidebar-structure.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:home",
+            "nav:clients",
+            "nav:review",
+            "nav:activity"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/NavigationStructureTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "CLI groups are nouns (`client`, `review`, `catalog`, `attention`) matching the same areas",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "25",
+      "capability": "⌘K palette",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/CommandPalette.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/command-palette.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "out",
+          "reason": "macOS uses per-view search fields and the standard Find (⌘F); a web-style palette would not match platform conventions",
+          "ids": [],
+          "tests": []
+        },
+        "cli": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "macOS uses per-view search fields and the standard Find (⌘F); a web-style palette would not match platform conventions",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "26",
+      "capability": "\"+ Add\" menu",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/AddMenu.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/add-menu.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "add:server",
+            "add:client"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/NavigationStructureTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "The + Add menu is navigation; each target has its own route (servers, clients, tokens, profiles).",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "27",
+      "capability": "Tab/URL sync",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/views/ServerDetail.vue#router.replace"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/server-detail-tab-url.spec.ts",
+            "vitest:frontend/tests/unit/add-server-tab-url.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "na",
+          "reason": "n/a (native state restoration)",
+          "ids": [],
+          "tests": []
+        },
+        "cli": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "Tab-to-URL sync is a Web router behaviour with no API.",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": "28",
+      "capability": "Onboarding usable-completion + Verify hints",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/components/OnboardingWizard.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/onboarding-wizard-usable-completion.spec.ts",
+            "vitest:frontend/tests/unit/onboarding-wizard-verify-hints.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/FirstRunDialog.swift#FirstRunDialog"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/FirstRunDialogSizingTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:connect"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/connect_hint_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "The first-run wizard is an operator flow; agents add servers through upstream_servers and never complete onboarding.",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/onboarding/state"
+          ],
+          "tests": [
+            "go:internal/httpapi/onboarding_test.go"
+          ]
+        }
+      }
+    },
+    {
+      "row": "29",
+      "capability": "Settings naming, edition-gated tabs",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:settings",
+            "component:frontend/src/views/Settings.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/settings-naming.spec.ts",
+            "vitest:frontend/tests/unit/settings-server-edition-wording.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/SettingsView.swift#SettingsView"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsWindowRetirementTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/status"
+          ],
+          "tests": [
+            "go:internal/httpapi/sse_status_edition_test.go#TestSSE_StatusFramesCarryEdition"
+          ]
+        }
+      }
+    },
+    {
+      "row": "30",
+      "capability": "Profile/client/token filters, Viewing chip, profile links",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/composables/useScopeQuery.ts#useScopeQuery",
+            "route:profiles"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/scope-query.spec.ts",
+            "vitest:frontend/tests/unit/profiles-unhide.spec.ts",
+            "vitest:frontend/tests/unit/viewing-filter.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/ScopeFilter.swift#ScopeFilter"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "spec108",
+          "ref": "108#15",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "spec108",
+          "ref": "108#7",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "spec108",
+          "ref": "108#15",
+          "ids": [],
+          "tests": []
+        }
+      }
+    }
+  ]
+}
