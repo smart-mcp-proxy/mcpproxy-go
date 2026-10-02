@@ -381,8 +381,11 @@ export interface UseScopeQueryResult {
   /** Rule 8: null when the active parameters are contradictory (today, an
    * explicit `server` that disagrees with `tool`'s server prefix) — the
    * caller must issue no request and render the conflict empty state instead
-   * (chips carry `conflicting: true` for the pair). */
-  toRest: () => Record<string, string> | null
+   * (chips carry `conflicting: true` for the pair). `ignoreConflict` returns
+   * the map the non-conflicting parameters produce anyway, for a caller that
+   * reads only parameters independent of the conflicting pair (a page whose own
+   * state already resolved it while the URL write-back is still in flight). */
+  toRest: (opts?: { ignoreConflict?: boolean }) => Record<string, string> | null
   linkTo: (page: PageId, patch?: Record<string, string>) => RouteLocationRaw
   chips: ComputedRef<ScopeChip[]>
 }
@@ -436,7 +439,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     set(patch)
   }
 
-  function toRest(): Record<string, string> | null {
+  function toRest(opts?: { ignoreConflict?: boolean }): Record<string, string> | null {
     const out: Record<string, string> = {}
     const snapshot: Record<string, string | undefined> = {}
     for (const def of defsForPage(page)) snapshot[def.name] = state[def.name]
@@ -470,7 +473,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     // Rule 8 ("Contradictory parameters"): no REST query could express both
     // active values, so no request is issued at all — never a partial one
     // built from whichever fields didn't conflict.
-    if (conflicted) return null
+    if (conflicted && !opts?.ignoreConflict) return null
 
     // Usage `window` (url-filter-contract.md `from`/`to` row): computed from
     // BOTH values together, including when neither is present (window=all) —
