@@ -17,6 +17,6 @@
   "first_failure": "tier_cap",
   "fixes": [
     {"step": "tier_cap", "action": "allow_in_profile", "target": "work-readonly", "label": "Allow github:create_issue in Work Read-only"},
-    {"step": "tier_cap", "action": "move_client", "target": "cursor", "label": "Move Cursor to Work Full"}
+    {"step": "tier_cap", "action": "move_client", "target": "cursor", "profile": "work-full", "label": "Move Cursor to Work Full"}
   ]
 }

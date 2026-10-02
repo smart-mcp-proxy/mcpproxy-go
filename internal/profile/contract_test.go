@@ -109,9 +109,10 @@ func TestContractFixtures_Decode(t *testing.T) {
 			Verdict      ExplainVerdict `json:"verdict"`
 			FirstFailure ExplainStep    `json:"first_failure"`
 			Fixes        []struct {
-				Step   ExplainStep `json:"step"`
-				Action FixAction   `json:"action"`
-				Target string      `json:"target"`
+				Step    ExplainStep `json:"step"`
+				Action  FixAction   `json:"action"`
+				Target  string      `json:"target"`
+				Profile string      `json:"profile"`
 			} `json:"fixes"`
 		}
 		require.NoError(t, json.Unmarshal(readFixture(t, "explain_blocked.json"), &explanation))
@@ -125,6 +126,8 @@ func TestContractFixtures_Decode(t *testing.T) {
 		require.Equal(t, "work-readonly", explanation.Fixes[0].Target)
 		require.Equal(t, FixMoveClient, explanation.Fixes[1].Action)
 		require.Equal(t, "cursor", explanation.Fixes[1].Target, "move_client targets the client id")
+		require.Equal(t, "work-full", explanation.Fixes[1].Profile, "move_client names the destination profile slug")
+		require.Empty(t, explanation.Fixes[0].Profile, "only move_client carries a destination profile")
 	})
 
 	t.Run("activity_attributed.json decodes source and block-reason enums", func(t *testing.T) {

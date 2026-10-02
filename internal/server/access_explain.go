@@ -127,6 +127,10 @@ func (p *MCPProxyServer) explainFixes(ev *AccessEvaluator, subject profile.Acces
 	add := func(action profile.FixAction, target, label string) {
 		fixes = append(fixes, runtime.Fix{Step: step, Action: action, Target: target, Label: label})
 	}
+	// addMove is add for move_client, which also names the destination profile.
+	addMove := func(client, dest, label string) {
+		fixes = append(fixes, runtime.Fix{Step: step, Action: profile.FixMoveClient, Target: client, Profile: dest, Label: label})
+	}
 	toolID := server + ":" + tool
 	profName := ev.res.Name
 	if subject.Kind == profile.AccessSubjectProfile {
@@ -157,7 +161,7 @@ func (p *MCPProxyServer) explainFixes(ev *AccessEvaluator, subject profile.Acces
 				continue
 			}
 			if altEv.Evaluate(server, tool).Callable {
-				add(profile.FixMoveClient, subject.ClientID, fmt.Sprintf("Move %s to %s", clientDisplay(subject.ClientID), titleOf(cfg, other)))
+				addMove(subject.ClientID, other, fmt.Sprintf("Move %s to %s", clientDisplay(subject.ClientID), titleOf(cfg, other)))
 				return
 			}
 		}
@@ -184,7 +188,7 @@ func (p *MCPProxyServer) explainFixes(ev *AccessEvaluator, subject profile.Acces
 		case subject.Kind == profile.AccessSubjectClient:
 			if cfg != nil && len(cfg.Profiles) > 0 && subject.CredentialState != profile.CredentialStateNone {
 				target := cfg.Profiles[0].Name
-				add(profile.FixMoveClient, subject.ClientID, fmt.Sprintf("Move %s to %s", clientDisplay(subject.ClientID), titleOf(cfg, target)))
+				addMove(subject.ClientID, target, fmt.Sprintf("Move %s to %s", clientDisplay(subject.ClientID), titleOf(cfg, target)))
 			} else {
 				add(profile.FixChangeSetting, "anonymous_profile", "Set anonymous_profile")
 			}

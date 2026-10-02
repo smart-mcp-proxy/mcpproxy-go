@@ -234,6 +234,10 @@ type Fix struct {
 	Action profile.FixAction   `json:"action"`
 	Target string              `json:"target"`
 	Label  string              `json:"label"`
+	// Profile is set for move_client only: the destination profile slug the fix
+	// moves the client to. Target stays the client id (UIs navigate by it) and
+	// Label carries the title, so neither can name the slug.
+	Profile string `json:"profile,omitempty"`
 }
 
 // AccessExplanation is GET /access/explain (FR-035, data-model §7).

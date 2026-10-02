@@ -4834,6 +4834,12 @@ components:
           $ref: '#/components/schemas/profile.FixAction'
         label:
           type: string
+        profile:
+          description: |-
+            Profile is set for move_client only: the destination profile slug the fix
+            moves the client to. Target stays the client id (UIs navigate by it) and
+            Label carries the title, so neither can name the slug.
+          type: string
         step:
           type: string
           x-enum-varnames:
