@@ -401,6 +401,28 @@ Not a new requirement: the audit's C1 was marked fixed, but the live official re
 - [x] T180 [US5] macOS card badge parity (D37.6): `CatalogView.trustBadge`, `native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift`, `native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift`; publisher and popularity on the macOS card are a follow-up
 - [x] T181 [P] Docs and bookkeeping for T172–T180: `spec.md` (US5, FR-060, FR-061, SC-008, edge cases), `data-model.md` §9, `contracts/rest-api.md`, `contracts/mcp-tools.md`, `research.md` D37, `plan.md`, `quickstart.md` recipe `fix-catalog-rank`, `parity-matrix.json` row 14, `acceptance-index.json` SC-008, Spec 110 amendments, `docs/api/rest-api.md`, `docs/cli/catalog-commands.md`, `docs/features/catalog-popularity.md`, the `catalog search` help text
 
+## Phase 18: PR fix-review-screen — honest scan coverage and approved-state review (final done-check, 2026-10-02)
+
+Not new requirements: two medium findings and one low from the final done-check, fixed test-first on every surface that shows them (FR-021, FR-023; research D40). The review screen showed `Baseline scan: clean · risk 0/100` beside `not_scanned` tools (no definitions captured, or a definition changed after the scan), and an approved server still showed Approve/Reject on every tool. Definitions of a freshly imported quarantined server were never captured automatically.
+
+- [x] T182 [P] storage stamps `definition_changed_at` centrally: `internal/storage/tool_approval_definition_changed_test.go` (`TestSaveToolApproval_StampsDefinitionChangedAtOnContentChange`: new record zero, status-only change carries the prior value, description/schema/output-schema change stamps the record and the caller's pointer, annotations-only change does not, `SaveIntegrityBaselineWithBlocks` preserves it)
+- [x] T183 [P] scanner records the exported tool names: `internal/security/scanner/export_tool_names_test.go` (`ScanContext.ToolNames` sorted and de-duplicated, set by both Pass-1 export sites)
+- [x] T184 [P] review scan coverage and honest per-tool verdicts (`current|stale|not_captured|tools_not_scanned|scanning|none`, covered/not-covered rule, legacy scans, queue row parity): `internal/runtime/review_scan_coverage_test.go`, with `internal/runtime/review_test.go` updated for the `covered` parameter
+- [x] T185 [P] automatic definition capture after a settled scan: `internal/runtime/review_capture_test.go` (eligibility: still quarantined, 0 records, completed baseline job that exported tools) and `internal/server/review_capture_after_scan_test.go` (event-driven, single-flight, not on a failed scan)
+- [x] T186 [P] [US2] Web scan banner by coverage with Rescan and Scan now: `frontend/tests/unit/review-screen-scan-coverage.spec.ts`
+- [x] T187 [P] [US2] Web approved state (Approved/Blocked badges, heading, Manage tools, Quarantine to review again with confirmation): `frontend/tests/unit/review-screen-approved-state.spec.ts`
+- [x] T188 [P] [US2] macOS banner, headline and tool state, decode of the new fields: `native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift`, with `native/macos/MCPProxy/MCPProxyTests/ReviewPayloadTests.swift` extended
+- [x] T189 [P] [US2] CLI `review show` prints the scan line: `cmd/mcpproxy/review_cmd_test.go` (`TestFormatReviewShowPrintsScanCoverage`)
+- [x] T190 `storage.ToolApprovalRecord.DefinitionChangedAt` and the central stamp in `BoltDB.SaveToolApproval`: `internal/storage/models.go`, `internal/storage/bbolt.go`
+- [x] T191 `scanner.ScanContext.ToolNames`; `exportToolDefinitions` returns the names: `internal/security/scanner/types.go`, `internal/security/scanner/service.go`
+- [x] T192 review composer: `ReviewScan.Coverage`, `ToolsScanned`, `UnscannedTools`, `reviewToolCovered`, `reviewToolScanVerdict(..., covered)`: `internal/runtime/review.go`
+- [x] T193 auto-capture: `internal/runtime/review_capture.go` (`ShouldCaptureReviewDefinitionsAfterScan`) and `internal/server/review_capture.go` (single-flight goroutine started from the scan-settled case in `internal/server/server.go`)
+- [x] T194 [US2] Web: `frontend/src/types/api.ts`, `frontend/src/utils/reviewPresentation.ts` (`scanBanner`, `reviewHeadline`, `toolState`), `frontend/src/components/ReviewScreen.vue`
+- [x] T195 [US2] macOS: `native/macos/MCPProxy/MCPProxy/API/Models.swift` (`ReviewScan` fields), `native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift` (`ReviewPresentation`, banner, state labels, quarantine confirmation)
+- [x] T196 [US2] CLI: the `Scan:` line of `review show` in `cmd/mcpproxy/review_cmd.go`
+- [x] T197 Docs and bookkeeping for T182–T196: `docs/features/security-quarantine.md`, `docs/api/rest-api.md`, `docs/cli/review-commands.md`, `specs/109-ux-navigation-consistency/acceptance-index.json`, `quickstart.md` recipe `fix-review-screen`, research D40
+- [x] T198 Verification gates: `go test -race` on `internal/storage`, `internal/runtime`, `internal/security/scanner`, `internal/server` (CI skip regex), both golangci-lint runs, `npm run test:unit`, `vue-tsc`, `swift test`, `TestSpec109Traceability*` and `TestSpec109ParityMatrix*` (`internal/httpapi/spec109_traceability_test.go`)
+
 ---
 
 ## Dependencies & Execution Order
@@ -449,4 +471,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-217 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+234 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 217 before the fix-review-screen PR, which added T182–T198; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).

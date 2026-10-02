@@ -46,7 +46,10 @@
         "vitest:frontend/tests/unit/review-screen.spec.ts",
         "vitest:frontend/tests/unit/review-inert-text.spec.ts",
         "go:internal/runtime/review_test.go#TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations",
-        "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes"
+        "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes",
+        "go:internal/runtime/review_scan_coverage_test.go#TestReviewScanCoverage",
+        "vitest:frontend/tests/unit/review-screen-scan-coverage.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift#testScanBannerForEveryCoverage"
       ]
     },
     "US2-2": {
@@ -70,7 +73,9 @@
       "tests": [
         "vitest:frontend/tests/unit/tool-diff-sections.spec.ts",
         "vitest:frontend/tests/unit/quarantine-block-api.spec.ts",
-        "go:internal/runtime/review_test.go#TestReviewUnifiedDiffUsesReadableSingleLineHunk"
+        "go:internal/runtime/review_test.go#TestReviewUnifiedDiffUsesReadableSingleLineHunk",
+        "vitest:frontend/tests/unit/review-screen-approved-state.spec.ts",
+        "go:cmd/mcpproxy/review_cmd_test.go#TestFormatReviewShowPrintsScanCoverage"
       ]
     },
     "US2-5": {
@@ -78,7 +83,9 @@
       "tests": [
         "vitest:frontend/tests/unit/review-screen.spec.ts",
         "go:internal/runtime/review_test.go#TestReviewPayload_QueueAndUncapturedDefinitions",
-        "go:internal/server/mcp_quarantine_discovery_test.go"
+        "go:internal/server/mcp_quarantine_discovery_test.go",
+        "go:internal/runtime/review_capture_test.go#TestShouldCaptureReviewDefinitionsAfterScan",
+        "go:internal/server/review_capture_after_scan_test.go#TestReviewCaptureAfterScanSettled"
       ]
     },
     "US2-6": {
