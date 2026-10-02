@@ -54,6 +54,18 @@ type ServerEntry struct {
 	// which stays unchanged. BuildCatalogHit copies it into CatalogHit and
 	// layers in GitHub stars from the popularity provider's cache.
 	Popularity *Popularity `json:"-"`
+
+	// Title is the source's own display title (server.json "title" for the
+	// official protocol), and Version the entry's published version. Both are
+	// `json:"-"` like Popularity: ServerEntry's wire JSON is unchanged. The
+	// catalog reads Title for display and matching (Spec 109 D36.10) and
+	// collapseOfficialVersions reads Version.
+	Title   string `json:"-"`
+	Version string `json:"-"`
+
+	// isLatest records an explicit isLatest:true from the official registry's
+	// publication metadata, so collapseOfficialVersions can prefer it.
+	isLatest bool
 }
 
 // RequiredInput declares a single env var / key a server needs before it will
