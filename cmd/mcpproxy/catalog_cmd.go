@@ -73,7 +73,7 @@ the curated official/popular sections with no query.
 'catalog search'/'catalog add' supersede 'registry search'/'registry add'.
 'registry list'/'add-source'/'edit'/'remove' still manage catalog SOURCES.`,
 	}
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newCatalogSearchCmd(), newCatalogShowCmd(), newCatalogAddCmd())
 	return cmd
 }

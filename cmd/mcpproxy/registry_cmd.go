@@ -67,7 +67,7 @@ daemon. 'list' and 'search' use the daemon when available and otherwise read the
 registries directly.`,
 	}
 
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryEditCmd(), newRegistryRemoveCmd())
 	return cmd
 }
@@ -624,8 +624,8 @@ func truncateStr(s string, max int) string {
 func loadRegistryConfig() (*config.Config, error) {
 	var cfg *config.Config
 	var err error
-	if registryConfigPath != "" {
-		cfg, err = config.LoadFromFile(registryConfigPath)
+	if path := resolveCLIConfigPath(registryConfigPath); path != "" {
+		cfg, err = config.LoadFromFile(path)
 	} else {
 		cfg, err = config.Load()
 	}
