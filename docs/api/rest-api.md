@@ -867,6 +867,142 @@ upstream drift (both report `hash_mismatch`, with different `detail`). Current
 pins are discoverable on ready preflight results and on the operator-tier tool
 listings above.
 
+### Attention
+
+#### GET /api/v1/attention
+
+The one needs-attention list every surface renders (the Web UI Home page, header pill and sidebar badge, the macOS tray and Home section, `mcpproxy attention`, the first line of `mcpproxy status` and the first section of `mcpproxy doctor`). Both editions. See [Needs Attention](../features/needs-attention.md) for the kinds, ranks and fixes.
+
+Administrators see every item. A scoped caller (an agent token, or a non-admin user session) sees only the items whose server it may enumerate, never a client or setting item, with `count` recomputed from the narrowed list.
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "generated_at": "2026-09-25T06:12:03Z",
+    "items": [
+      {
+        "id": "sign_in_required:server:github",
+        "kind": "sign_in_required",
+        "rank": 10,
+        "subject": {"type": "server", "id": "github", "name": "github"},
+        "summary": "github: sign in required",
+        "detail": "OAuth · api.githubcopilot.com",
+        "fix": {"verb": "login", "label": "Sign in", "target": "/servers/github"},
+        "since": "2026-09-25T06:02:11Z"
+      },
+      {
+        "id": "server_review:server:github",
+        "kind": "server_review",
+        "rank": 50,
+        "subject": {"type": "server", "id": "github", "name": "github"},
+        "summary": "github: waiting for review",
+        "fix": {"verb": "review", "label": "Review", "target": "/review/github"},
+        "since": "2026-09-25T06:01:40Z"
+      }
+    ]
+  }
+}
+```
+
+Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) is emitted when the set of ids changes; see [Real-time Updates](#real-time-updates).
+
+### Review
+
+#### GET /api/v1/review
+
+The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`) or a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts). `count` is the number of rows, the number the Review queue badge shows. For a scoped caller (an agent token or a non-admin user session) the queue lists only the servers that caller may see.
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "servers": [
+      {"server": "filesystem", "kind": "server_review", "quarantined": true, "tools_captured": 14,
+       "tier_counts": {"read": 9, "write": 3, "destructive": 2, "unannotated": 0, "unknown": 0},
+       "scan": {"verdict": "clean", "risk_score": 0}, "since": "2026-09-25T06:01:40Z"},
+      {"server": "github", "kind": "tool_review", "quarantined": false, "pending": 0, "changed": 1,
+       "since": "2026-09-25T06:10:00Z"}
+    ]
+  }
+}
+```
+
+#### GET /api/v1/servers/{id}/review
+
+The review payload of one server: a summary of the server (secrets in the URL, headers, environment and command line are always redacted) and every tool with its captured definition. A server the caller cannot see answers the same `404` as a missing one.
+
+```json
+{
+  "success": true,
+  "data": {
+    "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
+               "scan": {"verdict": "clean", "risk_score": 0}, "definitions_captured": true},
+    "tools": [
+      {"name": "edit_file", "description": "Make line-based edits to a text file", "input_schema": {"type": "object"},
+       "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending",
+       "disabled": false, "scan_verdict": "clean"},
+      {"name": "search_code", "description": "Search the code", "annotations": null, "tier": "unknown",
+       "approval_status": "changed", "scan_verdict": "warnings",
+       "previous": {"description": "Search files", "input_schema": {}, "annotations": null},
+       "diff": {"description": "@@ -1 +1 @@\n-Search files\n+Search the code", "input_schema": "", "annotations": ""}}
+    ]
+  }
+}
+```
+
+- `tier` is `read`, `write`, `destructive`, `unannotated` (annotations captured, no hints) or `unknown` (nothing captured, a record from before the review screen). It comes from one function, so the Web UI, macOS, `mcpproxy tools list --tier` and the MCP `quarantine_security` inspect operations show the same value.
+- `approval_status` is `approved`, `pending` (shown as "New, needs review") or `changed` ("Changed, needs review").
+- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`.
+- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them.
+- Descriptions are returned verbatim and must be rendered as inert text.
+
+The review decisions use these routes (all existing):
+
+| Decision | Route |
+|---|---|
+| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...]}`; the `block` tools are blocked in the same transaction that records the integrity baseline, before the server is unquarantined |
+| Reject server | `POST /api/v1/servers/{id}/security/reject` |
+| Approve tools | `POST /api/v1/servers/{id}/tools/approve` |
+| Reject (block) tools | `POST /api/v1/servers/{id}/tools/block` |
+
+`POST /api/v1/servers/{id}/unquarantine` is kept for API compatibility only; no first-party surface calls it. See [Review Commands](../cli/review-commands.md).
+
+### Catalog
+
+#### GET /api/v1/catalog/search
+
+Search every enabled catalog source (registry) at once. Both editions; open to any authenticated caller, with `added` the only field that depends on the caller's scope.
+
+| Parameter | Description |
+|---|---|
+| `q` | Free-text query. Empty returns `results: []` and fills `sections` (`official` and `popular`, up to 12 each) |
+| `source` | Narrow to one catalog source id, applied before ranking and the limit |
+| `limit` | Maximum results (default 20, maximum 50) |
+| `tag` | Not supported: catalog entries carry no tags, so a non-empty value returns `400` |
+
+```json
+{
+  "success": true,
+  "data": {
+    "query": "github",
+    "results": [
+      {"source": "official", "id": "io.github.github/github-mcp-server", "title": "GitHub",
+       "publisher": "github", "verified": true, "official": true, "popularity": {"stars": 21000},
+       "description": "GitHub's official MCP server", "transport": "http",
+       "install": {"url": "https://api.githubcopilot.com/mcp/"},
+       "required_inputs": [{"name": "GITHUB_TOKEN", "secret_like": true}], "added": false}
+    ],
+    "sections": null,
+    "unavailable": [{"source": "community", "reason": "timeout after 5s"}]
+  }
+}
+```
+
+Results are ranked: official source first, then verified publishers, then popularity (a missing value counts as zero), then text relevance, then title and id. The order is identical on the Web UI, macOS, the CLI (`mcpproxy catalog search`) and the MCP `search_servers` tool. A source that fails or times out is listed in `unavailable` and the other sources' results are still returned. `added` is true when a configured server visible to the caller has the same source and install target, and then `added_server_name` names it. Adding an entry stays `POST /api/v1/registries/{id}/servers/{serverId}/add`, which always quarantines the new server; see [Registry Add](../features/registry-add.md).
+
 ### Registries
 
 Discover MCP servers in known registries and add them as quarantined upstreams.

@@ -31,6 +31,14 @@ Releases follow [Semantic Versioning](https://semver.org/).
   and gives them unconfined access (REST and, with authentication required, MCP reject them with
   `401`). (spec 108 SC-010,
   [Profiles](https://docs.mcpproxy.app/features/profiles#upgrading-and-downgrading))
+- **cli (table text only, JSON output unchanged):** `mcpproxy upstream list` now shows the status
+  label in the STATUS column (`Online`, `Sign-in required`, `Needs review`, ...) instead of the
+  free-text health summary, and `--status` filters by it; `mcpproxy status` renames its `MCP
+  Endpoints` section to `Endpoint & mode` and starts with a `Needs attention: N` line;
+  `mcpproxy doctor` leads with the needs-attention list and its diagnostics heading is now
+  `Diagnostics: N findings` instead of "Found N issues that need attention". Scripts that parse
+  these tables should use `-o json`. (spec 109,
+  [Status Command](https://docs.mcpproxy.app/cli/status-command), [Management Commands](https://docs.mcpproxy.app/cli/management-commands))
 
 ### Deprecations
 
@@ -40,6 +48,16 @@ Releases follow [Semantic Versioning](https://semver.org/).
   filter chip replaces the former, a Clients submenu the latter). (spec 108)
 - **cli:** `mcpproxy token create --profile-pin` is now `--profile` (the old spelling still works,
   hidden, and prints a notice); `mcpproxy activity --agent` is now `--token` (a hidden alias). (spec 108)
+- **cli:** `registry search` and `registry add` are deprecated aliases of `catalog search` and
+  `catalog add`; `upstream approve`, `security approve|reject` and `tools approve|reject` are
+  documented aliases of `review approve|reject`; `tools list --risk` is an alias of `--tier`. They
+  all keep working. ([Catalog Commands](https://docs.mcpproxy.app/cli/catalog-commands),
+  [Review Commands](https://docs.mcpproxy.app/cli/review-commands))
+- **web ui:** `/repositories`, `/sessions`, `/tokens`, `/security` and `/overview` redirect to their
+  new homes (`/add-server?tab=catalog`, `/activity?view=sessions`, `/clients?tab=tokens`,
+  `/review`, `/`) and keep the query string. `POST /api/v1/servers/{id}/unquarantine` stays for API
+  compatibility but no first-party surface calls it any more. (spec 109,
+  [Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Features
 
@@ -103,6 +121,32 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **profiles:** an access explainer ("Why can't Cursor use `github:create_issue`?") walks the same
   chain that enforcement walks and names the fix, in the Web UI, the macOS app, `mcpproxy access
   explain` and the `profiles` MCP tool.
+- **navigation, attention and review (spec 109):** one needs-attention list, and one set of words,
+  on every surface.
+  - **Home and one list:** the Web UI and macOS landing page is Home, led by a single
+    needs-attention list (sign-in, review, missing secret, configuration error, unseen client).
+    The same count and order appear in the header pill, the sidebar badge, the macOS tray,
+    `mcpproxy attention`, the first line of `mcpproxy status` and the first section of
+    `mcpproxy doctor`. ([Needs Attention](https://docs.mcpproxy.app/features/needs-attention),
+    [Attention Command](https://docs.mcpproxy.app/cli/attention-command))
+  - **Review queue with informed review:** every tool of a quarantined server is visible, with its
+    tier, annotations and scan verdict, before you approve, on the Web UI, macOS, `mcpproxy review`
+    and the MCP inspect operations. Approving goes through the scan gate everywhere: the macOS app
+    now confirms and uses `security/approve` instead of a one-click unquarantine, and the Go tray
+    opens the review location instead of unquarantining. ([Review Commands](https://docs.mcpproxy.app/cli/review-commands))
+  - **Clients hub:** a Clients page shows each client's state (connected, never seen, installed), last
+    seen and sessions, with the connect flow, the Endpoint & mode tab and the Agent tokens tab;
+    `mcpproxy client list|show` prints the same rows. A connect result shows the client's reload hint.
+  - **Catalog-first Add:** one search across every catalog source with a fixed ranking (official,
+    verified, popularity, relevance), the "Add to MCPProxy" button, secret-named values defaulting to
+    the keyring, and `mcpproxy catalog search|show|add`. ([Catalog Commands](https://docs.mcpproxy.app/cli/catalog-commands))
+  - **One status word per server:** the card, the detail header, the macOS row and tray and
+    `upstream list` show the same label and one next step; a server that cannot be used never reads
+    Online, healthy or connected.
+  - **Navigation:** a grouped sidebar (Home, Connect, Protect, Monitor), a compact header with `⌘K`
+    search and a `+ Add` menu, filters kept in the URL so every deep link opens filtered, and Activity
+    views (Tool calls, Sessions, System events, All) with `--view` and `--from/--to` on the CLI.
+    ([Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Bug Fixes
 

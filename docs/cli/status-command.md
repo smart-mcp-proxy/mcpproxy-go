@@ -44,6 +44,7 @@ mcpproxy status
 
 ```
 MCPProxy Status
+Needs attention: 3 (run 'mcpproxy attention')
   State:       Running
   Version:     v1.2.0 (update available: v1.3.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0)
   Listen:      127.0.0.1:8080
@@ -54,7 +55,16 @@ MCPProxy Status
   Servers:     12 connected, 2 quarantined
   Socket:      /Users/you/.mcpproxy/mcpproxy.sock
   Config:      /Users/you/.mcpproxy/mcp_config.json
+
+Endpoint & mode
+  Routing mode:    retrieve_tools
+  /mcp             http://127.0.0.1:8080/mcp  (default, retrieve_tools mode)
+  /mcp/call        http://127.0.0.1:8080/mcp/call  (retrieve + call tools)
 ```
+
+The first line after the header is the **needs-attention count**, the same number the Web UI header pill and Home badge and the macOS tray show; it reads `Needs attention: none` when nothing needs you. An older daemon without the endpoint omits the line. See [Attention Command](/cli/attention-command).
+
+The **Endpoint & mode** section (it was named "MCP Endpoints" before) lists the routing mode and the MCP endpoints to point a client at, the same facts the Clients page shows on its **Endpoint & mode** tab. JSON output is unchanged.
 
 **When daemon is not running:**
 

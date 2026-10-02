@@ -37,7 +37,8 @@ func readDocByID(t *testing.T, id string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	// Windows checkouts (core.autocrlf) yield CRLF; the heading checks match "\n".
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 // unpublishedLinkProblems lists every relative markdown link of page that points

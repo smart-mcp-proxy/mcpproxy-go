@@ -13,9 +13,9 @@ Every new command honours the global `-o table|json|yaml`, `--json`, `MCPPROXY_O
 | `mcpproxy review reject <server> [--tools a,b] [--yes]` | no `--tools` → `security/reject`; `--tools` → `tools/block` | `Rejected …` |
 | `mcpproxy client list` | `GET /clients` | `CLIENT  STATE  LAST SEEN  SESSIONS  CALLS 24H  CONFIG PATH` (`display_path`). Spec 108 **appends** `CREDENTIAL  PROFILE  MODE  SOURCE  BLOCKED 24H` and `--profile`; it never removes or reorders these columns (`CONFIG PATH` stays) |
 | `mcpproxy client show <id>` | `GET /clients/{id}` | detail block incl. `reload_hint`, full `config_path`, sessions |
-| `mcpproxy catalog search <query> [--source id] [--limit n]` | `GET /catalog/search` | `TITLE  ID  PUBLISHER  ✓  POPULARITY  SOURCE`; unavailable sources on stderr as `note: source <id> unavailable: <reason>`. The retained compatibility flag `--tag` accepts only an empty value; a non-empty value exits with an error because catalog entries carry no tags. |
+| `mcpproxy catalog search <query> [--source id] [--limit n]` | `GET /catalog/search` | `SOURCE  ID  TITLE  TRANSPORT  ADDED`, then `Found N results. Add one with: mcpproxy catalog add <source>/<id>`; unavailable sources after the table as `⚠ <source> unavailable: <reason>`; `-o json` carries `publisher`, `verified`, `official` and `popularity`. The retained compatibility flag `--tag` accepts only an empty value; a non-empty value exits with an error because catalog entries carry no tags. |
 | `mcpproxy catalog show <source>/<id>` | Spec 070 find | detail incl. required inputs |
-| `mcpproxy catalog add <source>/<id> [--name] [--env K=V] [--secret-env K=V]` | Spec 070 add (+ secrets) | `Added <name> to MCPProxy (quarantined for review)` |
+| `mcpproxy catalog add <source>/<id> [--name] [--env K=V] [--enabled]` | Spec 070 add | `Added <name> to MCPProxy (quarantined for review)`. Values that must stay out of the config use `upstream add --secret-env K=V --secret-header 'N: v'` (FR-065, parity row 17) |
 
 With no query (`mcpproxy catalog search ""` or `catalog search --browse`), the output prints the `official` and `popular` sections.
 
@@ -42,3 +42,5 @@ With no query (`mcpproxy catalog search ""` or `catalog search --browse`), the o
 ## Golden tests
 
 `cmd/mcpproxy/*_test.go` goldens for each table above (`testdata/cli109/*.golden`), plus `--help-json` snapshots for `attention`, `review`, `client`, `catalog`. The parity test (109-m) reads `--help-json` and checks flag and column names against the terminology table.
+
+`cmd/mcpproxy/parity_109_cli_test.go` is the `--help-json` reader: `TestParity109CLICellsResolve` runs each CLI cell of `parity-matrix.json` through the real `--help-json` in a helper process, and `TestParity109FlagUsageNamesTheValues` checks the `--approval`, `--tier`, `--view` and `upstream list --status` usages against `internal/contracts/testdata/terminology.json`.

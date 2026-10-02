@@ -426,6 +426,11 @@ enum ServerStatusLinePresentation {
             return ServerStatusLine(label: "Connecting", detail: nil, tooltip: tooltip, tone: .neutral)
         }
         if server.connected {
+            // SC-003: a server the core reported as not usable never reads
+            // "Connected", whatever the legacy transport flag says.
+            if server.health?.usable == false {
+                return ServerStatusLine(label: "Unavailable", detail: nil, tooltip: tooltip, tone: .neutral)
+            }
             return ServerStatusLine(label: "Connected", detail: nil, tooltip: tooltip, tone: .success)
         }
         return ServerStatusLine(label: "Disconnected", detail: nil, tooltip: tooltip, tone: .neutral)

@@ -63,6 +63,17 @@ jobs:
               - 'frontend/src/components/settings/**'
               - 'scripts/check-settings-parity.py'
               - '.github/workflows/native-tests.yml'
+              # Go-owned goldens Swift reads by relative path (Spec 109-m M15):
+              # a Go-side label, enum, order or attention change must run
+              # swift test, not only the Go and vitest suites.
+              - 'internal/health/testdata/**'
+              - 'internal/contracts/testdata/**'
+              - 'internal/runtime/testdata/attention_parity_*'
+              - 'internal/registries/testdata/catalog_github_order.json'
+              - 'internal/secret/testdata/**'
+              - 'internal/profile/testdata/contract/**'
+              - 'specs/*/parity-matrix.json'
+              - 'frontend/src/types/contracts.ts'
             gotray:
               - 'internal/tray/**'
               - 'cmd/mcpproxy-tray/**'

@@ -700,7 +700,7 @@
 
 <script setup lang="ts">
 import { serverDetailPath, reviewPath } from '@/utils/serverRoute'
-import { toolApprovalLabel } from '@/utils/toolQuarantine'
+import { tierLabel, toolApprovalLabel } from '@/utils/toolQuarantine'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -1177,9 +1177,7 @@ function getTier(tool: GlobalTool): string {
 }
 
 function getTierLabel(tool: GlobalTool): string {
-  const t = getTier(tool)
-  if (t === 'unannotated') return 'Unannotated'
-  return t.charAt(0).toUpperCase() + t.slice(1)
+  return tierLabel(getTier(tool))
 }
 
 function getTierBadgeClass(tool: GlobalTool): string {

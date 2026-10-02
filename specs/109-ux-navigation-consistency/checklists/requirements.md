@@ -27,7 +27,7 @@
 - [x] CHK013 Every "—" cell carries a reason
 - [x] CHK014 One terminology table binds REST, CLI, Web and macOS names, and lists the retired names
 - [x] CHK015 Every inventory contradiction (W1–W5, M1–M5, C1–C6, R1–R3) plus the new ones (X1–X12) has a disposition: Resolved (FR), 108, or Accepted (reason)
-- [x] CHK016 Shared enums and golden fixtures are decoded by Go, vitest and Swift (FR-090, T005, T144)
+- [x] CHK016 Shared enums and golden fixtures are decoded by Go, vitest and Swift (FR-090): T005 is obsolete; the FR-090 golden is `internal/contracts/testdata/terminology.json` (plus `internal/health/testdata/status_fixtures.json`), read by Go, vitest and Swift by relative path (T144)
 
 ## Finding traceability
 
@@ -47,7 +47,7 @@
 | N7 naming, edition tab, emoji | FR-056, FR-050 | 109-a, 109-i | T008, T135 |
 | N8 empty tab is default | FR-051 | 109-a (interim), 109-d | T006, T057 |
 | H1 crowded header | FR-052–054 | 109-i | T136, T137 |
-| H2 profile switcher dead end | FR-057 (interim; removal = 108) | 109-a | T011 |
+| H2 profile switcher dead end | FR-057 (interim; removal = 108) | 109-a | T011 (**Shipped as:** `frontend/tests/unit/header-layout.spec.ts`, `frontend/tests/unit/viewing-filter.spec.ts`) |
 | H3 mode/endpoints in header | FR-031, FR-052 | 109-h, 109-i | T127, T136 (`header-layout.spec.ts`) |
 | H4 version row over modals | FR-055 | 109-a | T007 |
 | S2 blind approval | FR-020–024, FR-026 | 109-f, 109-g | T073–T078, T086–T087 |
@@ -56,7 +56,7 @@
 | S6 tabs don't update URL | FR-016 | 109-a, 109-k, 109-h | T009, T112, T127 |
 | S7 add form | FR-064, FR-065 | 109-j | T098, T100, T102, T103 |
 | C1 ranking | FR-060, FR-061, FR-067 | 109-j | T097, T101 |
-| C2 "Add to MCP" | FR-063 | 109-a, 109-j | T012, T102 |
+| C2 "Add to MCP" | FR-063 | 109-a, 109-j | T012 (**Shipped as:** `frontend/tests/unit/add-server-catalog.spec.ts`), T102 |
 | A1 bookkeeping buries calls | FR-070–072 | 109-k | T112 |
 | A2 metric shows zero; ticks; wording | FR-073, FR-074 | 109-a, 109-k | T013, T114 |
 | A3 nothing says what needs attention | FR-001–006 | 109-d (+ 109-h client feed) | T053–T059, T055a, T124 |
@@ -161,3 +161,8 @@
   - (medium) 109-d removes the Home one-click `approveTools` itself, so T058a passes in 109-d. T058a, T064, T084.
   - (medium) T124 split (T124a in `internal/server`, HTTP half in T125); T078b split by package. No import cycles.
   - (cross-spec) 108-a ← 109-a; `Tier` constants exported (T014, T023); `connect_cmd.go` / `ConnectClientView.swift` shared-file rule (T038); FR-075 `--from/--to` on `list|watch|summary|export` with defined `watch`/`summary` behaviour.
+
+## 109-m (parity, traceability and docs, 2026-10-02)
+
+- Traceability is now mechanical: `TestSpec109Traceability_*` parses the finding table, resolves every FR and task it names, requires every FR to be cited, and resolves `acceptance-index.json` (43 scenarios and SC-002 to SC-012); `TestSpec109RegisterDispositions` closes the contradiction register; `parity-matrix.json` is walked by Go, the CLI helper process, vitest and XCTest. The dry run on main found two stale test paths (T011 and T012, both annotated with **Shipped as:**) and two more that moved (T097 and T125a).
+- The CLI contract `catalog add` takes `--env`, not `--secret-env`; values that must stay out of the config go through `upstream add --secret-env|--secret-header` (parity row 17), and `contracts/cli.md` now says so.

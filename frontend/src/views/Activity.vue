@@ -1501,11 +1501,13 @@ import {
   matchesAuthFilter,
   OTHER_STATUS,
   SENSITIVE_LEGEND,
+  ACTIVITY_VIEW_LABELS,
   type ActiveFilterChip,
   type ActivityRun,
   type CompactSummaryPart,
   type StatusTone,
 } from '@/utils/activity'
+import type { ActivityView } from '@/types/contracts'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -1519,14 +1521,12 @@ const profilesStore = useProfilesStore()
 // the URL has no `view` at all — a fresh /activity used to render every
 // type mixed together (the audit's 29-row example) instead of "just the
 // calls the user made".
-type ActivityViewId = 'calls' | 'sessions' | 'system' | 'all'
-const ACTIVITY_VIEW_IDS: ActivityViewId[] = ['calls', 'sessions', 'system', 'all']
-const activityViewTabs: { id: ActivityViewId; label: string }[] = [
-  { id: 'calls', label: 'Tool calls' },
-  { id: 'sessions', label: 'Sessions' },
-  { id: 'system', label: 'System events' },
-  { id: 'all', label: 'All' },
-]
+type ActivityViewId = ActivityView
+const ACTIVITY_VIEW_IDS = Object.keys(ACTIVITY_VIEW_LABELS) as ActivityViewId[]
+const activityViewTabs: { id: ActivityViewId; label: string }[] = ACTIVITY_VIEW_IDS.map(id => ({
+  id,
+  label: ACTIVITY_VIEW_LABELS[id],
+}))
 
 const activeView = computed<ActivityViewId>(() => {
   const raw = route.query.view
