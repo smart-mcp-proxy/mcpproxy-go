@@ -1,4 +1,4 @@
-// First-run user test fixes sweep (Spec 109 T172-T177, Spec 108 T153; plan
+// First-run user test fixes sweep (Spec 109 T199-T204, Spec 108 T169; plan
 // fix-usertest-web).
 //
 // Drives the Web UI served by a REAL mcpproxy binary and checks the three

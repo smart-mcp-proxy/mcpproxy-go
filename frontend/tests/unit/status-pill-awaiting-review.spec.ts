@@ -3,7 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-// Spec 109 FR-052 / navigation-map "Status pill" (fix-usertest-web T175, user
+// Spec 109 FR-052 / navigation-map "Status pill" (fix-usertest-web T202, user
 // test journey B): four servers that only wait for review read as "0 of 4
 // online", which looks like a failed install. The pill says what is true:
 // how many are online, how many await review, how many are really offline.
@@ -41,7 +41,7 @@ async function mountPill() {
 
 const full = (w: Awaited<ReturnType<typeof mountPill>>) => w.get('[data-test="header-status-full"]').text().replace(/\s+/g, ' ')
 
-describe('StatusPill awaiting review and first load (fix-usertest-web T175)', () => {
+describe('StatusPill awaiting review and first load (fix-usertest-web T202)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useServersStore().loaded = true

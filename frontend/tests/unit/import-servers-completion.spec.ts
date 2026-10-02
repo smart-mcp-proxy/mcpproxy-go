@@ -3,7 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import ImportServers from '@/components/ImportServers.vue'
 import api from '@/services/api'
 
-// Spec 109 US7-4 / FR-043 (fix-usertest-web T173, audit F-04): after an import
+// Spec 109 US7-4 / FR-043 (fix-usertest-web T200, audit F-04): after an import
 // the detected importer shows ONE completion line. It used to render
 // "No importable servers found" directly above "2 servers imported · 1 skipped
 // (not selected)" because the reload after the import found everything already

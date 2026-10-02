@@ -1019,6 +1019,14 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	env := NewTestEnvironment(t)
 	defer env.Cleanup()
 
+	// This test pins the manual path: nothing is captured until inspection
+	// fetches definitions itself. The admission baseline scan would otherwise
+	// settle mid-test and trigger the automatic capture (Spec 109
+	// fix-review-screen, D-4), which re-grants the inspection exemption and
+	// races the disconnect assertion below. The automatic path has its own
+	// tests (review_capture_after_scan_test.go).
+	env.proxyServer.reviewCaptureFn = func(context.Context, string) error { return nil }
+
 	// Create MCP client
 	mcpClient := env.CreateProxyClient()
 	env.ConnectClient(mcpClient)

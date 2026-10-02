@@ -82,7 +82,7 @@ const emit = defineEmits<{
   'update:mode': [mode: 'value' | 'secret']
 }>()
 
-// Masking is presentation only (FR-065, fix-usertest-web T174): a field in
+// Masking is presentation only (FR-065, fix-usertest-web T201): a field in
 // Secret mode, or whose name looks secret-like (the same D13 rule that picks
 // the Secret default), is a password input with a Show/Hide toggle. Value vs
 // Secret still decides storage, so Value mode keeps storing plain config.

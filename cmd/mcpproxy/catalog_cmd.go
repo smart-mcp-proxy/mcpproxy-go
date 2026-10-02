@@ -73,7 +73,7 @@ the curated official/popular sections with no query.
 'catalog search'/'catalog add' supersede 'registry search'/'registry add'.
 'registry list'/'add-source'/'edit'/'remove' still manage catalog SOURCES.`,
 	}
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newCatalogSearchCmd(), newCatalogShowCmd(), newCatalogAddCmd())
 	return cmd
 }
@@ -82,8 +82,8 @@ func newCatalogSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search [query]",
 		Short: "Search the catalog across every enabled source",
-		Long: `Search every enabled catalog source at once (FR-060), ranked official-first,
-then verified, then popularity, then text relevance. Omit the query to browse
+		Long: `Search every enabled catalog source at once (FR-060), ranked by how well the name
+matches, then official source, verified publisher and popularity. Omit the query to browse
 the curated "official" and "popular" sections instead.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

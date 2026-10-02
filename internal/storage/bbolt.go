@@ -428,15 +428,39 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 // Tool approval operations (tool-level quarantine)
 
 // SaveToolApproval saves a tool approval record
+//
+// It stamps DefinitionChangedAt: when a prior record exists and its current
+// definition content differs from the incoming one the stamp is set to now,
+// otherwise the prior value is carried over. The stamp is also written back to
+// the caller's record.
 func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
+			prior := &ToolApprovalRecord{}
+			if err := prior.UnmarshalBinary(encoded); err == nil {
+				if toolDefinitionContentChanged(prior, record) {
+					record.DefinitionChangedAt = time.Now().UTC()
+				} else {
+					record.DefinitionChangedAt = prior.DefinitionChangedAt
+				}
+			}
+		}
 		data, err := record.MarshalBinary()
 		if err != nil {
 			return err
 		}
 		return bucket.Put([]byte(record.Key()), data)
 	})
+}
+
+// toolDefinitionContentChanged reports whether the current description or
+// schemas differ between two records of the same tool. Annotations are
+// deliberately excluded.
+func toolDefinitionContentChanged(prior, next *ToolApprovalRecord) bool {
+	return prior.CurrentDescription != next.CurrentDescription ||
+		prior.CurrentSchema != next.CurrentSchema ||
+		prior.CurrentOutputSchema != next.CurrentOutputSchema
 }
 
 // StampToolApprovalsIdentityKeyed marks the named records of one server

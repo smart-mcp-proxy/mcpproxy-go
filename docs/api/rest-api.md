@@ -939,7 +939,8 @@ The review payload of one server: a summary of the server (secrets in the URL, h
   "success": true,
   "data": {
     "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
-               "scan": {"verdict": "clean", "risk_score": 0}, "definitions_captured": true},
+               "scan": {"verdict": "clean", "risk_score": 0, "coverage": "current", "tools_scanned": 2},
+               "definitions_captured": true},
     "tools": [
       {"name": "edit_file", "description": "Make line-based edits to a text file", "input_schema": {"type": "object"},
        "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending",
@@ -955,8 +956,9 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 
 - `tier` is `read`, `write`, `destructive`, `unannotated` (annotations captured, no hints) or `unknown` (nothing captured, a record from before the review screen). It comes from one function, so the Web UI, macOS, `mcpproxy tools list --tier` and the MCP `quarantine_security` inspect operations show the same value.
 - `approval_status` is `approved`, `pending` (shown as "New, needs review") or `changed` ("Changed, needs review").
-- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`.
-- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them.
+- `scan.coverage` says whether the scan verdict describes the definitions in the payload: `current` (the latest completed scan analysed every captured definition as it is now), `stale` (some definitions were added or changed after that scan; `scan.unscanned_tools` lists them), `not_captured` (no definitions captured), `tools_not_scanned` (the scan completed but exported no tool definitions), `scanning` (a scan is running) or `none` (no completed scan). Show `risk_score` only for `current`. `scan.tools_scanned` is the number of definitions that scan exported.
+- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
+- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
 - Descriptions are returned verbatim and must be rendered as inert text.
 
 The review decisions use these routes (all existing):
@@ -1001,7 +1003,7 @@ Search every enabled catalog source (registry) at once. Both editions; open to a
 }
 ```
 
-Results are ranked: official source first, then verified publishers, then popularity (a missing value counts as zero), then text relevance, then title and id. The order is identical on the Web UI, macOS, the CLI (`mcpproxy catalog search`) and the MCP `search_servers` tool. A source that fails or times out is listed in `unavailable` and the other sources' results are still returned. When the daemon has a recent listing of that source (at most 24 hours old, kept in memory and filled by every successful fetch), the matches come from it instead: those results carry `from_cache: true` and the `unavailable` entry gains `fallback: "cached_listing"` and `cached_at`, so the source still reads as unavailable. An empty `q` lists `popular` before `official` in every surface, and `official` starts with the curated reference servers. `added` is true when a configured server visible to the caller has the same source and install target, and then `added_server_name` names it. Adding an entry stays `POST /api/v1/registries/{id}/servers/{serverId}/add`, which always quarantines the new server; see [Registry Add](../features/registry-add.md).
+Results are ranked by how well the name matches the query first (the publisher equals the query, then an exact name, a name prefix, a name word, a substring or description, and last a match through the namespace alone, which is how `io.github.*` entries match), then official source, verified publisher, popularity (a missing value counts as zero), title and id. `verified` means the publisher owns the source repository, `official` means the entry comes from a built-in source, and `title` is the server's own title when it has one. The order is identical on the Web UI, macOS, the CLI (`mcpproxy catalog search`) and the MCP `search_servers` tool. A source that fails or times out is listed in `unavailable` and the other sources' results are still returned. When the daemon has a recent listing of that source (at most 24 hours old, kept in memory and filled by every successful fetch), the matches come from it instead: those results carry `from_cache: true` and the `unavailable` entry gains `fallback: "cached_listing"` and `cached_at`, so the source still reads as unavailable. An empty `q` lists `popular` before `official` in every surface, and `official` starts with the curated reference servers. `added` is true when a configured server visible to the caller has the same source and install target, and then `added_server_name` names it. Adding an entry stays `POST /api/v1/registries/{id}/servers/{serverId}/add`, which always quarantines the new server; see [Registry Add](../features/registry-add.md).
 
 ### Registries
 

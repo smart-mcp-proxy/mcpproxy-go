@@ -53,7 +53,7 @@ Examples:
   mcpproxy token revoke deploy-bot`,
 	}
 
-	tokenCmd.PersistentFlags().StringVarP(&tokenConfigPath, "config", "c", "", "Path to configuration file")
+	addConfigFlag(tokenCmd.PersistentFlags(), &tokenConfigPath, "Path to configuration file")
 
 	// Subcommands
 	tokenCmd.AddCommand(newTokenCreateCmd())

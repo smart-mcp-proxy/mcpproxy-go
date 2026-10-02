@@ -42,6 +42,78 @@ struct ReviewQueueView: View {
     }
 }
 
+/// Pure presentation rules of the review sheet (Spec 109 fix-review-screen).
+/// The sentences are identical to the Web review screen
+/// (frontend/src/utils/reviewPresentation.ts) and `mcpproxy review show`.
+enum ReviewPresentation {
+    enum Severity: Equatable { case error, warning, success, info }
+    /// `.fetchDefinitions` marks the not-captured banner; its button lives in
+    /// the dedicated capture row, so the banner itself shows no second one.
+    enum BannerAction: Equatable { case rescan, scanNow, fetchDefinitions, none }
+    struct Banner: Equatable { let severity: Severity; let text: String; let action: BannerAction }
+
+    static let scanningBanner = Banner(severity: .info, text: "Scan in progress…", action: .none)
+
+    /// Returns nil when the payload carries no scan. The risk score is shown
+    /// only for a scan that covers every captured definition as it is now.
+    static func scanBanner(_ scan: ReviewScan?, definitionsCaptured: Bool) -> Banner? {
+        guard let scan else { return nil }
+        let coverage = definitionsCaptured ? (scan.coverage ?? "none") : "not_captured"
+        switch coverage {
+        case "current":
+            let tools = scan.toolsScanned ?? 0
+            let severity: Severity = scan.verdict == "dangerous" ? .error : (scan.verdict == "clean" ? .success : .warning)
+            return Banner(severity: severity, text: "Baseline scan: \(scan.verdict) · risk \(scan.riskScore ?? 0)/100 · covers all \(tools) \(tools == 1 ? "tool" : "tools")", action: .none)
+        case "stale":
+            let names = scan.unscannedTools ?? []
+            let what = names.count == 1 ? "1 tool definition changed or was added" : "\(names.count) tool definitions changed or were added"
+            let list = names.isEmpty ? "" : " (\(names.joined(separator: ", ")))"
+            return Banner(severity: .warning, text: "Scan out of date: \(what) after the last scan\(list). Last result: \(scan.verdict).", action: .rescan)
+        case "not_captured":
+            return Banner(severity: .warning, text: "Scan not checked against tool definitions: they have not been captured yet.", action: .fetchDefinitions)
+        case "tools_not_scanned":
+            return Banner(severity: .warning, text: "The last scan did not analyse tool definitions (0 exported).", action: .rescan)
+        case "scanning":
+            return scanningBanner
+        default:
+            return Banner(severity: .warning, text: "Not scanned yet.", action: .scanNow)
+        }
+    }
+
+    struct Headline: Equatable {
+        enum State: Equatable { case review, approved }
+        let state: State; let title: String; let subtitle: String
+    }
+
+    /// A server that is not quarantined and has nothing pending reads as approved.
+    static func headline(_ review: ServerReviewResponse) -> Headline {
+        let name = review.server.name
+        let reviewSubtitle = "Review tool definitions before changing what agents can call."
+        if review.server.quarantined { return Headline(state: .review, title: "Review \(name)", subtitle: reviewSubtitle) }
+        let pending = review.tools.filter { $0.approvalStatus == "pending" || $0.approvalStatus == "changed" }.count
+        if pending > 0 {
+            return Headline(state: .review, title: "Review \(name)", subtitle: "\(pending) \(pending == 1 ? "tool needs" : "tools need") review. Agents cannot call \(pending == 1 ? "it" : "them") until approved.")
+        }
+        if review.tools.isEmpty {
+            // Approved without seeing tools: still an approved server, with nothing captured yet.
+            return Headline(state: .approved, title: "\(name) is approved", subtitle: "No tool definitions have been captured yet. New or changed tools come back here for review.")
+        }
+        let blocked = review.tools.filter(\.disabled).count
+        let total = review.tools.count
+        let summary = "All \(total) \(total == 1 ? "tool" : "tools") approved\(blocked > 0 ? " (\(blocked) blocked)" : "")."
+        return Headline(state: .approved, title: "\(name) is approved", subtitle: "\(summary) New or changed tools come back here for review.")
+    }
+
+    enum ToolControl: Equatable { case allowToggle, approveReject, approved, blocked }
+
+    /// The control a tool row gets: the quarantine toggle, Approve/Reject, or a plain state.
+    static func toolState(_ tool: ReviewTool, quarantined: Bool) -> ToolControl {
+        if quarantined { return .allowToggle }
+        if tool.approvalStatus == "approved" { return tool.disabled ? .blocked : .approved }
+        return .approveReject
+    }
+}
+
 struct ReviewSheet: View {
     let serverName: String
     @ObservedObject var appState: AppState
@@ -52,10 +124,18 @@ struct ReviewSheet: View {
     @State private var scanning = false
     @State private var showBlindApprovalConfirmation = false
     @State private var showForceApprovalConfirmation = false
+    @State private var rescanning = false
+    @State private var showRequarantineConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading) {
-            HStack { Button("Back") { onDismiss() }; Spacer(); Text("Review \(serverName)").font(.title2).bold() }.padding()
+            HStack {
+                Button("Back") { onDismiss() }; Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(headline?.title ?? "Review \(serverName)").font(.title2).bold()
+                    if let subtitle = headline?.subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                }
+            }.padding()
             if let error { Text(error).foregroundStyle(.red).padding(.horizontal) }
             if let server = review?.server {
                 VStack(alignment: .leading, spacing: 3) {
@@ -66,7 +146,14 @@ struct ReviewSheet: View {
                     if let origin = server.sourceRegistryID { Text("Origin: \(origin)\(server.sourceRegistryProvenance.map { " · \($0)" } ?? "")") }
                 }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
             }
-            if let scan = review?.server.scan { Text("Baseline scan: \(scan.verdict)\(scan.riskScore.map { " · risk \($0)/100" } ?? "")").font(.subheadline).padding(.horizontal) }
+            if let banner = scanBanner {
+                HStack {
+                    Label(banner.text, systemImage: bannerIcon(banner.severity)).font(.subheadline).foregroundStyle(bannerColor(banner.severity))
+                    if banner.action == .rescan || banner.action == .scanNow {
+                        Button(banner.action == .scanNow ? "Scan now" : "Rescan") { Task { await rescan() } }.disabled(rescanning)
+                    }
+                }.padding(.horizontal)
+            }
             if review?.server.definitionsCaptured == false {
                 HStack { Text(scanning ? "Scan started. Refreshing when it finishes…" : "Tool definitions have not been captured yet."); Button("Fetch tool definitions") { Task { await fetchDefinitions() } }.disabled(scanning) }.padding(.horizontal)
             }
@@ -86,8 +173,14 @@ struct ReviewSheet: View {
                                 else { allowed.remove(tool.name) }
                             }
                         )).toggleStyle(.checkbox)
-                    } else if tool.approvalStatus == "pending" || tool.approvalStatus == "changed" {
-                        HStack { Button("Approve") { Task { await approveTool(tool.name) } }; Button("Reject", role: .destructive) { Task { await rejectTool(tool.name) } } }
+                    } else {
+                        switch ReviewPresentation.toolState(tool, quarantined: false) {
+                        case .approveReject:
+                            HStack { Button("Approve") { Task { await approveTool(tool.name) } }; Button("Reject", role: .destructive) { Task { await rejectTool(tool.name) } } }
+                        case .approved: Text("Approved").font(.caption).foregroundStyle(.green)
+                        case .blocked: Text("Blocked").font(.caption).foregroundStyle(.red)
+                        case .allowToggle: EmptyView()
+                        }
                     }
                 }
                 }
@@ -99,22 +192,50 @@ struct ReviewSheet: View {
                     Button("Approve Server (\(allowed.count) tools)") { requestApprove() }.buttonStyle(.borderedProminent)
                     Button("Reject Server", role: .destructive) { Task { await rejectServer() } }
                 }.padding()
+            } else if headline?.state == .approved {
+                HStack { Button("Quarantine to Review Again…") { showRequarantineConfirmation = true } }.padding()
             }
         }
         .task { await load() }
         .onReceive(NotificationCenter.default.publisher(for: .reviewChanged)) { _ in
             scanning = false
+            rescanning = false
             Task { await load() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .scanSettled)) { note in
             guard let settledServer = note.object as? String, settledServer == serverName else { return }
             scanning = false
+            rescanning = false
             Task { await load() }
         }
         .alert("Approve without seeing tools?", isPresented: $showBlindApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Approve", role: .destructive) { Task { await approve(force: false) } } } message: { Text("No tool definitions were captured. Fetch them before approval whenever possible.") }
+        .alert("Quarantine \(serverName) to review again?", isPresented: $showRequarantineConfirmation) { Button("Cancel", role: .cancel) {}; Button("Quarantine", role: .destructive) { Task { await requarantine() } } } message: { Text("Agents lose access to every tool on \(serverName) until you approve it again.") }
         .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Force Approve", role: .destructive) { Task { await approve(force: true) } } } message: { Text("Force approval activates this server despite dangerous baseline scan findings.") }
     }
 
+    private var headline: ReviewPresentation.Headline? { review.map(ReviewPresentation.headline) }
+    private var scanBanner: ReviewPresentation.Banner? {
+        guard let server = review?.server else { return nil }
+        let banner = ReviewPresentation.scanBanner(server.scan, definitionsCaptured: server.definitionsCaptured)
+        // A rescan the operator just started reads as in progress until it settles.
+        return banner != nil && rescanning ? ReviewPresentation.scanningBanner : banner
+    }
+    private func bannerIcon(_ severity: ReviewPresentation.Severity) -> String {
+        switch severity { case .error: return "xmark.octagon"; case .warning: return "exclamationmark.triangle"; case .success: return "checkmark.shield"; case .info: return "clock" }
+    }
+    private func bannerColor(_ severity: ReviewPresentation.Severity) -> Color {
+        switch severity { case .error: return .red; case .warning: return .orange; case .success: return .green; case .info: return .secondary }
+    }
+    private func rescan() async {
+        guard let client = appState.apiClient else { return }
+        rescanning = true
+        do { try await client.startSecurityScan(serverName) } catch { rescanning = false; self.error = error.localizedDescription }
+    }
+    private func requarantine() async {
+        guard let client = appState.apiClient else { return }
+        do { try await client.quarantineServer(serverName); await load(); NotificationCenter.default.post(name: .reviewChanged, object: nil) }
+        catch { self.error = error.localizedDescription }
+    }
     private func load() async {
         guard let client = appState.apiClient else { return }
         do { let value = try await client.serverReview(serverName); review = value; allowed = Set(value.tools.filter { !$0.disabled }.map(\.name)) } catch { self.error = error.localizedDescription }

@@ -5,7 +5,7 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import api from '@/services/api'
 
-// Spec 109 US7-4 / FR-043 (fix-usertest-web T173, audit F-04). After an import
+// Spec 109 US7-4 / FR-043 (fix-usertest-web T200, audit F-04). After an import
 // the Servers step must show one completion state: the review sentence reads
 // as a sentence ("step. 6 servers ...", never "step.6"), counts quarantined
 // servers honestly, and an import that leaves a usable server never falls
@@ -104,7 +104,7 @@ async function importTwo(wrapper: Awaited<ReturnType<typeof mountWizard>>) {
   await flushPromises()
 }
 
-describe('OnboardingWizard Servers step completion after an import (fix-usertest-web T173)', () => {
+describe('OnboardingWizard Servers step completion after an import (fix-usertest-web T200)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()

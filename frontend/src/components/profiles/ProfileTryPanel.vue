@@ -46,7 +46,7 @@ import type { ProfileConfig, TryProfileResponse } from '@/types/api'
 
 // Spec 108-i I18: Try it posts the CURRENT DRAFT to POST /profiles/try, so an
 // operator can see what a change would hide before saving it. `dirty` says
-// whether that draft differs from the saved profile (fix-usertest-web T153).
+// whether that draft differs from the saved profile (fix-usertest-web T169).
 const props = defineProps<{ draft: () => ProfileConfig; dirty: boolean }>()
 const query = ref('')
 const busy = ref(false)

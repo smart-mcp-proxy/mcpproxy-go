@@ -121,7 +121,7 @@ describe('ManualServerForm', () => {
     expect(wrapper.emitted('added')).toEqual([['remote']])
   })
 
-  // fix-usertest-web T174 (audit F-07): the value of a secret-like variable is
+  // fix-usertest-web T201 (audit F-07): the value of a secret-like variable is
   // masked while typing even though the row is still in Value mode, and the
   // masking never alters what is submitted.
   it('masks a secret-like env value while typing in Value mode and submits it unchanged', async () => {

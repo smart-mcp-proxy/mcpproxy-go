@@ -52,6 +52,15 @@ Input schema:
 {"type":"object"}
 ```
 
+When the review payload carries scan coverage, a `Scan:` line follows `Server:`. It says whether the baseline scan describes the definitions shown, in the same words as the Web UI and the macOS app:
+
+```
+Server: notes
+Scan: out of date (1 tool changed or added after the last scan: notes); run: mcpproxy security rescan notes
+```
+
+A scan that covers every captured tool reads `Scan: clean · risk 0/100 · covers all 5 tools`. When definitions have not been captured, the line says so and points to **Fetch tool definitions** on the Web or macOS review screen; there is no CLI command for that capture.
+
 Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
 
 ## review approve

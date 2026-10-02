@@ -62,6 +62,10 @@ describe('catalog order parity on the Web UI (SC-008)', () => {
     const titles = wrapper.findAll('[data-test="catalog-result-title"]').map(t => t.text())
     expect(titles).toEqual(golden.results.map(r => r.title))
     expect(titles[0]).toBe('GitHub')
-    expect(wrapper.findAll('[data-test^="catalog-result-"]').filter(n => n.attributes('data-test') !== 'catalog-result-title').length).toBe(golden.ids.length)
+    // One card per result: the per-card detail ids (title, publisher,
+    // popularity) are not cards.
+    const detailIds = new Set(['catalog-result-title', 'catalog-result-publisher', 'catalog-result-popularity'])
+    expect(wrapper.findAll('[data-test^="catalog-result-"]').filter(n => !detailIds.has(n.attributes('data-test') ?? '')).length).toBe(golden.ids.length)
+    expect(wrapper.find('[data-test="catalog-result-publisher"]').text()).toBe('by github')
   })
 })

@@ -8,7 +8,7 @@ import api from '@/services/api'
 import { tryHitRow } from '@/utils/profiles'
 import { makeClient, makeProfile } from './fixtures/profiles108i'
 
-// Spec 108 FR-041 / US4-2 (fix-usertest-web T153, audit F-05). The editor's
+// Spec 108 FR-041 / US4-2 (fix-usertest-web T169, audit F-05). The editor's
 // counts and Try it told the truth about the SAVED profile only:
 //  - Try it printed "[object Object]" for every hit (POST /profiles/try returns
 //    {score, tool: {name, server_name, description}}, the panel read a flat item);

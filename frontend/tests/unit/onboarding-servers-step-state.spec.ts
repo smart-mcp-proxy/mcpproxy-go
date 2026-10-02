@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { serversStepView, awaitingReviewSentence, importSummary } from '@/utils/onboardingServersStep'
 
-// Spec 109 US7-4 / FR-043 (fix-usertest-web T173): one completion state after
+// Spec 109 US7-4 / FR-043 (fix-usertest-web T200): one completion state after
 // an import, and copy that reads as a sentence.
 
 describe('serversStepView', () => {

@@ -899,7 +899,7 @@ const hasUsableServer = computed(() => onboarding.hasUsableServer)
 // onOpened). Manual add is not an import and does not count here.
 const importedThisSession = ref(0)
 // Which body the Servers step shows: choose / review / imported / empty
-// (fix-usertest-web T173). Pure rules live in utils/onboardingServersStep.ts.
+// (fix-usertest-web T200). Pure rules live in utils/onboardingServersStep.ts.
 const serversView = computed(() => serversStepView({
   sourcesWithServers: importSourcesWithServers.value.length,
   hasUsableServer: hasUsableServer.value,

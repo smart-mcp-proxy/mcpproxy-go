@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import SecretToggle from '@/components/SecretToggle.vue'
 
-// Spec 109 FR-065 / US5-5 (fix-usertest-web T174, audit F-07): a field in
+// Spec 109 FR-065 / US5-5 (fix-usertest-web T201, audit F-07): a field in
 // Secret mode OR whose name looks secret-like is masked while typing, in Value
 // mode too. Value/Secret decides storage, not display; Show/Hide is display
 // only. Before this, an API_TOKEN typed in Value mode was plain text on screen
