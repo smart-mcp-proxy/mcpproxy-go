@@ -1207,7 +1207,7 @@
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
                   <dt class="text-base-content/60">Status</dt>
                   <dd data-test="server-config-health-status">
-                    <span :class="healthLevelBadgeClass(server.health.level)">{{ configHealthStatusLabel(server.health) }}</span>
+                    <span :class="healthStatusBadgeClass(server.health)">{{ configHealthStatusLabel(server.health) }}</span>
                   </dd>
                   <dt class="text-base-content/60">Admin State</dt>
                   <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
@@ -1604,6 +1604,7 @@ import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
+import type { HealthStatusValue } from '@/types/contracts'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
@@ -1841,6 +1842,11 @@ const signInState = computed(() => {
 // can no longer read green here while the tiles say something else.
 const statusBadgeClass = computed(() => {
   const health = server.value?.health
+  // Health-vocabulary contract, "Colors": colour keys on `status`, never on
+  // `level`, wherever a status label is rendered. `level` only colours a
+  // payload without a known `status` (an older core).
+  const tone = healthStatusTone(health)
+  if (tone) return TONE_BADGE[tone]
   if (health) {
     switch (health.admin_state) {
       case 'disabled':
@@ -1918,6 +1924,11 @@ const healthLevelLabel = computed(() => {
   // with a "Sign-in required" sub-line. A non-enabled admin state therefore wins
   // the tile's word; the observed health keeps its own vocabulary on the
   // sub-line below ("Quarantined for review", "Disabled", "Sign-in required").
+  // Contract: a payload with a `status` speaks the one label table in every
+  // admin state ("Needs review", "Disabled"), so this tile never gives a second,
+  // different reading of the same server as the badges beside it.
+  const knownStatus = server.value?.health?.status
+  if (knownStatus && HEALTH_STATUS_TONE[knownStatus as HealthStatusValue]) return healthStatusLabel(knownStatus)
   switch (adminStateLabel.value) {
     case 'Quarantined':
       return 'Blocked'
@@ -1948,6 +1959,8 @@ const healthLevelLabel = computed(() => {
 // signal), not the FR-011 status label text above, so an unrecognized/missing
 // status still gets a sensible color.
 const healthLevelTone = computed(() => {
+  const tone = healthStatusTone(server.value?.health)
+  if (tone) return TONE_TEXT[tone]
   if (adminStateLabel.value === 'Disabled') return 'text-base-content/50'
   if (adminStateLabel.value === 'Quarantined') return 'text-base-content/50'
   const level = server.value?.health?.level
@@ -3522,6 +3535,45 @@ const hasIsolationData = computed(() => {
 function formatConfigTime(isoString: string | null | undefined): string {
   if (!isoString) return ''
   return formatDateTime(isoString, isoString)
+}
+
+// Health-vocabulary contract, "Colors": one tone per `status`, shared by the
+// header badge, the Health tile and the Configuration -> Health badge.
+// Hoisting this into utils/health.ts (and ServerCard.vue) is a follow-up.
+type HealthTone = 'success' | 'neutral' | 'warning' | 'error'
+const HEALTH_STATUS_TONE: Record<HealthStatusValue, HealthTone> = {
+  ready: 'success',
+  connecting: 'neutral',
+  disabled: 'neutral',
+  sign_in_required: 'warning',
+  needs_review: 'warning',
+  needs_secret: 'warning',
+  needs_config: 'warning',
+  error: 'error',
+}
+const TONE_BADGE: Record<HealthTone, string> = {
+  success: 'badge-success',
+  neutral: 'badge-neutral',
+  warning: 'badge-warning',
+  error: 'badge-error',
+}
+const TONE_TEXT: Record<HealthTone, string> = {
+  success: 'text-success',
+  neutral: 'text-base-content/50',
+  warning: 'text-warning',
+  error: 'text-error',
+}
+
+/** The tone of a known `health.status`, or undefined for a payload without one. */
+function healthStatusTone(health: HealthStatus | undefined): HealthTone | undefined {
+  return health?.status ? HEALTH_STATUS_TONE[health.status as HealthStatusValue] : undefined
+}
+
+// healthStatusBadgeClass colours the Configuration -> Health badge by `status`,
+// falling back to the level colours for a payload that has none.
+function healthStatusBadgeClass(health: HealthStatus): string {
+  const tone = healthStatusTone(health)
+  return tone ? `badge ${TONE_BADGE[tone]} badge-sm` : healthLevelBadgeClass(health.level)
 }
 
 // healthLevelBadgeClass returns the daisyUI class set for a Health.Level
