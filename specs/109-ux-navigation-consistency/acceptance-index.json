@@ -391,14 +391,16 @@
       ]
     },
     "SC-008": {
-      "summary": "Catalog search github ranks the official GitHub server first, same order everywhere",
+      "summary": "Catalog search github on a fixture recorded from the live official registry ranks the official GitHub server first, same order everywhere",
       "tests": [
         "golden:internal/registries/testdata/catalog_github_order.json",
         "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden",
         "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden",
         "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI",
         "vitest:frontend/tests/unit/catalog-order-parity.spec.ts",
-        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift"
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift",
+        "go:internal/registries/catalog_typed_test.go#TestSearchAll_RecordedRegistry_GitHubFirst",
+        "go:internal/registries/recorded_registry_test.go#TestCatalogGithubFixture_MainPageLacksGitHubServer"
       ]
     },
     "SC-009": {

@@ -96,4 +96,5 @@ The Web UI result row, the macOS catalog row and the CLI `catalog search` table 
 
 ## Amendments
 
+- 2026-10-02, Spec 109 fix-catalog-rank (T169-T172, research D36): FR-004 still holds, but `Rank` now puts the match tier (how well the name matches the query) first, so popularity breaks ties inside a tier. FR-005 Popular also de-duplicates by normalized title (the reference `fetch` and Docker `mcp/fetch` are one entry) and counts GitHub stars only when the publisher owns the repository the entry names. FR-007 and FR-009(e) enqueue at most `limit` eligible keys for a typed query (the empty-query landing is uncapped). Rationale: Spec 109 research D36.5, D36.7, D36.8.
 - 2026-10-02, Spec 109 demo-ux-fixes (T164): FR-005 and US1 scenario 3 replace "source order" with curated-first, then round-robin across sources. Official is still never popularity-ordered, so Popular still differs from it. Every surface renders Popular before Official when Popular is non-empty. Rationale: Spec 109 research D35 A9.

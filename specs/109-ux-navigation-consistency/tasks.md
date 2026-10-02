@@ -375,6 +375,23 @@ Not new requirements: nine findings from a live demo of `main` at `b3191a059`, f
 
 ---
 
+## Phase 16: PR fix-catalog-rank — catalog search ranks the real server first against the live registry (audit C1; 2026-10-02)
+
+Not a new requirement: the audit's C1 was marked fixed, but the live official registry returns names in byte order, so a typed `github` never reached GitHub's own server and the hand-written fixture hid it. FR-060, FR-061 and SC-008 now hold against a fixture recorded from the live registry. Decisions: research D36.
+
+- [x] T166 [P] Registry-shaped SC-008 fixture and fake registry (D36.12): `RecordedRegistryHandlerForTest` in `internal/registries/testhooks.go`, `internal/registries/recorded_registry_test.go` (`TestCatalogGithubFixture_MainPageLacksGitHubServer` proves the live bug, `TestRecordCatalogGithubFixture` re-records), the corpus in `internal/registries/testdata/catalog_github_order.json`, and the three Go legs (`internal/httpapi/spec109_catalog_order_test.go`, `internal/server/spec109_catalog_order_test.go`, `cmd/mcpproxy/catalog_order_parity_test.go`) serving it, the MCP leg now at `limit` 20
+- [x] T167 official.go (D36.2, D36.4, D36.10): server.json title and version, `collapseOfficialVersions`, `officialExpansionQueries`, `fetchOfficialCatalog` (one page per query, concurrent, main query decides availability): `internal/registries/official_catalog_test.go`
+- [x] T168 search.go (D36.3): `searchCatalogSource` fetches without truncating before ranking (`typedFetchCap` 300), the query filter and the cached-listing matcher match the title; `SearchServers` unchanged: `internal/registries/search_catalog_test.go`
+- [x] T169 catalog.go `BuildCatalogHit` signals (D36.5, D36.7, D36.9, D36.10): `verified` = the publisher owns the repository, `title` order, placeholder description empty, no stars for a borrowed repo: `internal/registries/catalog_hit_signals_test.go`
+- [x] T170 catalog.go `Rank` (D36.1): `matchTier` first, `relevanceScore` removed: `internal/registries/catalog_rank_tier_test.go`, `internal/registries/rank_test.go`
+- [x] T171 catalog.go `SearchAll` (D36.3, D36.7, D36.8): typed queries rank before truncating, the popularity prefetch is capped at `limit`, Popular de-dups by normalized title: `internal/registries/catalog_typed_test.go` (`TestSearchAll_RecordedRegistry_GitHubFirst`)
+- [x] T172 catalog.go warm-behind (D36.11): a source that outlives the budget finishes in the background (30 s, 2 per source) and warms the listing cache: `internal/registries/catalog_warm_behind.go`, `internal/registries/catalog_warm_behind_test.go` (run under `-race -count=20` and `GOMAXPROCS=1`)
+- [x] T173 [P] [US5] Web card (FR-061, D36.6): no Official badge, Verified, publisher line, popularity: `frontend/src/components/CatalogSearch.vue`, `frontend/tests/unit/catalog-card-signals.spec.ts`, `frontend/tests/unit/add-server-catalog.spec.ts`, `frontend/tests/unit/catalog-order-parity.spec.ts`
+- [x] T174 [US5] macOS card badge parity (D36.6): `CatalogView.trustBadge`, `native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift`, `native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift`; publisher and popularity on the macOS card are a follow-up
+- [x] T175 [P] Docs and bookkeeping for T166–T174: `spec.md` (US5, FR-060, FR-061, SC-008, edge cases), `data-model.md` §9, `contracts/rest-api.md`, `contracts/mcp-tools.md`, `research.md` D36, `plan.md`, `quickstart.md` recipe `fix-catalog-rank`, `parity-matrix.json` row 14, `acceptance-index.json` SC-008, Spec 110 amendments, `docs/api/rest-api.md`, `docs/cli/catalog-commands.md`, `docs/features/catalog-popularity.md`, the `catalog search` help text
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
@@ -421,4 +438,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-201 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+211 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 201 before the fix-catalog-rank PR, which added T166–T175; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
