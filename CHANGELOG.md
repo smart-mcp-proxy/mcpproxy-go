@@ -55,7 +55,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
   [Review Commands](https://docs.mcpproxy.app/cli/review-commands))
 - **web ui:** `/repositories`, `/sessions`, `/tokens`, `/security` and `/overview` redirect to their
   new homes (`/add-server?tab=catalog`, `/activity?view=sessions`, `/clients?tab=tokens`,
-  `/review`, `/`) and keep the query string. `POST /api/v1/servers/<built-in function id>/unquarantine` stays for API
+  `/review`, `/`) and keep the query string. `POST /api/v1/servers/{id}/unquarantine` stays for API
   compatibility but no first-party surface calls it any more. (spec 109,
   [Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 

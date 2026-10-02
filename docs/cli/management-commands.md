@@ -89,7 +89,7 @@ New servers and new or changed tools wait for review. `mcpproxy review` is the o
 |---|---|
 | `mcpproxy upstream approve <server> [tools...]` | `mcpproxy review approve <server> --tools ...` |
 | `mcpproxy security approve <server>` / `security reject` | `mcpproxy review approve <server>` / `mcpproxy review reject <server>` |
-| `mcpproxy tools approve` / `tools reject` | `mcpproxy review approve` / `mcpproxy review reject` with `--tools` |
+| `mcpproxy tools approve <server>:<tool>` / `tools reject <server>:<tool>` | `mcpproxy review approve <server> --tools ...` / `mcpproxy review reject <server> --tools ...` |
 
 `mcpproxy tools list --risk` is an alias of `--tier`.
 

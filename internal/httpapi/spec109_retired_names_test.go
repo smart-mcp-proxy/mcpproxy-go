@@ -67,8 +67,13 @@ type p109RetiredAllow struct {
 	Reason  string `json:"reason"`
 }
 
+// p109Interpolation matches the interpolation forms of the scanned languages
+// (Swift \(x), JS ${x}, Vue {{ x }}, printf verbs), so `"Dashboard \(name)"`
+// is still the retired label "Dashboard" with a value appended.
+var p109Interpolation = regexp.MustCompile(`\\\([^)]*\)|\$\{[^}]*\}|\{\{[^}]*\}\}|%[sdv@]`)
+
 func p109RetiredMatch(literal string) bool {
-	trimmed := strings.TrimSpace(literal)
+	trimmed := strings.TrimSpace(p109Interpolation.ReplaceAllString(literal, ""))
 	for _, retired := range p109RetiredExact {
 		if trimmed == retired {
 			return true
@@ -216,6 +221,8 @@ func TestSpec109RetiredNamesScannerBites(t *testing.T) {
 		{"add to mcpproxy", "frontend/src/a.ts", `const t = "Add to MCPProxy"`, 0},
 		{"path literal", "frontend/src/a.ts", `redirect: '/dashboard'`, 0},
 		{"longer sentence", "frontend/src/a.ts", `const t = "Open the Dashboard page"`, 0},
+		{"swift interpolation", "native/macos/MCPProxy/MCPProxy/A.swift", `Text("Dashboard \(name)")`, 1},
+		{"js template interpolation", "frontend/src/a.ts", "const t = `Repositories ${n}`", 1},
 	}
 	for _, c := range cases {
 		assert.Len(t, p109ScanRetiredSource(c.path, c.src), c.want, c.name)

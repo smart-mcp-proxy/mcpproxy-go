@@ -285,3 +285,56 @@ func TestSpec109ParityMatrixResolves(t *testing.T) {
 		require.Empty(t, p109MatrixTestUnresolved(t, "go:internal/httpapi/spec109_parity_matrix_test.go"))
 	})
 }
+
+// p109SymbolDeclared reports whether src declares or uses name as an
+// identifier (a type, function, variable, case, field or call) rather than
+// merely mentioning the word in a comment or string. A name with a non-word
+// character (a phrase, a route, a dotted call) must occur verbatim.
+func p109SymbolDeclared(src, name string) bool {
+	if !regexp.MustCompile(`^\w+$`).MatchString(name) {
+		return strings.Contains(src, name)
+	}
+	q := regexp.QuoteMeta(name)
+	for _, pat := range []string{
+		`\b(struct|class|enum|protocol|extension|func|var|let|case|const|function|type|interface|def)\s+` + q + `\b`,
+		`\b` + q + `\s*[:=(]`,
+		`(?m)^\s*` + q + `\s+\S`, // a Go struct field
+	} {
+		if regexp.MustCompile(pat).MatchString(src) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSpec109ParityMatrixSymbolsAreDeclared: a `symbol:` id naming an
+// identifier must be declared or used in the file, not just mentioned.
+func TestSpec109ParityMatrixSymbolsAreDeclared(t *testing.T) {
+	m := p109LoadMatrix(t)
+	checked := 0
+	for _, row := range m.Rows {
+		for _, surface := range p108Surfaces {
+			for _, id := range row.Cells[surface].Ids {
+				rest, ok := strings.CutPrefix(id, "symbol:")
+				if !ok {
+					continue
+				}
+				file, name, _ := strings.Cut(rest, "#")
+				b, err := os.ReadFile(filepath.Join(p109Root(t), filepath.FromSlash(file)))
+				require.NoError(t, err, "row %s %s: %s", row.Row, surface, id)
+				if !p109SymbolDeclared(string(b), name) {
+					t.Errorf("row %s %s: %s is mentioned in %s but never declared or used as an identifier", row.Row, surface, name, file)
+				}
+				checked++
+			}
+		}
+	}
+	require.Greater(t, checked, 20)
+
+	t.Run("a word in a comment is not a declaration", func(t *testing.T) {
+		require.False(t, p109SymbolDeclared("// the HomeView is nice\nlet x = 1", "HomeView"))
+		require.True(t, p109SymbolDeclared("struct HomeView: View {}", "HomeView"))
+		require.True(t, p109SymbolDeclared("\tUsable bool `json:\"usable\"`", "Usable"))
+		require.True(t, p109SymbolDeclared("router.replace({ query })", "router.replace"))
+	})
+}

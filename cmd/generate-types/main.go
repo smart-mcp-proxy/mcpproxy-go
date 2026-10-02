@@ -1114,6 +1114,9 @@ func enumBlock(prefix, typeName, comment string, values []string) string {
 	for _, v := range values {
 		name := prefix
 		for _, w := range strings.Split(v, "_") {
+			if w == "" {
+				continue // a leading, trailing or repeated underscore adds no word
+			}
 			name += strings.ToUpper(w[:1]) + w[1:]
 		}
 		names = append(names, name)

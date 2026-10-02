@@ -327,6 +327,33 @@ func TestSpec109Traceability_Findings(t *testing.T) {
 	}
 }
 
+// TestSpec109Traceability_EveryTableRowResolves: the rows that carry no
+// finding id (URL filter contract, Needs-attention endpoint, caller classes,
+// X12) are held to the same rule as the finding rows, because FR coverage and
+// the register tracer count them.
+func TestSpec109Traceability_EveryTableRowResolves(t *testing.T) {
+	tasks := p109Tasks(t)
+	frs, _ := p109SpecFRs(t, p109SpecDir+"/spec.md")
+	rows := p109AllTraceRows(t)
+	require.Greater(t, len(rows), len(p109SC001Findings), "the table has rows beyond the finding ids")
+	for _, row := range rows {
+		for _, fr := range p109ExpandFRs(row.FRs) {
+			assert.True(t, frs[fr], "row %q names %s, which spec.md does not define", row.ID, fr)
+		}
+		taskIDs := p109ExpandTasks(row.Tests, tasks)
+		assert.NotEmpty(t, taskIDs, "row %q names no task", row.ID)
+		for _, tid := range taskIDs {
+			task, ok := tasks[tid]
+			if !assert.True(t, ok, "row %q names %s, which tasks.md does not define", row.ID, tid) {
+				continue
+			}
+			if reason := p109TaskResolves(t, task); reason != "" {
+				assert.Fail(t, "unresolved task", "row %q -> %s: %s", row.ID, tid, reason)
+			}
+		}
+	}
+}
+
 // TestSpec109Traceability_FRCoverage is rule (b).
 func TestSpec109Traceability_FRCoverage(t *testing.T) {
 	defined, reserved := p109SpecFRs(t, p109SpecDir+"/spec.md")
@@ -385,6 +412,18 @@ func p109ResolveTestRef(t testing.TB, ref string) string {
 		return "unknown ref kind " + kind
 	}
 	path, name, _ := strings.Cut(rest, "#")
+	// A ref must name a test file, not any file that happens to exist.
+	fileKinds := map[string]*regexp.Regexp{
+		"go":     regexp.MustCompile(`_test\.go$`),
+		"vitest": regexp.MustCompile(`\.spec\.ts$`),
+		"pw":     regexp.MustCompile(`\.spec\.ts$`),
+		"xctest": regexp.MustCompile(`Tests?\.swift$`),
+		"sh":     regexp.MustCompile(`\.sh$`),
+		"golden": regexp.MustCompile(`\.json$`),
+	}
+	if !fileKinds[kind].MatchString(path) {
+		return path + " is not a " + kind + " test or golden file"
+	}
 	b, err := os.ReadFile(filepath.Join(p109Root(t), filepath.FromSlash(path)))
 	if err != nil {
 		return "missing file " + path

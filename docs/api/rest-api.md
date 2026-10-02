@@ -978,7 +978,7 @@ Search every enabled catalog source (registry) at once. Both editions; open to a
 
 | Parameter | Description |
 |---|---|
-| `q` | Free-text query. Empty returns `sections` (`official` and `popular`, up to 12 each) instead of `results` |
+| `q` | Free-text query. Empty returns `results: []` and fills `sections` (`official` and `popular`, up to 12 each) |
 | `source` | Narrow to one catalog source id, applied before ranking and the limit |
 | `limit` | Maximum results (default 20, maximum 50) |
 | `tag` | Not supported: catalog entries carry no tags, so a non-empty value returns `400` |

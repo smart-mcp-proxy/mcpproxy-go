@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -73,7 +74,15 @@ func p109HelpFor(t *testing.T, path string) (p109HelpJSON, error) {
 	var lastErr error
 	for extra := 0; extra <= 2; extra++ {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestParity109CLICellsResolve$")
-		cmd.Env = append(os.Environ(), "MCPPROXY_109_PARITY_TARGET="+path, "MCPPROXY_109_PARITY_EXTRA="+strconv.Itoa(extra))
+		// Drop an inherited copy of our own variables: a duplicate key could
+		// make the child read the stale value.
+		var env []string
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "MCPPROXY_109_PARITY_") {
+				env = append(env, kv)
+			}
+		}
+		cmd.Env = append(env, "MCPPROXY_109_PARITY_TARGET="+path, "MCPPROXY_109_PARITY_EXTRA="+strconv.Itoa(extra))
 		out, err := cmd.Output()
 		if err != nil {
 			lastErr = err
@@ -165,6 +174,45 @@ func TestParity109CLICellsResolve(t *testing.T) {
 		require.Empty(t, p109FieldProblems([]p109HelpJSON{help}, []string{"approval", "tier"}))
 		require.Equal(t, []string{"not_a_flag"}, p109FieldProblems([]p109HelpJSON{help}, []string{"tier", "not_a_flag"}))
 	})
+}
+
+// TestParity109CLIGroupsAreRegisteredInMain: the helper builds its own command
+// tree, so this pins the production one. Every command group a CLI cell of the
+// matrix names must be constructed and added to the root command in main.go.
+func TestParity109CLIGroupsAreRegisteredInMain(t *testing.T) {
+	if os.Getenv("MCPPROXY_109_PARITY_TARGET") != "" {
+		t.Skip("helper process")
+	}
+	constructors := map[string]string{
+		"attention": "GetAttentionCommand", "status": "GetStatusCommand", "doctor": "GetDoctorCommand",
+		"upstream": "GetUpstreamCommand", "review": "GetReviewCommand", "tools": "GetToolsCommand",
+		"client": "GetClientCommand", "connect": "GetConnectCommand", "token": "GetTokenCommand",
+		"catalog": "GetCatalogCommand", "registry": "GetRegistryCommand", "activity": "GetActivityCommand",
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "specs", "109-ux-navigation-consistency", "parity-matrix.json"))
+	require.NoError(t, err)
+	var matrix p109CLIMatrix
+	require.NoError(t, json.Unmarshal(raw, &matrix))
+	mainSrc, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+	src := string(mainSrc)
+
+	groups := map[string]bool{}
+	for _, row := range matrix.Rows {
+		for _, id := range row.Cells["cli"].Ids {
+			_, path, _ := strings.Cut(id, ":")
+			groups[strings.Fields(path)[0]] = true
+		}
+	}
+	require.GreaterOrEqual(t, len(groups), 10)
+	for group := range groups {
+		ctor, ok := constructors[group]
+		require.True(t, ok, "the matrix names the %q group: add its constructor to this test and to p109HelpRoot", group)
+		direct := "rootCmd.AddCommand(" + ctor + "())"
+		assigned := regexp.MustCompile(`(\w+) := ` + ctor + `\(\)`).FindStringSubmatch(src)
+		registered := strings.Contains(src, direct) || (assigned != nil && strings.Contains(src, "rootCmd.AddCommand("+assigned[1]+")"))
+		require.True(t, registered, "main.go does not add %s() to the root command", ctor)
+	}
 }
 
 type p109TermFamily struct {

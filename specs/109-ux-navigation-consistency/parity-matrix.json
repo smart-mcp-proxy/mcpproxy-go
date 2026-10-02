@@ -982,7 +982,7 @@
         "macos": {
           "status": "must",
           "ids": [
-            "symbol:native/macos/MCPProxy/MCPProxy/Views/RegistriesView.swift#RegistriesView"
+            "symbol:native/macos/MCPProxy/MCPProxy/Views/RegistriesView.swift#CatalogSourcesTab"
           ],
           "tests": [
             "xctest:native/macos/MCPProxy/MCPProxyTests/RegistryModelsTests.swift"
@@ -1078,7 +1078,7 @@
         "web": {
           "status": "must",
           "ids": [
-            "symbol:frontend/src/utils/activity.ts#fold"
+            "symbol:frontend/src/utils/activity.ts#groupActivityRuns"
           ],
           "tests": [
             "vitest:frontend/tests/unit/activity-system-folding.spec.ts"
