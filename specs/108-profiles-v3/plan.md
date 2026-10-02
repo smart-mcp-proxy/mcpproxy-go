@@ -128,6 +128,7 @@ Merge order: `a → (b ∥ c) → d → e → f → (g ∥ h ∥ i ∥ k) → j 
 | 108-l | `108-l-profiles-v3-parity-docs` | cross-surface parity test, Playwright `profiles-scope.spec.ts` in the release-gate sweep, docs, release notes, CLAUDE.md line | FR-051, SC-001, SC-006 | g, h, j, k | all |
 | 108-retro-go | `fix/108-retro-go` | post-merge Sol findings; Go only; after 108-k | FR-021a, 008a, 029, 031, 005 | k | Go core, REST, MCP, CLI |
 | fix-1458 | `fix-1458-profile-index-reconcile` | reconcile per-profile indexes on every apply/reload that changes `profiles` or `anonymous_profile` | FR-011 (`retrieve_tools` under a profile), L9 follow-up | l, retro-go | Go core |
+| fix-nested-refusal | `fix-nested-refusal` | nested code_execution profile refusals record block_reason; access-explain move_client hint names the destination | FR-029, FR-035, US1-5 | fix-1458, demo-ux-fixes | Go core, CLI |
 
 ## Design — the five mechanisms
 
