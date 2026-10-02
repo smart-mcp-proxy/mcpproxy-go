@@ -113,7 +113,15 @@ func (m *Manager) GetBoltDB() *BoltDB {
 
 // Upstream operations
 
-// SaveUpstreamServer saves an upstream server configuration
+// SaveUpstreamServer saves an upstream server configuration.
+//
+// Invariant: it never lowers a recorded Quarantined=true. Only
+// QuarantineUpstreamServer (the review/approve door) or a config that carries an
+// explicit operator decision (QuarantineExplicitlySet) may clear it. A Go-built
+// or file-decoded ServerConfig that merely says Quarantined=false is
+// indistinguishable from "never stated", so it must not erase a quarantine the
+// admission gate recorded. The guard changes only the persisted record, never
+// the caller's struct.
 func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -154,7 +162,13 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		ExposePrompts:            serverConfig.ExposePrompts,
 	}
 
-	return m.db.SaveUpstream(record)
+	kept, err := m.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		m.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name,
+			"action", "use the quarantine review (QuarantineServer) or state \"quarantined\": false in mcp_config.json")
+	}
+	return err
 }
 
 // GetUpstreamServer retrieves an upstream server by name

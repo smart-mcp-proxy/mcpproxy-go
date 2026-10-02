@@ -213,7 +213,14 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
 	}
-	return am.db.SaveUpstream(record)
+	// Same invariant as Manager.SaveUpstreamServer: never lower a recorded
+	// quarantine without an explicit decision (only quarantineServerSync may).
+	kept, err := am.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		am.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name)
+	}
+	return err
 }
 
 func (am *AsyncManager) deleteServerSync(name string) error {

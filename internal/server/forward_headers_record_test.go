@@ -115,6 +115,7 @@ func TestForwardedHeaderSuccessEchoScrubbedFromRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"X-Tenant-Id"}, sc.ForwardHeaders)
 	sc.Quarantined = false
+	sc.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
 	servers, err := rt.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
