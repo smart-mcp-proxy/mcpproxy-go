@@ -71,7 +71,8 @@ func TestSetProfileV3SwitchableClientCanSelectDeclaredTarget(t *testing.T) {
 		result, err := proxy.handleSetProfile(ctx, request)
 		require.NoError(t, err)
 		require.True(t, result.IsError)
-		require.Equal(t, "unknown profile 'work-full'", resultText(t, result))
+		require.Equal(t, expectedSetProfileRefusal(t, ctx, "work-full"), resultText(t, result))
+		require.Equal(t, "cannot switch to profile 'work-full': this client's profile is locked", resultText(t, result))
 		require.Empty(t, proxy.sessionStore.GetActiveProfile("locked-set-profile"))
 	})
 
@@ -327,7 +328,7 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				require.True(t, result.IsError, "%s: set_profile(%q) must be refused", row.name, slug)
 				text := resultText(t, result)
 				require.Equal(t, "", proxy.sessionStore.GetActiveProfile(sessionIDFromContext(ctx)), "a refusal leaves the session unchanged")
-				require.Equal(t, fmt.Sprintf("unknown profile '%s'", slug), text)
+				require.Equal(t, expectedSetProfileRefusal(t, ctx, slug), text)
 				if row.base != "" && row.base != slug {
 					require.NotContains(t, text, row.base, "a refusal must not name the caller's base profile (FR-018)")
 				}
@@ -501,9 +502,10 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 
 		other := mcp.CallToolRequest{}
 		other.Params.Arguments = map[string]interface{}{"profile": "legacy"}
-		refused, err := proxy.handleSetProfile(sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid), other)
+		lockedCtx := sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid)
+		refused, err := proxy.handleSetProfile(lockedCtx, other)
 		require.NoError(t, err)
 		require.True(t, refused.IsError)
-		require.Equal(t, "unknown profile 'legacy'", resultText(t, refused))
+		require.Equal(t, expectedSetProfileRefusal(t, lockedCtx, "legacy"), resultText(t, refused))
 	})
 }
