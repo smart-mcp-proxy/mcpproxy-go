@@ -179,3 +179,34 @@ export function toolKey(row: { server: string; tool: string }): string {
 export function toolRowId(row: { server: string; tool: string }): string {
   return `${row.server}__${row.tool}`
 }
+
+// --- Try it hits -------------------------------------------------------------
+
+export interface TryHitRow { key: string; server: string; tool: string; description: string }
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+// One POST /profiles/try hit as a row. The real shape is the retrieve_tools hit
+// {score, tool: {name: "server:tool", server_name, description, annotations}},
+// the one the CLI's tryResultRow reads. A flat {server, name, description} item
+// is accepted too. Only string fields are read, so an unexpected value can
+// never print as "[object Object]"; an unnamed hit gets an empty key.
+export function tryHitRow(item: Record<string, unknown>): TryHitRow {
+  const nested = typeof item.tool === 'object' && item.tool !== null ? (item.tool as Record<string, unknown>) : null
+  const t = nested ?? item
+  let name = text(t.name) || text(item.tool)
+  let server = text(t.server_name) || text(t.server) || text(item.server_name) || text(item.server)
+  const colon = name.indexOf(':')
+  if (colon > 0) {
+    if (!server) server = name.slice(0, colon)
+    name = name.slice(colon + 1)
+  }
+  return {
+    key: name ? (server ? `${server}:${name}` : name) : '',
+    server,
+    tool: name,
+    description: text(t.description) || text(item.description),
+  }
+}
