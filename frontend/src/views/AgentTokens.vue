@@ -151,7 +151,7 @@
             </td>
             <td :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</td>
             <td>
-              <span v-if="token.profile_pin" class="badge badge-outline badge-sm" :data-test="`token-profile-${token.name}`">{{ profilesStore.titleFor(token.profile_pin) }}</span>
+              <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
               <span v-else class="text-base-content/40 text-sm">&mdash;</span>
             </td>
             <td>
