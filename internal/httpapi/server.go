@@ -5670,6 +5670,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
 // @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the write would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
@@ -5706,6 +5707,9 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
 			return &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		if err := refuseLockedTelemetryChange(stored, resolved); err != nil {
+			return err
 		}
 		*stored = *resolved
 		return nil
@@ -5800,6 +5804,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
 // @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the patch would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
@@ -5838,6 +5843,9 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		merged, refusal := s.mergeConfigPatch(cfg, patchMap)
 		if refusal != nil {
 			return refusal
+		}
+		if err := refuseLockedTelemetryChange(cfg, merged); err != nil {
+			return err
 		}
 		*cfg = *merged
 		return nil

@@ -84,7 +84,7 @@ A client without an active client credential exits 1 with `mcpproxy connect <id>
 mcpproxy access explain --tool github:create_issue (--client cursor | --token ci | --profile work-readonly | --anonymous)
 ```
 
-Walks the gates a call meets (credential, profile, server in scope, tool rule, tier cap, token permission, global gate, server state, tool approval), prints the verdict (`allowed`, `blocked`, `hidden`) and the fixes in preference order, each with the command that performs it. The verdict is computed by the same predicate that enforces the call, so it never disagrees with what actually happens. Exit code 0 whenever an explanation is produced: the verdict is data.
+Walks the gates a call meets (credential, profile, server in scope, tool rule, tier cap, token permission, global gate, server state, tool approval), prints the verdict (`allowed`, `blocked`, `hidden`) and the fixes in preference order, each with the command that performs it. The verdict is computed by the same predicate that enforces the call, so it never disagrees with what actually happens. The move-client fix prints `mcpproxy client set-profile <client> <destination-profile>` with the profile it names. Exit code 0 whenever an explanation is produced: the verdict is data.
 
 ## `mcpproxy token`
 

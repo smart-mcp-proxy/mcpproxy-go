@@ -866,9 +866,18 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(ctx context.Context, server
 // from errorMsg. A post-dispatch output block already wrote the line as
 // outcome:blocked; the attempt's dedup makes this call a no-op then.
 func (p *MCPProxyServer) emitActivityToolCallCompleted(ctx context.Context, serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
+	p.emitActivityToolCallCompletedWithBlockReason(ctx, serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonDecisions, parentID, "")
+}
+
+// emitActivityToolCallCompletedWithBlockReason is emitActivityToolCallCompleted
+// plus blockReason: the profile.BlockReason of a pre-dispatch profile
+// tool-policy refusal (today only the code_execution sandbox's nested gate);
+// empty for everything else. It mirrors the emitActivityPolicyDecision /
+// emitActivityPolicyDecisionWithBlockReason pair, and keeps status at index 6.
+func (p *MCPProxyServer) emitActivityToolCallCompletedWithBlockReason(ctx context.Context, serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID, blockReason string) {
 	p.auditToolCallFromStatus(ctx, status, durationMs, requestBytes, responseBytes)
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID, p.activityAttribution(ctx, sessionID))
+		p.mainServer.runtime.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID, blockReason, p.activityAttribution(ctx, sessionID))
 	}
 }
 

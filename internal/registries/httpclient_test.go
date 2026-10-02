@@ -14,9 +14,9 @@ import (
 // restores the production delay afterwards.
 func withFastRetries(t *testing.T) {
 	t.Helper()
-	prev := registryRetryBaseDelay
-	registryRetryBaseDelay = time.Millisecond
-	t.Cleanup(func() { registryRetryBaseDelay = prev })
+	prev := registryRetryBaseDelay.Load()
+	registryRetryBaseDelay.Store(int64(time.Millisecond))
+	t.Cleanup(func() { registryRetryBaseDelay.Store(prev) })
 }
 
 // swapRegistryClient overrides the shared registry HTTP client for a test and
@@ -156,9 +156,9 @@ func TestRegistryGet_ParentContextStopsRetry(t *testing.T) {
 // large/hostile registry response fails fast instead of allocating unbounded.
 func TestRegistryGet_RejectsOversizedBody(t *testing.T) {
 	withFastRetries(t)
-	prev := registryMaxBodyBytes
-	registryMaxBodyBytes = 16
-	t.Cleanup(func() { registryMaxBodyBytes = prev })
+	prev := registryMaxBodyBytes.Load()
+	registryMaxBodyBytes.Store(16)
+	t.Cleanup(func() { registryMaxBodyBytes.Store(prev) })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

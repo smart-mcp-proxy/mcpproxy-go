@@ -129,6 +129,8 @@ Get server status and statistics. The `data` object carries `running`, `edition`
 
 `GET /api/v1/config` keeps returning the stored `telemetry.enabled`, which can differ from `enabled` here when an environment variable overrides it. A dev (non-release) build never transmits whatever `enabled` says.
 
+While an environment variable forces telemetry off, `POST /api/v1/config/apply` and `PATCH /api/v1/config` answer `422` and write nothing if the document would change `telemetry.enabled` (the value is judged after decoding, so a miscased key is caught too). A document that leaves `telemetry.enabled` as stored is accepted.
+
 ### Servers
 
 #### GET /api/v1/servers

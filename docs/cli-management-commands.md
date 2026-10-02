@@ -11,6 +11,15 @@ MCPProxy provides two command groups:
 
 All commands support both **daemon mode** (fast, via socket) and **standalone mode** (direct connection).
 
+## Global flags
+
+`-c/--config` and `-d/--data-dir` are accepted before or after the command name
+and apply to every management command. An empty value (`-c ""`, `--config=`) is an
+error, never "use the default". A command's own `--config` wins over the global
+one. With only `-d DIR`, management commands read `DIR/mcp_config.json` when it
+exists; they never create a default configuration under `~/.mcpproxy` when a
+path was given.
+
 ## Command Reference
 
 ### `mcpproxy upstream list`
@@ -405,7 +414,7 @@ mcpproxy doctor [flags]
 ```
 
 **Flags:**
-- `--output, -o` - Output format (pretty, json) [default: pretty]
+- `--output, -o` - Output format (pretty, json, yaml) [default: pretty]; the global `--json` is shorthand for `-o json`
 - `--log-level, -l` - Log level [default: warn]
 - `--config, -c` - Path to config file
 - `--server` - Limit health checks to a single upstream server by name (Spec 044)
@@ -424,6 +433,12 @@ mcpproxy doctor --output=json
 # Only show issues for a single server
 mcpproxy doctor --server=github
 ```
+
+The report is made to be shared, so credentials are always redacted in every
+format: query parameters such as `?apikey=` or `?token=` in any URL (including
+`web_ui_url`) print as `REDACTED`, and so does the admin API key wherever it
+would appear. Use `mcpproxy status --show-key` or `mcpproxy status --web-url`
+when you need the key itself.
 
 **Health Checks:**
 - Upstream server connection errors

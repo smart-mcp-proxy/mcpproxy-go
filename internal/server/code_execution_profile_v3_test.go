@@ -10,6 +10,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,12 +49,7 @@ func TestCodeExecution_ProfileV3HiddenAndRefused(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Equal(t, "unknown tool: code_execution", resultText(t, result))
 
-	go rt.ActivityService().Start(rt.AppContext(), rt)
-	startDeadline := time.Now().Add(5 * time.Second)
-	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
-		time.Sleep(time.Millisecond)
-	}
-	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before the policy decision is emitted")
+	startProfileV3ActivityService(t, rt)
 	result, err = proxy.handleCodeExecution(urlCtx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Arguments: map[string]interface{}{"code": "1 + 1"}},
 	})
@@ -73,6 +69,19 @@ func TestCodeExecution_ProfileV3HiddenAndRefused(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("profile code_execution denial did not persist block_reason")
+}
+
+// startProfileV3ActivityService starts the runtime's activity service and waits
+// for it to subscribe, so activity events emitted afterwards are persisted by
+// the bus subscriber (the write is asynchronous).
+func startProfileV3ActivityService(t *testing.T, rt *runtime.Runtime) {
+	t.Helper()
+	go rt.ActivityService().Start(rt.AppContext(), rt)
+	startDeadline := time.Now().Add(5 * time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before the activity is emitted")
 }
 
 func TestCodeExecution_DanglingProfileHiddenFromDiscovery(t *testing.T) {
@@ -321,6 +330,7 @@ func TestCodeExecution_ProfileV3NestedCallBlockedBeforeUpstream(t *testing.T) {
 	updated.Profiles[0].CodeExecution = boolPtr(true)
 	rt.UpdateConfig(&updated, "")
 	up := startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
+	startProfileV3ActivityService(t, rt)
 
 	result, err := proxy.handleCodeExecution(urlProfileCtx(proxy, "work-readonly"), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Arguments: map[string]interface{}{
@@ -355,6 +365,18 @@ func TestCodeExecution_ProfileV3NestedCallBlockedBeforeUpstream(t *testing.T) {
 	}
 	require.NotEmpty(t, childParentID, "profile-refused nested call is persisted")
 	require.Equal(t, parentID, childParentID, "the refused child record links to its parent execution")
+
+	// Spec 108 US1-5 / FR-029 (T166): the activity child carries the typed
+	// block reason and the caller's scope attribution.
+	child := waitNestedChild(t, rt, parentID, "github", "create_issue")
+	assert.Equal(t, storage.ActivityTypeToolCall, child.Type)
+	assert.Equal(t, storage.ActivityStatusBlocked, child.Status)
+	assert.Equal(t, storage.ActivitySourceInternal, child.Source)
+	assert.Equal(t, string(profile.BlockReasonTier), child.BlockReason)
+	assert.Equal(t, "profile_tier", child.Metadata[storage.MetadataKeyBlockReason])
+	assert.Equal(t, "work-readonly", child.Profile)
+	assert.Equal(t, "url", child.ProfileSource)
+	assert.Equal(t, v3TierRefusal(t), child.ErrorMessage)
 }
 
 func profileV3ToolNames(tools []mcp.Tool) []string {

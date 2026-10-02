@@ -22,11 +22,11 @@ Profile gate evaluated after the Spec 105 server-scope gate and before upstream 
 
 ## `code_execution`
 
-Absent from `tools/list` and refused at call (`tool not found` uniform shape) when the profile's effective code execution is off: `code_execution: false`, or unset under a `read`/`write` `max_tier` (FR-003a). Nested `call_tool` refusals are returned to the script as the same error text and recorded as children (`parent_id`).
+Absent from `tools/list` and refused at call (`tool not found` uniform shape) when the profile's effective code execution is off: `code_execution: false`, or unset under a `read`/`write` `max_tier` (FR-003a). Nested `call_tool` refusals are returned to the script as the same error text and recorded as `tool_call` children (`parent_id`, `status=blocked`) carrying the same `block_reason` as a top-level refusal.
 
 ## `set_profile` (semantics change only)
 
-Admission per FR-022; every refusal uses the Spec 105 `profileNotSelectable` uniform body. Response unchanged: `{active_profile, servers}` plus `profile_source` (new field, additive), which reports only the caller's own selection — `session` with the selected slug, or `none`/empty `active_profile` after `set_profile("")` even when the next request falls through to a pin, binding or anonymous base (FR-018).
+Admission per FR-022; every refusal is non-disclosing: a client credential (`mcp_cli_`) gets the per-caller uniform text of `contracts/refusals.md` (locked: `cannot switch to profile '<p>': this client's profile is locked`; switchable: `cannot switch to profile '<p>': it is not a profile this client may switch to`; the text depends only on the credential's own mode, never on the slug, and never names the bound profile), every other caller keeps the Spec 105 uniform `unknown profile '<p>'` (administrators: with the `available:` list). `/mcp/p/<slug>` keeps the Spec 105 `profileNotSelectable` body. Response unchanged: `{active_profile, servers}` plus `profile_source` (new field, additive), which reports only the caller's own selection — `session` with the selected slug, or `none`/empty `active_profile` after `set_profile("")` even when the next request falls through to a pin, binding or anonymous base (FR-018).
 
 ## `profiles` (new, admin only — FR-017, research D12/D14)
 

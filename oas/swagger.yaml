@@ -4834,6 +4834,12 @@ components:
           $ref: '#/components/schemas/profile.FixAction'
         label:
           type: string
+        profile:
+          description: |-
+            Profile is set for move_client only: the destination profile slug the fix
+            moves the client to. Target stays the client id (UIs navigate by it) and
+            Label carries the title, so neither can name the slug.
+          type: string
         step:
           type: string
           x-enum-varnames:
@@ -6577,6 +6583,14 @@ paths:
           description: 'binding_bypassable_without_auth: the patch would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -6635,6 +6649,14 @@ paths:
           description: 'binding_bypassable_without_auth: the write would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,12 +37,18 @@ const (
 
 // registryRetryBaseDelay is the first backoff; each subsequent retry doubles it
 // (500ms, then 1s). A var (not const) so tests can shrink it.
-var registryRetryBaseDelay = 500 * time.Millisecond
+var registryRetryBaseDelay atomic.Int64 // nanoseconds; atomic because a leaked warm-behind fetch may still read it
 
 // registryMaxBodyBytes caps how much of a registry response we buffer in memory,
 // bounding a large or hostile body (a real official page of 100 servers is a few
-// hundred KB, so 16 MiB is generous). A var so tests can shrink it.
-var registryMaxBodyBytes int64 = 16 << 20
+// hundred KB, so 16 MiB is generous). Atomic so tests can shrink it while a
+// background (warm-behind) fetch goroutine from an earlier test is still reading.
+var registryMaxBodyBytes atomic.Int64
+
+func init() {
+	registryMaxBodyBytes.Store(16 << 20)
+	registryRetryBaseDelay.Store(int64(500 * time.Millisecond))
+}
 
 var (
 	registryHTTPClientOnce sync.Once
@@ -143,7 +150,7 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 		if attempt > 1 {
 			// Back off before retrying, but bail out immediately if the parent
 			// context is already done.
-			delay := registryRetryBaseDelay * time.Duration(1<<(attempt-2))
+			delay := time.Duration(registryRetryBaseDelay.Load()) * time.Duration(1<<(attempt-2))
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -180,7 +187,7 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 
 		// Cap the buffered body so a large/hostile response can't OOM us. Read
 		// one byte past the cap to detect an over-limit body.
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, registryMaxBodyBytes+1))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, registryMaxBodyBytes.Load()+1))
 		resp.Body.Close()
 		if readErr != nil {
 			if ctx.Err() != nil {
@@ -189,9 +196,9 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			lastErr = readErr
 			continue
 		}
-		if int64(len(body)) > registryMaxBodyBytes {
+		if int64(len(body)) > registryMaxBodyBytes.Load() {
 			// Not transient — a retry would hit the same oversized body.
-			return nil, fmt.Errorf("registry response exceeds %d bytes", registryMaxBodyBytes)
+			return nil, fmt.Errorf("registry response exceeds %d bytes", registryMaxBodyBytes.Load())
 		}
 
 		// Retry server-side failures while attempts remain.

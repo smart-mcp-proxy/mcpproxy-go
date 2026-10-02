@@ -135,6 +135,9 @@ var statusArgIndex = map[string]int{
 	// — ctx became the first parameter in Spec 107 PR-D (FR-012), moving
 	// status from index 5 to 6.
 	"emitActivityToolCallCompleted": 6,
+	// Spec 108 T166: the block-reason variant takes the same leading
+	// parameters, so it is held to the same rule.
+	"emitActivityToolCallCompletedWithBlockReason": 6,
 }
 
 func TestActivityCompletionNeverHardcodesSuccess(t *testing.T) {

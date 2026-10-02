@@ -290,7 +290,7 @@ func TestProfilesV3Acceptance_Check5_LockedCannotSwitchAndManagementHidden(t *te
 		res, err := setProfile(ctx, "work-full")
 		require.NoError(t, err)
 		require.True(t, res.IsError)
-		require.Equal(t, "unknown profile 'work-full'", resultText(t, res))
+		require.Equal(t, expectedSetProfileRefusal(t, ctx, "work-full"), resultText(t, res))
 		require.Empty(t, proxy.sessionStore.GetActiveProfile("acc5-locked"))
 		require.Equal(t, "work-readonly", proxy.ResolveProfileV3(ctx, idx).Name)
 	})
@@ -322,10 +322,11 @@ func TestProfilesV3Acceptance_Check5_LockedCannotSwitchAndManagementHidden(t *te
 		require.False(t, ok.IsError, resultText(t, ok))
 		require.Equal(t, "work-full", proxy.sessionStore.GetActiveProfile("acc5-switchable"))
 
-		refused, err := setProfile(sessionCtx(clientCtx("codex", "work-readonly", auth.ProfileModeSwitchable), "acc5-switchable-2"), "admin-all")
+		switchableCtx := sessionCtx(clientCtx("codex", "work-readonly", auth.ProfileModeSwitchable), "acc5-switchable-2")
+		refused, err := setProfile(switchableCtx, "admin-all")
 		require.NoError(t, err)
 		require.True(t, refused.IsError)
-		require.Equal(t, "unknown profile 'admin-all'", resultText(t, refused), "an undeclared target gets the uniform refusal")
+		require.Equal(t, expectedSetProfileRefusal(t, switchableCtx, "admin-all"), resultText(t, refused), "an undeclared target gets the per-caller uniform refusal")
 	})
 
 	t.Run("the profiles management tool is for an administrator session only", func(t *testing.T) {
