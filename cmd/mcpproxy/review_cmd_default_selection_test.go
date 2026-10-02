@@ -192,6 +192,20 @@ func TestReviewApproveToolsSelectsExactly(t *testing.T) {
 	})
 }
 
+func TestReviewApproveSelectionFlagsNeedCapturedTools(t *testing.T) {
+	for _, flags := range [][]string{{"--tools", "nonexistent"}, {"--except", "nonexistent"}} {
+		t.Run(flags[0], func(t *testing.T) {
+			recorder := &reviewRecorder{}
+			newMemoryReviewDaemon(t, recorder)
+			_, err := runReviewApprove(t, "table", nil, append([]string{"bare"}, append(flags, "--yes")...)...)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "no tool definitions captured")
+			require.Contains(t, err.Error(), "'bare'")
+			require.Empty(t, recorder.writes(), "selection flags are never silently discarded")
+		})
+	}
+}
+
 func TestReviewApprovePromptNamesCount(t *testing.T) {
 	t.Run("default selection", func(t *testing.T) {
 		recorder := &reviewRecorder{}

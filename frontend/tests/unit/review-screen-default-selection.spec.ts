@@ -163,6 +163,26 @@ describe('ReviewScreen default selection (D41)', () => {
     }
   })
 
+  it('navigating to another server drops the force retry state of the previous one', async () => {
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'dangerous baseline finding' }).mockResolvedValueOnce({ success: true })
+    const wrapper = await mountScreen()
+    const forceDialog = wrapper.findAll('dialog')[1].element as HTMLDialogElement & { showModal: () => void; close: () => void }
+    forceDialog.showModal = vi.fn()
+    forceDialog.close = vi.fn()
+    await wrapper.get('[data-test="review-approve-all"]').trigger('click')
+    await flushPromises()
+    expect(forceDialog.showModal).toHaveBeenCalled()
+    // Component reuse: /review/fixture -> /review/other while the force dialog is open.
+    ;(api.getServerReview as any).mockResolvedValue(payload([tool('read_x'), tool('write_x', { tier: 'write', default_allowed: false })]))
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    expect(forceDialog.close).toHaveBeenCalled()
+    await wrapper.findAll('dialog')[1].get('button.btn-error').trigger('click')
+    await flushPromises()
+    // Never fail open: the forced call uses the new server's own default block list, not [] from the old attempt.
+    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', true, ['write_x'])
+  })
+
   it('a review-changed reload keeps an explicit uncheck and an explicit check of an unchanged tool', async () => {
     const wrapper = await mountScreen()
     await wrapper.get('[data-test="review-allow-read_file"]').setValue(false)

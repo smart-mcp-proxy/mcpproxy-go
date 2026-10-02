@@ -78,7 +78,7 @@ const emit = defineEmits<{ approved: []; refreshed: [] }>()
 const review = ref<ServerReviewResponse | null>(null)
 const loading = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
-const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[]>([]); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
+const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
 const headline = computed(() => review.value ? reviewHeadline(review.value) : { state: 'review', title: '', subtitle: '' })
 const banner = computed(() => {
@@ -125,7 +125,7 @@ function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?
 async function approve(force: boolean, block?: string[]) {
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true
   const all = review.value?.tools.map(t => t.name) ?? []
-  const blocked = block ?? (force ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
   const res = await api.securityApprove(props.serverName, force, blocked)
   approving.value = false
@@ -143,8 +143,8 @@ async function refreshAfterScanSettled(event: Event) {
   rescanning.value = false
   void load()
 }
-// Component reuse across /review/A -> /review/B: scan state belongs to the old server.
-watch(() => props.serverName, () => { choices.clear(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+// Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
+watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

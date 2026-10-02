@@ -73,6 +73,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 				body["block"] = block
 			}
 			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block)
+		} else if len(tools) > 0 || len(except) > 0 {
+			// Nothing to select from: dropping --tools/--except would approve blind.
+			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
 		}
 		if !yes {
 			confirmed, err := confirm(prompt)
