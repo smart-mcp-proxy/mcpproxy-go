@@ -25,15 +25,20 @@
         <template v-if="awaiting > 0">
           <span class="text-base-content/50"> · </span>
           <span data-test="header-status-awaiting">{{ awaiting }} awaiting review</span>
-          <template v-if="offline > 0">
+          <span v-if="offline > 0" class="max-[1279px]:hidden" data-test="header-status-offline-group">
             <span class="text-base-content/50"> · </span>
             <span data-test="header-status-offline">{{ offline }} offline</span>
-          </template>
+          </span>
         </template>
         <span class="text-base-content/50"> · </span>
         <span data-test="header-status-tools">{{ toolsLabel }}</span>
-        <span class="text-base-content/50"> · </span>
-        <span class="text-base-content/70" data-test="header-status-mode" :title="modeTitle">{{ modeLabel }}</span>
+        <!-- The longer awaiting-review wording would overflow the header at
+             1100-1279px, so the routing-mode chip (and the offline count)
+             drop out there; the pill's title still carries the full text. -->
+        <span :class="awaiting > 0 ? 'max-[1279px]:hidden' : ''" data-test="header-status-mode-group">
+          <span class="text-base-content/50"> · </span>
+          <span class="text-base-content/70" data-test="header-status-mode" :title="modeTitle">{{ modeLabel }}</span>
+        </span>
       </template>
     </span>
   </router-link>
