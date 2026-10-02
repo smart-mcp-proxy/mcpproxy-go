@@ -271,6 +271,7 @@ type ScanContext struct {
 	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
 	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server
 	ToolsExported   int      `json:"tools_exported,omitempty"`  // Number of tool definitions exported for scanning
+	ToolNames       []string `json:"tool_names,omitempty"`      // Sorted, de-duplicated names of the exported tool definitions (Pass 1)
 	ScannedFiles    []string `json:"scanned_files,omitempty"`   // List of files that were scanned (capped at MaxScannedFiles)
 	TotalFiles      int      `json:"total_files"`               // Total file count (may be > len(ScannedFiles) if capped)
 	TotalSizeBytes  int64    `json:"total_size_bytes"`          // Total size of scanned source

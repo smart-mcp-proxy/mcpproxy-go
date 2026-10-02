@@ -214,14 +214,19 @@ func TestReviewToolScanVerdict_UsesToolFindingsAndHeldFallback(t *testing.T) {
 	record := &storage.ToolApprovalRecord{ToolName: "delete", HeldVerdict: "dangerous"}
 	require.Equal(t, "warnings", reviewToolScanVerdict([]scanner.ScanFinding{{
 		Location: "github:delete", ThreatLevel: scanner.ThreatLevelWarning,
-	}}, "github", record))
+	}}, "github", record, true))
 	require.Equal(t, "dangerous", reviewToolScanVerdict([]scanner.ScanFinding{{
 		Location: "tool:delete", ThreatLevel: scanner.ThreatLevelDangerous,
-	}}, "github", record))
+	}}, "github", record, true))
 	require.Equal(t, "dangerous", reviewToolScanVerdict([]scanner.ScanFinding{{
 		Location: "README.md", ThreatLevel: scanner.ThreatLevelDangerous,
-	}}, "github", record), "non-tool scan findings must not be attributed to a tool")
-	require.Equal(t, "not_scanned", reviewToolScanVerdict(nil, "github", &storage.ToolApprovalRecord{ToolName: "delete"}))
+	}}, "github", record, true), "non-tool scan findings must not be attributed to a tool")
+	plain := &storage.ToolApprovalRecord{ToolName: "delete"}
+	require.Equal(t, "not_scanned", reviewToolScanVerdict(nil, "github", plain, false))
+	require.Equal(t, "clean", reviewToolScanVerdict(nil, "github", plain, true), "a covering scan with no finding for the tool is clean")
+	require.Equal(t, "not_scanned", reviewToolScanVerdict([]scanner.ScanFinding{{
+		Location: "tool:delete", ThreatLevel: scanner.ThreatLevelDangerous,
+	}}, "github", plain, false), "findings of a scan that did not cover the current definition are not applied")
 }
 
 func TestReviewUnifiedDiffUsesReadableSingleLineHunk(t *testing.T) {

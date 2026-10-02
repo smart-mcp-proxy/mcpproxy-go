@@ -151,6 +151,13 @@ type Server struct {
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
 
+	// Automatic tool definition capture after a settled scan (see
+	// review_capture.go). reviewCaptureFn defaults to
+	// runtime.RefreshServerTools and is replaceable in tests;
+	// reviewCaptureInFlight is the per-server single-flight guard.
+	reviewCaptureFn       func(ctx context.Context, serverName string) error
+	reviewCaptureInFlight sync.Map
+
 	// Informational Pass-1 baseline scanning (see scan_informational.go).
 	// infoScanKnown holds every server name observed since process start, so a
 	// servers.changed carrying a name that is not in it is a NEW admission;
@@ -840,6 +847,10 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
 			serverName, _ := evt.Payload["server_name"].(string)
 			s.maybeAutoApproveScanSettled(context.Background(), serverName)
+			// A freshly scanned, still-quarantined server has its tool
+			// definitions captured for review (never blocks this loop).
+			status, _ := evt.Payload["status"].(string)
+			s.maybeCaptureReviewDefinitions(serverName, status)
 		}
 	}
 }
