@@ -170,7 +170,10 @@ func TestSearchAll_StaleCacheOver24hIsNotUsed(t *testing.T) {
 
 	base := time.Now()
 	prev := listingNow
-	t.Cleanup(func() { listingNow = prev })
+	t.Cleanup(func() {
+		quiesceWarmBehind(t)
+		listingNow = prev
+	})
 	listingNow = func() time.Time { return base }
 	SearchAll(context.Background(), "", "", 10, opts)
 
@@ -181,7 +184,10 @@ func TestSearchAll_StaleCacheOver24hIsNotUsed(t *testing.T) {
 		t.Fatalf("a listing older than 24h must not be served, got %v / %+v", idsOf(hits), unavailable)
 	}
 
-	// exactly at the limit is still served
+	// exactly at the limit is still served. A timed-out fetch above keeps
+	// running in the background and reads listingNow when it caches, so let it
+	// finish before the clock is swapped.
+	quiesceWarmBehind(t)
 	listingNow = func() time.Time { return base.Add(24 * time.Hour) }
 	hits, _, _ = SearchAll(context.Background(), "github", "", 10, opts)
 	if len(hits) != 1 {
@@ -362,4 +368,16 @@ func TestSearchAll_FallbackWithinSC011Budget(t *testing.T) {
 	if len(hits) != 1 {
 		t.Fatalf("expected the cached hit, got %v", idsOf(hits))
 	}
+}
+
+// quiesceWarmBehind waits until no background (warm-behind) fetch is running,
+// so a test may swap package-level hooks such as listingNow without racing
+// the goroutine a timed-out search leaves behind.
+func quiesceWarmBehind(t *testing.T) {
+	t.Helper()
+	waitFor(t, "background fetches to finish", 10*time.Second, func() bool {
+		warmBehind.mu.Lock()
+		defer warmBehind.mu.Unlock()
+		return len(warmBehind.inflight) == 0
+	})
 }
