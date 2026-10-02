@@ -536,7 +536,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// must follow the profile's fail-closed unannotated policy.
 			intrinsic := profile.IntrinsicTier(annotations, true)
 			if admitted, reason, tier := policy.Decide(serverName, toolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
-				errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, toolName)
+				errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, toolName, profileRefusalSubject(profileResolution, profileIndex))
 				p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID,
 					"blocked", errMsg, telemetry.BlockReasonOther, string(blockReason))
 				return mcp.NewToolResultError(errMsg), nil

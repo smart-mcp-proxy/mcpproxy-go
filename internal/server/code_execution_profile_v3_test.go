@@ -192,7 +192,7 @@ func TestCallToolRoutingMode_ProfileV3FilterAndEnforcement(t *testing.T) {
 	require.NoError(t, json.Unmarshal(writePayload, &writeEnvelope), string(writePayload))
 	require.True(t, writeEnvelope.Result.IsError)
 	require.NotEmpty(t, writeEnvelope.Result.Content)
-	assert.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", writeEnvelope.Result.Content[0].Text)
+	assert.Equal(t, v3TierRefusal(t), writeEnvelope.Result.Content[0].Text)
 	assert.Empty(t, up.dispatched(), "the /mcp/call profile gate must refuse before upstream I/O")
 }
 
@@ -330,7 +330,8 @@ func TestCodeExecution_ProfileV3NestedCallBlockedBeforeUpstream(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.IsError, "a denied nested call is returned as an error envelope to the script; result=%s", resultText(t, result))
-	require.Contains(t, resultText(t, result), "blocked by profile: github:create_issue is a write tool; this profile allows read tools only")
+	// The script result is JSON, so the quotes around the title are escaped.
+	require.Contains(t, resultText(t, result), jsonEscapedText(t, v3TierRefusal(t)))
 	require.Empty(t, up.dispatched(), "nested profile denial must happen before upstream I/O")
 	calls, total, listErr := rt.GetToolCalls(50, 0, nil)
 	require.NoError(t, listErr)

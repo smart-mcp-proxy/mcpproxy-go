@@ -4113,7 +4113,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
 		intrinsic := profile.IntrinsicTier(annotations, found)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
-			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
 			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))

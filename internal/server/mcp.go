@@ -2365,12 +2365,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// the effective profile is non-legacy, and NEVER for no profile or a
 	// legacy one (SC-003 byte parity: a legacy profile, even one that sets
 	// only a display title, must not gain this field). profile names the
-	// slug only when the caller itself selected it (url/session) — never for
-	// a pin, so discovery can never confirm that a caller is pinned or to
-	// what (research D27).
+	// slug only to a caller whose effective profile is its own: pin, binding,
+	// url, session (Spec 108 D39 narrows research D27, which withheld it from a
+	// pin). Never for anonymous (the operator's anonymous_profile) or a dangling
+	// base. The same predicate decides the tool refusals' wording
+	// (profileDisclosedTo), so refusal and discovery cannot diverge.
 	if nonLegacyProfile {
 		response["hidden_by_profile"] = hiddenByPolicy
-		if profileSource == profile.SourceURL || profileSource == profile.SourceSession {
+		if profileDisclosedTo(profileSource) && policy != nil {
 			response["profile"] = profileName
 		}
 	}
@@ -2954,12 +2956,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// and effective annotation identity. This gate follows server-scope and
 	// identity resolution, but precedes token permissions, global gates,
 	// server state, and tool approval. A profile denial therefore never
-	// reaches the upstream and cannot reveal a profile's name to the caller.
+	// reaches the upstream. It names the profile only to a caller whose
+	// effective profile is its own (pin, binding, url, session: Spec 108 D39);
+	// an anonymous caller keeps the non-disclosing text.
 	if policy := profileResolution.Policy; policy != nil {
 		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
 		admitted, reason, tier := policy.Decide(serverName, actualToolName, intrinsic)
 		if !admitted && reason != profile.ReasonServerNotInProfile {
-			errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, actualToolName)
+			errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, actualToolName, profileRefusalSubject(profileResolution, profileIdx))
 			recordProfileToolRefusal(ctx, &profile.ToolBlockedError{Reason: blockReason, Message: errMsg})
 			p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonOther, string(blockReason))
 			return mcp.NewToolResultError(errMsg), nil

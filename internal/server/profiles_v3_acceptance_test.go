@@ -60,7 +60,8 @@ func TestProfilesV3Acceptance_Check1_DiscoveryHidesNonReadTools(t *testing.T) {
 		require.Empty(t, p108ToolNames(resp), "%s must not be discovered under work-readonly", hidden)
 		require.NotNil(t, resp.HiddenByProfile, "%s: hidden_by_profile is reported", hidden)
 		require.GreaterOrEqual(t, *resp.HiddenByProfile, 1, "%s: the count says something was hidden", hidden)
-		require.Nil(t, resp.Profile, "a locked credential (pin source) never learns the profile")
+		require.NotNil(t, resp.Profile, "a locked credential learns its OWN profile (Spec 108 D39)")
+		require.Equal(t, "work-readonly", *resp.Profile)
 	}
 	require.Empty(t, p108ToolNames(callRetrieveToolsV3(t, proxy, cursor, "read_text_file", 10)), "no filesystem tool is returned")
 	visible := callRetrieveToolsV3(t, proxy, cursor, "list_issues", 10)
@@ -104,8 +105,8 @@ func TestProfilesV3Acceptance_Check1_DiscoveryHidesNonReadTools(t *testing.T) {
 // TestProfilesV3Acceptance_Check2_CLIListsBlockedRecord (CLI),
 // activity-scope-params.spec.ts (Web) and ScopeFilterTests (macOS).
 func TestProfilesV3Acceptance_Check2_WriteRefusedAndRecorded(t *testing.T) {
-	const refusal = "blocked by profile: github:create_issue is a write tool; this profile allows read tools only"
 	proxy, rt := newProfilesV3Fixture(t)
+	refusal := v3TierRefusal(t)
 	up := startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
 	go rt.ActivityService().Start(rt.AppContext(), rt)
 	require.Eventually(t, rt.ActivityService().Started, 5*time.Second, time.Millisecond,
@@ -183,7 +184,7 @@ func TestProfilesV3Acceptance_Check3_UnannotatedHiddenUntilClassified(t *testing
 	callBefore, err := f.proxy.handleCallToolVariant(cursor, auditCallToolRequest(tool, nil), "call_tool_read")
 	require.NoError(t, err)
 	require.True(t, callBefore.IsError)
-	require.Equal(t, "blocked by profile: github:search_code has no tier annotation; an operator can classify it in the profile to allow it", resultText(t, callBefore))
+	require.Equal(t, v3Disclosed(t, "unannotated", "github", "search_code", profile.TierUnannotated, "read", "work-readonly"), resultText(t, callBefore))
 	require.Empty(t, f.upstreams["github"].dispatched())
 
 	// Classify it read from the MCP tool; no restart, no reload step.

@@ -297,7 +297,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			serverName, toolName, profile.IntrinsicTier(identity.Annotations, identity.Found),
 		)
 		if !admitted && reason != profile.ReasonServerNotInProfile {
-			sandbox.profileRefusal, _ = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName)
+			sandbox.profileRefusal, _ = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName, profileRefusalSubject(profileResolution, profileIdx))
 		}
 		return required, rawGate
 	}
