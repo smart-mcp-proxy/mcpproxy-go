@@ -46,6 +46,14 @@ type CatalogHit struct {
 	// the source's live fetch failed (Spec 109 D35); see listing_cache.go.
 	FromCache  bool
 	Popularity *Popularity
+
+	// starsBorrowed marks a hit whose GitHub stars must not be attributed to it
+	// (Spec 109 D37.7: "stars eligible" is its negation, so the zero value stays
+	// eligible for hand-built hits). An official-protocol entry may name ANY
+	// GitHub repo as its source, so stars only count when the publisher owns
+	// that repo (Verified); a hit that borrows another project's repo keeps only
+	// its source-native signal. Set by BuildCatalogHit; never marshalled.
+	starsBorrowed bool
 }
 
 // CatalogInstall is the REST/MCP install target: either a remote URL or a
@@ -152,12 +160,19 @@ const (
 	defaultPopularityWait = 800 * time.Millisecond
 )
 
-// SearchAll fans SearchServers out to every enabled registry in parallel
+// SearchAll fans the catalog fetch out to every enabled registry in parallel
 // (FR-060), each bounded by opts.SourceTimeout (default 5s), merges the
 // results, de-duplicates by (source, id), ranks them with Rank, and returns
 // unavailable[] for sources that failed or timed out. An empty q additionally
 // populates sections (official + popular, ≤ 12 each); a non-empty q leaves
 // sections nil.
+//
+// A typed q is fetched in full (searchCatalogSource, ≤ typedFetchCap per
+// source) and ranked BEFORE it is truncated to `limit` (Spec 109 D37.3): the
+// official registry returns names in byte order, so truncating first would let
+// its alphabet decide what the user can see. A fetch that outlives the budget
+// finishes in the background and refreshes the listing cache (D37.11, see
+// catalog_warm_behind.go).
 func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions) ([]CatalogHit, *CatalogSections, []SourceError) {
 	timeout := opts.SourceTimeout
 	if timeout <= 0 {
@@ -177,12 +192,12 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	// section pool (Official/Popular) is as wide as each source will give —
 	// otherwise a `limit` of 10 would starve Popular of anything beyond the
 	// first 10 official hits before popularity ever gets a say. The final
-	// `results` list is still truncated to `limit` below. A non-empty q keeps
-	// fetching exactly `limit` per source (unchanged), since it has no
-	// sections to populate.
-	fetchLimit := limit
-	if empty {
-		fetchLimit = maxCatalogLimit
+	// `results` list is still truncated to `limit` below. A typed q has no
+	// sections: it fetches every match (capped) and ranks before truncating.
+	fetchLimit := maxCatalogLimit
+	cachedCap := fetchLimit
+	if !empty {
+		cachedCap = typedFetchCap
 	}
 
 	sources := ListRegistries()
@@ -199,48 +214,59 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 		go func(i int) {
 			defer wg.Done()
 			reg := sources[i]
-			sctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
 
-			entries, err := SearchServers(sctx, reg.ID, tag, q, fetchLimit, nil)
-			if err != nil {
-				reason := err.Error()
-				if sctx.Err() != nil {
+			fetch := func(c context.Context, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
+				if empty {
+					return searchRegistry(c, &reg, tag, "", fetchLimit, nil)
+				}
+				return searchCatalogSourceProgress(c, &reg, q, onPartial)
+			}
+			res := fetchSourceWithinBudget(ctx, reg, timeout, fetch)
+			if res.err != nil {
+				reason := res.err.Error()
+				if res.timedOut {
 					reason = fmt.Sprintf("timeout after %s", timeout)
 				}
 				failure := &SourceError{Source: reg.ID, Reason: reason}
+				// Live hits that arrived before the failure (the official
+				// protocol's owner and name-prefix queries) still count, ahead
+				// of the cached listing's matches.
+				matches := make([]CatalogHit, 0, len(res.entries))
+				live := make(map[string]bool, len(res.entries))
+				for _, e := range res.entries {
+					live[e.ID] = true
+					matches = append(matches, BuildCatalogHit(&reg, e))
+				}
 				// Answer from the source's cached listing when the live fetch
 				// failed for any reason except a missing API key (that source
 				// never fetched, so nothing is cached for it). The source stays
-				// in unavailable[]; the hits are marked FromCache.
-				if !errors.Is(err, ErrRegistryKeyMissing) {
+				// in unavailable[]; the cached hits are marked FromCache.
+				if !errors.Is(res.err, ErrRegistryKeyMissing) {
 					if cached, at, ok := cachedListing(&reg); ok {
-						matches := make([]CatalogHit, 0, len(cached))
+						cachedMatches := 0
 						for i := range cached {
-							if len(matches) >= fetchLimit {
+							if cachedMatches >= cachedCap {
 								break
 							}
-							if !matchCachedEntry(&cached[i], q) {
+							if live[cached[i].ID] || !matchCachedEntry(&cached[i], q) {
 								continue
 							}
 							cached[i].Registry = reg.Name
 							hit := BuildCatalogHit(&reg, cached[i])
 							hit.FromCache = true
 							matches = append(matches, hit)
+							cachedMatches++
 						}
 						failure.Fallback = FallbackCachedListing
 						failure.CachedAt = &at
-						outcomes[i] = sourceOutcome{hits: matches, unavailable: failure}
-						return
 					}
 				}
-				outcomes[i] = sourceOutcome{unavailable: failure}
+				outcomes[i] = sourceOutcome{hits: matches, unavailable: failure}
 				return
 			}
-			cacheListing(&reg, entries)
 
-			hits := make([]CatalogHit, 0, len(entries))
-			for _, e := range entries {
+			hits := make([]CatalogHit, 0, len(res.entries))
+			for _, e := range res.entries {
 				hits = append(hits, BuildCatalogHit(&reg, e))
 			}
 			outcomes[i] = sourceOutcome{hits: hits}
@@ -278,8 +304,14 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	// Spec 110 FR-002/007: resolve popularity (cache hits immediately, misses
 	// queued for a bounded background wait) BEFORE ranking, so both the
 	// Rank tiebreak (US2) and the Popular section see up-to-date signal. This
-	// mutates each hit's Popularity in place but does not reorder `all`.
-	resolvePopularity(ctx, all, q, popularityWait(opts.PopularityWait))
+	// mutates each hit's Popularity in place but does not reorder `all`. A
+	// typed q enqueues at most `limit` keys (D37.7): the fetch is wide now, and
+	// GitHub's unauthenticated budget is 50 requests an hour.
+	maxKeys := 0
+	if !empty {
+		maxKeys = limit
+	}
+	resolvePopularity(ctx, all, q, popularityWait(opts.PopularityWait), maxKeys)
 
 	var sections *CatalogSections
 	if empty {
@@ -317,8 +349,10 @@ func popularityWait(configured time.Duration) time.Duration {
 // PopularityProvider (if any) to resolve every hit's GitHub repo key, waits
 // up to `wait` for the background fetch to land, and re-applies whatever is
 // now cached. A nil provider (no popularity wiring — e.g. most tests) is a
-// fast no-op.
-func resolvePopularity(ctx context.Context, hits []CatalogHit, q string, wait time.Duration) {
+// fast no-op. maxKeys > 0 caps how many distinct repos are considered: only
+// the top maxKeys eligible hits in Rank order are enqueued (Spec 109 D37.7);
+// 0 means no cap (the empty-query landing, which needs stars across its pool).
+func resolvePopularity(ctx context.Context, hits []CatalogHit, q string, wait time.Duration, maxKeys int) {
 	provider := getPopularityProvider()
 	if provider == nil {
 		return
@@ -334,9 +368,15 @@ func resolvePopularity(ctx context.Context, hits []CatalogHit, q string, wait ti
 	seen := make(map[string]bool, len(priority))
 	keys := make([]string, 0, len(priority))
 	for _, h := range priority {
+		if h.starsBorrowed {
+			continue // borrowed repo: its stars are not this server's (D37.7)
+		}
 		key, ok := GitHubRepoKey(h.Entry.SourceCodeURL)
 		if !ok || seen[key] {
 			continue
+		}
+		if maxKeys > 0 && len(seen) >= maxKeys {
+			break
 		}
 		seen[key] = true
 		// Only Stale/Absent need a fetch (FR-008): a Fresh positive or a
@@ -369,26 +409,36 @@ func filterHitsBySource(hits []CatalogHit, source string) []CatalogHit {
 }
 
 // BuildCatalogHit derives the catalog-only fields (Title, Publisher,
-// Verified, Official, Popularity) from a registry entry. Verified currently
-// tracks Official — no registry in this spec supplies an independent
-// publisher-verification signal yet, so a trusted (built-in) source's
-// namespace is the only verification evidence available (data-model §9,
-// research D12). Exported so a single-entry lookup (CLI `catalog show`) can
-// build the same CatalogHit shape SearchAll uses internally.
+// Verified, Official, Popularity) from a registry entry. Official means the
+// hit came from a built-in (trusted) source and feeds Rank and the Official
+// section (Spec 109 D37.6). Verified is narrower (D37.5): for a trusted
+// official-protocol entry it means the publisher's namespace owns the source
+// repository; for a trusted reference or Docker entry it stays "trusted
+// source"; an untrusted source never verifies. Exported so a single-entry
+// lookup (CLI `catalog show`) can build the same CatalogHit shape SearchAll
+// uses internally.
 func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 	official := reg.IsTrusted()
-	title := entry.Name
-	if title == "" {
-		title = entry.ID
+	verified := official
+	starsBorrowed := false
+	if reg.Protocol == protocolOfficial {
+		verified = official && publisherOwnsRepo(entry.ID, entry.SourceCodeURL)
+		starsBorrowed = !verified
+	}
+	// A parser's "No description available" is a placeholder, not a
+	// description: surfaces print nothing for an empty one (D37.9).
+	if entry.Description == noDescAvailable {
+		entry.Description = ""
 	}
 	hit := CatalogHit{
-		Entry:     entry,
-		Source:    reg.ID,
-		Title:     title,
-		Publisher: derivePublisher(entry.ID, reg.Name),
-		Verified:  official,
-		Official:  official,
-		Curated:   reg.Protocol == protocolReference,
+		Entry:         entry,
+		Source:        reg.ID,
+		Title:         catalogHitTitle(reg, entry),
+		Publisher:     derivePublisher(entry.ID, reg.Name),
+		Verified:      verified,
+		Official:      official,
+		Curated:       reg.Protocol == protocolReference,
+		starsBorrowed: starsBorrowed,
 	}
 	// FR-001/FR-002: copy the source-native signal (e.g. Docker pull_count)
 	// first, then layer in GitHub stars from the provider's cache only — no
@@ -401,12 +451,93 @@ func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 	return hit
 }
 
+// catalogHitTitle picks the display title (Spec 109 D37.10): the source's own
+// title, then for an official-protocol entry the name segment after the
+// namespace ("github", not "io.github.github/github-mcp-server"), then the
+// entry's name, then its id.
+func catalogHitTitle(reg *RegistryEntry, entry ServerEntry) string {
+	if entry.Title != "" {
+		return entry.Title
+	}
+	if reg.Protocol == protocolOfficial {
+		if i := strings.IndexByte(entry.ID, '/'); i >= 0 && i+1 < len(entry.ID) {
+			return entry.ID[i+1:]
+		}
+	}
+	if entry.Name != "" {
+		return entry.Name
+	}
+	return entry.ID
+}
+
+// publisherOwnsRepo reports whether the namespace of an official-protocol id
+// owns the GitHub repository it names as its source (Spec 109 D37.5): an
+// `io.github.<x>` namespace needs repo owner x; a domain namespace needs its
+// owner label (≥ 3 characters, e.g. "notion" of com.notion) to equal the repo
+// owner, be a whole token of it, or be a ≥ 5 character brand with a ≤ 4
+// character prefix/suffix on it (e.g. "makenotion"). A re-publisher of someone else's server, a
+// borrowed repo URL or a missing repository never verifies.
+func publisherOwnsRepo(id, sourceCodeURL string) bool {
+	key, ok := GitHubRepoKey(sourceCodeURL)
+	if !ok {
+		return false
+	}
+	repoOwner := key[:strings.IndexByte(key, '/')]
+	slash := strings.IndexByte(id, '/')
+	if slash <= 0 {
+		return false
+	}
+	namespace := strings.ToLower(id[:slash])
+	if x, isGitHub := strings.CutPrefix(namespace, "io.github."); isGitHub {
+		return x != "" && x == repoOwner
+	}
+	label, ok := namespaceOwner(id)
+	label = strings.ToLower(label)
+	return ok && domainLabelMatchesOwner(label, repoOwner)
+}
+
+// domainLabelMatchesOwner is the domain-namespace half of publisherOwnsRepo.
+// A bare substring test let any short label verify against an unrelated owner
+// ("hub" inside "github"), so the label must be the owner itself, a whole
+// "-"/"_"-separated token of it ("acme" of acme-corp), or a brand of at least
+// 5 characters with a short (at most 4 characters) prefix or suffix on the
+// owner ("notion" of makenotion).
+func domainLabelMatchesOwner(label, repoOwner string) bool {
+	if len(label) < 3 {
+		return false
+	}
+	if label == repoOwner {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(repoOwner, func(r rune) bool { return r == '-' || r == '_' }) {
+		if tok == label {
+			return true
+		}
+	}
+	if len(label) < 5 {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(repoOwner, label); ok && len(rest) <= 4 {
+		return true
+	}
+	if rest, ok := strings.CutSuffix(repoOwner, label); ok && len(rest) <= 4 {
+		return true
+	}
+	return false
+}
+
 // applyCachedStars fills in hit.Popularity.Stars from the installed
 // PopularityProvider's cache ONLY (Spec 110 FR-002): no I/O, so both
 // BuildCatalogHit and SearchAll's post-Resolve re-apply can call this freely.
 // A nil provider, an entry with no GitHub-shaped SourceCodeURL, or a
 // non-displayable lookup state (Absent/Negative) leave the hit unchanged.
 func applyCachedStars(hit *CatalogHit) {
+	if hit.starsBorrowed {
+		// The publisher does not own the named repo: its stars are not this
+		// server's. Keep only what the source itself reported (D37.7).
+		resetToSourceNativeStars(hit)
+		return
+	}
 	key, ok := GitHubRepoKey(hit.Entry.SourceCodeURL)
 	if !ok {
 		return
@@ -449,26 +580,59 @@ func resetToSourceNativeStars(hit *CatalogHit) {
 }
 
 // derivePublisher extracts a display publisher from an official-protocol
-// reverse-DNS id such as "io.github.github/github-mcp-server" (→ "github").
-// Falls back to the registry's own name when the id carries no such
-// namespace.
+// reverse-DNS id such as "io.github.github/github-mcp-server" (→ "github"; see
+// namespaceOwner). Falls back to the registry's own name when the id carries
+// no such namespace.
 func derivePublisher(id, registryName string) string {
-	slash := strings.IndexByte(id, '/')
-	if slash <= 0 {
-		return registryName
-	}
-	namespace := id[:slash]
-	if dot := strings.LastIndexByte(namespace, '.'); dot >= 0 && dot+1 < len(namespace) {
-		return namespace[dot+1:]
+	if owner, ok := namespaceOwner(id); ok {
+		return owner
 	}
 	return registryName
 }
 
-// Rank is the pure, deterministic catalog ordering (data-model §9,
-// contracts/rest-api.md#catalog): official desc, verified desc, popularity
-// desc (missing = 0), text relevance desc, title asc, id asc. It reports
-// whether a sorts strictly before b.
+// secondLevelSuffixes are the second-level public suffixes that sit between a
+// country code and the organisation in a reverse-DNS namespace (uk.co.acme).
+var secondLevelSuffixes = map[string]bool{"co": true, "com": true, "org": true, "net": true, "ac": true, "gov": true, "edu": true}
+
+// namespaceOwner returns the publisher label of an id's reverse-DNS namespace
+// (Spec 109 D37.1 tier 5): the user of `io.github.<user>`, otherwise the
+// registrable-domain label, the second one ("com.notion/x" -> "notion",
+// "com.quranmajeed.time/x" -> "quranmajeed", "uk.co.acme/x" -> "acme"). It
+// reports false when the id has no dotted namespace, so the registry-name
+// fallback of derivePublisher never counts as an owner.
+func namespaceOwner(id string) (string, bool) {
+	slash := strings.IndexByte(id, '/')
+	if slash <= 0 {
+		return "", false
+	}
+	labels := strings.Split(id[:slash], ".")
+	if len(labels) < 2 {
+		return "", false
+	}
+	i := 1
+	switch {
+	case labels[0] == "io" && labels[1] == "github":
+		i = 2
+	case len(labels) >= 3 && secondLevelSuffixes[labels[1]]:
+		i = 2
+	}
+	if i >= len(labels) || labels[i] == "" {
+		return "", false
+	}
+	return labels[i], true
+}
+
+// Rank is the pure, deterministic catalog ordering (Spec 109 D37.1, data-model
+// §9, contracts/rest-api.md#catalog): match tier desc (how well the NAME
+// matches q: publisher equals q > exact name > name prefix > name token >
+// substring or description > namespace-only), official source desc, verified
+// desc, popularity desc (missing = 0, Spec 110 FR-004), title asc, id asc. It
+// reports whether a sorts strictly before b. An empty q puts every hit in
+// tier 0, so browse-time order is official, verified, popularity, title, id.
 func Rank(a, b CatalogHit, q string) bool {
+	if at, bt := matchTier(a, q), matchTier(b, q); at != bt {
+		return at > bt
+	}
 	if a.Official != b.Official {
 		return a.Official
 	}
@@ -477,9 +641,6 @@ func Rank(a, b CatalogHit, q string) bool {
 	}
 	if !popularityEqual(a.Popularity, b.Popularity) {
 		return morePopular(a.Popularity, b.Popularity)
-	}
-	if ar, br := relevanceScore(a, q), relevanceScore(b, q); ar != br {
-		return ar > br
 	}
 	at, bt := strings.ToLower(catalogTitle(a)), strings.ToLower(catalogTitle(b))
 	if at != bt {
@@ -534,31 +695,77 @@ func popularityEqual(a, b *Popularity) bool {
 	return as == bs && ai == bi
 }
 
-// relevanceScore is a simple, deterministic token-match count of q against
-// title/id/description — good enough to break ties below popularity, never
-// used as the primary key.
-func relevanceScore(h CatalogHit, q string) int {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
+// normalizeMatchText lower-cases s and collapses every run of the separators
+// `- _ . /` and whitespace to one space, so "GitHub-MCP_server" and "github mcp
+// server" compare equal. Surrounding separators are trimmed.
+func normalizeMatchText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	space := true // swallow leading separators
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case '-', '_', '.', '/', ' ', '\t', '\n', '\r':
+			if !space {
+				b.WriteByte(' ')
+				space = true
+			}
+		default:
+			b.WriteRune(r)
+			space = false
+		}
+	}
+	return strings.TrimSuffix(b.String(), " ")
+}
+
+// matchTier scores how well a hit's NAME matches q (Spec 109 D37.1), 0-5. Rank
+// puts it first so the real server beats a merely popular or official one:
+//
+//	5  the publisher (namespace owner) equals q   io.github.github/… for "github"
+//	4  the name segment or the title equals q     com.mcparmory/github
+//	3  the segment or title starts with q          github-mcp-server
+//	2  a whole word of the segment/title equals q  obsidian-github-mcp
+//	1  q is a substring of the segment/title/description
+//	0  no match, or the only match is the namespace (io.github.*)
+//
+// q and every field are normalized by normalizeMatchText. An empty q is 0.
+func matchTier(h CatalogHit, q string) int {
+	nq := normalizeMatchText(q)
+	if nq == "" {
 		return 0
 	}
-	score := 0
-	title := strings.ToLower(catalogTitle(h))
-	id := strings.ToLower(h.Entry.ID)
-	desc := strings.ToLower(h.Entry.Description)
-	if title == q {
-		score += 100
+	id := h.Entry.ID
+	if owner, ok := namespaceOwner(id); ok && normalizeMatchText(owner) == nq {
+		return 5
 	}
-	if strings.Contains(title, q) {
-		score += 10
+	seg := id
+	if i := strings.IndexByte(id, '/'); i >= 0 {
+		seg = id[i+1:]
 	}
-	if strings.Contains(id, q) {
-		score += 5
+	fields := [2]string{normalizeMatchText(seg), normalizeMatchText(catalogTitle(h))}
+	for _, f := range fields {
+		if f == nq {
+			return 4
+		}
 	}
-	if strings.Contains(desc, q) {
-		score++
+	for _, f := range fields {
+		if strings.HasPrefix(f, nq+" ") {
+			return 3
+		}
 	}
-	return score
+	for _, f := range fields {
+		if strings.Contains(" "+f+" ", " "+nq+" ") {
+			return 2
+		}
+	}
+	for _, f := range fields {
+		if strings.Contains(f, nq) {
+			return 1
+		}
+	}
+	if strings.Contains(normalizeMatchText(h.Entry.Description), nq) {
+		return 1
+	}
+	return 0
 }
 
 // buildSections splits the merged, de-duplicated, source-filtered pool
@@ -574,7 +781,7 @@ func relevanceScore(h CatalogHit, q string) int {
 //   - Popular: hits with a known signal (stars>0 ∨ installs>0), sorted by
 //     popularity (FR-004) then Rank as a tiebreak, at most one per GitHub
 //     repo key (a monorepo's shared star count keeps only the first by Rank —
-//     spec.md edge cases), capped at 12.
+//     spec.md edge cases) and one per normalized title (D37.8), capped at 12.
 func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	sections := &CatalogSections{Official: []CatalogHit{}, Popular: []CatalogHit{}}
 
@@ -597,6 +804,7 @@ func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	})
 
 	seenRepo := make(map[string]bool, len(candidates))
+	seenTitle := make(map[string]bool, len(candidates))
 	for _, h := range candidates {
 		if len(sections.Popular) >= catalogSectionCap {
 			break
@@ -607,13 +815,27 @@ func buildSections(pool []CatalogHit, q string) *CatalogSections {
 			// hit) — (source, id) already made this unique within `pool`.
 			dedupKey = "no-repo:" + h.Source + "\x00" + h.Entry.ID
 		}
-		if seenRepo[dedupKey] {
+		// The same server listed by two sources (the reference `fetch` and
+		// Docker's mcp/fetch) shares a normalized title, not a repo key
+		// (Spec 109 D37.8).
+		titleKey := popularTitleKey(h)
+		if seenRepo[dedupKey] || (titleKey != "" && seenTitle[titleKey]) {
 			continue
 		}
 		seenRepo[dedupKey] = true
+		if titleKey != "" {
+			seenTitle[titleKey] = true
+		}
 		sections.Popular = append(sections.Popular, h)
 	}
 	return sections
+}
+
+// popularTitleKey is Popular's second de-dup key (Spec 109 D37.8): the title
+// lower-cased with a Docker `mcp/` prefix stripped, nothing else, so `fetch`
+// and `mcp/fetch` collapse while `fetch-mcp` stays separate.
+func popularTitleKey(h CatalogHit) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(catalogTitle(h))), "mcp/")
 }
 
 // officialBrowseOrder orders the official-source hits of the merged pool (in
