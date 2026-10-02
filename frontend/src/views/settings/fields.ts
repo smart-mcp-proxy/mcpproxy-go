@@ -848,5 +848,19 @@ export function buildPartial(source: any, dirtyKeys: string[]): Record<string, a
     const val = getPath(source, key)
     setPath(out, key, f?.listKind ? textToList(f.listKind, val) : val)
   }
+  // audit_log is validated as a whole block: a block carrying neither
+  // `stdout` nor `path` while enabled is refused (MsgAuditLogNoSink). When the
+  // block is absent on disk the backend merge creates it from this partial
+  // alone, so a rotation-only edit would arrive without the sink toggles the
+  // form is displaying. Ship the displayed enable/sink state with any audit_log
+  // edit so what is saved matches what the form shows.
+  if (dirtyKeys.some((k) => k.startsWith('audit_log.'))) {
+    for (const k of ['audit_log.enabled', 'audit_log.stdout']) {
+      if (!dirtyKeys.includes(k)) {
+        const v = getPath(source, k)
+        if (v !== undefined) setPath(out, k, v)
+      }
+    }
+  }
   return out
 }
