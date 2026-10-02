@@ -31,12 +31,16 @@ type Popularity struct {
 // GET /registries/{id}/servers and MCP search_servers keep serving its JSON
 // unchanged (contracts/rest-api.md#catalog).
 type CatalogHit struct {
-	Entry      ServerEntry
-	Source     string
-	Title      string
-	Publisher  string
-	Verified   bool
-	Official   bool
+	Entry     ServerEntry
+	Source    string
+	Title     string
+	Publisher string
+	Verified  bool
+	Official  bool
+	// Curated marks a hit from the built-in reference source (Spec 109 D35):
+	// the shipped, hand-picked basics. buildSections lists them first in the
+	// Official section. Pure data, set by BuildCatalogHit.
+	Curated    bool
 	Popularity *Popularity
 }
 
@@ -344,6 +348,7 @@ func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 		Publisher: derivePublisher(entry.ID, reg.Name),
 		Verified:  official,
 		Official:  official,
+		Curated:   reg.Protocol == protocolReference,
 	}
 	// FR-001/FR-002: copy the source-native signal (e.g. Docker pull_count)
 	// first, then layer in GitHub stars from the provider's cache only — no
@@ -520,12 +525,12 @@ func relevanceScore(h CatalogHit, q string) int {
 // (BEFORE limit truncation and BEFORE any Rank sort) into the empty-query
 // landing sections (Spec 110 FR-005, amending Spec 109 FR-060):
 //
-//   - Official: official-source hits in `pool`'s own MERGE (source-native)
-//     order — registry-list order, then each source's native order. Pool
-//     MUST NOT have been Rank-sorted yet: on an all-official default install
-//     every hit ties on Official/Verified, so Rank order IS popularity order,
-//     and building Official from a ranked pool silently reintroduces the bug
-//     this spec fixes. Capped at 12.
+//   - Official: the official-source hits of `pool`, curated first, never
+//     popularity-ordered (Spec 109 D35 amends Spec 110 FR-005; see
+//     officialBrowseOrder). Pool MUST NOT have been Rank-sorted yet: on an
+//     all-official default install every hit ties on Official/Verified, so Rank
+//     order IS popularity order, and building Official from a ranked pool
+//     silently reintroduces the bug Spec 110 fixed. Capped at 12.
 //   - Popular: hits with a known signal (stars>0 ∨ installs>0), sorted by
 //     popularity (FR-004) then Rank as a tiebreak, at most one per GitHub
 //     repo key (a monorepo's shared star count keeps only the first by Rank —
@@ -533,10 +538,9 @@ func relevanceScore(h CatalogHit, q string) int {
 func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	sections := &CatalogSections{Official: []CatalogHit{}, Popular: []CatalogHit{}}
 
-	for _, h := range pool {
-		if h.Official && len(sections.Official) < catalogSectionCap {
-			sections.Official = append(sections.Official, h)
-		}
+	sections.Official = officialBrowseOrder(pool)
+	if len(sections.Official) > catalogSectionCap {
+		sections.Official = sections.Official[:catalogSectionCap]
 	}
 
 	candidates := make([]CatalogHit, 0, len(pool))
@@ -570,6 +574,46 @@ func buildSections(pool []CatalogHit, q string) *CatalogSections {
 		sections.Popular = append(sections.Popular, h)
 	}
 	return sections
+}
+
+// officialBrowseOrder orders the official-source hits of the merged pool (in
+// MERGE order: registry-list order, then each source's native order) for the
+// empty-query Official section. The curated reference servers come first, in
+// curated order; the rest are interleaved round-robin across their sources in
+// registry-list order, each source keeping its native order. The official
+// source paginates alphabetically by reverse-DNS id, so taking its first twelve
+// would list obscure namespaces and hide the curated basics (Spec 109 D35, demo
+// finding #6). Popularity plays no part: Popular must still differ from Official.
+func officialBrowseOrder(pool []CatalogHit) []CatalogHit {
+	var out []CatalogHit
+	var sources []string
+	bySource := make(map[string][]CatalogHit)
+	for _, h := range pool {
+		if !h.Official {
+			continue
+		}
+		if h.Curated {
+			out = append(out, h)
+			continue
+		}
+		if _, ok := bySource[h.Source]; !ok {
+			sources = append(sources, h.Source)
+		}
+		bySource[h.Source] = append(bySource[h.Source], h)
+	}
+	for round := 0; ; round++ {
+		progressed := false
+		for _, src := range sources {
+			if round < len(bySource[src]) {
+				out = append(out, bySource[src][round])
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+	}
+	return out
 }
 
 // ToCatalogResult builds the REST DTO from an internal hit. added is computed

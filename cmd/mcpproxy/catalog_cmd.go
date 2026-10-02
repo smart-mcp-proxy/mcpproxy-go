@@ -375,10 +375,26 @@ func catalogInstallTargetForConfigServer(s *config.ServerConfig) string {
 func renderCatalogSearch(formatter clioutput.OutputFormatter, resp *cliclient.CatalogSearchResponse) error {
 	if _, isTable := formatter.(*clioutput.TableFormatter); isTable {
 		if resp.Sections != nil {
-			fmt.Println("Official:")
-			printCatalogTable(formatter, resp.Sections.Official)
-			fmt.Println("\nPopular:")
-			printCatalogTable(formatter, resp.Sections.Popular)
+			// Popular first when it has entries (popularity if available, else
+			// the curated Official list), and never an empty section's header
+			// and table (Spec 109 D35). Same order as the Web UI and macOS.
+			printed := false
+			section := func(title string, rows []registries.CatalogResult) {
+				if len(rows) == 0 {
+					return
+				}
+				if printed {
+					fmt.Println()
+				}
+				fmt.Println(title + ":")
+				printCatalogTable(formatter, rows)
+				printed = true
+			}
+			section("Popular", resp.Sections.Popular)
+			section("Official", resp.Sections.Official)
+			if !printed {
+				printCatalogTable(formatter, nil)
+			}
 		} else {
 			printCatalogTable(formatter, resp.Results)
 		}

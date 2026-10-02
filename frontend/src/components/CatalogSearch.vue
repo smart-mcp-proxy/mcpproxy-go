@@ -23,11 +23,13 @@
       </div>
 
       <template v-if="sections">
-        <div v-if="sections.official.length > 0" data-test="catalog-section-official">
-          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Official</h4>
+        <!-- Popular first when it has entries (popularity if available), then the
+             curated Official list (Spec 109 D35, amends Spec 110 FR-005). -->
+        <div v-if="sections.popular.length > 0" data-test="catalog-section-popular">
+          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Popular</h4>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
             <CatalogResultCard
-              v-for="r in sections.official"
+              v-for="r in sections.popular"
               :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
@@ -37,11 +39,11 @@
             />
           </div>
         </div>
-        <div v-if="sections.popular.length > 0" data-test="catalog-section-popular">
-          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Popular</h4>
+        <div v-if="sections.official.length > 0" data-test="catalog-section-official">
+          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Official</h4>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <CatalogResultCard
-              v-for="r in sections.popular"
+              v-for="r in sections.official"
               :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
