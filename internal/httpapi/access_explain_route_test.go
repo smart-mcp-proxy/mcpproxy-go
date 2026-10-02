@@ -104,7 +104,7 @@ func TestAccessExplainRoute_ResponseShapeEqualsTheSharedFixture(t *testing.T) {
 		Verdict: profile.ExplainVerdictHidden, FirstFailure: profile.StepTierCap,
 		Fixes: []internalRuntime.Fix{
 			{Step: profile.StepTierCap, Action: profile.FixAllowInProfile, Target: "work-readonly", Label: "Allow github:create_issue in Work Read-only"},
-			{Step: profile.StepTierCap, Action: profile.FixMoveClient, Target: "cursor", Label: "Move Cursor to Work Full"},
+			{Step: profile.StepTierCap, Action: profile.FixMoveClient, Target: "cursor", Profile: "work-full", Label: "Move Cursor to Work Full"},
 		},
 	}
 	for _, s := range profile.StepOrder() {

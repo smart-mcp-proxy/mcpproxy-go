@@ -140,7 +140,11 @@ func fixCommand(f runtime.Fix, tool string) string {
 	case profile.FixAddServerToProfile:
 		return fmt.Sprintf("mcpproxy profile update %s --add-server %s", f.Target, server)
 	case profile.FixMoveClient:
-		return fmt.Sprintf("mcpproxy client set-profile %s <profile>", f.Target)
+		dest := f.Profile
+		if dest == "" {
+			dest = "<profile>" // a daemon that predates the field
+		}
+		return fmt.Sprintf("mcpproxy client set-profile %s %s", f.Target, dest)
 	case profile.FixEditToken:
 		return "mcpproxy token create --name <new-name> --profile <profile>"
 	case profile.FixEnableServer:

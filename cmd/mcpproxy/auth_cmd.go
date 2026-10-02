@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,19 +104,19 @@ func init() {
 	authLoginCmd.Flags().BoolVar(&authAll, "all", false, "Authenticate all servers that require OAuth")
 	authLoginCmd.Flags().BoolVar(&authForce, "force", false, "Skip confirmation prompt when using --all")
 	authLoginCmd.Flags().StringVarP(&authLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	authLoginCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(authLoginCmd.Flags(), &authConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	authLoginCmd.Flags().DurationVar(&authTimeout, "timeout", 5*time.Minute, "Authentication timeout")
 
 	// Define flags for auth status command
 	authStatusCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to check status for (optional)")
 	authStatusCmd.Flags().StringVarP(&authLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	authStatusCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(authStatusCmd.Flags(), &authConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	authStatusCmd.Flags().BoolVar(&authAll, "all", false, "Show status for all servers")
 
 	// Define flags for auth logout command
 	authLogoutCmd.Flags().StringVarP(&authServerName, "server", "s", "", "Server name to logout from (required)")
 	authLogoutCmd.Flags().StringVarP(&authLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	authLogoutCmd.Flags().StringVarP(&authConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(authLogoutCmd.Flags(), &authConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	authLogoutCmd.Flags().DurationVar(&authTimeout, "timeout", 30*time.Second, "Logout timeout")
 
 	// Mark required flags
@@ -585,20 +584,17 @@ func displayAuthStatusPretty(servers []map[string]interface{}) error {
 }
 
 func loadAuthConfig() (*config.Config, error) {
-	var configFile string
-	if authConfigPath != "" {
-		configFile = authConfigPath
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	cfgPath := resolveCLIConfigPath(authConfigPath)
+	if cfgPath == "" {
+		var err error
+		if cfgPath, err = defaultHomeConfigPath(); err != nil {
+			return nil, err
 		}
-		configFile = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 	}
 
-	globalConfig, err := config.LoadFromFile(configFile)
+	globalConfig, err := config.LoadFromFile(cfgPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config from %s: %w", configFile, err)
+		return nil, fmt.Errorf("failed to load config from %s: %w", cfgPath, err)
 	}
 
 	// Respect global --data-dir flag

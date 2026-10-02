@@ -67,7 +67,7 @@ daemon. 'list' and 'search' use the daemon when available and otherwise read the
 registries directly.`,
 	}
 
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryEditCmd(), newRegistryRemoveCmd())
 	return cmd
 }
@@ -622,19 +622,16 @@ func truncateStr(s string, max int) string {
 // command's --config flag and the global --data-dir, falling back to defaults
 // so 'list'/'search' still work without a config file.
 func loadRegistryConfig() (*config.Config, error) {
-	var cfg *config.Config
-	var err error
-	if registryConfigPath != "" {
-		cfg, err = config.LoadFromFile(registryConfigPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	// Go through loadCLIConfig so a --data-dir with no config file anywhere
+	// uses defaults rooted at that directory instead of creating
+	// $HOME/.mcpproxy/mcp_config.json.
+	cfg, err := loadCLIConfig(registryConfigPath)
 	if err != nil {
 		// Discovery should still work with defaults if no config is present.
 		cfg = config.DefaultConfig()
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
 	}
 	return cfg, nil
 }

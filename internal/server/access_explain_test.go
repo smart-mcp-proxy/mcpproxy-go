@@ -128,6 +128,10 @@ func TestExplain_FixesOrderedByPreference(t *testing.T) {
 	for _, fix := range e.Fixes {
 		assert.Equal(t, profile.StepTierCap, fix.Step)
 	}
+	// FR-035: the destination profile slug travels with move_client only, so a
+	// client can print a runnable command (the label carries the title).
+	assert.Equal(t, "work-full", e.Fixes[1].Profile, "move_client carries the destination slug")
+	assert.Empty(t, e.Fixes[0].Profile, "only move_client carries a destination profile")
 
 	e, err = f.proxy.Explain(context.Background(), cursor, "github:search_code") // unannotated
 	require.NoError(t, err)
@@ -148,6 +152,24 @@ func TestExplain_FixesOrderedByPreference(t *testing.T) {
 	assert.Equal(t, "work-readonly", e.Profile.Name)
 	assert.Equal(t, "pin", e.Profile.Source)
 	assert.Equal(t, "cursor", e.Subject.Name)
+}
+
+// A client bound to a profile that no longer exists fails the profile step; its
+// move_client fix names the destination profile too.
+func TestExplain_DanglingClientBindingMoveFixNamesDestination(t *testing.T) {
+	f := newProfilesV3RESTFixture(t, nil)
+	f.mintClient("cursor", "work-readonly", auth.ProfileModeLocked)
+	updated := *f.rt.Config()
+	updated.Profiles = append([]config.ProfileConfig(nil), updated.Profiles[1:]...)
+	f.rt.UpdateConfig(&updated, "")
+
+	e, err := f.proxy.Explain(context.Background(), profile.AccessSubject{Kind: profile.AccessSubjectClient, ClientID: "cursor"}, "github:list_issues")
+	require.NoError(t, err)
+	require.Equal(t, profile.StepProfile, e.FirstFailure)
+	require.NotEmpty(t, e.Fixes)
+	assert.Equal(t, profile.FixMoveClient, e.Fixes[0].Action)
+	assert.Equal(t, "cursor", e.Fixes[0].Target)
+	assert.Equal(t, updated.Profiles[0].Name, e.Fixes[0].Profile)
 }
 
 func TestExplain_ProfileSubjectOffersNoMoveClient(t *testing.T) {

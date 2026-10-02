@@ -507,11 +507,14 @@ func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport)
 		refusal := errors.New(report.Message)
 		o.toolCaller.storeToolCallInHistory(report.ServerName, report.ToolName, report.Arguments, nil, refusal, startedAt, 0)
 		o.toolCaller.emitSubCallRefused(report.Ctx, report.ServerName, report.ToolName,
-			mintCorrelationID(report.ServerName, report.ToolName), report.Arguments, refusal, startedAt, 0)
+			mintCorrelationID(report.ServerName, report.ToolName), report.Arguments, refusal, startedAt, 0, report.BlockReason)
 	}
 	if o.proxy == nil || o.proxy.auditSink == nil {
 		return
 	}
+	// Note: the audit reason below stays the Spec 107 vocabulary even for a
+	// profile refusal (report.BlockReason is not mapped here); aligning it
+	// with the top-level gate's `other` is a Spec 107/108 follow-up.
 	reasonKey := telemetry.BlockReasonTokenScope
 	switch report.Code {
 	case jsruntime.ErrorCodeServerNotAllowed:
