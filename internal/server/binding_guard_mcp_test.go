@@ -76,7 +76,11 @@ func TestBindingGuardRuntime_EndToEnd(t *testing.T) {
 	require.True(t, found, "anonymous_denied_by_binding_guard must be reported")
 
 	// a fix lifts the guard: anonymous_profile equal to the binding
-	proxy.currentConfig().AnonymousProfile = "work-readonly"
+	// Publish a new snapshot instead of mutating the live one: the attention
+	// subscriber reads the current config concurrently (data race under -race).
+	fixed := *proxy.currentConfig()
+	fixed.AnonymousProfile = "work-readonly"
+	rt.UpdateConfig(&fixed, "")
 	idx = proxy.profileIndexFor(proxy.currentConfig())
 	res = proxy.ResolveProfileV3(anonCtx(), idx)
 	require.False(t, res.BindingGuarded)
