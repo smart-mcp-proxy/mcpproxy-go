@@ -207,7 +207,15 @@
             <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
-          <ImportServers :key="importSession" detected @imported="onSharedImport" />
+          <!-- The done card below is the one completion state; suppress the
+               importer's own "imported" line while it shows (review F2.1). -->
+          <ImportServers
+            :key="importSession"
+            detected
+            :show-empty="false"
+            :show-message="serversView !== 'imported'"
+            @imported="onSharedImport"
+          />
 
           <!-- Detected import sources (Spec 046 v2 — sectioned checkbox layout) -->
           <div v-if="false" class="flex justify-center py-4">
@@ -219,19 +227,13 @@
                import" dead end below is wrong here: there IS something to do,
                it's reviewing what was already brought in. -->
           <div
-            v-else-if="importSourcesWithServers.length === 0 && !hasUsableServer && quarantinedServersAwaitingReview.length > 0"
+            v-else-if="serversView === 'review'"
             class="border border-base-300 rounded-lg mb-5"
             data-test="servers-inline-review"
           >
-            <div class="px-4 pt-4 pb-2 text-sm">
-              <span class="font-semibold">Approve a server to finish this step.</span>
-              <span class="opacity-70">
-                {{ quarantinedServersAwaitingReview.length }}
-                imported server{{ quarantinedServersAwaitingReview.length === 1 ? '' : 's' }}
-                {{ quarantinedServersAwaitingReview.length === 1 ? 'is' : 'are' }} waiting in quarantine —
-                review its tools before it can run.
-              </span>
-            </div>
+            <p class="px-4 pt-4 pb-2 text-sm">
+              <span class="font-semibold">Approve a server to finish this step.</span>{{ ' ' }}<span class="opacity-70">{{ awaitingReviewText }}</span>
+            </p>
             <ReviewQueueList :rows="quarantinedReviewRows" @review="goToServerReview" />
             <p v-if="serverAddedJustNow" class="text-xs text-success px-4 pb-3 pt-1">
               ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
@@ -242,7 +244,25 @@
                none — the exact user this wizard matters most to — staring at a
                dead end. Give that user the two ways to get a first server. -->
           <div
-            v-else-if="importSourcesWithServers.length === 0"
+            v-else-if="serversView === 'imported'"
+            class="border border-base-300 rounded-lg p-6 text-center mb-5"
+            data-test="servers-import-done"
+          >
+            <div class="font-semibold text-success">
+              {{ importedThisSession }} server{{ importedThisSession === 1 ? '' : 's' }} imported.
+            </div>
+            <p class="text-sm opacity-70 mt-1">Next: check that your client can reach them.</p>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm mt-4"
+              data-test="servers-import-done-verify"
+              @click="selectTab('verify')"
+            >
+              Continue to Verify
+            </button>
+          </div>
+          <div
+            v-else-if="serversView === 'empty'"
             class="border border-base-300 rounded-lg p-6 text-center mb-5"
             data-test="servers-nothing-to-import"
           >
@@ -674,6 +694,7 @@ import ReviewQueueList from '@/components/ReviewQueueList.vue'
 import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
+import { serversStepView, awaitingReviewSentence } from '@/utils/onboardingServersStep'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
 
 interface Props {
@@ -848,6 +869,22 @@ const quarantinedReviewRows = computed(() => quarantinedServersAwaitingReview.va
 // usability. A visible tool_count can consist entirely of blocked tools, so it
 // must never complete onboarding on its own.
 const hasUsableServer = computed(() => onboarding.hasUsableServer)
+
+// Servers brought in by an import during THIS wizard open (reset in
+// onOpened). Manual add is not an import and does not count here.
+const importedThisSession = ref(0)
+// Which body the Servers step shows: choose / review / imported / empty
+// (fix-usertest-web T200). Pure rules live in utils/onboardingServersStep.ts.
+const serversView = computed(() => serversStepView({
+  sourcesWithServers: importSourcesWithServers.value.length,
+  hasUsableServer: hasUsableServer.value,
+  awaitingReview: quarantinedServersAwaitingReview.value.length,
+  importedThisSession: importedThisSession.value,
+}))
+const awaitingReviewText = computed(() => awaitingReviewSentence(
+  quarantinedServersAwaitingReview.value.length,
+  Math.min(importedThisSession.value, quarantinedServersAwaitingReview.value.length),
+))
 
 function selectionKey(path: string, name: string) {
   return `${path}::${name}`
@@ -1031,6 +1068,7 @@ async function onOpened() {
   userPickedTab = false
   const requested = onboarding.consumeWizardInitialTab()
   importSession.value++
+  importedThisSession.value = 0
   serverAddedJustNow.value = false
   connectMessage.value = ''
   // Backup lines are session-scoped (Spec 078 US2): don't replay backup
@@ -1717,6 +1755,7 @@ async function onServerAdded() {
 
 async function onSharedImport(count: number) {
   if (count === 0) return
+  importedThisSession.value += count
   serverAddedJustNow.value = true
   await Promise.all([fetchImportSources(), serversStore.fetchServers(), onboarding.fetchState()])
 }

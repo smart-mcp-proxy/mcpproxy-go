@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -636,5 +637,105 @@ func TestImportServersJSON_ApplyResponseReflectsOverrides(t *testing.T) {
 	}
 	if bytes.Contains(rr.Body.Bytes(), []byte("ghp_realvalue1234567890")) {
 		t.Error("response must not echo the override secret value")
+	}
+}
+
+// postImportPath writes content to a temp file and POSTs it to the
+// import-from-path endpoint, returning the recorder.
+func postImportPath(t *testing.T, content, format string, preview bool) *httptest.ResponseRecorder {
+	t.Helper()
+	server := NewServer(&mockImportController{apiKey: "test-key"}, zap.NewNop().Sugar(), nil)
+	path := filepath.Join(t.TempDir(), "client-config")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(ImportFromPathRequest{Path: path, Format: format})
+	url := "/api/v1/servers/import/path"
+	if preview {
+		url += "?preview=true"
+	}
+	req := httptest.NewRequest("POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	return rr
+}
+
+// F-04: a client config that exists but holds no MCP servers (Claude
+// Code/Desktop installed, nothing configured) must preview as "nothing to
+// import", not as a 400 that the wizard shows as an error.
+func TestImportFromPath_PreviewEmptyClientConfigIsEmptyNot400(t *testing.T) {
+	cases := []struct {
+		name, format, content, wantFormat string
+	}{
+		{"claude-desktop empty object", "claude-desktop", `{}`, "claude_desktop"},
+		{"claude-code no mcpServers key", "claude-code", `{"numStartups":3}`, "claude_code"},
+		{"cursor empty server map", "cursor", `{"mcpServers":{}}`, "cursor"},
+		{"claude-desktop zero bytes", "claude-desktop", ``, "claude_desktop"},
+		{"gemini whitespace only", "gemini", "  \n", "gemini"},
+		{"codex toml without mcp_servers", "codex", "[other]\nx=1\n", "codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postImportPath(t, tc.content, tc.format, true)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), `"imported":[]`) {
+				t.Errorf("Expected an empty (non-null) imported list, got %s", rr.Body.String())
+			}
+			var wrapped wrappedImportResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+				t.Fatalf("Failed to unmarshal response: %v", err)
+			}
+			if !wrapped.Success {
+				t.Error("Expected success=true")
+			}
+			if wrapped.Data.Summary.Total != 0 {
+				t.Errorf("Expected summary.total 0, got %d", wrapped.Data.Summary.Total)
+			}
+			if wrapped.Data.Format != tc.wantFormat {
+				t.Errorf("Expected format %q, got %q", tc.wantFormat, wrapped.Data.Format)
+			}
+		})
+	}
+}
+
+// Apply semantics are unchanged: importing a file with no servers is still a
+// 400 so the CLI/apply caller is told nothing happened.
+func TestImportFromPath_ApplyEmptyClientConfigStill400(t *testing.T) {
+	rr := postImportPath(t, `{}`, "claude-desktop", false)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "no MCP servers found in Claude Desktop config") {
+		t.Errorf("Expected the no-servers message, got %s", rr.Body.String())
+	}
+}
+
+// A malformed file still reports its error honestly, even in preview.
+func TestImportFromPath_PreviewMalformedJSONStill400(t *testing.T) {
+	rr := postImportPath(t, `{"mcpServers":`, "claude-desktop", true)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "invalid JSON") {
+		t.Errorf("Expected an invalid JSON message, got %s", rr.Body.String())
+	}
+}
+
+// The Paste/JSON endpoint is unchanged: the user who pasted an empty config
+// is told it has no servers.
+func TestImportServersJSON_EmptyMcpServersStill400(t *testing.T) {
+	server := NewServer(&mockImportController{apiKey: "test-key"}, zap.NewNop().Sugar(), nil)
+	body, _ := json.Marshal(ImportRequest{Content: `{"mcpServers":{}}`})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

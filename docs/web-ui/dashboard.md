@@ -52,7 +52,7 @@ Settings, Docs, Feedback and the theme switch sit below the groups. **Clients** 
 
 ## The header
 
-At 1100 px and wider the header shows, left to right: the search field (`⌘K`), the status pill (for example "1 of 2 online, 14 tools, Retrieve"), the attention pill and the **+ Add** menu. Narrower widths collapse each into an icon; nothing clips or scrolls sideways down to 390 px.
+At 1100 px and wider the header shows, left to right: the search field (`⌘K`), the status pill (for example "1 of 2 online, 14 tools, Retrieve"; when servers are waiting for review it says so, "0 online, 4 awaiting review", and it shows "Loading servers…" until the first list arrives), the attention pill and the **+ Add** menu. Narrower widths collapse each into an icon; nothing clips or scrolls sideways down to 390 px.
 
 - **Search and `⌘K`** (`Ctrl+K` on Windows and Linux; `/` when no input is focused) opens the command palette. It searches pages, servers, tools, settings and actions. Pressing Enter on free text opens the Tools page with that text as the query.
 - **+ Add** offers **Server** (the catalog-first Add Server page), **Client** (the connect dialog with the diff preview), **Token** (the create-token dialog) and **Profile** once profiles are available. Connecting a new client is at most two clicks from any page.
