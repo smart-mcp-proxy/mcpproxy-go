@@ -4,14 +4,31 @@
       <label class="label py-0">
         <span class="label-text text-xs font-mono">{{ name }}</span>
       </label>
-      <input
-        :type="mode === 'secret' ? 'password' : 'text'"
-        class="input input-bordered input-sm w-full font-mono"
-        :value="modelValue"
-        :placeholder="mode === 'secret' ? 'Value stored in the OS keyring on Add' : ''"
-        data-test="secret-toggle-value-input"
-        @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      />
+      <div class="flex items-center gap-1">
+        <input
+          :type="masked ? 'password' : 'text'"
+          class="input input-bordered input-sm w-full font-mono"
+          :value="modelValue"
+          :placeholder="mode === 'secret' ? 'Value stored in the OS keyring on Add' : ''"
+          autocomplete="off"
+          spellcheck="false"
+          data-1p-ignore
+          data-lpignore="true"
+          data-test="secret-toggle-value-input"
+          @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+        />
+        <button
+          v-if="sensitive"
+          type="button"
+          class="btn btn-ghost btn-xs shrink-0"
+          :aria-pressed="revealed"
+          :aria-label="`${revealed ? 'Hide' : 'Show'} ${name} value`"
+          data-test="secret-toggle-reveal"
+          @click="revealed = !revealed"
+        >
+          {{ revealed ? 'Hide' : 'Show' }}
+        </button>
+      </div>
     </div>
     <div class="join mt-6 shrink-0" role="group" :aria-label="`${name} storage`">
       <button
@@ -39,6 +56,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { looksSecret } from '@/utils/secretLike'
 
 // One Value/Secret toggle for a single env var or header field (Spec 109
@@ -63,6 +81,14 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   'update:mode': [mode: 'value' | 'secret']
 }>()
+
+// Masking is presentation only (FR-065, fix-usertest-web T174): a field in
+// Secret mode, or whose name looks secret-like (the same D13 rule that picks
+// the Secret default), is a password input with a Show/Hide toggle. Value vs
+// Secret still decides storage, so Value mode keeps storing plain config.
+const revealed = ref(false)
+const sensitive = computed(() => props.mode === 'secret' || looksSecret(props.name))
+const masked = computed(() => sensitive.value && !revealed.value)
 
 function setMode(mode: 'value' | 'secret') {
   if (mode === 'secret' && !props.keyringAvailable) return

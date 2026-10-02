@@ -121,6 +121,31 @@ describe('ManualServerForm', () => {
     expect(wrapper.emitted('added')).toEqual([['remote']])
   })
 
+  // fix-usertest-web T174 (audit F-07): the value of a secret-like variable is
+  // masked while typing even though the row is still in Value mode, and the
+  // masking never alters what is submitted.
+  it('masks a secret-like env value while typing in Value mode and submits it unchanged', async () => {
+    vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
+    vi.mocked(api.getServers).mockResolvedValue({ success: true, data: { servers: [] } })
+    const wrapper = await mountManual()
+
+    await wrapper.find('[data-test="manual-name-input"]').setValue('fx-secret')
+    await wrapper.find('[data-test="manual-command-input"]').setValue('node')
+    await wrapper.find('[data-test="manual-env-add"]').trigger('click')
+    await wrapper.find('[data-test="manual-env-name-0"]').setValue('API_TOKEN')
+    await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('fake-secret-value')
+
+    const input = wrapper.find('[data-test="secret-toggle-value-input"]')
+    expect(input.attributes('type')).toBe('password')
+    expect(wrapper.find('[data-test="secret-toggle-mode-value"]').classes()).toContain('btn-active')
+
+    await wrapper.find('[data-test="manual-server-form"]').trigger('submit')
+    await flushPromises()
+
+    const [, payload] = vi.mocked(api.callTool).mock.calls[0] as [string, Record<string, unknown>]
+    expect(JSON.parse(payload.env_json as string)).toEqual({ API_TOKEN: 'fake-secret-value' })
+  })
+
   it('requires confirmation before adding with auto trust mode and submits the chosen mode', async () => {
     vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
     vi.mocked(api.getServers).mockResolvedValue({ success: true, data: { servers: [] } })
