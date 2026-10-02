@@ -35,3 +35,19 @@ export function telemetrySettingLock(s?: TelemetryState | null): { reason: strin
     value: false,
   }
 }
+
+/**
+ * Locked settings (an environment forces their effective value) that a whole
+ * config document would change relative to the stored one. FR-044a: a locked
+ * setting must never be saved. The Raw JSON editor posts the entire document,
+ * so the per-field lock on the forms does not cover it. Returns the dotted keys
+ * whose value in `doc` differs from `stored`.
+ */
+export function lockedKeysChanged(doc: unknown, stored: unknown, locks: Record<string, unknown>): string[] {
+  const read = (root: unknown, key: string): unknown =>
+    key.split('.').reduce<unknown>(
+      (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
+      root
+    )
+  return Object.keys(locks).filter((key) => JSON.stringify(read(doc, key)) !== JSON.stringify(read(stored, key)))
+}

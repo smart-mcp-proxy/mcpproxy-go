@@ -214,7 +214,7 @@ import {
 } from '@/views/settings/fields'
 import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
-import { telemetrySettingLock } from '@/utils/telemetryState'
+import { lockedKeysChanged, telemetrySettingLock } from '@/utils/telemetryState'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -476,6 +476,15 @@ async function applyConfig() {
   configErrors.value = []
   try {
     const cfg = JSON.parse(configJson.value)
+    // FR-044a: the form fields are locked, but this posts the whole document.
+    const lockedEdits = lockedKeysChanged(cfg, rawConfig, fieldLocks.value)
+    if (lockedEdits.length > 0) {
+      configErrors.value = lockedEdits.map((key) => ({
+        field: key,
+        message: fieldLocks.value[key].reason,
+      }))
+      return
+    }
     const response = await api.applyConfig(cfg)
     if (response.success && response.data) {
       systemStore.addToast({

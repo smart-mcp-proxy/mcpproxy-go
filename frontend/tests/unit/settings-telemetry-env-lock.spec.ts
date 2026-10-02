@@ -13,6 +13,7 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getStatus: vi.fn(),
+  applyConfig: vi.fn(),
 }))
 
 vi.mock('@/services/api', () => ({
@@ -20,7 +21,7 @@ vi.mock('@/services/api', () => ({
     getConfig: mocks.getConfig,
     getStatus: mocks.getStatus,
     validateConfig: vi.fn(),
-    applyConfig: vi.fn(),
+    applyConfig: mocks.applyConfig,
     patchConfig: vi.fn(),
   },
 }))
@@ -95,6 +96,69 @@ describe('Settings telemetry toggle follows the effective state', () => {
     const wrapper = await mountGeneral()
     const toggle = wrapper.find('[data-test="setting-toggle-telemetry.enabled"]')
     expect((toggle.element as HTMLInputElement).disabled).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('Raw JSON apply never saves a locked setting (FR-044a)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mocks.getConfig.mockReset()
+    mocks.getStatus.mockReset()
+    mocks.applyConfig.mockReset()
+    mocks.getConfig.mockResolvedValue({ success: true, data: { config: { telemetry: { enabled: true } } } })
+    mocks.applyConfig.mockResolvedValue({ success: true, data: { applied_immediately: true } })
+  })
+
+  async function mountRaw(status: unknown) {
+    mocks.getStatus.mockResolvedValue({ success: true, data: status })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/settings', name: 'settings', component: Settings, meta: { title: 'Settings' } },
+        { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div/>' } },
+      ],
+    })
+    router.push('/settings?tab=raw')
+    await router.isReady()
+    const wrapper = mount(Settings, {
+      global: {
+        plugins: [router],
+        stubs: { VueMonacoEditor: { name: 'VueMonacoEditor', props: ['value'], template: '<div data-test="raw-editor"/>' } },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  async function edit(wrapper: Awaited<ReturnType<typeof mountRaw>>, doc: unknown) {
+    wrapper.findComponent({ name: 'VueMonacoEditor' }).vm.$emit('update:value', JSON.stringify(doc))
+    await flushPromises()
+    await wrapper.find('[data-test="settings-raw-apply"]').trigger('click')
+    await flushPromises()
+  }
+
+  const envOff = { telemetry: { enabled: false, source: 'env', disabled_by: 'MCPPROXY_TELEMETRY=false' } }
+
+  it('refuses a document that changes the env-locked telemetry.enabled', async () => {
+    const wrapper = await mountRaw(envOff)
+    await edit(wrapper, { telemetry: { enabled: false } })
+    expect(mocks.applyConfig).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('telemetry.enabled')
+    wrapper.unmount()
+  })
+
+  it('control: a document that leaves the locked value alone still applies', async () => {
+    const wrapper = await mountRaw(envOff)
+    await edit(wrapper, { telemetry: { enabled: true }, listen: '127.0.0.1:9' })
+    expect(mocks.applyConfig).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('control: with no env lock the key is editable', async () => {
+    const wrapper = await mountRaw({ telemetry: { enabled: true, source: 'config' } })
+    await edit(wrapper, { telemetry: { enabled: false } })
+    expect(mocks.applyConfig).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 })

@@ -115,6 +115,47 @@ final class SettingsEffectiveStateTests: XCTestCase {
         XCTAssertNil(unknown.listenNote, "no status, no claim about the connected core")
     }
 
+    /// The Settings window outlives a core restart, so the note must follow the
+    /// core now connected rather than the one the first load saw.
+    func testListenNoteFollowsTheCoreAfterARestart() async {
+        let store = makeStore(
+            configJSON: #"{"listen":"127.0.0.1:9090"}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:8080"}"#)
+        await store.load()
+        XCTAssertEqual(
+            store.listenNote,
+            "Connected core v0.1.0 is listening on 127.0.0.1:8080. The saved address 127.0.0.1:9090 takes effect after a restart.")
+
+        // The core restarts on the saved address.
+        SettingsStubURLProtocol.bodies["/api/v1/status"] =
+            envelope(#"{"running":true,"listen_addr":"127.0.0.1:9090"}"#)
+        await store.refreshStatus()
+        XCTAssertEqual(store.runningListenAddr, "127.0.0.1:9090")
+        XCTAssertEqual(store.listenNote, "Connected core v0.1.0 is listening on 127.0.0.1:9090.")
+    }
+
+    func testANewConnectionRefreshesTheStatusByItself() async throws {
+        let appState = AppState()
+        appState.apiClient = SettingsStubURLProtocol.makeClient()
+        appState.version = "v0.1.0"
+        let store = ConfigStore(appState: appState)
+        SettingsStubURLProtocol.bodies = [
+            "/api/v1/config": envelope(#"{"config":{"listen":"127.0.0.1:9090"}}"#),
+            "/api/v1/status": envelope(#"{"running":true,"listen_addr":"127.0.0.1:8080"}"#),
+        ]
+        await store.load()
+        XCTAssertEqual(store.runningListenAddr, "127.0.0.1:8080")
+
+        SettingsStubURLProtocol.bodies["/api/v1/status"] =
+            envelope(#"{"running":true,"listen_addr":"127.0.0.1:9090"}"#)
+        appState.coreState = .connected  // a real state change bumps connectionGeneration
+
+        for _ in 0..<100 where store.runningListenAddr != "127.0.0.1:9090" {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(store.runningListenAddr, "127.0.0.1:9090")
+    }
+
     func testListenNoteOmitsAnEmptyVersion() async {
         let store = makeStore(
             configJSON: #"{"listen":"127.0.0.1:18666"}"#,

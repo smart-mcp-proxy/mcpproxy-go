@@ -10,6 +10,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - Store
 
@@ -45,7 +46,21 @@ final class ConfigStore: ObservableObject {
     private var raw: [String: Any] = [:]
     private let appState: AppState
 
-    init(appState: AppState) { self.appState = appState }
+    private var connectionObserver: AnyCancellable?
+
+    init(appState: AppState) {
+        self.appState = appState
+        // The Settings window is reused across core restarts, so the running
+        // address cached from the first load goes stale the moment the core is
+        // replaced. Re-read /status whenever the tray lands on a new connection.
+        connectionObserver = appState.$connectionGeneration
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.appState.coreState == .connected else { return }
+                Task { await self.refreshStatus() }
+            }
+    }
 
     func load() async {
         guard let api = appState.apiClient else {
@@ -68,6 +83,15 @@ final class ConfigStore: ObservableObject {
             applyStatus(status)
         }
         loading = false
+    }
+
+    /// Re-read `GET /api/v1/status` for what the connected core says about
+    /// itself (running listen address, effective telemetry state) without
+    /// touching the config the user may be editing. Best effort: a failed read
+    /// keeps what was last known.
+    func refreshStatus() async {
+        guard loaded, let api = appState.apiClient, let status = try? await api.status() else { return }
+        applyStatus(status)
     }
 
     /// Adopt what `GET /api/v1/status` says about the connected core: its running
@@ -615,7 +639,9 @@ struct ConfigTabContainer<Content: View>: View {
                 }
             }
         }
-        .task { if !store.loaded { await store.load() } }
+        .task {
+            if !store.loaded { await store.load() } else { await store.refreshStatus() }
+        }
     }
 
     private func scroll(_ proxy: ScrollViewProxy) {
