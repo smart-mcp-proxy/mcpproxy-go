@@ -111,7 +111,8 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
     "command": "npx -y @modelcontextprotocol/server-filesystem /tmp", "url": "",
     "quarantined": true, "trust_mode": "manual",
     "source_registry_id": "official", "source_registry_provenance": "…",
-    "scan": {"verdict": "clean", "risk_score": 0, "report_id": "…", "scanned_at": "…"},
+    "scan": {"verdict": "clean", "risk_score": 0, "report_id": "…", "scanned_at": "…",
+             "coverage": "current", "tools_scanned": 14},
     "definitions_captured": true
   },
   "tools": [
@@ -146,8 +147,9 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
 - `annotations`/`tier` pairs: `annotations: null` → `tier: "unknown"` (nothing captured — a record from before this spec, as in the `search_code` example above); `annotations: {}` → `tier: "unannotated"` (captured, no hints); otherwise `contracts.AnnotationTier`. For instance `{"name": "list_dir", "annotations": {}, "tier": "unannotated", …}`.
 - `source_registry_id`, `source_registry_provenance`: the existing MCP-866 origin fields of the server config, `omitempty` (absent for a manually added server).
 - `tier`: `unknown` when the record carries no stored annotations (captured before this spec).
-- `scan_verdict` per tool: `dangerous|warnings|clean|not_scanned`, from the latest baseline report's findings for that tool, else the record's `held_verdict`.
-- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/discover-tools`; the explicit inspection-only capture obtains a bounded supervisor exemption, stores approval records, emits `review.changed`, and never indexes the quarantined definitions. Baseline scanning remains a separate security operation.
+- `scan.coverage` (always present): `current` = the latest completed scan analysed every captured definition as it is now; `stale` = at least one captured definition was added or changed after that scan (`scan.unscanned_tools` lists them, sorted); `not_captured` = no definitions captured (`definitions_captured: false`); `tools_not_scanned` = the scan completed but exported 0 tool definitions (source-only or URL scan); `scanning` = the newest baseline job is pending or running; `none` = no completed scan (never scanned, or the newest job failed or was cancelled). Precedence: `not_captured` > `scanning` > `none` > `tools_not_scanned` > `stale` > `current`. `scan.tools_scanned` is the number of definitions that scan exported (omitted when 0). Surfaces show `risk_score` only for `current`. A tool is covered when the scan's recorded tool names (`ScanContext.tool_names`) include it and its definition did not change after the scan started (`definition_changed_at`); for a scan recorded without names, approved records are covered, pending records are covered on a quarantined server only, and a changed record with no change time is not covered. A payload from an older core has no `coverage`; surfaces read that as `none`.
+- `scan_verdict` per tool: `dangerous|warnings|clean|not_scanned`. A **covered** tool gets the verdict of the latest baseline report's findings for that tool, else the record's `held_verdict`, else `clean`. A tool the scan did **not** cover gets its `held_verdict` (the Spec 086 in-process check of the current definition) or `not_scanned`; findings of an older scan describe an older definition and are not applied.
+- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/discover-tools`; the explicit inspection-only capture obtains a bounded supervisor exemption, stores approval records, emits `review.changed`, and never indexes the quarantined definitions. Baseline scanning remains a separate security operation, except that after a baseline scan completes having exported tool definitions for a still-quarantined server with no records, MCPProxy runs the same capture itself (the upstream was already started and listed for that scan, so no new process is started). With `security.auto_baseline_scan: false` and no manual scan, nothing is captured automatically.
 - Descriptions are returned verbatim. Surfaces render them as inert text (research D19).
 
 Review verbs (existing routes; one change):

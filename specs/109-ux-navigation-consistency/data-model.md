@@ -22,6 +22,7 @@ Constants: `internal/health/constants.go` `Status*`, exported by `cmd/generate-t
 |---|---|---|
 | `current_annotations` | `*config.ToolAnnotations` (JSON) | written with `current_description` in `checkToolApprovals`; `omitempty`. A captured tool with no hints is stored as a non-nil empty object `{}`, so nil always means "not captured" (→ `unknown`) and `{}` means "captured, unannotated" |
 | `previous_annotations` | `*config.ToolAnnotations` (JSON) | moved from `current_annotations` when a change is recorded; `omitempty` |
+| `definition_changed_at` | `time.Time` (JSON, omitted when zero) | fix-review-screen. Stamped by `BoltDB.SaveToolApproval` inside its write transaction when a prior record exists and its `current_description`, `current_schema` or `current_output_schema` differ from the incoming record; otherwise the prior value is carried over. A brand-new record stays zero (first capture is not a change). Annotations are excluded and the field is never part of the hash |
 
 The approval hash is unchanged (annotations stay excluded, `tool_quarantine.go:26`). Records without these fields → review `tier: unknown`.
 
@@ -101,6 +102,8 @@ Spec 108 input wiring (109-l): `(*Runtime).AttentionClientWarnings()` calls `Cli
 ## 5. Review payloads (derived) — `internal/runtime/review.go`
 
 `ReviewQueue{Count, Servers []ReviewQueueRow}` and `ServerReview{Server ReviewServer, Tools []ReviewTool}` exactly as in contracts/rest-api.md#review. Composed from `ListToolApprovals(server)`, server config (command/url/transport/trust mode — the summary is built from a `contracts.Server` copy passed through `oauth.RedactServerSecretFields` before any field is read, so no raw secret enters the payload, FR-021), and the latest scan summary and per-tool findings (`security/scanner` service). Diff: unified diff computed server-side in `internal/runtime/review_diff.go` (same sections as today's `frontend/src/utils/toolDiff.ts` `computeToolDiffSections`: description, input schema, output schema, plus annotations), so macOS and the CLI get the same text. The Web UI renders the server diff and drops its local computation. The server summary also carries the existing `source_registry_id` / `source_registry_provenance` (MCP-866 origin, `contracts.Server` fields, `omitempty`), so a reviewer sees which catalog the server came from; both are listed in contracts/rest-api.md#review and FR-021.
+
+Scan coverage (fix-review-screen): `ReviewScan` adds `coverage`, `tools_scanned` and `unscanned_tools`. The composer reads the newest baseline job and its `ScanContext` (`tools_exported` and the new `tool_names`: the sorted, de-duplicated names of the exported definitions, recorded by Pass 1) and compares each approval record with it: a record is covered when the scan saw its name and `definition_changed_at` is not after the job's `started_at`. A scan recorded without `tool_names` (older core) covers approved records, and pending records of a quarantined server; it does not cover a pending record of a trusted server or a changed record with no change time. The per-tool `scan_verdict` follows from coverage (`clean` only for a covered tool).
 
 ## 6. Client presence (derived) — `internal/runtime/clients_presence.go`
 

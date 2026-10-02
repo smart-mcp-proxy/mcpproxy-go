@@ -375,6 +375,30 @@ Not new requirements: nine findings from a live demo of `main` at `b3191a059`, f
 
 ---
 
+## Phase 16: PR fix-review-screen — honest scan coverage and approved-state review (final done-check, 2026-10-02)
+
+Not new requirements: two medium findings and one low from the final done-check, fixed test-first on every surface that shows them (FR-021, FR-023; research D36). The review screen showed `Baseline scan: clean · risk 0/100` beside `not_scanned` tools (no definitions captured, or a definition changed after the scan), and an approved server still showed Approve/Reject on every tool. Definitions of a freshly imported quarantined server were never captured automatically.
+
+- [x] T166 [P] storage stamps `definition_changed_at` centrally: `internal/storage/tool_approval_definition_changed_test.go` (`TestSaveToolApproval_StampsDefinitionChangedAtOnContentChange`: new record zero, status-only change carries the prior value, description/schema/output-schema change stamps the record and the caller's pointer, annotations-only change does not, `SaveIntegrityBaselineWithBlocks` preserves it)
+- [x] T167 [P] scanner records the exported tool names: `internal/security/scanner/export_tool_names_test.go` (`ScanContext.ToolNames` sorted and de-duplicated, set by both Pass-1 export sites)
+- [x] T168 [P] review scan coverage and honest per-tool verdicts (`current|stale|not_captured|tools_not_scanned|scanning|none`, covered/not-covered rule, legacy scans, queue row parity): `internal/runtime/review_scan_coverage_test.go`, with `internal/runtime/review_test.go` updated for the `covered` parameter
+- [x] T169 [P] automatic definition capture after a settled scan: `internal/runtime/review_capture_test.go` (eligibility: still quarantined, 0 records, completed baseline job that exported tools) and `internal/server/review_capture_after_scan_test.go` (event-driven, single-flight, not on a failed scan)
+- [x] T170 [P] [US2] Web scan banner by coverage with Rescan and Scan now: `frontend/tests/unit/review-screen-scan-coverage.spec.ts`
+- [x] T171 [P] [US2] Web approved state (Approved/Blocked badges, heading, Manage tools, Quarantine to review again with confirmation): `frontend/tests/unit/review-screen-approved-state.spec.ts`
+- [x] T172 [P] [US2] macOS banner, headline and tool state, decode of the new fields: `native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift`, with `native/macos/MCPProxy/MCPProxyTests/ReviewPayloadTests.swift` extended
+- [x] T173 [P] [US2] CLI `review show` prints the scan line: `cmd/mcpproxy/review_cmd_test.go` (`TestFormatReviewShowPrintsScanCoverage`)
+- [x] T174 `storage.ToolApprovalRecord.DefinitionChangedAt` and the central stamp in `BoltDB.SaveToolApproval`: `internal/storage/models.go`, `internal/storage/bbolt.go`
+- [x] T175 `scanner.ScanContext.ToolNames`; `exportToolDefinitions` returns the names: `internal/security/scanner/types.go`, `internal/security/scanner/service.go`
+- [x] T176 review composer: `ReviewScan.Coverage`, `ToolsScanned`, `UnscannedTools`, `reviewToolCovered`, `reviewToolScanVerdict(..., covered)`: `internal/runtime/review.go`
+- [x] T177 auto-capture: `internal/runtime/review_capture.go` (`ShouldCaptureReviewDefinitionsAfterScan`) and `internal/server/review_capture.go` (single-flight goroutine started from the scan-settled case in `internal/server/server.go`)
+- [x] T178 [US2] Web: `frontend/src/types/api.ts`, `frontend/src/utils/reviewPresentation.ts` (`scanBanner`, `reviewHeadline`, `toolState`), `frontend/src/components/ReviewScreen.vue`
+- [x] T179 [US2] macOS: `native/macos/MCPProxy/MCPProxy/API/Models.swift` (`ReviewScan` fields), `native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift` (`ReviewPresentation`, banner, state labels, quarantine confirmation)
+- [x] T180 [US2] CLI: the `Scan:` line of `review show` in `cmd/mcpproxy/review_cmd.go`
+- [x] T181 Docs and bookkeeping for T166–T180: `docs/features/security-quarantine.md`, `docs/api/rest-api.md`, `docs/cli/review-commands.md`, `specs/109-ux-navigation-consistency/acceptance-index.json`, `quickstart.md` recipe `fix-review-screen`, research D36
+- [x] T182 Verification gates: `go test -race` on `internal/storage`, `internal/runtime`, `internal/security/scanner`, `internal/server` (CI skip regex), both golangci-lint runs, `npm run test:unit`, `vue-tsc`, `swift test`, `TestSpec109Traceability*` and `TestSpec109ParityMatrix*` (`internal/httpapi/spec109_traceability_test.go`)
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
@@ -421,4 +445,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-201 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+218 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 201 before the fix-review-screen PR, which added T166–T182; 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
