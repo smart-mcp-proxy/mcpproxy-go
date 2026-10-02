@@ -19,9 +19,9 @@
           </label>
         </div>
       </div>
-      <div v-else class="text-sm opacity-70" data-test="detected-import-empty">No importable servers found in local client configs.</div>
+      <div v-else-if="showEmpty" class="text-sm opacity-70" data-test="detected-import-empty">{{ importedOnce ? 'Nothing left to import — every server in your client configs is on MCPProxy.' : 'No importable servers found in local client configs.' }}</div>
       <div v-if="detectedError" class="alert alert-error text-sm mt-3">{{ detectedError }}</div>
-      <p v-if="detectedMessage" class="text-sm mt-3" data-test="detected-import-message">{{ detectedMessage }}</p>
+      <p v-if="detectedMessage && showMessage" class="text-sm mt-3" :class="detectedImportedCount > 0 ? 'text-success' : ''" data-test="detected-import-message">{{ detectedImportedCount > 0 ? '✓ ' : '' }}{{ detectedMessage }}</p>
       <p v-if="detectedSelectedCount" class="text-xs mt-2" data-test="detected-selection-summary">
         <span class="font-semibold">{{ detectedSelectedCount }}</span> selected
         <span v-if="detectedRenames.size" class="text-warning"> · {{ detectedRenames.size }} renamed</span>
@@ -96,9 +96,11 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import api, { type CanonicalConfigPath } from '@/services/api'
 import type { ImportResponse, ImportedServer } from '@/types'
-import { skipReasonLabel } from '@/utils/importSkipReason'
+import { importSummary } from '@/utils/onboardingServersStep'
 
-const props = withDefaults(defineProps<{ detected?: boolean }>(), { detected: false })
+// showEmpty: the wizard owns its own empty and completion states, so it turns
+// this one off; standalone use keeps the first-load empty line.
+const props = withDefaults(defineProps<{ detected?: boolean; showEmpty?: boolean; showMessage?: boolean }>(), { detected: false, showEmpty: true, showMessage: true })
 const emit = defineEmits<{ imported: [count: number] }>()
 
 const content = ref('')
@@ -117,6 +119,10 @@ const detectedLoading = ref(false)
 const detectedImporting = ref(false)
 const detectedError = ref<string | null>(null)
 const detectedMessage = ref('')
+const detectedImportedCount = ref(0)
+// True once an import completed in this panel, so an empty reload reads
+// "nothing left" instead of "nothing found".
+const importedOnce = ref(false)
 const detectedQuarantine = ref(true)
 const detectedSelectedCount = computed(() => detectedSources.value.reduce((n, source) => n + Object.values(source.selected).filter(Boolean).length, 0))
 const detectedRenames = computed(() => {
@@ -151,7 +157,7 @@ function toggleDetectedQuarantine(event: Event) {
 async function loadDetectedSources(clearMessage = true) {
   detectedLoading.value = true
   detectedError.value = null
-  if (clearMessage) detectedMessage.value = ''
+  if (clearMessage) { detectedMessage.value = ''; detectedImportedCount.value = 0 }
   try {
     const paths = await api.getCanonicalConfigPaths()
     if (!paths.success || !paths.data) return
@@ -171,7 +177,7 @@ async function importDetected() {
   try {
     let imported = 0
     let renamed = 0
-    const skippedByReason = new Map<string, number>()
+    const skipped: Array<{ reason?: string }> = []
     for (const source of detectedSources.value) {
       const server_names = source.servers.filter(server => source.selected[server.name]).map(server => server.name)
       if (!server_names.length) continue
@@ -183,12 +189,11 @@ async function importDetected() {
       const response = await api.importServersFromPath({ path: source.path, format: source.format, server_names, rename: Object.keys(rename).length ? rename : undefined, skip_quarantine: !detectedQuarantine.value })
       if (!response.success) throw new Error(response.error || `Could not import ${source.name}`)
       imported += response.data?.summary?.imported ?? server_names.length
-      for (const skipped of response.data?.skipped ?? []) skippedByReason.set(skipped.reason, (skippedByReason.get(skipped.reason) ?? 0) + 1)
+      skipped.push(...(response.data?.skipped ?? []))
     }
-    const parts = [`${imported} server${imported === 1 ? '' : 's'} imported`]
-    if (renamed) parts.push(`${renamed} renamed`)
-    for (const [reason, count] of skippedByReason) parts.push(`${count} skipped (${skipReasonLabel(reason)})`)
-    detectedMessage.value = parts.join(' · ')
+    detectedMessage.value = importSummary({ imported, renamed, skipped })
+    detectedImportedCount.value = imported
+    importedOnce.value = true
     emit('imported', imported)
     await loadDetectedSources(false)
   } catch (error) { detectedError.value = error instanceof Error ? error.message : 'Import failed' }

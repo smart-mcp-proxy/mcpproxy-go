@@ -349,6 +349,7 @@ The last residuals of the Spec 109 done check. Each stays inside the files Spec 
 **B5 estimate label (T166).** The Web tooltip constant is local to `Home.vue` (same wording as `Usage.vue` and macOS) because `Usage.vue` is out of this PR's files; hoisting it is a follow-up. macOS gets `HomeTokenSavingsBadge`, shared by the hub badge and the Token Savings card.
 
 **Follow-ups left out.** Refused attempts in the default Tool calls view on Web, macOS and CLI together; `ProfileCard.vue` "1 calls" (Spec 108-owned); hoisting the status-to-tone map into `utils/health.ts` for `ServerCard.vue`, and the estimate tooltip into a shared constant; a macOS Home getting-started card; the low items left in #1394.
+
 ## D37 - fix-catalog-rank decisions (catalog search puts the real server first; audit C1; 2026-10-02)
 
 Audit finding C1 was marked fixed by 109-j but the live registry still buried GitHub's own server. Every number below was probed against `registry.modelcontextprotocol.io` on 2026-10-02. The official registry's `?search=` is a case-insensitive substring of `server.name` only, in byte order, 100 per page. `search=github` therefore returns 100 alphabetical `io.github.*` names, and `io.github.github/github-mcp-server` lies thousands of entries later. `search=.github/` returns exactly that one server, `search=/github` returns the 39 names whose server segment starts with `github`, and `search=github mcp` (with a space) returns none. Cold queries took 4-25 s.
@@ -390,3 +391,17 @@ The final done-check found the review screen reading `Baseline scan: clean · ri
 - **D40.6 No per-tool revoke verb.** FR-022 keeps exactly four review verbs. Approved tools show state; per-tool enable/disable stays on the Tools tab; server-level re-review is the existing quarantine action behind a confirmation.
 - **D40.7 Queue rows.** `ReviewQueueRow.scan` gets the same fields; `Review.vue` rows do not render scan today, so they get no UI change.
 - **Residuals.** A namespaced raw tool exported through the StateView/index fallback can read as stale until a rescan (a trusted server whose StateView was empty during the scan); the matcher is not widened, because widening could hide a real new tool. If a definition changes between the admission scan and the automatic capture (seconds), the new record has no stamp and its name is in `tool_names`, so it reads `current`; the approval gate still re-scans independently.
+
+## D41 - fix-usertest-web decisions (first-run user test; 2026-10-02)
+
+Four Web findings (F-04, F-05, F-07, journey B) of a codex first-run user test of `main` at `d7efa80d8`. Spec 108's half (F-05) is D40 in that spec.
+
+**T199 preview-only scope.** `no_servers` is a legitimate empty answer only for a canonical client file that the UI auto-previews. So only `POST /servers/import/path?preview=true` changes (0 bytes, whitespace, `{}`, an absent or empty server map answer `200` with `imported: []`). Apply, a malformed file, the multipart upload and `/import/json` keep their `400`: a user who uploads or pastes an empty config should be told so, and the CLI uses `configimport` directly.
+
+**T200 completion state.** (1) The count in "waiting in quarantine" stays all quarantined servers, because those are the Review rows listed below it; "imported" is said only for the ones imported in this wizard session. (2) `filtered_out` is never reported in an import summary on any Web import surface; the CLI lists it per row and keeps that. (3) Manual add is not an import: it keeps its "Server added" line in the nothing-to-import card. The wizard owns its empty and completion states (`ImportServers` gets `showEmpty`), so one body is shown: choose, review, imported or empty (`utils/onboardingServersStep.ts`).
+
+**T201 name-based masking.** Mask by Secret mode or by the shared D13 `looksSecret` name rule, not by value entropy: masking every env value would hide `WORKDIR=/tmp` for no reason. Show/Hide is display only and never emits a mode or value change. The post-save view masks every literal because it cannot know intent; the input can. Web only: macOS `SecretFieldToggleView` has the same Value-mode gap.
+
+**T202 status pill.** `awaiting` is `health.admin_state == "quarantined"` (the Home attention list's predicate); `offline` is enabled rows that are neither usable nor awaiting; disabled rows are in no bucket. The compact form is unchanged (FR-053 width budget; the title carries the full text). Before the first list (`serversStore.loaded`) the pill says so instead of "0 of 0 online"; a failed first load reads "Servers unavailable".
+
+**Follow-ups left out.** macOS `SecretFieldToggleView` masking for secret-like names in Value mode; a draft-evaluated effective-tools route (Spec 108 D40); removing the dead `v-if="false"` blocks and the duplicate canonical-file previews from `OnboardingWizard.vue`; the other report findings are owned by other PRs (F-01 doctor key leak, F-02 review defaults, F-03 telemetry copy, F-06 `-c` shadowing, F-08 catalog, F-09 to F-11).

@@ -83,7 +83,7 @@ mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --secret-header 
 mcpproxy upstream add weather --secret-env WEATHER_API_KEY=abc123 -- npx -y weather-mcp
 ```
 
-`--secret-env` and `--secret-header` write the value to the keyring and store `${keyring:<server>-env-<name>}` in the config. The Web UI and macOS Add Server forms offer the same choice as a **Value · Secret** toggle that defaults to Secret for names like `*_TOKEN`, `*_KEY`, `*SECRET*` and `*PASSWORD*`. See [Keyring Integration](/features/keyring-integration).
+`--secret-env` and `--secret-header` write the value to the keyring and store `${keyring:<server>-env-<name>}` in the config. The Web UI and macOS Add Server forms offer the same choice as a **Value · Secret** toggle that defaults to Secret for names like `*_TOKEN`, `*_KEY`, `*SECRET*` and `*PASSWORD*`. The value is masked while you type it (Show reveals it). See [Keyring Integration](/features/keyring-integration).
 
 ## Catalog sources and the older commands
 

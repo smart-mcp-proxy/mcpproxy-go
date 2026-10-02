@@ -9725,7 +9725,9 @@ paths:
   /api/v1/servers/import/path:
     post:
       description: Import MCP server configurations by reading a file from the server's
-        filesystem
+        filesystem. A preview (preview=true) of a file with no MCP servers (empty,
+        {}, or no/empty server map) answers 200 with an empty imported list; an apply
+        of such a file and a malformed file still answer 400.
       parameters:
       - description: If true, return preview without importing
         in: query

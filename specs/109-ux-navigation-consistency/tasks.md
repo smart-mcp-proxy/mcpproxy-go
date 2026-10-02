@@ -384,8 +384,6 @@ Not new requirements: the last open items of the done check, fixed test-first in
 - [x] T170 [P] FR-051 / US1-4: a fresh instance (no server configured) shows a "Get started" card instead of "All clear" and hides the top usage strip; any attention item wins; `mcpproxy attention` is unchanged (`frontend/tests/unit/home-getting-started.spec.ts`)
 - [x] T171 Docs and bookkeeping for T166–T170: `spec.md` (US1-4, FR-051, FR-070, FR-073), `contracts/url-filter-contract.md`, `contracts/health-vocabulary.md`, `parity-matrix.json` row 22, `acceptance-index.json`, `quickstart.md` recipe `fix-ux-residuals`, research D36, `docs/web-ui/dashboard.md`
 
----
-
 ## Phase 17: PR fix-catalog-rank — catalog search ranks the real server first against the live registry (audit C1; 2026-10-02)
 
 Not a new requirement: the audit's C1 was marked fixed, but the live official registry returns names in byte order, so a typed `github` never reached GitHub's own server and the hand-written fixture hid it. FR-060, FR-061 and SC-008 now hold against a fixture recorded from the live registry. Decisions: research D37.
@@ -422,6 +420,17 @@ Not new requirements: two medium findings and one low from the final done-check,
 - [x] T196 [US2] CLI: the `Scan:` line of `review show` in `cmd/mcpproxy/review_cmd.go`
 - [x] T197 Docs and bookkeeping for T182–T196: `docs/features/security-quarantine.md`, `docs/api/rest-api.md`, `docs/cli/review-commands.md`, `specs/109-ux-navigation-consistency/acceptance-index.json`, `quickstart.md` recipe `fix-review-screen`, research D40
 - [x] T198 Verification gates: `go test -race` on `internal/storage`, `internal/runtime`, `internal/security/scanner`, `internal/server` (CI skip regex), both golangci-lint runs, `npm run test:unit`, `vue-tsc`, `swift test`, `TestSpec109Traceability*` and `TestSpec109ParityMatrix*` (`internal/httpapi/spec109_traceability_test.go`)
+
+## Phase 19: PR fix-usertest-web — first-run user test findings (2026-10-02)
+
+Not new requirements: four Web findings from a codex first-run user test of `main` at `d7efa80d8`; Spec 108's T169–T170 own the profile editor one. Decisions: research D41.
+
+- [x] T199 [US7] F-04 backend / FR-040: `POST /servers/import/path?preview=true` of a canonical client file with no servers (0 bytes, whitespace, `{}`, no or empty server map) answers `200` with an empty `imported` list instead of `400`; apply, a malformed file and `/import/json` stay `400`; `configimport.ErrTypeNoServers` + `IsNoServers`, `httpapi.emptyImportPreview` (`internal/httpapi/import_test.go` `TestImportFromPath_PreviewEmptyClientConfigIsEmptyNot400`, `TestImportFromPath_ApplyEmptyClientConfigStill400`, `TestImportFromPath_PreviewMalformedJSONStill400`, `TestImportServersJSON_EmptyMcpServersStill400`, `internal/configimport/types_test.go` `TestIsNoServers`; swagger description)
+- [x] T200 [US7] F-04 Web / US7-4 / FR-043: one completion state after an import: no "No importable servers found" next to "2 servers imported", no "not selected" skip, the review sentence reads "Approve a server to finish this step. 6 servers are waiting in quarantine, including the 2 you just imported — …", and a usable server with nothing left shows "N servers imported." + "Continue to Verify" (`frontend/tests/unit/onboarding-servers-step-state.spec.ts`, `import-servers-completion.spec.ts`, `onboarding-wizard-import-completion.spec.ts`; `frontend/src/utils/onboardingServersStep.ts`)
+- [x] T201 [US5] F-07 / FR-065 / US5-5: a Secret-mode or secret-named value is masked while typing with a Show/Hide toggle that changes display only (`frontend/tests/unit/secret-toggle-masking.spec.ts`, `add-server-manual.spec.ts`, `add-server-paste.spec.ts`; `SecretToggle.vue` only)
+- [x] T202 [US6] journey B / FR-052: the header status pill reads "0 online · 4 awaiting review · 0 tools · Retrieve" for review-pending servers and "Loading servers…" before the first list (`frontend/tests/unit/status-pill-awaiting-review.spec.ts`; `StatusPill.vue`)
+- [x] T203 [P] Playwright guard for T201, T202 and Spec 108 T169 at 1440x900 and 900x900 (`e2e/web-ui-sweep/usertest-web-fixes.spec.ts`, `scripts/run-web-smoke.sh`, `navigation-consistency.spec.ts` pill regex)
+- [x] T204 Docs and bookkeeping for T199–T203: `spec.md` (US5-5, US6-2, US7-4, FR-043, FR-052, FR-065, Terminology), `contracts/navigation-map.md`, `contracts/rest-api.md` "Import preview", `acceptance-index.json`, `parity-matrix.json` row 17, `quickstart.md` recipe `fix-usertest-web`, research D41, `docs/web-ui/dashboard.md`, `docs/features/config-import.md`, `docs/cli/catalog-commands.md`
 
 ---
 
@@ -471,4 +480,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-234 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 217 before the fix-review-screen PR, which added T182–T198; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+240 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 234 before the fix-usertest-web PR, which added T199–T204; 217 before the fix-review-screen PR, which added T182–T198; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).

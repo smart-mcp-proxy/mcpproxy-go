@@ -219,6 +219,7 @@
       "summary": "Secret-named env vars default to Secret and land in the keyring",
       "tests": [
         "vitest:frontend/tests/unit/secret-toggle.spec.ts",
+        "vitest:frontend/tests/unit/secret-toggle-masking.spec.ts",
         "vitest:frontend/tests/unit/use-secret-fields.spec.ts",
         "vitest:frontend/tests/unit/secret-ref.spec.ts",
         "golden:internal/secret/testdata/ref_names.json",
@@ -246,7 +247,9 @@
       "tests": [
         "vitest:frontend/tests/unit/header-layout.spec.ts",
         "vitest:frontend/tests/unit/add-menu.spec.ts",
-        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts"
+        "vitest:frontend/tests/unit/status-pill-awaiting-review.spec.ts",
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
+        "pw:e2e/web-ui-sweep/usertest-web-fixes.spec.ts"
       ]
     },
     "US6-3": {
@@ -330,7 +333,10 @@
       "summary": "The Servers step completes only with a usable server and shows the inline review list",
       "tests": [
         "vitest:frontend/tests/unit/onboarding-wizard-usable-completion.spec.ts",
-        "vitest:frontend/tests/unit/onboarding-wizard-inline-review.spec.ts"
+        "vitest:frontend/tests/unit/onboarding-wizard-inline-review.spec.ts",
+        "vitest:frontend/tests/unit/onboarding-wizard-import-completion.spec.ts",
+        "vitest:frontend/tests/unit/import-servers-completion.spec.ts",
+        "go:internal/httpapi/import_test.go#TestImportFromPath_PreviewEmptyClientConfigIsEmptyNot400"
       ]
     },
     "US7-5": {

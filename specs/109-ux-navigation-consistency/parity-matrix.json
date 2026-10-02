@@ -934,6 +934,7 @@
           ],
           "tests": [
             "vitest:frontend/tests/unit/secret-toggle.spec.ts",
+            "vitest:frontend/tests/unit/secret-toggle-masking.spec.ts",
             "vitest:frontend/tests/unit/use-secret-fields.spec.ts"
           ]
         },

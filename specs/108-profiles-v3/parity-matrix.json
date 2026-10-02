@@ -335,7 +335,8 @@
             "component:frontend/src/components/profiles/ProfileTryPanel.vue"
           ],
           "tests": [
-            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts"
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts",
+            "vitest:frontend/tests/unit/profile-try-unsaved.spec.ts"
           ]
         },
         "macos": {

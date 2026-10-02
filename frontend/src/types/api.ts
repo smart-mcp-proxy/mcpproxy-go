@@ -1465,8 +1465,15 @@ export type ProfileMoved = { clients: string[]; tokens: string[] }
 export interface ProfileRenameResult { profile: ProfileView; moved: ProfileMoved }
 export interface ProfileDeleteResult { deleted: string; moved: ProfileMoved; anonymous_profile_moved_to?: string }
 
+/** One retrieve_tools hit as POST /profiles/try returns it (consumers read the nested `tool`). */
+export interface TryProfileHit {
+  score?: number
+  tool?: { name?: string; server_name?: string; description?: string; annotations?: unknown } | string
+  [key: string]: unknown
+}
+
 export interface TryProfileResponse {
-  results: Array<Record<string, unknown>>
+  results: Array<TryProfileHit>
   hidden_by_profile: number
   hidden: Array<{ server: string; tool: string; reason: string }>
   hidden_truncated?: boolean

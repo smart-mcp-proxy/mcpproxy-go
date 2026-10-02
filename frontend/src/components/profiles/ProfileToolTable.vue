@@ -1,7 +1,8 @@
 <template>
   <section class="space-y-3" aria-labelledby="profile-tools-heading" data-test="profile-tool-table">
     <h2 id="profile-tools-heading" class="font-semibold">Tools under this profile</h2>
-    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts">{{ counts.visible }} visible &middot; {{ counts.hidden }} hidden</p>
+    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts"><template v-if="unsaved">Saved profile: </template>{{ counts.visible }} visible &middot; {{ counts.hidden }} hidden</p>
+    <p v-if="unsaved" class="text-xs text-warning" data-test="profile-tool-unsaved-note">Counts and access show the saved profile. Save to update them, or use Try it below to test your unsaved edits.</p>
 
     <div class="flex flex-wrap gap-2" data-test="profile-tool-filters">
       <label class="sr-only" for="tool-filter-server">Filter by server</label>
@@ -126,6 +127,9 @@ const props = defineProps<{
   loading?: boolean
   editable?: boolean
   focusKey?: string
+  // The draft differs from the saved profile; the counts and access column
+  // are the SAVED profile's evaluation (FR-041), so say so.
+  unsaved?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'toggle', payload: { list: 'allow' | 'deny'; key: string }): void

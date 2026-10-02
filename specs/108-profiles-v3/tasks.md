@@ -355,6 +355,13 @@ Two gaps found by the done-check audit: a nested `call_tool` refused by the prof
 - [x] T167 [US4] `access explain` move-client hint names the destination profile (FR-035): `runtime.Fix.Profile` (`profile`, `omitempty`, move_client only), `explainFixes` fills it, `fixCommand` prints `mcpproxy client set-profile <client> <profile>` and falls back to the placeholder for a daemon that predates the field. Tests: `TestExplain_FixesOrderedByPreference`, `TestExplain_DanglingClientBindingMoveFixNamesDestination`, `TestAccessExplain_MoveClientFixNamesDestinationProfile`, `explain_blocked.json` in `internal/httpapi/access_explain_route_test.go` and `internal/profile/contract_test.go`; `oas/swagger.yaml`
 - [x] T168 Docs and bookkeeping for T166–T167: `contracts/refusals.md`, `contracts/mcp-tools.md`, `contracts/rest-api.md`, `contracts/cli.md`, `data-model.md`, `plan.md`, `docs/features/activity-log.md`, `docs/features/profiles.md`, `docs/cli/profile-commands.md`
 
+## Phase 19: PR fix-usertest-web — profile editor finding F-05 (2026-10-02)
+
+One Web finding from a codex first-run user test of `main` at `d7efa80d8`; Spec 109's T199–T204 own the others. Decisions: research D40.
+
+- [x] T169 [US4] F-05 / FR-041: Try it reads the real `{score, tool: {name, server_name, description}}` hit (`tryHitRow`, no more `[object Object]`) and says "Uses your unsaved edits" / "Uses the saved profile"; the tool table's counts read "Saved profile: N visible · M hidden" with a pointer to Try it while the draft differs (`frontend/tests/unit/profile-try-unsaved.spec.ts`, `profile-policy-editor.spec.ts`; `ProfileTryPanel.vue`, `ProfileToolTable.vue`, `ProfileEditor.vue`, `utils/profiles.ts`; Playwright `e2e/web-ui-sweep/usertest-web-fixes.spec.ts`)
+- [x] T170 [US4] Docs and bookkeeping for T169: FR-041, `contracts/rest-api.md` try row, `parity-matrix.json` row 6, `docs/features/profiles.md`, research D40, quickstart row
+
 ---
 
 ## Dependencies & Execution Order
@@ -390,4 +397,4 @@ MVP = 108-a + 108-b (US1 discovery via config + `/mcp/p/<slug>` or pinned tokens
 
 ## Task Count
 
-193 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 · demo-ux-fixes 5 · fix-usertest-cli 4 · fix-nested-refusal 3 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147; demo-ux-fixes added T148–T152; fix-usertest-cli added T153–T156; fix-nested-refusal added T166–T168.
+195 tasks: setup 3 · a 14 · b 13 · c 24 · d 19 · e 14 · f 17 · g 8 · h 4 · i 16 · j 11 · k 21 · l 9 · retro-go 7 · fix-1458 1 · demo-ux-fixes 5 · fix-usertest-cli 4 · fix-nested-refusal 3 · fix-usertest-web 2 (counted mechanically; the 108-l plan carries the counting script). History: codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks; 108-j added T106a, T107a, T108a, T109a; the post-merge macOS and Go review fixes added to k and retro-go; 108-l added T124a, T126a, T127; fix-1458 added T147; demo-ux-fixes added T148–T152; fix-usertest-cli added T153–T156; fix-nested-refusal added T166–T168; fix-usertest-web added T169–T170.
