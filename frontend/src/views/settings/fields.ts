@@ -40,6 +40,12 @@ export type ValueKind = 'hostport' | 'bytesize' | 'cpu' | 'hostname' | 'url' | '
 // Without this the textarea would PATCH a plain string into a []string key.
 export type ListKind = 'comma' | 'lines'
 
+export interface DefaultContext {
+  // 'server' for the server-edition build; anything else (including unknown,
+  // while /status is still loading) reads as the personal edition.
+  edition?: string
+}
+
 export interface SettingField {
   key: string // dot-path, e.g. "docker_isolation.enabled"
   label: string
@@ -58,8 +64,16 @@ export interface SettingField {
   resetDefault?: string // when set, render an inline "Reset to default" button that emits this value
   // Value an absent/blank key actually resolves to on the Go side. Only needed
   // for `omitempty` fields whose zero value is meaningful (the serialization
-  // modes: "" means "full"). See normalizeFieldDefaults below for why.
-  defaultValue?: string
+  // modes: "" means "full") and for nullable (*bool) keys whose nil resolves to
+  // true (quarantine_enabled, telemetry.enabled, ...). See normalizeFieldDefaults
+  // below for why. The shared fixture internal/config/testdata/
+  // settings_nullable_defaults.json pins the boolean ones to the Go resolvers.
+  defaultValue?: string | boolean
+  // Default that depends on the rest of the config or on the edition (the
+  // audit_log.* keys: an absent block resolves per edition, an explicit block
+  // resolves differently). Receives an UNTOUCHED snapshot of the config, so
+  // materialising one default never changes the answer for another.
+  defaultFor?: (cfg: any, ctx: DefaultContext) => unknown
   // Set for a textarea that edits a []string key (see ListKind).
   listKind?: ListKind
 }
@@ -71,6 +85,10 @@ export interface SettingsAccordion {
   fields: SettingField[]
   docs?: string // doc page path on docs.mcpproxy.app
 }
+
+// The label of the per-section save button. The Settings header copy
+// interpolates the same constant, so the instruction and the button cannot drift.
+export const SAVE_CHANGES_LABEL = 'Save changes'
 
 // Base URL for the hosted documentation; field/accordion `docs` are paths under it.
 export const DOCS_BASE = 'https://docs.mcpproxy.app'
@@ -172,6 +190,7 @@ export const SECURITY_FIELDS: SettingField[] = [
   },
   {
     key: 'quarantine_enabled',
+    defaultValue: true, // *bool, nil = on (Config.IsQuarantineEnabled)
     docs: '/features/security-quarantine',
     label: 'Quarantine new servers & changed tools',
     help: 'Holds newly added servers and tools whose description/schema changed for your approval before agents can call them — protects against Tool Poisoning Attacks. Recommended ON.',
@@ -318,6 +337,7 @@ export const GENERAL_FIELDS: SettingField[] = [
   },
   {
     key: 'telemetry.enabled',
+    defaultValue: true, // *bool, nil = on (Config.IsTelemetryEnabled)
     docs: '/features/telemetry',
     label: 'Anonymous usage telemetry',
     help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time. Disabling sends a single anonymous opt-out signal, then stops all telemetry.',
@@ -450,14 +470,25 @@ export function isBlankInstructions(v: string | null | undefined): boolean {
 // construction" — DetectConfigChanges), so every row carries the restart
 // badge. There is no secret key under `audit_log`, so no row uses the
 // `secret` control.
+// An absent audit_log block resolves per edition (EffectiveAuditLog): the server
+// edition runs enabled with a stdout sink, the personal edition leaves audit
+// logging off. Once the block exists, `enabled` defaults on and `stdout` off
+// (an explicit block never defaults to stdout; it needs a path).
+function auditLogEnabledDefault(cfg: any, ctx: DefaultContext): boolean {
+  return cfg?.audit_log == null ? ctx.edition === 'server' : true
+}
+function auditLogStdoutDefault(cfg: any, ctx: DefaultContext): boolean {
+  return cfg?.audit_log == null ? ctx.edition === 'server' : false
+}
+
 export const AUDIT_LOG_FIELDS: SettingField[] = [
-  { key: 'audit_log.enabled', label: 'Enable audit logging', help: 'Writes one JSONL line per authorization decision and tool call. On by default under the server edition; the personal edition defaults to off.', control: 'toggle', restart: true },
-  { key: 'audit_log.stdout', label: 'Write to stdout', help: 'Server edition default when no path is set — not used under the native stdio transport (stdout carries JSON-RPC there); set a path instead.', control: 'toggle', restart: true },
+  { key: 'audit_log.enabled', label: 'Enable audit logging', help: 'Writes one JSONL line per authorization decision and tool call. On by default under the server edition; the personal edition defaults to off.', control: 'toggle', restart: true, defaultFor: auditLogEnabledDefault },
+  { key: 'audit_log.stdout', label: 'Write to stdout', help: 'Server edition default when no path is set — not used under the native stdio transport (stdout carries JSON-RPC there); set a path instead.', control: 'toggle', restart: true, defaultFor: auditLogStdoutDefault },
   { key: 'audit_log.path', label: 'File path', help: 'Where to write the rotating audit log file. Leave blank to use stdout instead.', control: 'text', optional: true, placeholder: '/var/log/mcpproxy/audit.jsonl', restart: true },
   { key: 'audit_log.max_size_mb', label: 'Rotate after (MB)', control: 'number', min: 1, restart: true },
   { key: 'audit_log.max_backups', label: 'Rotated files to keep', control: 'number', min: 1, restart: true },
   { key: 'audit_log.max_age_days', label: 'Delete rotated logs after (days)', control: 'number', min: 1, restart: true },
-  { key: 'audit_log.compress', label: 'Compress rotated files', control: 'toggle', restart: true },
+  { key: 'audit_log.compress', label: 'Compress rotated files', control: 'toggle', restart: true, defaultValue: true },
 ]
 
 // ---- Section 3: Advanced (subsystem accordions) ----
@@ -676,23 +707,71 @@ export function aliasServerEdition(cfg: any): any {
  *  - `raw` is the untouched response. The Raw JSON tab must show server truth,
  *    and both helpers above MUTATE their argument, so the clones matter.
  */
-export function hydrateConfigState(cfg: any): { working: any; original: any; raw: any } {
+export function hydrateConfigState(
+  cfg: any,
+  ctx: DefaultContext = {}
+): { working: any; original: any; raw: any } {
   const clone = (v: any) => (v == null ? v : JSON.parse(JSON.stringify(v)))
   return {
-    working: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)))),
-    original: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)))),
+    working: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)), ctx)),
+    original: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)), ctx)),
     raw: clone(cfg),
   }
 }
 
-export function normalizeFieldDefaults(cfg: any): any {
+export function normalizeFieldDefaults(cfg: any, ctx: DefaultContext = {}): any {
   if (cfg == null || typeof cfg !== 'object') return cfg
+  // Resolve every default against an untouched snapshot FIRST, then write them.
+  // Writing as we go would let `audit_log.enabled` create the audit_log block
+  // and flip the answer `audit_log.stdout` gives for "is the block absent".
+  const snapshot = JSON.parse(JSON.stringify(cfg))
+  const resolved: Array<[string, unknown]> = []
   for (const f of allCatalogFields()) {
-    if (f.defaultValue == null) continue
-    const cur = getPath(cfg, f.key)
-    if (cur == null || cur === '') setPath(cfg, f.key, f.defaultValue)
+    const dv = f.defaultFor ? f.defaultFor(snapshot, ctx) : f.defaultValue
+    if (dv == null) continue
+    const cur = getPath(snapshot, f.key)
+    if (cur == null || cur === '') resolved.push([f.key, dv])
   }
+  for (const [key, value] of resolved) setPath(cfg, key, value)
   return cfg
+}
+
+/**
+ * Re-resolve the edition-dependent defaults (the `defaultFor` fields) once the
+ * edition is known, for a form that was hydrated before /status arrived. Only
+ * keys the user has not touched (working equals original) are rewritten, and
+ * both copies get the same value, so nothing becomes an unsaved change.
+ */
+export function refreshEditionDefaults(
+  state: { working: any; original: any },
+  raw: any,
+  ctx: DefaultContext
+): void {
+  const fresh = hydrateConfigState(raw, ctx).working
+  for (const f of allCatalogFields()) {
+    if (!f.defaultFor) continue
+    const w = getPath(state.working, f.key)
+    const o = getPath(state.original, f.key)
+    if (JSON.stringify(w) !== JSON.stringify(o)) continue
+    const next = getPath(fresh, f.key)
+    if (next === undefined) continue
+    setPath(state.working, f.key, next)
+    setPath(state.original, f.key, next)
+  }
+}
+
+/**
+ * Effective boolean for a catalogue toggle: the config value when present,
+ * otherwise the field's declared default (nil *bool keys resolve to true).
+ * The one place the "absent means X" rule lives, so the posture chip and the
+ * toggle cannot disagree.
+ */
+export function effectiveBool(cfg: any, key: string, ctx: DefaultContext = {}): boolean {
+  const cur = getPath(cfg, key)
+  if (cur != null && cur !== '') return !!cur
+  const f = allCatalogFields().find((x) => x.key === key)
+  const dv = f?.defaultFor ? f.defaultFor(cfg, ctx) : f?.defaultValue
+  return !!dv
 }
 
 /**

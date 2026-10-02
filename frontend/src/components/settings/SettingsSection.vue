@@ -41,7 +41,7 @@
           @click="attemptSave"
         >
           <span v-if="saving" class="loading loading-spinner loading-xs"></span>
-          Save changes
+          {{ SAVE_CHANGES_LABEL }}
         </button>
       </div>
     </div>
@@ -77,7 +77,7 @@
 <script setup lang="ts">
 import { ref, computed, getCurrentInstance } from 'vue'
 import SettingField from './SettingField.vue'
-import { getPath, setPath, buildPartial, validateField, type SettingField as Field } from '@/views/settings/fields'
+import { getPath, setPath, buildPartial, validateField, SAVE_CHANGES_LABEL, type SettingField as Field } from '@/views/settings/fields'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 

@@ -5,7 +5,7 @@
       <div>
         <h1 class="text-3xl font-bold">Settings</h1>
         <p class="text-base-content/70 mt-1">
-          Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
+          Edit a section, then press {{ SAVE_CHANGES_LABEL }} to apply it. A badge marks fields that need a restart.
           <a
             :href="`${DOCS_BASE}/configuration/config-file`"
             target="_blank"
@@ -206,6 +206,9 @@ import {
   isBlankInstructions,
   restartRequiredLabels,
   hydrateConfigState,
+  refreshEditionDefaults,
+  effectiveBool,
+  SAVE_CHANGES_LABEL,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
@@ -310,7 +313,7 @@ const filteredFields = computed<SettingField[]>(() => {
 const posture = computed(() => {
   const w: any = state.working || {}
   const sdd = w.sensitive_data_detection?.enabled !== false
-  const quarantine = w.quarantine_enabled !== false // default-on
+  const quarantine = effectiveBool(w, 'quarantine_enabled') // nil = on, same rule as the toggle
   return [
     { label: 'Quarantine', on: quarantine, good: quarantine },
     { label: 'MCP auth', on: !!w.require_mcp_auth, good: !!w.require_mcp_auth },
@@ -388,6 +391,16 @@ const editorOptions = {
   lineNumbers: 'on' as const,
 }
 
+// The untouched /config response of the last load; the edition-dependent
+// defaults are re-resolved from it if /status arrives after the config did.
+let rawConfig: any = null
+watch(
+  () => systemStore.status?.edition,
+  (edition) => {
+    if (loaded.value && rawConfig) refreshEditionDefaults(state, rawConfig, { edition })
+  }
+)
+
 async function loadConfig() {
   loading.value = true
   loadError.value = ''
@@ -403,9 +416,10 @@ async function loadConfig() {
       // keys the API omits (the serialization modes: absent means "full"), so
       // their <select> shows the real default instead of an empty box. Applied
       // to both copies — otherwise the untouched field would read as dirty.
-      const hydrated = hydrateConfigState(cfg)
+      const hydrated = hydrateConfigState(cfg, { edition: systemStore.status?.edition })
       state.working = hydrated.working
       state.original = hydrated.original
+      rawConfig = hydrated.raw
       formEpoch.value++
       // hydrated.raw, not cfg: the Raw tab must show the untouched response,
       // and this makes that dependency explicit rather than relying on the
