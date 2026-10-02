@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -119,8 +120,7 @@ func main() {
 	rootCmd.SetVersionTemplate(versionLine())
 
 	// Add global flags
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
-	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
+	registerRootPathFlags(rootCmd)
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "Log level (trace, debug, info, warn, error) - defaults: server=info, other commands=warn")
 	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", false, "Enable logging to file in standard OS location (default: console only)")
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
@@ -255,12 +255,28 @@ func main() {
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
 
-	if err := rootCmd.Execute(); err != nil {
-		// Check for specific error types to return appropriate exit codes
-		exitCode := classifyError(err)
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(exitCode)
+	if code := executeRoot(rootCmd, os.Stderr); code != ExitCodeSuccess {
+		os.Exit(code)
 	}
+}
+
+// executeRoot runs the command tree and reports a failure exactly once. Cobra
+// prints "Error: <err>" itself unless SilenceErrors is set, and main() used to
+// print it again, so every RunE error (including the connect binding-guard
+// "Fixes:" list) appeared twice. Errors are silenced in cobra and written here
+// once; usage output on flag errors is unchanged (SilenceUsage is untouched).
+func executeRoot(root *cobra.Command, stderr io.Writer) int {
+	root.SilenceErrors = true
+	err := root.Execute()
+	if err == nil {
+		return ExitCodeSuccess
+	}
+	fmt.Fprintf(stderr, "Error: %v\n", err)
+	// Cobra appends this hint itself only when it prints the error.
+	if strings.HasPrefix(err.Error(), "unknown command") {
+		fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", root.CommandPath())
+	}
+	return classifyError(err)
 }
 
 func createSearchServersCommand() *cobra.Command {
