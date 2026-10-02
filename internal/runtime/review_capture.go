@@ -18,7 +18,7 @@ import (
 // no tool routing) adds no new trust exposure. With automatic baseline scans
 // off and no manual scan, no job exists and nothing is started.
 func (r *Runtime) ShouldCaptureReviewDefinitionsAfterScan(serverName string) bool {
-	if serverName == "" || r.storageManager == nil || !r.serverIsQuarantined(serverName) {
+	if serverName == "" || r.storageManager == nil {
 		return false
 	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
@@ -46,5 +46,11 @@ func (r *Runtime) ShouldCaptureReviewDefinitionsAfterScan(serverName string) boo
 	if err != nil || job == nil || job.Status != scanner.ScanJobStatusCompleted {
 		return false
 	}
-	return job.ScanContext != nil && job.ScanContext.ToolsExported > 0
+	if job.ScanContext == nil || job.ScanContext.ToolsExported == 0 {
+		return false
+	}
+	// The configuration read comes last: it is the one check that depends on
+	// the live snapshot, and the cheap storage gates above reject almost every
+	// settle event first.
+	return r.serverIsQuarantined(serverName)
 }
