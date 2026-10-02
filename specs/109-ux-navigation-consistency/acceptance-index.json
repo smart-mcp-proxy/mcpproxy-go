@@ -56,6 +56,10 @@
       "summary": "Approve server with unchecked tools runs the scan-gated approval and blocks the rest",
       "tests": [
         "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "go:internal/runtime/review_default_allowed_test.go#TestReviewDefaultAllowed",
+        "vitest:frontend/tests/unit/review-screen-default-selection.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift#testApproveLabels",
+        "go:cmd/mcpproxy/review_cmd_default_selection_test.go#TestReviewApproveQuarantinedUsesDefaultSelection",
         "go:internal/httpapi/security_scanner_test.go#TestSecurityHandlerApproveServerWithBlocks",
         "go:internal/storage/scanner_test.go#TestSaveIntegrityBaselineWithBlocksIsAtomic",
         "go:internal/security/scanner/service_test.go#TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine"
@@ -82,6 +86,7 @@
       "summary": "Uncaptured definitions say so and offer Fetch tool definitions",
       "tests": [
         "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "vitest:frontend/tests/unit/review-screen-default-selection.spec.ts",
         "go:internal/runtime/review_test.go#TestReviewPayload_QueueAndUncapturedDefinitions",
         "go:internal/server/mcp_quarantine_discovery_test.go",
         "go:internal/runtime/review_capture_test.go#TestShouldCaptureReviewDefinitionsAfterScan",

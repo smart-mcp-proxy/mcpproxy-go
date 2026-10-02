@@ -66,13 +66,16 @@ Descriptions and schemas come from the upstream server and are shown as plain te
 ## review approve
 
 ```bash
-mcpproxy review approve <server> [--tools a,b] [--except a,b] [--force] [--yes]
+mcpproxy review approve <server> [--all | --tools a,b] [--except a,b] [--force] [--yes]
 ```
+
+On a quarantined server the command allows the same default selection as the Web and macOS review screens: only read-only tools with a clean scan (`default_allowed` in the review payload). Every other tool is blocked, meaning approved and disabled, until you enable it on the Tools tab. A core that does not send `default_allowed` blocks every tool.
 
 | Flag | Meaning |
 |------|---------|
-| `--except a,b` | Quarantined server only: block these tools while approving the server |
-| `--tools a,b` | Trusted server only: approve only these pending or changed tools |
+| `--all` | Approve every tool (the Web and macOS "Approve all"). On a trusted server this is the default and changes nothing |
+| `--tools a,b` | Quarantined server: allow exactly these tools and block the rest. Trusted server: approve only these pending or changed tools |
+| `--except a,b` | Quarantined server only: block these tools as well, whichever base was chosen |
 | `--force` | Approve although the scan verdict is dangerous (use only after reading the findings) |
 | `--yes` | Skip the confirmation prompt |
 
@@ -80,19 +83,25 @@ The command picks the right endpoint for you:
 
 | Server state | Endpoint | Notes |
 |--------------|----------|-------|
-| Quarantined | `POST /api/v1/servers/{id}/security/approve` | `--except` becomes `block`; `--force` is sent as `force` |
+| Quarantined | `POST /api/v1/servers/{id}/security/approve` | `block` is every tool outside the selection (default, `--all` or `--tools`, minus `--except`); `--force` is sent as `force` |
 | Trusted (not quarantined) | `POST /api/v1/servers/{id}/tools/approve` | `--tools` selects tools; without it every pending or changed tool is approved |
 
 Using the wrong flag for the state fails with exit code 1 instead of doing something else:
 
-- `--tools` on a quarantined server: `--tools cannot select a quarantined server approval; use --except to block tools`
+- `--all` together with `--tools`: `--all cannot be combined with --tools`
+- A tool name that is not in the review (`--tools` or `--except`): `unknown tool 'x' for server 's'`; nothing is written
 - `--except` on a trusted server: `--except applies only while approving a quarantined server`
+
+The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`. JSON and YAML output stay the REST data object.
+
+`mcpproxy review approve <server> --yes` used to allow every tool. It now allows the default selection, so it matches the review screens; add `--all` to approve every tool.
 
 ```bash
 mcpproxy review approve filesystem --except delete_0 --force --yes
 ```
 
 ```
+Allowing 0 of 1 tool; blocking 1: delete_0
 Approved server filesystem
 ```
 
