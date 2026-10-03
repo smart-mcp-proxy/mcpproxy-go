@@ -167,6 +167,51 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Bug Fixes
 
+- **security/quarantine:** a server added by editing `mcp_config.json` (no `quarantined` key,
+  first seen) stayed held for review only until its first restart. Restarting it (by hand, after a
+  secret change, or through the automatic baseline scan's connect) wrote the raw file entry over
+  the recorded quarantine, so the next config write or core restart admitted it and auto-approved
+  its tools. The restart path now runs the entry through the config-load admission gate, and storage
+  never lowers a recorded quarantine unless the operator sets `"quarantined": false` or approves the
+  server. Present since v0.53.0. ([#1463](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1463))
+- **security/cli:** `mcpproxy doctor` no longer prints the admin API key (it was embedded in the Web
+  UI URL) in any output format, and URL credentials are masked in its output. ([#1472](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1472))
+- **review:** the Review screen starts fail-closed: read tools are pre-selected, write, destructive
+  and unannotated tools are not, the button states the exact count ("Approve server (3 of 9
+  tools)"), and approving everything is an explicit action. The same defaults apply on macOS and
+  in `mcpproxy review approve`. ([#1481](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1481))
+- **review:** the scan banner no longer says "clean" for definitions that were never scanned or
+  changed after the scan, an approved server shows its approved state instead of per-tool
+  Approve/Reject buttons, and tool definitions are captured automatically when a quarantined
+  server is imported. ([#1470](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1470))
+- **catalog:** search finds the server you mean: a typed query fetches enough results from each
+  registry, versions of one server collapse to a single entry, an exact owner or name match ranks
+  first (searching "github" now returns GitHub's own server first), and "Verified" means the
+  publisher owns the source repository. ([#1469](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1469))
+- **telemetry:** when telemetry is disabled by `MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK` or `CI`,
+  the setup wizard, Home banner, Settings and the macOS app say so and lock the control instead of
+  showing the opt-out notice; `GET /api/v1/status` reports the effective state and its source.
+  macOS Settings shows the listen address of the core it is connected to. ([#1471](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1471))
+- **cli:** the global `-c/--config` and `-d/--data-dir` flags apply to every management command
+  (`upstream`, `registry`, `catalog` included) in any position, and no command silently creates a
+  default config in `~/.mcpproxy` when one was given; errors are printed once; a locked client
+  credential calling `set_profile` is told that profile changes are locked. ([#1472](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1472))
+- **web:** first-run fixes — the setup wizard shows one completion state after importing servers,
+  previewing an empty client config no longer fails, secret values are masked while you type,
+  the status pill says "awaiting review" for quarantined servers instead of "0 online", and the
+  profile editor's Try it uses your unsaved edits and shows readable reasons. ([#1473](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1473))
+- **profiles:** a call refused inside `code_execution` records the same `block_reason` as a
+  top-level refusal, and `mcpproxy access explain` names the destination profile in its move-client
+  fix. ([#1468](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1468))
+- **web:** token savings are labelled as an estimate on Home and in the macOS app, Activity's
+  "Clear filters" on a server/tool conflict reloads the list, "Needs review" health badges are
+  orange, and a brand-new install shows a getting-started card instead of "All clear". ([#1467](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1467))
+- **logging:** an upgrade start no longer repeats the "predate the config-load admission gate"
+  advisory on every config pass (once per server per process), and the benign startup race
+  "connection already in progress or established" is logged at debug instead of error.
+- **profiles:** `set_profile` from a switchable client credential reports the servers of the
+  profile it just selected instead of the binding's narrower set.
+
 - **web/settings:** toggles for nullable settings (`quarantine_enabled`, `telemetry.enabled` and the
   `audit_log.*` booleans) show the value the core actually applies instead of OFF when the key is
   absent, and the page header now says to press Save changes instead of "Changes save instantly".
@@ -235,6 +280,10 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Documentation
 
+- **docs:** profiles are described as optional (without one, nothing profile-level restricts a
+  caller), and the `quarantined` default for servers added by editing `mcp_config.json` is
+  explained, with the full admission rules in Security Quarantine and a first-run note in the Quick
+  Start.
 - **051:** README hero — frosted-tiles banner + demo GIF (#488) ([#488](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/488)) ([`25731da`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/25731da5e1a26753ee90a173a8ea03a317e82666))
 
 ## [0.33.1] - 2026-05-20
