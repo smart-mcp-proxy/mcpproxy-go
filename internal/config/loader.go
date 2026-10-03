@@ -743,6 +743,13 @@ func expandDataDir(cfg *Config) {
 	cfg.DataDir = resolved
 }
 
+// ApplyTLSEnvOverrides applies the MCPPROXY_* environment overrides to cfg.
+// Exported for CLI loaders that fall back to DefaultConfig() when no config
+// file exists.
+func ApplyTLSEnvOverrides(cfg *Config) {
+	applyTLSEnvOverrides(cfg)
+}
+
 // applyTLSEnvOverrides applies the MCPPROXY_* environment overrides. Each one
 // goes through OverrideForProcess so no save path persists it (see
 // process_overrides.go); the env-sourced set is rebuilt from scratch on every

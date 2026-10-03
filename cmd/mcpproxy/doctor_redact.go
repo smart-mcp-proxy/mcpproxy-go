@@ -20,7 +20,7 @@ const doctorRedactionMask = "REDACTED"
 // in doctor output even outside a URL. runDoctor sets it for the run.
 var doctorSecretLiterals []string
 
-var doctorURLPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+var doctorURLPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"<>]+`)
 
 func doctorMask(string) string { return doctorRedactionMask }
 
@@ -32,7 +32,12 @@ func redactDoctorString(s string) string {
 	}
 	if strings.Contains(s, "://") {
 		s = doctorURLPattern.ReplaceAllStringFunc(s, func(u string) string {
-			return oauth.RedactURLQueryParamsWith(u, doctorMask)
+			trailing := ""
+			for strings.HasSuffix(u, "'") {
+				trailing = "'" + trailing
+				u = u[:len(u)-1]
+			}
+			return oauth.RedactURLQueryParamsWith(u, doctorMask) + trailing
 		})
 	}
 	for _, lit := range doctorSecretLiterals {
