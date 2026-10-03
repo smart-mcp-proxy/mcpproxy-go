@@ -224,6 +224,25 @@ func (r *Runtime) reportPreFixAdmissions(names []string) {
 	if len(names) == 0 {
 		return
 	}
+	// The gate runs several times per process (gateInitialConfig, then
+	// LoadConfiguredServers, then the pre-publish hook on every publish); name
+	// each affected server once per process.
+	r.preFixMu.Lock()
+	if r.preFixReported == nil {
+		r.preFixReported = make(map[string]struct{})
+	}
+	fresh := names[:0:0]
+	for _, n := range names {
+		if _, seen := r.preFixReported[n]; !seen {
+			r.preFixReported[n] = struct{}{}
+			fresh = append(fresh, n)
+		}
+	}
+	r.preFixMu.Unlock()
+	if len(fresh) == 0 {
+		return
+	}
+	names = fresh
 	r.logger.Warn("Configured servers predate the config-load admission gate and have never been explicitly reviewed",
 		zap.Strings("servers", names),
 		zap.String("action", "review them in the quarantine UI, or record the decision with an explicit \"quarantined\" value in mcp_config.json (issue #937)"))

@@ -127,6 +127,12 @@ type Runtime struct {
 	selfWriteMu      sync.Mutex
 	recentSelfWrites []selfWriteEntry
 
+	// preFixReported holds the servers the "predate the config-load admission
+	// gate" advisory has already named in this process, so the gate passes at
+	// startup and on every later publish do not repeat it.
+	preFixMu       sync.Mutex
+	preFixReported map[string]struct{}
+
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status
