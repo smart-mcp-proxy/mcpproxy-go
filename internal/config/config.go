@@ -2335,6 +2335,25 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	return errors
 }
 
+// ValidateServerForLoad runs the per-server checks config.Load applies at boot
+// (the stdio command-required check, url-required for HTTP protocols, protocol
+// and name validity, ...) against a single server and returns only the errors
+// attributable to it. Write surfaces that persist a server built outside the
+// config loader (e.g. imports) use it so they can never save an entry the next
+// startup would refuse to load.
+func ValidateServerForLoad(server *ServerConfig) []ValidationError {
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{server}
+	const prefix = "mcpServers[0]"
+	var out []ValidationError
+	for _, e := range cfg.validateDetailedCore() {
+		if strings.HasPrefix(e.Field, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
 // loopback callback listener cannot honor.
 //
