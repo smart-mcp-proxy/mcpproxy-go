@@ -9,6 +9,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Item 4a: on an upgrade start the pre-fix advisory must be emitted once per
@@ -28,6 +29,7 @@ func TestConfigLoadAdmissionGate_PreFixAdvisoryOncePerProcess(t *testing.T) {
 		require.NoError(t, rt.storageManager.SaveUpstreamServer(&config.ServerConfig{
 			Name: name, Command: "./x", Protocol: "stdio", Enabled: true,
 		}))
+		seedApproval(t, rt, name, "read_graph", storage.ToolApprovalStatusApproved, "h1")
 	}
 
 	// Production startup order (lifecycle.go): hook + initial gate, then
