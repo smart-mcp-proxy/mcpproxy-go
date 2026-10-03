@@ -102,24 +102,34 @@ curl "http://127.0.0.1:8080/api/v1/activity?request_id=a1b2c3d4-e5f6-7890-abcd-e
 
 #### GET /api/v1/status
 
-Get server status and statistics.
+Get server status and statistics. The `data` object carries `running`, `edition`, `listen_addr`, `routing_mode`, `upstream_stats`, `started_at`, `timestamp` and the blocks below. (An earlier version of this page showed a different shape; it was stale.)
 
-**Response:**
+**Response (abridged):**
 ```json
 {
-  "status": "running",
-  "version": "0.11.0",
-  "uptime": 3600,
-  "servers": {
-    "total": 5,
-    "connected": 4,
-    "quarantined": 1
-  },
-  "tools": {
-    "total": 42
+  "success": true,
+  "data": {
+    "running": true,
+    "edition": "personal",
+    "listen_addr": "127.0.0.1:8080",
+    "routing_mode": "retrieve_tools",
+    "upstream_stats": { "total_servers": 5, "connected_servers": 4, "quarantined_servers": 1, "total_tools": 42 },
+    "telemetry": { "enabled": false, "source": "env", "disabled_by": "MCPPROXY_TELEMETRY=false" }
   }
 }
 ```
+
+**`telemetry`** is the effective telemetry state of the running core, so a UI can say whether telemetry is on and why. It is withheld from scoped callers (agent tokens), like `activation`.
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Whether the core sends telemetry. Always equal to the resolved state: an environment opt-out wins over the config file. |
+| `source` | `env` (an environment variable disabled it), `config` (`telemetry.enabled` is set in the config file, true or false) or `default` (unset, which means on). |
+| `disabled_by` | Present only when `source` is `env`: `DO_NOT_TRACK`, `CI` or `MCPPROXY_TELEMETRY=false`. |
+
+`GET /api/v1/config` keeps returning the stored `telemetry.enabled`, which can differ from `enabled` here when an environment variable overrides it. A dev (non-release) build never transmits whatever `enabled` says.
+
+While an environment variable forces telemetry off, `POST /api/v1/config/apply` and `PATCH /api/v1/config` answer `422` and write nothing if the document would change `telemetry.enabled` (the value is judged after decoding, so a miscased key is caught too). A document that leaves `telemetry.enabled` as stored is accepted.
 
 ### Servers
 

@@ -1537,6 +1537,58 @@
       }
     },
     {
+      "row": "28a",
+      "capability": "Effective telemetry state (notice + setting lock)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "symbol:frontend/src/utils/telemetryState.ts#telemetryNoticeMode",
+            "component:frontend/src/components/TelemetryBanner.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/telemetry-state.spec.ts",
+            "vitest:frontend/tests/unit/telemetry-banner-wizard.spec.ts",
+            "vitest:frontend/tests/unit/settings-telemetry-env-lock.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/TelemetryNotice.swift#TelemetryNotice"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/TelemetryNoticeTests.swift",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:telemetry status"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/telemetry_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "Telemetry is an operator setting; agents have no notice to read.",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/status"
+          ],
+          "tests": [
+            "go:internal/httpapi/status_telemetry_test.go"
+          ]
+        }
+      }
+    },
+    {
       "row": "29",
       "capability": "Settings naming, edition-gated tabs",
       "cells": {
@@ -1579,6 +1631,51 @@
           ],
           "tests": [
             "go:internal/httpapi/sse_status_edition_test.go#TestSSE_StatusFramesCarryEdition"
+          ]
+        }
+      }
+    },
+    {
+      "row": "29a",
+      "capability": "Settings names the connected core and its running listen address",
+      "cells": {
+        "web": {
+          "status": "na",
+          "reason": "n/a (served by that core)",
+          "ids": [],
+          "tests": []
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Settings/ConfigSettingsView.swift#listenNote"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:status"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/status_cmd_test.go"
+          ]
+        },
+        "mcp": {
+          "status": "na",
+          "reason": "n/a",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/status"
+          ],
+          "tests": [
+            "go:internal/httpapi/status_telemetry_test.go"
           ]
         }
       }
