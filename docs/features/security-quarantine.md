@@ -269,10 +269,16 @@ mcpproxy review show github [--full]
 
 **Web UI:**
 1. Select the quarantined server from **Review queue**.
-2. Choose the tools to allow; unselected tools are submitted as explicit
-   blocks with the approval decision.
-3. Choose **Approve server**. If no tool definitions have been captured, the
-   UI asks for a separate confirmation before a blind approval can proceed.
+2. Choose the tools to allow. Only read-only tools whose scan is clean start
+   checked; write, destructive, unannotated, not-scanned and held tools start
+   unchecked. Unselected tools are submitted as explicit blocks with the
+   approval decision and stay blocked until you enable them on the Tools tab.
+3. Choose **Approve server**; the button names the exact count (for example
+   "Approve server (3 of 9 tools)"). **Approve all** is a separate action that
+   allows every pending or changed tool (tools you blocked earlier on a
+   re-quarantined server stay blocked). If no tool definitions have been captured, the button
+   reads "Approve without seeing tools" and the UI asks for a separate
+   confirmation before a blind approval can proceed.
 
 The review controls are deliberate: **Fetch tool definitions** uses the
 inspection-only `discover-tools` capture to store current upstream metadata
@@ -301,8 +307,10 @@ curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
 
 **CLI:**
 ```bash
-# Quarantined server: scan-gated approval; --except keeps tools disabled
-mcpproxy review approve github [--except a,b] [--force] [--yes]
+# Quarantined server: scan-gated approval. By default only read-only tools with
+# a clean scan are allowed; --all allows every tool, --tools a,b exactly those,
+# --except keeps more tools disabled
+mcpproxy review approve github [--all | --tools a,b] [--except a,b] [--force] [--yes]
 
 # Trusted server: approve only the listed new or changed tools
 mcpproxy review approve github --tools create_issue

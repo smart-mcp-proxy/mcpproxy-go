@@ -108,8 +108,11 @@ type ReviewTool struct {
 	ScanVerdict    string                  `json:"scan_verdict"`
 	HeldReason     string                  `json:"held_reason"`
 	HeldSignals    []string                `json:"held_signals"`
-	Previous       *ReviewToolPrevious     `json:"previous"`
-	Diff           *ReviewToolDiff         `json:"diff,omitempty"`
+	// DefaultAllowed is the review screens' fail-closed default selection
+	// (D43). Always serialised, so an older core (field absent) reads as false.
+	DefaultAllowed bool                `json:"default_allowed"`
+	Previous       *ReviewToolPrevious `json:"previous"`
+	Diff           *ReviewToolDiff     `json:"diff,omitempty"`
 }
 
 type ReviewToolPrevious struct {
@@ -233,6 +236,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 			ScanVerdict: reviewToolScanVerdict(scanFindings, serverName, record, covered[record.ToolName]),
 			HeldReason:  record.HeldReason, HeldSignals: append([]string(nil), record.HeldSignals...),
 		}
+		tool.DefaultAllowed = reviewDefaultAllowed(tool)
 		if record.PreviousDescription != "" || record.PreviousSchema != "" || record.PreviousOutputSchema != "" || record.PreviousAnnotations != nil {
 			tool.Previous = &ReviewToolPrevious{
 				Description: record.PreviousDescription, InputSchema: rawSchema(record.PreviousSchema),
@@ -245,6 +249,22 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		result.Tools = append(result.Tools, tool)
 	}
 	return result, nil
+}
+
+// reviewDefaultAllowed is the default selection of the review screens (D43.2).
+// An already blocked tool stays blocked; an approved tool stays allowed; a
+// pending or changed tool starts allowed only when it is read-only, the scan
+// verified its current definition as clean and nothing holds it. Everything
+// else (write, destructive, unannotated, unknown, not scanned, warnings,
+// dangerous, held) starts unchecked.
+func reviewDefaultAllowed(tool ReviewTool) bool {
+	if tool.Disabled {
+		return false
+	}
+	if tool.ApprovalStatus == storage.ToolApprovalStatusApproved {
+		return true
+	}
+	return tool.Tier == contracts.TierRead && tool.ScanVerdict == "clean" && tool.HeldReason == ""
 }
 
 func reviewTier(annotations *config.ToolAnnotations) contracts.Tier {

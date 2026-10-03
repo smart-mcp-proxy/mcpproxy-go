@@ -5486,6 +5486,7 @@ func (p *MCPProxyServer) handleInspectQuarantinedTools(ctx context.Context, requ
 					"approval_status":    "pending",
 					"disabled":           false,
 					"scan_verdict":       "not_scanned",
+					"default_allowed":    false,
 					"server_name":        serverName,
 					"quarantine_status":  "QUARANTINED",
 

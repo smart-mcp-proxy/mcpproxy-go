@@ -288,6 +288,7 @@
           ],
           "tests": [
             "vitest:frontend/tests/unit/review-screen.spec.ts",
+            "vitest:frontend/tests/unit/review-screen-default-selection.spec.ts",
             "vitest:frontend/tests/unit/server-detail-approve-dialog.spec.ts"
           ]
         },
@@ -297,7 +298,8 @@
             "symbol:native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift#ReviewSheet"
           ],
           "tests": [
-            "xctest:native/macos/MCPProxy/MCPProxyTests/ApproveServerPathTests.swift#testSecurityApprovalUsesScanGateAndForcePayload"
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ApproveServerPathTests.swift#testSecurityApprovalUsesScanGateAndForcePayload",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift#testDefaultSelectionFollowsDefaultAllowed"
           ]
         },
         "cli": {
@@ -307,11 +309,14 @@
             "cmd:review reject"
           ],
           "tests": [
-            "go:cmd/mcpproxy/review_cmd_test.go"
+            "go:cmd/mcpproxy/review_cmd_test.go",
+            "go:cmd/mcpproxy/review_cmd_default_selection_test.go#TestReviewApproveAllFlag"
           ],
           "fields": [
+            "all",
             "except",
-            "force"
+            "force",
+            "tools"
           ]
         },
         "mcp": {

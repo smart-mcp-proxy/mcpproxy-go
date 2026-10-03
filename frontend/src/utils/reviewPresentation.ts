@@ -94,3 +94,65 @@ export function toolState(tool: ReviewTool, quarantined: boolean): ToolControl {
   if (tool.approval_status === 'approved') return tool.disabled ? 'blocked' : 'approved'
   return 'approve-reject'
 }
+
+// ---------------------------------------------------------------------------
+// Default selection (Spec 109 fix-review-defaults, D43). The core decides which
+// tools start checked (`default_allowed`); these helpers only read it. A payload
+// from an older core has no field, which reads as false: every tool starts
+// unchecked, so a mismatched core fails closed. The macOS app
+// (ReviewPresentation in ReviewQueueView.swift) uses the same sentences.
+// ---------------------------------------------------------------------------
+
+export const REVIEW_SELECTION_HINT = 'Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab.'
+
+/** What the user explicitly chose for one tool, with the payload they saw. */
+export interface SelectionChoice {
+  allowed: boolean
+  tool: ReviewTool
+}
+
+/** The names that start checked: the core's `default_allowed`, a missing field counting as false. */
+export function initialSelection(tools: ReviewTool[]): string[] {
+  return tools.filter(t => t.default_allowed === true).map(t => t.name)
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  const left = a as Record<string, unknown>
+  const right = b as Record<string, unknown>
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (!sameValue(left[key], right[key])) return false
+  }
+  return true
+}
+
+/**
+ * The selection after a reload. An explicit uncheck always survives; an
+ * explicit check survives only while the tool's payload is the one the user
+ * saw (a changed definition, verdict or tier falls back to the default).
+ */
+export function mergeSelection(tools: ReviewTool[], choices: Map<string, SelectionChoice>): string[] {
+  return tools.filter(tool => {
+    const choice = choices.get(tool.name)
+    if (!choice) return tool.default_allowed === true
+    if (!choice.allowed) return false
+    return sameValue(choice.tool, tool) ? true : tool.default_allowed === true
+  }).map(t => t.name)
+}
+
+/** Primary approve button: the exact count, or the blind-approval wording when nothing is captured. */
+export function approveLabel(selected: number, total: number, definitionsCaptured: boolean): string {
+  if (!definitionsCaptured || total === 0) return 'Approve without seeing tools'
+  return `Approve server (${selected} of ${total} ${plural(total, 'tool', 'tools')})`
+}
+
+/** Tooltip of the approve-everything action: it does not re-enable tools blocked earlier. */
+export const APPROVE_ALL_HINT = 'Allows every pending or changed tool. Tools you blocked earlier on a re-quarantined server stay blocked.'
+
+/** The explicit approve-everything action. */
+export function approveAllLabel(total: number): string {
+  return `Approve all (${total} ${plural(total, 'tool', 'tools')})`
+}

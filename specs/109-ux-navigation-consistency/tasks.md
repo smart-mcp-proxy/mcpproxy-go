@@ -447,6 +447,25 @@ Not new requirements: two medium findings of the codex first-run user test, fixe
 
 ---
 
+## Phase 21: PR fix-review-defaults — the review screen starts fail-closed (final done-check, 2026-10-02)
+
+Not new requirements: one medium security-default finding from the Codex user test (F-02), fixed test-first on every surface (FR-021, FR-023; research D43). Every "Allow this tool" checkbox started checked, including write and destructive tools whose definitions were unverified. The core now computes `default_allowed` once; Web, macOS and the CLI read it.
+
+- [x] T211 [P] Go composer rule: `internal/runtime/review_default_allowed_test.go` (`TestReviewDefaultAllowed`, `TestServerReview_DefaultAllowedFollowsCoverage`, the key is serialised when false)
+- [x] T212 [P] MCP parity: `internal/server/quarantine_inspect_review_parity_test.go` (`TestInspectQuarantinedCarriesDefaultAllowed`) and the live path in `internal/server/e2e_test.go` (`TestE2E_InspectQuarantined`)
+- [x] T213 [P] CLI: `cmd/mcpproxy/review_cmd_default_selection_test.go` (default selection, `--all`, `--tools`, prompt names the count, JSON is the bare REST object, `reviewApproveSelection` table), `cmd/mcpproxy/review_cmd_test.go`, goldens `review-approve.golden`, `review-approve-default.golden`, `review-approve-all.golden`
+- [x] T214 [P] [US2] Web helpers: `frontend/tests/unit/review-screen-default-selection.spec.ts` (`initialSelection`, `mergeSelection`, `approveLabel`, `approveAllLabel`, `REVIEW_SELECTION_HINT`)
+- [x] T215 [P] [US2] Web component: the same spec file plus `frontend/tests/unit/review-screen.spec.ts` re-baselined (defaults, Approve all, force retry re-sends the attempted block list, a reload keeps choices)
+- [x] T216 [P] [US2] macOS: `native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift` (`testDefaultSelectionFollowsDefaultAllowed`, `testMergeSelectionKeepsUnchecksAndDropsStaleChecks`, `testApproveLabels`, `testSelectionHintMatchesWeb`) and `ReviewPayloadTests.swift`
+- [x] T217 Go: `ReviewTool.DefaultAllowed` and `reviewDefaultAllowed` in `internal/runtime/review.go`; `default_allowed: false` on the live inspection in `internal/server/mcp.go`
+- [x] T218 CLI: `cmd/mcpproxy/review_cmd.go` (`reviewServerState`, `reviewApproveSelection`, `--all`, `--tools` on a quarantined server, prompt after the read, summary line)
+- [x] T219 [US2] Web: `frontend/src/types/api.ts`, `frontend/src/utils/reviewPresentation.ts`, `frontend/src/components/ReviewScreen.vue`
+- [x] T220 [US2] macOS: `native/macos/MCPProxy/MCPProxy/API/Models.swift` (`ReviewTool.defaultAllowed`), `native/macos/MCPProxy/MCPProxy/Views/ReviewQueueView.swift` (`ReviewPresentation` selection helpers, Approve All, `pendingBlock`)
+- [x] T221 Docs and bookkeeping for T211–T220: `spec.md` (FR-021, FR-023, US2-2), `research.md` D43, `contracts/rest-api.md`, `contracts/cli.md`, `contracts/mcp-tools.md`, `data-model.md` §5, `plan.md`, `quickstart.md` recipe `fix-review-defaults`, `acceptance-index.json`, `parity-matrix.json` row 6, `docs/features/security-quarantine.md`, `docs/cli/review-commands.md`, `docs/cli/command-reference.md`, `docs/api/rest-api.md`
+- [x] T222 Verification gates: `go test -race` on `internal/runtime`, `cmd/mcpproxy` and `internal/server`, `internal/httpapi`, `internal/storage` (CI skip regex), both golangci-lint runs, `npx vitest run`, `vue-tsc`, `swift test`, `TestSpec109Traceability*` and `TestSpec109ParityMatrix*`
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
@@ -493,4 +512,4 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 
 ## Task Count
 
-246 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 240 before fix-usertest-telemetry-macos, which added T205–T210; 234 before the fix-usertest-web PR, which added T199–T204; 217 before the fix-review-screen PR, which added T182–T198; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).
+258 tasks (the mechanical count of `- [ ] T…` lines under the phase headings; 246 before the fix-review-defaults PR, which added T211–T222; 240 before fix-usertest-telemetry-macos, which added T205–T210; 234 before the fix-usertest-web PR, which added T199–T204; 217 before the fix-review-screen PR, which added T182–T198; 201 before fix-ux-residuals (T166–T171) and fix-catalog-rank (T172–T181); 195 before the demo-ux-fixes PR, 186 before 109-m; demo-ux-fixes added T160–T165); see the checklist above for phase totals and completion state (109-l added T152a, T154a, T157, T158, T159; 109-m added T144a, T145a, T145b, T147a, T148c, T149a–T149d; codex round 4 added T078c, T124a; codex round 3 added T011a, T076a, T101a, T125a, T148a, T148b; codex round 1 added T069a, T077b, T078b, and the threshold-timer test inside T053; Spec 108's duplicated scope-filter and Clients-shell tasks were merged into T111/T116/T117/T122/T131).

@@ -104,6 +104,39 @@ enum ReviewPresentation {
         return Headline(state: .approved, title: "\(name) is approved", subtitle: "\(summary) New or changed tools come back here for review.")
     }
 
+    // MARK: Default selection (Spec 109 fix-review-defaults, D43)
+    // The core decides which tools start checked (`default_allowed`); these
+    // helpers only read it. A missing field (an older core) reads as false, so a
+    // mismatched core fails closed. Sentences match the Web screen.
+
+    static let approveAllHint = "Allows every pending or changed tool. Tools you blocked earlier on a re-quarantined server stay blocked."
+    static let selectionHint = "Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab."
+
+    /// What the user explicitly chose for one tool, with the payload they saw.
+    struct Choice: Equatable { let allowed: Bool; let tool: ReviewTool }
+
+    static func initialSelection(_ tools: [ReviewTool]) -> Set<String> {
+        Set(tools.filter { $0.defaultAllowed == true }.map(\.name))
+    }
+
+    /// The selection after a reload: an explicit uncheck always survives; an
+    /// explicit check survives only while the tool's payload is the one the user
+    /// saw (a changed definition, verdict or tier falls back to the default).
+    static func mergeSelection(_ tools: [ReviewTool], choices: [String: Choice]) -> Set<String> {
+        Set(tools.filter { tool in
+            guard let choice = choices[tool.name] else { return tool.defaultAllowed == true }
+            if !choice.allowed { return false }
+            return choice.tool == tool ? true : tool.defaultAllowed == true
+        }.map(\.name))
+    }
+
+    static func approveLabel(selected: Int, total: Int, definitionsCaptured: Bool) -> String {
+        if !definitionsCaptured || total == 0 { return "Approve Without Seeing Tools" }
+        return "Approve Server (\(selected) of \(total) \(total == 1 ? "tool" : "tools"))"
+    }
+
+    static func approveAllLabel(total: Int) -> String { "Approve All (\(total) \(total == 1 ? "tool" : "tools"))" }
+
     enum ToolControl: Equatable { case allowToggle, approveReject, approved, blocked }
 
     /// The control a tool row gets: the quarantine toggle, Approve/Reject, or a plain state.
@@ -120,6 +153,8 @@ struct ReviewSheet: View {
     let onDismiss: () -> Void
     @State private var review: ServerReviewResponse?
     @State private var allowed = Set<String>()
+    @State private var choices: [String: ReviewPresentation.Choice] = [:]
+    @State private var pendingBlock: [String]?
     @State private var error: String?
     @State private var scanning = false
     @State private var showBlindApprovalConfirmation = false
@@ -171,6 +206,8 @@ struct ReviewSheet: View {
                             set: { isAllowed in
                                 if isAllowed { allowed.insert(tool.name) }
                                 else { allowed.remove(tool.name) }
+                                // An explicit click survives a reload (D43.4).
+                                choices[tool.name] = ReviewPresentation.Choice(allowed: isAllowed, tool: tool)
                             }
                         )).toggleStyle(.checkbox)
                     } else {
@@ -188,8 +225,14 @@ struct ReviewSheet: View {
                 Spacer()
             }
             if review?.server.quarantined == true {
+                if let review, review.server.definitionsCaptured, !review.tools.isEmpty {
+                    Text(ReviewPresentation.selectionHint).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                }
                 HStack {
-                    Button("Approve Server (\(allowed.count) tools)") { requestApprove() }.buttonStyle(.borderedProminent)
+                    Button(ReviewPresentation.approveLabel(selected: allowed.count, total: review?.tools.count ?? 0, definitionsCaptured: review?.server.definitionsCaptured ?? false)) { requestApprove(everything: false) }.buttonStyle(.borderedProminent)
+                    if let review, review.server.definitionsCaptured, !review.tools.isEmpty, allowed.count < review.tools.count {
+                        Button(ReviewPresentation.approveAllLabel(total: review.tools.count)) { requestApprove(everything: true) }.help(ReviewPresentation.approveAllHint)
+                    }
                     Button("Reject Server", role: .destructive) { Task { await rejectServer() } }
                 }.padding()
             } else if headline?.state == .approved {
@@ -238,12 +281,19 @@ struct ReviewSheet: View {
     }
     private func load() async {
         guard let client = appState.apiClient else { return }
-        do { let value = try await client.serverReview(serverName); review = value; allowed = Set(value.tools.filter { !$0.disabled }.map(\.name)) } catch { self.error = error.localizedDescription }
+        do { let value = try await client.serverReview(serverName); review = value; allowed = ReviewPresentation.mergeSelection(value.tools, choices: choices) } catch { self.error = error.localizedDescription }
     }
-    private func requestApprove() { if review?.server.definitionsCaptured == false { showBlindApprovalConfirmation = true } else { Task { await approve(force: false) } } }
+    private func requestApprove(everything: Bool) {
+        if review?.server.definitionsCaptured == false { pendingBlock = nil; showBlindApprovalConfirmation = true; return }
+        pendingBlock = everything ? [] : nil
+        Task { await approve(force: false) }
+    }
+    /// The force retry re-sends the block list of the attempt that triggered it (D43.5).
     private func approve(force: Bool) async {
         guard let client = appState.apiClient, let review else { return }
-        do { try await client.securityApproveServer(serverName, force: force, block: review.tools.map(\.name).filter { !allowed.contains($0) }); await load() }
+        let block = pendingBlock ?? review.tools.map(\.name).filter { !allowed.contains($0) }
+        pendingBlock = block
+        do { try await client.securityApproveServer(serverName, force: force, block: block); choices = [:]; pendingBlock = nil; await load() }
         catch { self.error = error.localizedDescription; if !force, case let APIClientError.httpError(status, message) = error, status == 409, message.localizedCaseInsensitiveContains("dangerous") { showForceApprovalConfirmation = true } }
     }
     private func fetchDefinitions() async {
