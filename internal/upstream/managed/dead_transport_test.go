@@ -67,6 +67,11 @@ func TestIsDeadTransportError(t *testing.T) {
 		{"jsonrpc error echoing file already closed", errors.New("CallTool failed for 'rm': close /x: file already closed"), false},
 		{"jsonrpc error echoing transport closed", errors.New("CallTool failed for 'ws': upstream websocket transport closed"), false},
 		{"jsonrpc error echoing closed pipe", errors.New("CallTool failed for 'exec': io: read/write on closed pipe"), false},
+		// Even the full transport phrase, when it is server-supplied text
+		// inside a JSON-RPC error rather than mcp-go's own wrapper, is a
+		// tool failure (opencode review: match only the typed wrapper or a
+		// message that starts with its prefix).
+		{"jsonrpc error echoing the transport wrapper text", errors.New("CallTool failed for 'proxy': upstream said transport error: transport closed"), false},
 		// A JSON-RPC error answered by a LIVE server whose message merely
 		// mentions EOF is a tool failure, not a dead transport.
 		{"tool error mentioning EOF", errors.New("tool error: unexpected EOF while parsing input"), false},
@@ -205,4 +210,23 @@ func TestPerformHealthCheck_DeadTransportAfterDisconnectKeepsDisconnected(t *tes
 	assert.Equal(t, types.StateDisconnected, mc.StateManager.GetState(),
 		"a ping failure from the closed generation must not re-mark the Disconnected client")
 	assert.Equal(t, 0, mc.StateManager.GetConnectionInfo().RetryCount)
+}
+
+// TestSetErrorIfCurrentConnection_EpochArm pins the generation half of the
+// guard on its own: the client is still Ready, but on a NEWER connection than
+// the one that produced the failure (a reconnect landed while the request was
+// in flight). The stale verdict must be dropped, not charged to the new
+// session. The !IsConnected() half is covered by the after-Disconnect tests.
+func TestSetErrorIfCurrentConnection_EpochArm(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, nil)
+	require.Equal(t, types.StateReady, mc.StateManager.GetState())
+	staleEpoch := mc.ConnectionEpoch()
+	mc.connectionEpoch.Store(nextConnectionEpoch()) // reconnected, still Ready
+
+	assert.False(t, mc.setErrorIfCurrentConnection(coreShapedTransportClosed(), staleEpoch))
+	assert.Equal(t, types.StateReady, mc.StateManager.GetState(),
+		"a failure from a replaced connection must not mark the current one")
+
+	assert.True(t, mc.setErrorIfCurrentConnection(coreShapedTransportClosed(), mc.ConnectionEpoch()))
+	assert.Equal(t, types.StateError, mc.StateManager.GetState())
 }

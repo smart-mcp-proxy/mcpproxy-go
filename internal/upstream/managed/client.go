@@ -1061,6 +1061,7 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 		}
 	}()
 
+	listEpoch := mc.connectionEpoch.Load()
 	tools, err := mc.coreClient.ListTools(listCtx)
 	mc.publishListToolsResult(tools, err)
 
@@ -1077,7 +1078,9 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
-			mc.StateManager.SetError(err)
+			// Guarded like the call and health paths: only the connection
+			// that produced the failure may be marked, once.
+			mc.setErrorIfCurrentConnection(err, listEpoch)
 		}
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
@@ -1141,10 +1144,6 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
-	// The connection generation this call runs on, so a transport failure is
-	// only ever charged to the session that produced it (RC4-STDIO-001).
-	callEpoch := mc.connectionEpoch.Load()
-
 	// #1317 round 2: counted from HERE, before admission control, not just
 	// around the transport call below — a call already queued in
 	// acquireAdmission's wait is just as "in flight" from tryReconnect()'s
@@ -1198,6 +1197,10 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 		invoker = mc.coreClient
 	}
 
+	// The connection generation this call runs on, read AFTER the admission
+	// wait (a queued call may outlive a reconnect), so a transport failure is
+	// only ever charged to the session that produced it (RC4-STDIO-001).
+	callEpoch := mc.connectionEpoch.Load()
 	result, err := invoker.CallTool(ctx, toolName, args)
 	if err != nil {
 		mc.recordCallToolOAuthSignal(toolName, err)
@@ -2224,13 +2227,24 @@ func isDeadTransportError(err error) bool {
 		errors.Is(err, os.ErrClosed) {
 		return true
 	}
-	msg := err.Error()
-	const transportPrefix = "transport error: "
-	idx := strings.Index(msg, transportPrefix)
-	if idx < 0 {
-		return false
+	// Text fallback, for chains that were flattened into a string: only the
+	// payload of mcp-go's own transport wrapper counts — either the typed
+	// *transport.Error, or a message that STARTS with its prefix. A server's
+	// JSON-RPC error is surfaced unwrapped (errors.New(message)), so text it
+	// supplies can only match if it is the entire message, not by containing
+	// the phrase somewhere.
+	var transportMsg string
+	var tErr *mcptransport.Error
+	if errors.As(err, &tErr) && tErr.Err != nil {
+		transportMsg = tErr.Err.Error()
+	} else {
+		const transportPrefix = "transport error: "
+		msg := err.Error()
+		if !strings.HasPrefix(msg, transportPrefix) {
+			return false
+		}
+		transportMsg = strings.TrimPrefix(msg, transportPrefix)
 	}
-	transportMsg := msg[idx+len(transportPrefix):]
 	for _, marker := range []string{
 		mcptransport.ErrTransportClosed.Error(), // "transport closed"
 		os.ErrClosed.Error(),                    // "file already closed"
@@ -2465,6 +2479,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 
 	// Fetch fresh tool count with timeout. Publish the result so any concurrent
 	// ListTools waiter coalesced behind us receives the real tools list.
+	countEpoch := mc.connectionEpoch.Load()
 	tools, err := mc.coreClient.ListTools(listCtx)
 	mc.publishListToolsResult(tools, err)
 	if err != nil {
@@ -2473,9 +2488,10 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 			zap.Error(err),
 			zap.Int("cached_count", cachedCount))
 
-		// Check if it's a connection error and update state
+		// Check if it's a connection error and update state (guarded: only
+		// the connection that produced the failure may be marked, once).
 		if mc.isConnectionError(err) {
-			mc.StateManager.SetError(err)
+			mc.setErrorIfCurrentConnection(err, countEpoch)
 		}
 
 		// Return cached count if available, even if stale
