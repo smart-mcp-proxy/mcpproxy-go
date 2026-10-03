@@ -237,3 +237,27 @@ func TestImportPreview_RedactsCredentialShapedCommandFromSummary(t *testing.T) {
 func bytesContains(haystack []byte, needle string) bool {
 	return bytes.Contains(haystack, []byte(needle))
 }
+
+func TestImportPreview_EmptyObjectWithoutFormatHint(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	body, _ := json.Marshal(ImportRequest{Content: "{}"})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 0 {
+		t.Fatalf("expected 0 imported servers, got %d", len(wrapped.Data.Imported))
+	}
+}

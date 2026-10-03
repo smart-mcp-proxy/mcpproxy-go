@@ -487,6 +487,9 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	// Run import
 	result, err := configimport.Import(content, opts)
 	if err != nil {
+		if preview && bytes.Equal(bytes.TrimSpace(content), []byte("{}")) {
+			return emptyImportPreview(formatHint), nil
+		}
 		return nil, err
 	}
 
