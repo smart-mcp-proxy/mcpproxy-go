@@ -1182,3 +1182,86 @@ func TestDetectConfigChanges_ForwardClientHeaders(t *testing.T) {
 		assert.Contains(t, result.ChangedFields, "forward_client_headers")
 	})
 }
+
+func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			Listen:  "127.0.0.1:8080",
+			DataDir: "/d",
+			TLS:     &config.TLSConfig{},
+		}
+	}
+
+	t.Run("require_mcp_auth toggle detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		oldCfg.RequireMCPAuth = false
+		newCfg := base()
+		newCfg.RequireMCPAuth = true
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "require_mcp_auth")
+		assert.False(t, result.RequiresRestart)
+		assert.True(t, result.AppliedImmediately)
+	})
+
+	t.Run("quarantine_enabled toggle detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		disabled := false
+		newCfg := base()
+		newCfg.QuarantineEnabled = &disabled
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "quarantine_enabled")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("init_timeout change detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		dur := config.Duration(45 * time.Second)
+		newCfg := base()
+		newCfg.InitTimeout = &dur
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "init_timeout")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("max_result_size_chars change detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		val := 250000
+		newCfg := base()
+		newCfg.MaxResultSizeChars = &val
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "max_result_size_chars")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("forward_proxy_env change detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		oldCfg.ForwardProxyEnv = false
+		newCfg := base()
+		newCfg.ForwardProxyEnv = true
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "forward_proxy_env")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("debug_search change detected hot-reloadable", func(t *testing.T) {
+		oldCfg := base()
+		oldCfg.DebugSearch = false
+		newCfg := base()
+		newCfg.DebugSearch = true
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "debug_search")
+		assert.False(t, result.RequiresRestart)
+	})
+}

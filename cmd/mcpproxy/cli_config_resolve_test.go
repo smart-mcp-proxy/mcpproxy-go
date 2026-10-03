@@ -199,3 +199,41 @@ func TestResolveCLIConfigPathPrecedence(t *testing.T) {
 		t.Errorf("-d without a config file falls back to discovery, got %q", got)
 	}
 }
+
+func TestLoadRegistryConfig_ExplicitConfigErrorPropagated(t *testing.T) {
+	resetLoaderGlobals(t)
+	configFile = filepath.Join(t.TempDir(), "nonexistent.json")
+
+	_, err := loadRegistryConfig()
+	if err == nil {
+		t.Fatal("expected error when explicit global -c points to nonexistent file, got nil")
+	}
+
+	configFile = ""
+	registryConfigPath = filepath.Join(t.TempDir(), "nonexistent-local.json")
+	_, err = loadRegistryConfig()
+	if err == nil {
+		t.Fatal("expected error when explicit --config points to nonexistent file, got nil")
+	}
+}
+
+func TestLoadCLIConfig_DataDirAppliesTLSEnvOverrides(t *testing.T) {
+	resetLoaderGlobals(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	t.Setenv("MCPPROXY_LISTEN", "127.0.0.1:23456")
+	t.Setenv("MCPPROXY_TLS_ENABLED", "false")
+	dataDir = filepath.Join(t.TempDir(), "new-datadir")
+
+	cfg, err := loadCLIConfig("")
+	if err != nil {
+		t.Fatalf("loadCLIConfig failed: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:23456" {
+		t.Errorf("expected Listen to be 127.0.0.1:23456 from env override, got %q", cfg.Listen)
+	}
+	if cfg.TLS != nil && cfg.TLS.Enabled {
+		t.Errorf("expected TLS to be disabled from env override, got enabled")
+	}
+}

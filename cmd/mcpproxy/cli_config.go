@@ -33,6 +33,7 @@ func loadCLIConfig(explicitPath string) (*config.Config, error) {
 		// $HOME/.mcpproxy/mcp_config.json and report the HOME defaults, which
 		// contradicts the data dir the operator named.
 		cfg = config.DefaultConfig()
+		config.ApplyTLSEnvOverrides(cfg)
 	} else {
 		cfg, err = config.Load()
 	}
