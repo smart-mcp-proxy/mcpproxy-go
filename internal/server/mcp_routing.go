@@ -260,9 +260,11 @@ func emptyDirectCatalog(mode string, logger *zap.Logger) *directCatalog {
 	return cat
 }
 
-// renderFullDirectTool is the pre-Spec-102 rendering, moved verbatim out of the
-// loop and otherwise untouched (FR-015): with deferral off, direct-surface
-// tools/list payloads must stay byte-identical to pre-feature behavior.
+// renderFullDirectTool is the pre-Spec-102 rendering, moved out of the loop
+// (FR-015): with deferral off, direct-surface tools/list payloads must stay
+// byte-identical to pre-feature behavior. The one deliberate delta is carrying
+// a top-level additionalProperties/$defs through, which only changes bytes for
+// upstream schemas that declare them.
 func renderFullDirectTool(entry *directCatalogEntry, description string) mcp.Tool {
 	opts := []mcp.ToolOption{mcp.WithDescription(description)}
 
@@ -301,6 +303,17 @@ func renderFullDirectTool(entry *directCatalogEntry, description string) mcp.Too
 					}
 				}
 				mcpTool.InputSchema.Required = reqStrings
+			}
+			// Keep the object open when upstream declared it open: dropping
+			// additionalProperties advertises {"properties":{}}, which
+			// grammar-constrained clients compile to "no keys allowed" (#1364
+			// failure class). Carried only when present, so schemas without
+			// these keys keep their pre-feature bytes (FR-015).
+			if ap, ok := schema["additionalProperties"]; ok {
+				mcpTool.InputSchema.AdditionalProperties = ap
+			}
+			if defs, ok := schema["$defs"].(map[string]interface{}); ok {
+				mcpTool.InputSchema.Defs = defs
 			}
 		}
 	}
