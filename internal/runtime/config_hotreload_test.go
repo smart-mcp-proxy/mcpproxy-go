@@ -1182,3 +1182,22 @@ func TestDetectConfigChanges_ForwardClientHeaders(t *testing.T) {
 		assert.Contains(t, result.ChangedFields, "forward_client_headers")
 	})
 }
+
+// TestDetectConfigChanges_AdvertiseUpstreamServers: a lone
+// advertise_upstream_servers flip is a hot-reloadable change, and unset vs
+// explicit true (the same resolved value) is not.
+func TestDetectConfigChanges_AdvertiseUpstreamServers(t *testing.T) {
+	mk := func(v *bool) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			AdvertiseUpstreamServers: v,
+		}
+	}
+	off, on := false, true
+	result := DetectConfigChanges(mk(nil), mk(&off))
+	require.True(t, result.Success)
+	assert.Contains(t, result.ChangedFields, "advertise_upstream_servers")
+	assert.False(t, result.RequiresRestart)
+
+	assert.NotContains(t, DetectConfigChanges(mk(nil), mk(&on)).ChangedFields, "advertise_upstream_servers")
+}

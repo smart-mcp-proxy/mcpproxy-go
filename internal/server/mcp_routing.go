@@ -816,7 +816,7 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. " +
 			"Use natural language to describe what you want to accomplish. " +
 			"Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools)." +
-			retrieveToolsDiagnosticsNote),
+			retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -869,7 +869,7 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). " +
 			"Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. " +
 			"Use natural language to describe what you want to accomplish." +
-			retrieveToolsDiagnosticsNote),
+			retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -1220,6 +1220,9 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// no-op while no prompts are registered.
 	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
 	opts = append(opts, mcpserver.WithToolFilter(p.filterProfileV3Tools))
+	// Name the caller's reachable servers in retrieve_tools' description
+	// (no-op on the direct surface, which has no retrieve_tools).
+	opts = append(opts, mcpserver.WithToolFilter(p.filterAdvertiseServersInRetrieveTools))
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -1237,9 +1240,9 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		// EVERY caller including administrators, before any tool reaches the
 		// wire.
 		mcpserver.WithToolFilter(stripDirectToolStampFilter),
-		// FR-007: the in-band convention channel. Until now no routing-mode
-		// server carried instructions at all — only the default retrieve_tools
-		// server did — so this changes the direct server's initialize response.
+		// FR-007: the in-band convention channel. The direct server gets its
+		// own text (plus the deferral legend); the code-execution and
+		// call-tool servers below share p.server's.
 		mcpserver.WithInstructions(resolveDirectInstructions(directCustomInstructions(p.config))),
 	)
 	p.directServer = mcpserver.NewMCPServer(
@@ -1248,18 +1251,27 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		directOpts...,
 	)
 
+	// The code-execution and call-tool servers carry the same initialize
+	// instructions as p.server. /mcp is served through GetMCPServerForMode,
+	// which returns callToolServer (retrieve_tools mode) or codeExecServer —
+	// almost never p.server — so without this a client on the default
+	// endpoint got no instructions at all, and agents never learned that
+	// upstream tools sit behind retrieve_tools (they fell back to shell CLIs).
+	// defaultInstructions is already routing-mode-aware.
+	sharedInstructions := mcpserver.WithInstructions(resolveInstructions(directCustomInstructions(p.config)))
+
 	// Create code execution mode server
 	p.codeExecServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		opts...,
+		append(append([]mcpserver.ServerOption{}, opts...), sharedInstructions)...,
 	)
 
 	// Create call tool mode server (/mcp/call)
 	p.callToolServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		opts...,
+		append(append([]mcpserver.ServerOption{}, opts...), sharedInstructions)...,
 	)
 
 	// Register tools for code execution mode (static tools that don't change)

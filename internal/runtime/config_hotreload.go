@@ -295,6 +295,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
 	}
 
+	// advertise_upstream_servers is read live per connect/tools/list; this
+	// clause makes a lone toggle emit config.reloaded so connected clients
+	// are re-listed (NotifyUpstreamInventoryChanged). Compared resolved:
+	// unset and true are the same value.
+	if oldCfg.AdvertiseUpstreamServersEnabled() != newCfg.AdvertiseUpstreamServersEnabled() {
+		result.ChangedFields = append(result.ChangedFields, "advertise_upstream_servers")
+	}
+
 	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without
 	// this clause a lone aggregate_upstream_prompts toggle computes empty
 	// ChangedFields and is swallowed as "no changes detected", so ApplyConfig

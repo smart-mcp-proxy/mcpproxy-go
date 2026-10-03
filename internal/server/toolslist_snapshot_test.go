@@ -210,10 +210,15 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     clients read the empty properties map as "no keys allowed". Schema shape
 //     of that one parameter only; assertCallToolVariantDelta and
 //     TestOpenObjectParamsAreNotGrammarClosed_Issue1364 pin it.
+//   - retrieve_tools — agent visibility: the description states that upstream
+//     tools are reachable ONLY through it, so agents search before falling
+//     back to shell CLIs (retrieveToolsReachNote). DESCRIPTION ONLY, static
+//     prose; the per-caller "CONNECTED SERVERS" suffix is added by a tool
+//     filter at list time and is absent here (no connected upstreams).
 var toolsListAllowedDelta = map[string][]string{
-	"default_server":      {"call_tool_read", "call_tool_write", "call_tool_destructive", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
-	"retrieve_tools_mode": {"call_tool_read", "call_tool_write", "call_tool_destructive", "code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
-	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
+	"default_server":      {"call_tool_read", "call_tool_write", "call_tool_destructive", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
+	"retrieve_tools_mode": {"call_tool_read", "call_tool_write", "call_tool_destructive", "code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
+	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
 }
 
 // toolsListAllowedAdditions enumerates the tool entries a shipped change was
@@ -444,6 +449,22 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 					require.NoError(t, err)
 					assert.JSONEq(t, string(pre), string(trimmed),
 						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
+					continue
+				}
+				if name == "retrieve_tools" {
+					// Agent visibility: the description gained exactly
+					// retrieveToolsReachNote. With it removed the entry must
+					// still equal the frozen pre-105 capture.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					desc, _ := postM["description"].(string)
+					assert.Contains(t, desc, retrieveToolsReachNote,
+						"surface %s: retrieve_tools carries the reach note", surface)
+					postM["description"] = strings.Replace(desc, retrieveToolsReachNote, "", 1)
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: retrieve_tools may differ from the pre-105 golden only by retrieveToolsReachNote", surface)
 					continue
 				}
 				if isCallToolVariantName(name) {

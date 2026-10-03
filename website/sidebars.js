@@ -95,6 +95,7 @@ const sidebars = {
         'features/needs-attention',
         'features/profiles',
         'features/connect-clients',
+        'features/agent-instructions',
         'features/config-import',
         'features/registry-add',
         'features/activity-log',

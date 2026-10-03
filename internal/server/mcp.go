@@ -16,7 +16,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -76,16 +75,8 @@ const (
 	// defaultInstructions is returned in the MCP initialize response when no
 	// custom instructions are configured. It guides AI agents on the correct
 	// workflow for discovering and calling tools through the proxy.
-	defaultInstructions = "This is mcpproxy-go, an MCP aggregator proxy that connects multiple upstream MCP servers and exposes their tools. " +
-		"DISCOVERY: Use 'retrieve_tools' to search for tools by description across all connected upstream servers — do this before assuming a capability is unavailable. " +
-		"CALLING: When 'call_tool_read', 'call_tool_write', and 'call_tool_destructive' are exposed, call the variant named by the 'call_with' field of each retrieve_tools result. " +
-		"When 'code_execution' is exposed, you may instead orchestrate several discovered tools in a single step with JavaScript. " +
-		"When upstream tools are listed directly (named 'server__tool'), just call them by name. " +
-		"Do NOT use 'search_servers' to find existing tools — it searches EXTERNAL registries for adding NEW servers only. " +
-		"Use 'upstream_servers' with operation 'list' to see currently connected servers and their status. " +
-		// Discussion #948: carry the project links at the protocol level so an
-		// agent (and anyone reading its logs) can always find the project.
-		"ABOUT: MCPProxy homepage " + branding.Homepage + ", source " + branding.Repo + ", docs " + branding.Docs + "."
+	defaultInstructions = instrIntro + instrNotListed + instrDiscovery + instrCLIFallback + instrRetry +
+		instrCalling + instrCodeExecution + instrDirect + instrSearchServers + instrUpstreamList + instrAbout
 
 	// Connection status constants
 	statusError                = "error"
@@ -121,6 +112,15 @@ func mcpServerVersion() string {
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
+	// inventoryMu guards lastInventoryKey, the reachable-server set last
+	// announced via tools/list_changed (NotifyUpstreamInventoryChanged).
+	inventoryMu      sync.Mutex
+	lastInventoryKey string
+	// reachableMu guards the cached reachable-server set (mcp_agent_access.go).
+	reachableMu sync.Mutex
+	reachable   []string
+	reachableAt time.Time
+
 	server          *mcpserver.MCPServer
 	storage         *storage.Manager
 	index           *index.Manager
@@ -565,6 +565,9 @@ func NewMCPProxyServer(
 		)
 	})
 
+	// Per-caller instructions: profile, token scope and limits (mcp_agent_access.go).
+	installCallerInstructionsHooks(hooks, proxyRef.Load)
+
 	// Add hook to clean up session on disconnect
 	// NOTE: This hook may NOT be called for Streamable HTTP transport because HTTP is stateless
 	// and has no persistent connection. For HTTP transport, we rely on inactivity timeout
@@ -704,6 +707,7 @@ func NewMCPProxyServer(
 	// never invoked, so binding it early changes nothing while prompts are off.
 	mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
 	mcpserver.WithToolFilter(proxy.filterProfileV3Tools)(mcpServer)
+	mcpserver.WithToolFilter(proxy.filterAdvertiseServersInRetrieveTools)(mcpServer)
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
@@ -712,6 +716,7 @@ func NewMCPProxyServer(
 
 	// Initialize routing mode server instances (Spec 031)
 	proxy.initRoutingModeServers()
+	proxy.seedInventoryKey()
 
 	return proxy
 }
@@ -1265,7 +1270,7 @@ const retrieveToolsDiagnosticsNote = " ANNOTATION FILTERS: read_only_only, exclu
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsOpts := []mcp.ToolOption{
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsDiagnosticsNote),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),

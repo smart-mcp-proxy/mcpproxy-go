@@ -238,6 +238,7 @@ func main() {
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(agentInstructionsCmd)
 	rootCmd.AddCommand(clientCmd)
 	rootCmd.AddCommand(profileCmd)
 	rootCmd.AddCommand(accessCmd)

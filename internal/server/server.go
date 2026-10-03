@@ -788,6 +788,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 				s.mcpProxy.RefreshPrompts()
+				// retrieve_tools' description names the reachable servers;
+				// re-list clients when that set changes.
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
 			// and must have its baseline scan triggered so the settle handler can
@@ -829,6 +832,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// session, so an unguarded call would make any unrelated config
 				// edit look, to a client, exactly like the tool set changing.
 				s.mcpProxy.RefreshDirectModeToolsOnSerializationChange()
+				// advertise_upstream_servers is hot-reloadable: re-list
+				// retrieve_tools clients when it flips (guarded on change).
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced

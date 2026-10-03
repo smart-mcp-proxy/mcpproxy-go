@@ -336,8 +336,9 @@ Now have your agent actually use the server. In your AI client:
 
 > *"Search my mcpproxy tools for a way to resolve a library ID, then call it for Vue Router."*
 
-Your agent calls `retrieve_tools` first, which searches every upstream server and
-returns only the matching tools (abbreviated - each entry also carries the
+Your agent calls `retrieve_tools` first (if it tries a shell CLI instead, add the
+[Agent Instructions](/features/agent-instructions) snippet to its `CLAUDE.md` / `AGENTS.md`),
+which searches every upstream server and returns only the matching tools (abbreviated - each entry also carries the
 description, input schema and a relevance score):
 
 ```json

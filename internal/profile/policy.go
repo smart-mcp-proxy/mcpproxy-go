@@ -338,6 +338,12 @@ func (p *CompiledPolicy) effectiveTier(identity string, intrinsic Tier) Tier {
 // calls Decide when it already holds a non-nil CompiledPolicy for the
 // caller's effective profile — data-model.md §4 ProfileResolution.Policy is
 // nil only for source "none", which never reaches Decide).
+// HasAllowRules reports whether the policy has explicit tools.allow rules,
+// which Decide admits even above the tier cap.
+func (p *CompiledPolicy) HasAllowRules() bool {
+	return p != nil && len(p.allow) > 0
+}
+
 func (p *CompiledPolicy) Decide(server, tool string, intrinsic Tier) (admitted bool, reason Reason, profileTier Tier) {
 	identity := canonicalIdentity(server, tool)
 	profileTier = p.effectiveTier(identity, intrinsic)
