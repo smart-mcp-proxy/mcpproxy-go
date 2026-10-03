@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
@@ -507,6 +508,28 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 				result.Imported[i].Server.Name = newName
 			}
 		}
+		// configimport validated the pre-rename name; re-check the renamed
+		// servers with the same boot-path validation so a rename cannot
+		// persist an entry the next startup refuses (RC4-IMPORT-001).
+		kept := result.Imported[:0]
+		for _, imported := range result.Imported {
+			if errs := config.ValidateServerForLoad(imported.Server); len(errs) > 0 {
+				msgs := make([]string, 0, len(errs))
+				for _, e := range errs {
+					msgs = append(msgs, e.Error())
+				}
+				result.Failed = append(result.Failed, configimport.FailedServer{
+					Name:    imported.Server.Name,
+					Error:   "invalid_server",
+					Details: strings.Join(msgs, "; "),
+				})
+				continue
+			}
+			kept = append(kept, imported)
+		}
+		result.Imported = kept
+		result.Summary.Imported = len(result.Imported)
+		result.Summary.Failed = len(result.Failed)
 	}
 
 	// Apply the caller's field overrides (Paste tab env/header edits)

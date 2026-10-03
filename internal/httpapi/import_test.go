@@ -739,3 +739,25 @@ func TestImportServersJSON_EmptyMcpServersStill400(t *testing.T) {
 		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// RC4-IMPORT-001 follow-up: configimport validated the pre-rename name, so a
+// rename to a name the boot path refuses (':' is the qualified-name
+// separator) must fail the entry instead of persisting it.
+func TestRunImport_RenameToInvalidNameIsRejected(t *testing.T) {
+	const content = `{"mcpServers": {"good": {"command": "good-mcp"}}}`
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/path", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+
+	resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, map[string]string{"good": "bad:name"}, nil, false)
+	if err != nil {
+		t.Fatalf("runImport returned error: %v", err)
+	}
+	if len(resp.Imported) != 0 {
+		t.Fatalf("a rename to an invalid name must not be imported, got %+v", resp.Imported)
+	}
+	if len(resp.Failed) != 1 || resp.Failed[0].Error != "invalid_server" {
+		t.Fatalf("expected one invalid_server failure, got %+v", resp.Failed)
+	}
+}
