@@ -2513,6 +2513,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		Enabled:     enabled,
 		Quarantined: quarantined,
 	}
+	if req.Quarantined != nil {
+		// The caller stated the value: record it as an operator statement so
+		// the admission gate obeys it on later loads (it is written to
+		// mcp_config.json instead of being dropped as a default).
+		serverConfig.MarkQuarantineExplicitlySet(true)
+	}
 	if req.ReconnectOnUse != nil {
 		serverConfig.ReconnectOnUse = *req.ReconnectOnUse
 	}

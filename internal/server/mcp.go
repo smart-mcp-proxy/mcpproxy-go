@@ -5797,6 +5797,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// F9: optional per-server expose_prompts override on add. GetBool can't tell
 	// absent from false, so probe the raw args for presence.
 	if rawArgs := request.GetArguments(); rawArgs != nil {
+		// A stated `quarantined` is an operator statement the admission gate
+		// must obey on later loads, not a default to drop on save.
+		if _, stated := rawArgs["quarantined"]; stated {
+			serverConfig.MarkQuarantineExplicitlySet(true)
+		}
 		if raw, ok := rawArgs["expose_prompts"]; ok {
 			if b, ok := raw.(bool); ok {
 				serverConfig.ExposePrompts = &b
