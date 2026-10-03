@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
+	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 )
@@ -1138,6 +1141,9 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
+	// The connection generation this call runs on, so a transport failure is
+	// only ever charged to the session that produced it (RC4-STDIO-001).
+	callEpoch := mc.connectionEpoch.Load()
 
 	// #1317 round 2: counted from HERE, before admission control, not just
 	// around the transport call below — a call already queued in
@@ -1247,7 +1253,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 					zap.String("tool", toolName),
 					zap.Error(err))
 			}
-			mc.StateManager.SetError(err)
+			mc.recordDeadConnection(toolName, err, callEpoch)
 		}
 		return nil, err
 	}
@@ -1260,6 +1266,33 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	}
 
 	return result, nil
+}
+
+// recordDeadConnection flips the server to Error after a tools/call produced
+// hard evidence that its connection is broken (refused/reset, broken pipe, or
+// a dead stdio transport). The health loop's next tick then reconnects through
+// the normal ShouldRetry backoff.
+//
+// The verdict is applied only while the client is still Ready on the SAME
+// connection generation the call ran on, serialized with Connect/Disconnect
+// through epochMu (the same pairing probeAfterAmbiguousCallError uses):
+//   - a call that was on the wire when the user disconnected the server sees
+//     "transport closed" too; that belongs to the closed generation and must
+//     not flip the Disconnected client to Error;
+//   - a burst of concurrent calls hitting the same dead transport records ONE
+//     failure, not one per call — every extra SetError would bump retryCount
+//     and stretch the reconnect backoff for a single process death.
+func (mc *Client) recordDeadConnection(toolName string, err error, callEpoch int64) {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	if !mc.IsConnected() || mc.connectionEpoch.Load() != callEpoch {
+		mc.logger.Debug("Tool call connection failure belongs to a connection that is already gone; not re-marking",
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("tool", toolName),
+			zap.Error(err))
+		return
+	}
+	mc.StateManager.SetError(err)
 }
 
 // recordCallToolOAuthSignal inspects a failed tools/call error and, when it is an
@@ -1836,6 +1869,12 @@ func isTransientHealthCheckError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A dead transport (the stdio child exited, its pipes closed) never
+	// recovers by waiting: every later request fails the same way until the
+	// process is respawned (RC4-STDIO-001).
+	if isDeadTransportError(err) {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	// Hard failures: short-circuit to "not transient" so the caller flips
 	// Error on the first miss. Order matters — check these BEFORE the
@@ -2133,10 +2172,48 @@ func (mc *Client) waitForReconnectCompletion(ctx context.Context) error {
 	}
 }
 
+// isDeadTransportError reports whether err proves the transport itself is
+// closed, as opposed to one request failing on a live connection. The stdio
+// case is RC4-STDIO-001: when the upstream's child process dies, mcp-go's
+// stdio reader hits EOF and closes the transport, and every later request
+// returns transport.ErrTransportClosed ("transport closed") — which matched
+// none of isConnectionError's markers, so the health loop ignored it as a
+// "high activity timeout" and the server stayed Ready with every call failing.
+//
+// Sentinels are matched through the error chain; the text fallbacks cover
+// chains flattened before they reach us. Bare "EOF" is deliberately NOT
+// matched as text: a live server's JSON-RPC error can mention it.
+func isDeadTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, mcptransport.ErrTransportClosed) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		mcptransport.ErrTransportClosed.Error(), // "transport closed"
+		os.ErrClosed.Error(),                    // "file already closed"
+		io.ErrClosedPipe.Error(),                // "io: read/write on closed pipe"
+	} {
+		if containsString(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // isConnectionError checks if an error indicates a connection problem
 func (mc *Client) isConnectionError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isDeadTransportError(err) {
+		return true
 	}
 
 	errStr := err.Error()
