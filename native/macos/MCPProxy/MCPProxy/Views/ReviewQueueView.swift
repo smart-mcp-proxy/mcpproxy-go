@@ -104,7 +104,7 @@ enum ReviewPresentation {
         return Headline(state: .approved, title: "\(name) is approved", subtitle: "\(summary) New or changed tools come back here for review.")
     }
 
-    // MARK: Default selection (Spec 109 fix-review-defaults, D41)
+    // MARK: Default selection (Spec 109 fix-review-defaults, D43)
     // The core decides which tools start checked (`default_allowed`); these
     // helpers only read it. A missing field (an older core) reads as false, so a
     // mismatched core fails closed. Sentences match the Web screen.
@@ -206,7 +206,7 @@ struct ReviewSheet: View {
                             set: { isAllowed in
                                 if isAllowed { allowed.insert(tool.name) }
                                 else { allowed.remove(tool.name) }
-                                // An explicit click survives a reload (D41.4).
+                                // An explicit click survives a reload (D43.4).
                                 choices[tool.name] = ReviewPresentation.Choice(allowed: isAllowed, tool: tool)
                             }
                         )).toggleStyle(.checkbox)
@@ -288,7 +288,7 @@ struct ReviewSheet: View {
         pendingBlock = everything ? [] : nil
         Task { await approve(force: false) }
     }
-    /// The force retry re-sends the block list of the attempt that triggered it (D41.5).
+    /// The force retry re-sends the block list of the attempt that triggered it (D43.5).
     private func approve(force: Bool) async {
         guard let client = appState.apiClient, let review else { return }
         let block = pendingBlock ?? review.tools.map(\.name).filter { !allowed.contains($0) }

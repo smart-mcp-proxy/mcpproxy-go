@@ -22,7 +22,7 @@ const tool = (name: string, extra: Partial<ReviewTool> = {}): ReviewTool => ({
   name, description: name, tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: true, ...extra,
 })
 
-describe('review selection helpers (D41)', () => {
+describe('review selection helpers (D43)', () => {
   it('initialSelection reads default_allowed and counts a missing field as false', () => {
     const tools = [
       tool('read_a'),
@@ -94,7 +94,7 @@ async function mountScreen(tools: ReviewTool[] = fixtureTools(), definitionsCapt
 const checked = (wrapper: Awaited<ReturnType<typeof mountScreen>>, name: string) =>
   (wrapper.get(`[data-test="review-allow-${name}"]`).element as HTMLInputElement).checked
 
-describe('ReviewScreen default selection (D41)', () => {
+describe('ReviewScreen default selection (D43)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     ;(api.securityApprove as any).mockResolvedValue({ success: true })

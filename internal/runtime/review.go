@@ -109,7 +109,7 @@ type ReviewTool struct {
 	HeldReason     string                  `json:"held_reason"`
 	HeldSignals    []string                `json:"held_signals"`
 	// DefaultAllowed is the review screens' fail-closed default selection
-	// (D41). Always serialised, so an older core (field absent) reads as false.
+	// (D43). Always serialised, so an older core (field absent) reads as false.
 	DefaultAllowed bool                `json:"default_allowed"`
 	Previous       *ReviewToolPrevious `json:"previous"`
 	Diff           *ReviewToolDiff     `json:"diff,omitempty"`
@@ -251,7 +251,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 	return result, nil
 }
 
-// reviewDefaultAllowed is the default selection of the review screens (D41.2).
+// reviewDefaultAllowed is the default selection of the review screens (D43.2).
 // An already blocked tool stays blocked; an approved tool stays allowed; a
 // pending or changed tool starts allowed only when it is read-only, the scan
 // verified its current definition as clean and nothing holds it. Everything

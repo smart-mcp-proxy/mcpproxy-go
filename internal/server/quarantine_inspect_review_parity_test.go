@@ -54,7 +54,7 @@ func TestInspectQuarantinedTools_UsesComposerWhenDefinitionsCaptured(t *testing.
 	require.JSONEq(t, string(wantTools), string(gotTools))
 }
 
-// default_allowed is the review screens' fail-closed selection hint (D41). The
+// default_allowed is the review screens' fail-closed selection hint (D43). The
 // captured inspection serialises the composer, so it must equal the REST value
 // for a mix of tiers; inspect_tools is an approval-state listing and does not
 // carry it.

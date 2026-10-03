@@ -319,6 +319,12 @@ export MCPPROXY_TELEMETRY=false
 
 This overrides the config file setting and is useful for CI/CD environments or system-wide policies.
 
+### How the UI shows an environment opt-out
+
+When an environment variable (`MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK` or `CI`) disables telemetry, the Web UI and the macOS app say so instead of showing the usual notice: the setup wizard's last step, the Home banner and the macOS welcome read "Anonymous usage telemetry is off — disabled by MCPPROXY_TELEMETRY=false in the environment. Nothing is sent." The telemetry toggle in Settings is shown off and disabled with the same reason; unset the variable and restart MCPProxy to change it. If you turned telemetry off in the config file yourself, no notice is shown. The core reports this state at `telemetry` in `GET /api/v1/status`.
+
+Development builds (a version that is not a release number) never send telemetry, whatever the setting. That is a property of the build and is not reflected in the UI.
+
 ## Data handling
 
 - Telemetry data is sent to a Cloudflare Worker over HTTPS

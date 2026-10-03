@@ -212,7 +212,7 @@ for (const width of WIDTHS) {
         expect(visible.includes('header-drawer-toggle'), `drawer toggle visibility on ${where}`).toBe(width < 1024)
 
         const pill = (await header.locator('[data-test="header-status-pill"]').innerText()).trim()
-        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ of \d+ online/)
+        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ (of \d+ )?online/)
         else expect(pill, `status pill on ${where}`).toMatch(/^\s*●?\s*\d+\/\d+\s*$/)
 
         const add = (await header.locator('[data-test="header-add-menu"]').innerText()).trim()

@@ -12,7 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
-// TestReviewDefaultAllowed pins the fail-closed default selection (D41.2):
+// TestReviewDefaultAllowed pins the fail-closed default selection (D43.2):
 // the core decides which tools the review screens pre-check.
 func TestReviewDefaultAllowed(t *testing.T) {
 	tiers := []contracts.Tier{

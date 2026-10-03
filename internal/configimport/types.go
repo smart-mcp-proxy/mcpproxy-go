@@ -3,6 +3,7 @@
 package configimport
 
 import (
+	"errors"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -205,6 +206,17 @@ type ImportOptions struct {
 
 	// Now is the timestamp to use for Created field (default: time.Now())
 	Now time.Time
+}
+
+// ErrTypeNoServers is the ImportError.Type a parser returns when a recognised
+// client config holds no MCP servers (empty or absent server map).
+const ErrTypeNoServers = "no_servers"
+
+// IsNoServers reports whether err is the "client config has no MCP servers"
+// import error. A malformed file or an undetectable format is not.
+func IsNoServers(err error) bool {
+	var ie *ImportError
+	return errors.As(err, &ie) && ie.Type == ErrTypeNoServers
 }
 
 // ImportError represents a structured error for import failures.

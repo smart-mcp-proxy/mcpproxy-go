@@ -22,7 +22,7 @@ import (
 //	(a) every SC-001 finding id has a row in checklists/requirements.md, and
 //	    every FR and task that row names exists and resolves to a test file;
 //	(b) every FR in spec.md is cited by at least one task (reserved ids excepted);
-//	(c) acceptance-index.json maps all 43 acceptance scenarios and SC-002 to
+//	(c) acceptance-index.json maps all 45 acceptance scenarios and SC-002 to
 //	    SC-012 to refs that resolve.
 //
 // A task resolves when its line names a backticked path that exists in the
@@ -470,7 +470,7 @@ func TestSpec109Traceability_AcceptanceIndex(t *testing.T) {
 	p108ReadJSON(t, p109SpecDir+"/acceptance-index.json", &idx)
 
 	ids := p109ScenarioIDs(t)
-	require.Len(t, ids, 43, "spec.md should define 43 acceptance scenarios")
+	require.Len(t, ids, 45, "spec.md should define 45 acceptance scenarios")
 	liveOnly := 0
 	check := func(kind, id string, e p109AcceptanceEntry) {
 		if e.LiveOnly != "" {

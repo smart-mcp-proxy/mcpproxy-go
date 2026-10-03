@@ -6583,6 +6583,14 @@ paths:
           description: 'binding_bypassable_without_auth: the patch would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -6641,6 +6649,14 @@ paths:
           description: 'binding_bypassable_without_auth: the write would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -9725,7 +9741,9 @@ paths:
   /api/v1/servers/import/path:
     post:
       description: Import MCP server configurations by reading a file from the server's
-        filesystem
+        filesystem. A preview (preview=true) of a file with no MCP servers (empty,
+        {}, or no/empty server map) answers 200 with an empty imported list; an apply
+        of such a file and a malformed file still answer 400.
       parameters:
       - description: If true, return preview without importing
         in: query
@@ -10026,8 +10044,9 @@ paths:
       - stats
   /api/v1/status:
     get:
-      description: Get comprehensive server status including running state, listen
-        address, upstream statistics, and timestamp
+      description: |-
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
           content:

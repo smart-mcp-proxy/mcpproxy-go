@@ -23,7 +23,7 @@ async function mountRoute() {
   return wrapper
 }
 
-describe('Review route keeps the explicit selection across review.changed (D41.4)', () => {
+describe('Review route keeps the explicit selection across review.changed (D43.4)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     ;(api.getReviewQueue as any).mockResolvedValue({ success: true, data: { count: 1, servers: [{ server: 'fixture', kind: 'tool_review', quarantined: true, pending: 2, changed: 0 }] } })

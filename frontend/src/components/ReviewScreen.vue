@@ -93,7 +93,7 @@ const filteredTools = computed(() => review.value?.tools.filter(t => !props.chan
 const primaryLabel = computed(() => approveLabel(allowedTools.value.length, review.value?.tools.length ?? 0, review.value?.server.definitions_captured ?? false))
 const showApproveAll = computed(() => !!review.value && review.value.server.quarantined && review.value.server.definitions_captured && review.value.tools.length > 0 && allowedTools.value.length < review.value.tools.length)
 const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.value?.tools ?? []).filter(x => x.tier === t).length])))
-// An explicit click is remembered with the payload the user saw, so a reload keeps it (D41.4).
+// An explicit click is remembered with the payload the user saw, so a reload keeps it (D43.4).
 function recordChoice(tool: ReviewTool, allowed: boolean) { choices.set(tool.name, { allowed, tool }) }
 function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema: tool.input_schema, output_schema: tool.output_schema, annotations: tool.annotations }, null, 2) }
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
@@ -123,7 +123,7 @@ async function fetchDefinitions() {
 }
 function requestApprove(everything: boolean) { if (!review.value?.server.definitions_captured) { confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
-// The force retry re-sends the block list of the attempt that triggered it (D41.5).
+// The force retry re-sends the block list of the attempt that triggered it (D43.5).
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true

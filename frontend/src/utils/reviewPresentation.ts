@@ -96,7 +96,7 @@ export function toolState(tool: ReviewTool, quarantined: boolean): ToolControl {
 }
 
 // ---------------------------------------------------------------------------
-// Default selection (Spec 109 fix-review-defaults, D41). The core decides which
+// Default selection (Spec 109 fix-review-defaults, D43). The core decides which
 // tools start checked (`default_allowed`); these helpers only read it. A payload
 // from an older core has no field, which reads as false: every tool starts
 // unchecked, so a mismatched core fails closed. The macOS app

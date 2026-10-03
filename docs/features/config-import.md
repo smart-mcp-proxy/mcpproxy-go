@@ -232,6 +232,7 @@ When importing, MCPProxy checks for existing servers by name:
 - **Existing servers are skipped** by default
 - Skipped servers appear in the `skipped` array with reason
 - Use the preview mode to see what will be imported before committing
+- Previewing a client config that holds no MCP servers (an empty file, `{}`, or an empty server list) answers with "no servers" (an empty `imported` list) instead of an error; importing it still reports that no servers were found
 
 ## Security Considerations
 

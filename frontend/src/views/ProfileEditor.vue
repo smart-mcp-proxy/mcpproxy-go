@@ -181,11 +181,12 @@
             :loading="toolsLoading"
             :editable="canEdit"
             :focus-key="focusKey"
+            :unsaved="dirty"
             @toggle="toggleRule"
             @classify="classify"
             @remove-classification="removeClassification"
           />
-          <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" />
+          <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" :dirty="dirty" />
         </div>
       </div>
 

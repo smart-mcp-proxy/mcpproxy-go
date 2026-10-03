@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,7 +241,7 @@ type ImportFromPathRequest struct {
 
 // handleImportFromPath godoc
 // @Summary Import servers from a file path
-// @Description Import MCP server configurations by reading a file from the server's filesystem
+// @Description Import MCP server configurations by reading a file from the server's filesystem. A preview (preview=true) of a file with no MCP servers (empty, {}, or no/empty server map) answers 200 with an empty imported list; an apply of such a file and a malformed file still answer 400.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -291,9 +292,23 @@ func (s *Server) handleImportFromPath(w http.ResponseWriter, r *http.Request) {
 	// Preview mode?
 	preview := r.URL.Query().Get("preview") == "true"
 
+	// A client config that exists but holds nothing (0 bytes, whitespace) is a
+	// legitimate "nothing to import" answer when auto-previewing detected
+	// clients, not a failure. Apply still reports it.
+	if preview && len(bytes.TrimSpace(content)) == 0 {
+		logger.Debug("Import preview of empty client config", "path", path)
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
+	}
+
 	// Use the common runImport function
 	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview, req.Rename, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			logger.Debug("Import preview of client config with no servers", "path", path)
+			s.writeSuccess(w, emptyImportPreview(req.Format))
+			return
+		}
 		logger.Error("Import from path failed", "path", path, "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -599,6 +614,23 @@ func (s *Server) selfListenAddrs() []string {
 		addrs = append(addrs, cfg.Listen)
 	}
 	return addrs
+}
+
+// emptyImportPreview is the preview answer for a client config that holds no
+// MCP servers: a successful, empty ImportResponse (all lists non-nil so the
+// JSON carries [] rather than null) whose format comes from the caller's hint.
+func emptyImportPreview(formatHint string) *ImportResponse {
+	resp := &ImportResponse{
+		Imported: []ImportedServerResponse{},
+		Skipped:  []configimport.SkippedServer{},
+		Failed:   []configimport.FailedServer{},
+		Warnings: []string{},
+	}
+	if f := parseFormat(formatHint); f != configimport.FormatUnknown {
+		resp.Format = string(f)
+		resp.FormatName = f.String()
+	}
+	return resp
 }
 
 // parseFormat converts a format string to ConfigFormat

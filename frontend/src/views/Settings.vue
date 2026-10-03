@@ -32,7 +32,7 @@
     <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
       <div class="card-body">
         <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
-        <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
+        <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
       </div>
     </div>
 
@@ -83,7 +83,7 @@
               {{ p.label }}: {{ p.on ? 'on' : 'off' }}
             </span>
           </div>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
           <AnonymousProfileSetting :require-mcp-auth="!!state.working.require_mcp_auth" />
           <ScannerSettings />
         </div>
@@ -93,7 +93,7 @@
       <div v-show="activeTab === 'general'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg">⚙️ General</h2>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
         </div>
       </div>
 
@@ -120,7 +120,7 @@
                 :data-test="`settings-accordion-docs-${acc.id}`"
               >Learn more ↗</a>
             </p>
-            <SettingsSection :key="`acc-${acc.id}-${formEpoch}`" :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
+            <SettingsSection :key="`acc-${acc.id}-${formEpoch}`" :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
           </div>
         </details>
         <div class="text-xs text-base-content/50 px-1">
@@ -133,7 +133,7 @@
       <div v-if="hasServerEdition" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg" data-test="settings-server-edition-title">{{ serverEditionTitle }}</h2>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
         </div>
       </div>
 
@@ -213,6 +213,8 @@ import {
   type SettingsAccordion,
 } from '@/views/settings/fields'
 import api from '@/services/api'
+import { useOnboardingStore } from '@/stores/onboarding'
+import { lockedKeysChanged, telemetrySettingLock } from '@/utils/telemetryState'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -474,6 +476,15 @@ async function applyConfig() {
   configErrors.value = []
   try {
     const cfg = JSON.parse(configJson.value)
+    // FR-044a: the form fields are locked, but this posts the whole document.
+    const lockedEdits = lockedKeysChanged(cfg, rawConfig, fieldLocks.value)
+    if (lockedEdits.length > 0) {
+      configErrors.value = lockedEdits.map((key) => ({
+        field: key,
+        message: fieldLocks.value[key].reason,
+      }))
+      return
+    }
     const response = await api.applyConfig(cfg)
     if (response.success && response.data) {
       systemStore.addToast({
@@ -482,6 +493,9 @@ async function applyConfig() {
       })
       if (response.data.applied_immediately) await serversStore.fetchServers()
       await loadConfig()
+      // The document may have changed telemetry.enabled; the banner and the
+      // lock follow the effective state, like after a section save.
+      void onboarding.loadTelemetryState(true)
     } else {
       configErrors.value = [{ field: 'apply', message: response.error || 'Failed to apply configuration' }]
     }
@@ -553,12 +567,32 @@ async function focusField(key: string) {
   setTimeout(() => row.classList.remove(...highlight), 2500)
 }
 
+// Spec 109 FR-044a: an environment opt-out (MCPPROXY_TELEMETRY=false,
+// DO_NOT_TRACK, CI) forces telemetry off regardless of the config file. The
+// config document stays the stored value (it is a GET-then-POST-back document),
+// so the effective state read off /status locks the toggle instead.
+const onboarding = useOnboardingStore()
+const fieldLocks = computed<Record<string, { reason: string; value?: unknown }>>(() => {
+  const locks: Record<string, { reason: string; value?: unknown }> = {}
+  const lock = telemetrySettingLock(onboarding.telemetryState)
+  if (lock) locks['telemetry.enabled'] = lock
+  return locks
+})
+
+// After a save that touched telemetry.enabled, refresh the effective state so
+// the banner and the lock follow.
+function onSectionSaved(changed: string[]) {
+  if (changed.includes('telemetry.enabled')) void onboarding.loadTelemetryState(true)
+}
+
 // Fetch the resolved built-in MCP instructions default for the textarea
-// placeholder (MCP-2175). Non-fatal: a failure or an older core just leaves the
-// static catalogue placeholder in place.
-async function loadDefaultInstructions() {
+// placeholder (MCP-2175) and the effective telemetry state (FR-044a).
+// Non-fatal: a failure or an older core just leaves the static catalogue
+// placeholder in place and the telemetry toggle unlocked.
+async function loadStatusExtras() {
   try {
     const resp = await api.getStatus()
+    if (resp.success) onboarding.setTelemetryState(resp.data?.telemetry ?? null)
     if (resp.success && typeof resp.data?.default_instructions === 'string') {
       defaultInstructions.value = resp.data.default_instructions
       // In case loadConfig already ran and set loaded=true, prefill now.
@@ -640,7 +674,7 @@ onMounted(async () => {
       tabParamPending = false
     })
   }
-  loadDefaultInstructions()
+  loadStatusExtras()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
   await loadConfig()
   const focus = route.query.focus

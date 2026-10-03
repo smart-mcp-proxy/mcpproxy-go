@@ -147,7 +147,7 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 | Try a draft | Try it | Try it | `profile try` | not offered | `POST /profiles/try` |
 | Explain access | Explain access | Explain access | `access explain` | `profiles explain` | `GET /access/explain` |
 
-**Try it** runs a real `retrieve_tools` under the unsaved draft and shows what is returned and what is hidden with reasons, without saving anything.
+**Try it** runs a real `retrieve_tools` under the unsaved draft and shows what is returned and what is hidden with reasons, without saving anything. The tool table and its visible/hidden counts show the saved profile; while you have unsaved edits they are labelled "Saved profile". Try it says whether it used your unsaved edits.
 
 **Deleting a profile** that clients, tokens or `anonymous_profile` still use is refused with `409 profile_in_use` (listing who) until you give `reassign_to`; `force` leaves the references dangling, which denies everything and never widens. A profile that is the `anonymous_profile` is refused even with `force`. **Renaming** moves every pin, binding, `switchable_to` and `anonymous_profile` reference to the new name.
 

@@ -1451,6 +1451,9 @@ struct StatusResponse: Codable {
     /// Spec 109-k FR-080a: availability signals. Omitted by a core that
     /// supports none of them (109-k itself ships the list empty).
     let features: StatusFeatures?
+    /// Spec 109 FR-044a: the effective telemetry state (env opt-out vs config
+    /// vs default). Omitted for scoped callers and by a core that predates it.
+    let telemetry: TelemetryStateDTO?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -1461,6 +1464,7 @@ struct StatusResponse: Codable {
         case timestamp
         case defaultInstructions = "default_instructions"
         case features
+        case telemetry
     }
 
     /// Whether the core accepts the Spec 108 `profile`/`client`/`token`

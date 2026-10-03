@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-6" data-test="review-queue">
     <div class="flex flex-wrap items-end justify-between gap-3"><div><h1 class="text-3xl font-bold">Review queue</h1><p class="text-base-content/70">Review servers and tool changes before agents can use them.</p></div><span class="badge badge-warning badge-lg">{{ queue?.count ?? 0 }}</span></div>
-    <!-- Only the first load blanks the page: a background reload (review.changed) must not unmount ReviewScreen, or its per-instance selection is lost (D41.4). -->
+    <!-- Only the first load blanks the page: a background reload (review.changed) must not unmount ReviewScreen, or its per-instance selection is lost (D43.4). -->
     <div v-if="loading && !queue" class="text-center py-10"><span class="loading loading-spinner loading-lg"></span></div>
     <div v-else-if="error && !queue" class="alert alert-error">{{ error }}</div>
     <div v-else-if="selectedServer">

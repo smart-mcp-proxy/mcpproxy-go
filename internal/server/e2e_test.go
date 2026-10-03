@@ -1181,7 +1181,7 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 			ScanVerdict string          `json:"scan_verdict"`
 			Annotations json.RawMessage `json:"annotations"`
 			// default_allowed is always present and false on the live path:
-			// nothing was scanned, so nothing starts pre-selected (D41.7).
+			// nothing was scanned, so nothing starts pre-selected (D43.7).
 			DefaultAllowed *bool `json:"default_allowed"`
 		} `json:"tools"`
 	}

@@ -125,7 +125,7 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertFalse(source.contains(#"/api/v1/servers/\(id)/quarantine"#))
     }
 
-    // MARK: Default selection (Spec 109 fix-review-defaults, D41)
+    // MARK: Default selection (Spec 109 fix-review-defaults, D43)
 
     private func selectionTool(_ name: String, defaultAllowed: Bool?, description: String = "d", verdict: String = "clean", heldReason: String? = nil, heldSignals: [String]? = nil) throws -> ReviewTool {
         let field = defaultAllowed.map { ",\"default_allowed\":\($0)" } ?? ""

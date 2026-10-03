@@ -133,6 +133,10 @@ page disagree):
   at 1440 and 900 px: the token Profile chip is one line inside its cell, and
   radio labels sit next to their radios in the create-profile, custom-client and
   bulk-move dialogs.
+- `usertest-web-fixes.spec.ts`: the first-run user test findings, at 1440 and
+  900 px: the header status pill names servers awaiting review, a secret-like
+  Manual-add value is masked with a Show toggle, and profile Try it is readable
+  and labels unsaved edits.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),

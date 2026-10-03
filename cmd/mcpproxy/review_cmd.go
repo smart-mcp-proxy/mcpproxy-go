@@ -180,7 +180,7 @@ func reviewDeclined(message string, err error) error {
 
 // reviewToolState is the part of a review tool the approval selection needs.
 // DefaultAllowed is nil when the core predates the field, which counts as
-// false: a mismatched core fails closed (D41.1).
+// false: a mismatched core fails closed (D43.1).
 type reviewToolState struct {
 	Name           string `json:"name"`
 	Tier           string `json:"tier"`
