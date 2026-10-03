@@ -51,7 +51,11 @@ import (
 // records: zero-tool (prompts/resources-only) servers, servers never
 // discovered while live (e.g. disabled since they were vetted), and servers
 // last vetted before tool approvals were stored (v0.21). Each is held once
-// on upgrade; one approval releases it and records the decision. When the
+// on upgrade; one approval releases it and records the decision. The rule
+// applies only to servers config.db already held when this process started
+// (bootKnownServers): AddServer saves a new server to config.db before it
+// publishes the config, so a server added while running must not be read as
+// "known but never approved" before its tools are even discovered. When the
 // approval records cannot be read the gate keeps the old rule: unknown is not
 // the same as never admitted.
 //
@@ -148,6 +152,13 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 		return cfg, false
 	}
 
+	r.bootKnownOnce.Do(func() {
+		r.bootKnownServers = make(map[string]struct{}, len(stored))
+		for name := range stored {
+			r.bootKnownServers[name] = struct{}{}
+		}
+	})
+
 	decisions := make(map[int]admissionDecision)
 	var preFix []string
 
@@ -173,6 +184,13 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 			// the fix looks like. Upgrade safety says leave it alone; honesty
 			// says say so.
 			if !sc.QuarantineExplicitlySet() && cfg.QuarantineDefaultForServer(sc) {
+				_, bootKnown := r.bootKnownServers[sc.Name]
+				if !bootKnown {
+					// Added while this process runs: AddServer saves it to
+					// config.db before publishing, so "known" here only means
+					// "just added" — the add path already decided admission.
+					continue
+				}
 				if vetted, ok := r.hasApprovalBaseline(sc.Name); ok && !vetted {
 					decisions[i] = admissionDecision{
 						server: sc.Name,

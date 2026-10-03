@@ -1717,6 +1717,12 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		Quarantined: quarantined,
 		TrustMode:   req.TrustMode,
 	}
+	if req.Quarantined != nil {
+		// A stated --quarantine/--no-quarantine is written to the file as an
+		// operator statement; otherwise SaveConfig drops quarantined:false
+		// and the admission gate holds the server on the next start.
+		newServer.MarkQuarantineExplicitlySet(true)
+	}
 
 	// Add to config
 	globalConfig.Servers = append(globalConfig.Servers, newServer)

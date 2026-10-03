@@ -292,6 +292,12 @@ func TestImport_SkipQuarantine(t *testing.T) {
 			if s.Server.Quarantined {
 				t.Errorf("server %s should NOT be quarantined when SkipQuarantine=true", s.Server.Name)
 			}
+			// RC-UPG-001 follow-up: the stated value must persist as an
+			// operator statement, or the boot gate re-holds the server after
+			// a restart when its tools were never discovered.
+			if !s.Server.QuarantineExplicitlySet() {
+				t.Errorf("server %s: SkipQuarantine must be recorded as an explicit quarantine statement", s.Server.Name)
+			}
 		}
 	})
 }

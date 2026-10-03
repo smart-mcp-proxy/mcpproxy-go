@@ -149,6 +149,11 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 		// Override quarantine if SkipQuarantine is set
 		if opts.SkipQuarantine {
 			serverConfig.Quarantined = false
+			// The caller stated the value: keep it as an operator statement
+			// so it is written to mcp_config.json and the admission gate
+			// obeys it after a restart, instead of re-holding a server
+			// whose tools were never discovered.
+			serverConfig.MarkQuarantineExplicitlySet(true)
 		}
 
 		// FR-040: classify env/header fields and build the second-line

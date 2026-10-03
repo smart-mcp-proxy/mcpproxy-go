@@ -133,6 +133,14 @@ type Runtime struct {
 	preFixMu       sync.Mutex
 	preFixReported map[string]struct{}
 
+	// bootKnownServers is the set of servers config.db held the first time
+	// the admission gate read it in this process (RC-UPG-001). Only those can
+	// carry a stale record from an older release; a server added while this
+	// process runs is saved to config.db before its config is published, so
+	// the gate must not read it as "known but never approved".
+	bootKnownOnce    sync.Once
+	bootKnownServers map[string]struct{}
+
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status

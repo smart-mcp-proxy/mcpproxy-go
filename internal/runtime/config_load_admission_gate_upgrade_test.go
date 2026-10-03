@@ -126,3 +126,27 @@ func TestConfigLoadAdmissionGate_RequarantineSurvivesRestart(t *testing.T) {
 	require.NoError(t, rt.LoadConfiguredServers(reloaded))
 	assert.True(t, storedServer(t, rt, "legacy-keyless").Quarantined)
 }
+
+// v0.70.0-rc.3 release gate (matrix/oauth): AddServer saves a new server to
+// config.db BEFORE publishing the config, so the publish-time gate saw it as
+// "known, unquarantined, never approved" and re-held it before its tools
+// (an OAuth server has none until sign-in) could be discovered. The
+// no-baseline rule is for records an older release left behind, so it only
+// applies to servers config.db held when this process started.
+func TestConfigLoadAdmissionGate_ServerAddedWhileRunningIsNotRequarantined(t *testing.T) {
+	rt, cfg, _ := gateEnvAt(t, []map[string]any{
+		{"name": "boot", "command": "./x", "protocol": "stdio", "enabled": true, "quarantined": false},
+	}, nil, zap.NewNop())
+	// Boot: the first gate pass records what config.db held at start.
+	require.NoError(t, rt.LoadConfiguredServers(cfg))
+
+	// Runtime add, in AddServer's order: storage first, then the config.
+	added := &config.ServerConfig{Name: "added-later", URL: "http://127.0.0.1:1/mcp", Protocol: "http", Enabled: true}
+	require.NoError(t, rt.storageManager.SaveUpstreamServer(added))
+	next := *rt.Config()
+	next.Servers = append(append([]*config.ServerConfig{}, rt.Config().Servers...), config.CopyServerConfig(added))
+	require.NoError(t, rt.LoadConfiguredServers(&next))
+
+	assert.False(t, storedServer(t, rt, "added-later").Quarantined,
+		"a server added while running was admitted by its add path; the upgrade rule must not re-hold it")
+}
