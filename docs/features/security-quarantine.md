@@ -53,7 +53,19 @@ held; a server whose trust mode is `auto` is admitted.
 
 The second condition is what makes upgrading safe: every server you are already
 running has a `config.db` record, so **upgrading never re-quarantines a server
-you have already vetted**. The boundary is that a server present in a
+you have already vetted**. "Vetted" means the record is backed by an approval
+baseline — at least one of the server's tools was approved at some point, which
+happens automatically when a trusted server first connects. A server recorded
+as unquarantined whose tools were never approved was never admitted, and the
+gate holds it for review (see the restart note below).
+
+Because the rule cannot tell such a server apart from a vetted one that has no
+tool records, a few vetted servers are also held once on upgrade: servers that
+expose no tools (prompts or resources only), servers that never connected while
+live (for example, disabled ever since they were vetted), and servers last
+vetted before v0.21. Approve them from the quarantine review; the decision is
+recorded and they are not held again. To skip the review, add
+`"quarantined": false` to the server's entry before upgrading. The boundary is that a server present in a
 hand-written config but absent from `config.db` — after a wiped data directory,
 or on a machine that has never seen that config before — is treated as
 first-seen and held for review.
@@ -103,8 +115,11 @@ quarantine: a restart from the REST API, the CLI, the tray or an MCP client,
 "restart all", a secret change that restarts the servers using it, and a security
 scan (including the baseline scan that runs shortly after startup) all re-read the
 server from `mcp_config.json` and wrote the un-gated entry over the recorded
-quarantine. Such a server shows up in the same "predate the config-load admission
-gate" warning and should be reviewed the same way. From this fix on, a restart
+quarantine. Upgrading now catches this case: such a server has no approved tool,
+so the gate quarantines it again at startup and logs `Quarantining known server
+with no approved tool baseline`; approve it from the quarantine review as usual.
+A server that ran unquarantined (and so has approved tools) still only shows up
+in the "predate the config-load admission gate" warning. From this fix on, a restart
 runs the file entry through the admission gate, and `config.db` refuses to lower a
 recorded quarantine unless the operator states `"quarantined": false` or the
 server is released from the quarantine review.

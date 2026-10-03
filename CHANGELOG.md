@@ -167,6 +167,8 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Bug Fixes
 
+- **Upgrade no longer admits a server an older release held in quarantine (RC-UPG-001).** A v0.69 restart (including the baseline security scan shortly after startup) wrote a keyless server's un-gated config over its recorded quarantine, while v0.69 kept holding it in memory. On upgrade the config-load admission gate read that record as already admitted and auto-baseline approved all of its tools. The gate now also requires an approval baseline: a server recorded as unquarantined whose tools were never approved is quarantined again for review. Servers with approved tools are unaffected; vetted servers with no tool records (zero-tool servers, servers that never connected while live, servers last vetted before v0.21) are also held once — approve them, or set `"quarantined": false` before upgrading.
+
 - **security/quarantine:** a server added by editing `mcp_config.json` (no `quarantined` key,
   first seen) stayed held for review only until its first restart. Restarting it (by hand, after a
   secret change, or through the automatic baseline scan's connect) wrote the raw file entry over
