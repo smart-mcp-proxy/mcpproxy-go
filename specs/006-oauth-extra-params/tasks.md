@@ -133,7 +133,7 @@ Go monorepo structure:
 
 - [ ] T043 [P] [US3] Update runAuthLoginClientMode to display configuration preview in cmd/mcpproxy/auth_cmd.go
 - [ ] T044 [P] [US3] Add pre-browser-open summary (provider, scopes, PKCE, extra_params) in cmd/mcpproxy/auth_cmd.go
-- [ ] T045 [P] [US3] Add authorization URL display with all parameters visible in cmd/mcpproxy/auth_cmd.go
+- [x] T045 [P] [US3] Add authorization URL display with all parameters visible in cmd/mcpproxy/auth_cmd.go
 - [ ] T046 [P] [US3] Add post-success verification summary in cmd/mcpproxy/auth_cmd.go
 
 #### Debug Logging
