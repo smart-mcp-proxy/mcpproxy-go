@@ -32,7 +32,11 @@ const agentInstructionsRetrieve = `Its tools are NOT listed individually.
 - Call the tool it returns via the ` + "`call_tool_*`" + ` variant named in ` + "`call_with`" + `.
 - If nothing relevant comes back, retry with different wording or just the
   service name before concluding the tool does not exist.
-- Use ` + "`upstream_servers`" + ` (operation ` + "`list`" + `) to see which servers are connected.
+`
+
+// agentInstructionsUpstreamList is appended to the retrieve_tools workflow only
+// when the management tools are exposed (not disable_management/read_only_mode).
+const agentInstructionsUpstreamList = `- Use ` + "`upstream_servers`" + ` (operation ` + "`list`" + `) to see which servers are connected.
 `
 
 const agentInstructionsCodeExecution = `Its tools are NOT listed individually.
@@ -107,7 +111,14 @@ func runAgentInstructions(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("unknown --client %q (want claude-code, codex or cursor)", agentInstructionsClient)
 	}
 	mode := ""
-	if cfg, err := loadUpstreamConfig(); err == nil && cfg != nil {
+	management := true
+	cfg, err := loadUpstreamConfig()
+	if err != nil || cfg == nil {
+		// Same warning --with-servers gives: without the config the
+		// workflow cannot follow routing_mode, so say which one is assumed.
+		fmt.Fprintf(os.Stderr, "warning: cannot load config (%v); printing the default retrieve_tools workflow\n", err)
+	} else {
+		management = !cfg.DisableManagement && !cfg.ReadOnlyMode
 		mode = cfg.RoutingMode
 		if mode == config.RoutingModeCodeExecution && !cfg.EnableCodeExecution {
 			// code_execution mode with the tool switched off exposes no
@@ -119,14 +130,15 @@ func runAgentInstructions(cmd *cobra.Command, _ []string) error {
 	if agentInstructionsWithServers {
 		servers = agentInstructionsServers()
 	}
-	_, err := fmt.Fprint(cmd.OutOrStdout(), buildAgentInstructions(agentInstructionsClient, mode, servers))
+	_, err = fmt.Fprint(cmd.OutOrStdout(), buildAgentInstructions(agentInstructionsClient, mode, management, servers))
 	return err
 }
 
 // buildAgentInstructions renders the snippet for client and routing mode
 // (unset or unknown = retrieve_tools, the default) with an optional server
 // list.
-func buildAgentInstructions(client, routingMode string, servers []string) string {
+// management reports whether upstream_servers is exposed.
+func buildAgentInstructions(client, routingMode string, management bool, servers []string) string {
 	var b strings.Builder
 	if client == "cursor" {
 		b.WriteString("---\ndescription: Use mcpproxy MCP tools for external services\nalwaysApply: true\n---\n\n")
@@ -141,6 +153,9 @@ func buildAgentInstructions(client, routingMode string, servers []string) string
 		b.WriteString(agentInstructionsCodeExecutionDisabled)
 	default:
 		b.WriteString(agentInstructionsRetrieve)
+		if management {
+			b.WriteString(agentInstructionsUpstreamList)
+		}
 	}
 	// Same rule as the MCP surface (advertisableServerName): a name that
 	// could carry prompt text never lands in an agent memory file.
