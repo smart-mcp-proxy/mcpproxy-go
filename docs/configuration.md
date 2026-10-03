@@ -1383,6 +1383,20 @@ You can edit this from the Web UI under **Settings → Advanced → MCP server i
 
 **Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
 
+Whatever the base text, each connection also gets a per-caller **YOUR ACCESS** block appended. It lists the active profile, the connected servers that caller can reach and its allowed operations, all filtered to its profile and agent-token scope. See [Agent Instructions](/features/agent-instructions).
+
+### Advertising upstream servers
+
+```json
+{
+  "advertise_upstream_servers": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `advertise_upstream_servers` | bool | `true` | Name the caller's reachable upstream servers in the initialize instructions and in the `retrieve_tools` description, so agents use proxied tools instead of shell CLIs. Names are always filtered to the caller's profile and agent-token scope. Set `false` to keep server names out of client context; operation limits are still stated. Read live. |
+
 **Warning:** the text is operator-published content, returned verbatim to **every** client that initializes — including [agent tokens](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn) scoped to a subset of servers. Do not put server names, hostnames, credentials or other secrets in it.
 
 ---

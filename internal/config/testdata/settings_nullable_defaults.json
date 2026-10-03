@@ -17,6 +17,7 @@
     }
   },
   "not_in_settings": [
+    "advertise_upstream_servers",
     "forward_client_headers",
     "security.auto_baseline_scan",
     "security.deep_scan.fetch_package_source",

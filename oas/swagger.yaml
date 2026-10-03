@@ -56,6 +56,15 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        advertise_upstream_servers:
+          description: |-
+            AdvertiseUpstreamServers controls whether MCP clients are told the
+            names of the upstream servers they can reach — in the initialize
+            instructions and the retrieve_tools description — so agents use the
+            proxied tools instead of falling back to shell CLIs. Names are always
+            filtered to the caller's profile and agent-token scope. Default true;
+            set false to keep server names out of client context. Read live.
+          type: boolean
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream

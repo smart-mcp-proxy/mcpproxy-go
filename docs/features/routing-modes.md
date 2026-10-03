@@ -169,6 +169,11 @@ Code execution mode is designed for multi-step orchestration workflows. Instead 
 
 ## Choosing the Right Mode
 
+In `retrieve_tools` and `code_execution` modes the agent does not see upstream tools
+in its tool list. mcpproxy names the caller's reachable servers in its instructions
+and in the `retrieve_tools` description; see [Agent Instructions](/features/agent-instructions)
+for a `CLAUDE.md` / `AGENTS.md` snippet that makes agents use them reliably.
+
 | Factor | retrieve_tools | direct | code_execution |
 |--------|---------------|--------|----------------|
 | **Token cost** | Low (only matched tools) | High (all tools) | Medium (catalog in description) |

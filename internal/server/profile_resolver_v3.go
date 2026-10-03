@@ -120,13 +120,19 @@ func (p *MCPProxyServer) ResolveProfileV3(ctx context.Context, idx *profileIndex
 // the calling session (FR-028, plan D23) — the one place a resolution is
 // recorded, so session rows and reassignment notifications can find it.
 func (p *MCPProxyServer) recordSessionResolution(ctx context.Context, res ProfileResolution) {
-	if p.sessionStore == nil {
+	if p.sessionStore == nil || ctx.Value(noResolutionRecordKey{}) != nil {
 		return
 	}
 	if sid := sessionIDFromContext(ctx); sid != "" {
 		p.sessionStore.UpdateSessionProfile(sid, res.Name, res.Source)
 	}
 }
+
+// noResolutionRecordKey marks a context whose profile resolutions are probes
+// (e.g. composing initialize instructions) and must not be recorded as the
+// session's resolution: that record steers which sessions a later profile
+// edit notifies, and only real requests may set it.
+type noResolutionRecordKey struct{}
 
 func (p *MCPProxyServer) resolveProfileV3(ctx context.Context, idx *profileIndex) ProfileResolution {
 	if anonymousProfileCaller(ctx) && p.bindingGuardActive(idx) {
