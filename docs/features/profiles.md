@@ -7,7 +7,7 @@ description: "Named views over your upstream servers with a tool policy: tier ca
 # Profiles
 
 :::note Profiles are optional
-You do not need a profile to use MCPProxy. Without an effective profile (no profiles configured, or a caller that none of them applies to), every configured server is in scope for that caller. Use profiles when you need to scope access, for example to give one client or token read-only access to a few servers.
+You do not need a profile to use MCPProxy. Without an effective profile (no profiles configured, or a caller that none of them applies to), no profile-level restriction applies to that caller: it can reach every configured server, unless its own credential is scoped (for example an agent token with an allowed-servers list). Use profiles when you need to scope access, for example to give one client or token read-only access to a few servers.
 :::
 
 A **profile** is a named view over your upstream servers plus a **tool policy**. It decides which servers a caller reaches, which of their tools the caller can discover and call, and whether the caller gets code execution and the management tools. The same profile is used by every surface that lets you work with MCPProxy: the config file, the Web UI and macOS app (**Profiles** in the sidebar), the CLI (`mcpproxy profile ...`), the MCP `profiles` tool and the REST API.

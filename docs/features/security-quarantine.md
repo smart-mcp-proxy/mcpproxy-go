@@ -46,8 +46,10 @@ A config-file server is held for review when **both** of the following are true:
 
 Quarantine must also be enabled (`quarantine_enabled`, on by default), and the
 server's [trust mode](#trust-modes-auto--scan--manual) must not be `auto`. A
-server with no `trust_mode` is `manual`, so by default a first-seen config-file
-server is held; a server with `"trust_mode": "auto"` is admitted.
+server with no `trust_mode` is `manual` unless a legacy setting resolves to
+`auto` (`"auto_approve_tool_changes": true`, or the older
+`"skip_quarantine": true`), so by default a first-seen config-file server is
+held; a server whose trust mode is `auto` is admitted.
 
 The second condition is what makes upgrading safe: every server you are already
 running has a `config.db` record, so **upgrading never re-quarantines a server
