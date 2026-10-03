@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -31,6 +33,15 @@ func coreShapedTransportClosed() error {
 	return fmt.Errorf("CallTool failed for 'echo': %w", transport.NewError(transport.ErrTransportClosed))
 }
 
+// httpShapedEOF reproduces the chain mcp-go's streamable-HTTP transport hands
+// back when net/http's POST fails mid-response: transport.Error wrapping
+// "failed to send request: %w" wrapping *url.Error wrapping the io error.
+func httpShapedEOF(ioErr error) error {
+	urlErr := &url.Error{Op: "Post", URL: "https://upstream.example/mcp", Err: ioErr}
+	return fmt.Errorf("CallTool failed for 'echo': %w",
+		transport.NewError(fmt.Errorf("failed to send request: %w", urlErr)))
+}
+
 func TestIsDeadTransportError(t *testing.T) {
 	cases := []struct {
 		name string
@@ -41,11 +52,21 @@ func TestIsDeadTransportError(t *testing.T) {
 		{"sentinel transport closed", transport.ErrTransportClosed, true},
 		{"core-wrapped transport closed", coreShapedTransportClosed(), true},
 		{"flattened transport closed text", errors.New("transport error: transport closed"), true},
-		{"wrapped io.EOF", fmt.Errorf("failed to read: %w", io.EOF), true},
-		{"wrapped io.ErrUnexpectedEOF", fmt.Errorf("read: %w", io.ErrUnexpectedEOF), true},
 		{"wrapped io.ErrClosedPipe", fmt.Errorf("write: %w", io.ErrClosedPipe), true},
 		{"wrapped os.ErrClosed", fmt.Errorf("failed to write request: %w", os.ErrClosed), true},
-		{"flattened file already closed", errors.New("failed to write request: write |1: file already closed"), true},
+		{"flattened file already closed", errors.New("transport error: failed to write request: write |1: file already closed"), true},
+		// One truncated/reset HTTP response on a LIVE streamable-HTTP or SSE
+		// upstream (LB idle timeout, keep-alive race): net/http wraps io.EOF /
+		// io.ErrUnexpectedEOF. That is not a dead transport and must keep the
+		// normal flap tolerance instead of evicting on the first miss.
+		{"http POST unexpected EOF", httpShapedEOF(io.ErrUnexpectedEOF), false},
+		{"http POST EOF", httpShapedEOF(io.EOF), false},
+		{"wrapped io.EOF", fmt.Errorf("failed to read: %w", io.EOF), false},
+		// A live server's JSON-RPC error (mcp-go returns it unwrapped, not as
+		// transport.Error) can echo errno text; that is a tool failure.
+		{"jsonrpc error echoing file already closed", errors.New("CallTool failed for 'rm': close /x: file already closed"), false},
+		{"jsonrpc error echoing transport closed", errors.New("CallTool failed for 'ws': upstream websocket transport closed"), false},
+		{"jsonrpc error echoing closed pipe", errors.New("CallTool failed for 'exec': io: read/write on closed pipe"), false},
 		// A JSON-RPC error answered by a LIVE server whose message merely
 		// mentions EOF is a tool failure, not a dead transport.
 		{"tool error mentioning EOF", errors.New("tool error: unexpected EOF while parsing input"), false},
@@ -128,4 +149,60 @@ func TestCallTool_DeadTransportAfterDisconnectKeepsDisconnected(t *testing.T) {
 
 	mc.recordDeadConnection("echo", coreShapedTransportClosed(), staleEpoch)
 	assert.Equal(t, types.StateDisconnected, mc.StateManager.GetState())
+}
+
+// TestPerformHealthCheck_HTTPEOFIsTolerated: an HTTP-shaped EOF from a live
+// upstream stays below the eviction threshold on the first miss.
+func TestPerformHealthCheck_HTTPEOFIsTolerated(t *testing.T) {
+	mc := newTestClientForHealth(t)
+	mc.healthProbe = &fakeProber{pingErr: httpShapedEOF(io.ErrUnexpectedEOF)}
+
+	mc.performHealthCheck()
+
+	assert.Equal(t, types.StateReady, mc.StateManager.GetState(),
+		"one truncated HTTP response must not evict a live upstream")
+}
+
+// TestCallTool_JSONRPCErrorEchoingClosedFileKeepsReady: a healthy server's own
+// tool error that mentions "file already closed" must not flip it to Error.
+func TestCallTool_JSONRPCErrorEchoingClosedFileKeepsReady(t *testing.T) {
+	mc, _ := newTestClientForCallTool(t, errors.New("CallTool failed for 'echo': close /x: file already closed"))
+
+	_, err := mc.CallTool(context.Background(), "echo", nil)
+	require.Error(t, err)
+	assert.Equal(t, types.StateReady, mc.StateManager.GetState())
+}
+
+// disconnectDuringPingProber simulates Disconnect running while the health
+// ping is on the wire: the transport closes (the ping fails with "transport
+// closed"), Disconnect bumps the epoch and Resets the state, and only then
+// does the health goroutine reach its verdict.
+type disconnectDuringPingProber struct {
+	mc    *Client
+	calls atomic.Int32
+}
+
+func (p *disconnectDuringPingProber) Ping(_ context.Context) error {
+	p.calls.Add(1)
+	p.mc.epochMu.Lock()
+	p.mc.connectionEpoch.Store(nextConnectionEpoch())
+	p.mc.epochMu.Unlock()
+	p.mc.StateManager.Reset()
+	return transport.NewError(transport.ErrTransportClosed)
+}
+
+// TestPerformHealthCheck_DeadTransportAfterDisconnectKeepsDisconnected is the
+// health-loop twin of the call-path guard: a ping that failed because
+// Disconnect closed the transport must not flip the Reset client to Error.
+func TestPerformHealthCheck_DeadTransportAfterDisconnectKeepsDisconnected(t *testing.T) {
+	mc := newTestClientForHealth(t)
+	p := &disconnectDuringPingProber{mc: mc}
+	mc.healthProbe = p
+
+	mc.performHealthCheck()
+
+	require.Equal(t, int32(1), p.calls.Load())
+	assert.Equal(t, types.StateDisconnected, mc.StateManager.GetState(),
+		"a ping failure from the closed generation must not re-mark the Disconnected client")
+	assert.Equal(t, 0, mc.StateManager.GetConnectionInfo().RetryCount)
 }

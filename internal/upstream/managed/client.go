@@ -1283,16 +1283,30 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 //     failure, not one per call — every extra SetError would bump retryCount
 //     and stretch the reconnect backoff for a single process death.
 func (mc *Client) recordDeadConnection(toolName string, err error, callEpoch int64) {
-	mc.epochMu.Lock()
-	defer mc.epochMu.Unlock()
-	if !mc.IsConnected() || mc.connectionEpoch.Load() != callEpoch {
+	if !mc.setErrorIfCurrentConnection(err, callEpoch) {
 		mc.logger.Debug("Tool call connection failure belongs to a connection that is already gone; not re-marking",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("tool", toolName),
 			zap.Error(err))
-		return
+	}
+}
+
+// setErrorIfCurrentConnection applies SetError(err) only while the client is
+// still Ready on connection generation epoch, serialized with Connect and
+// Disconnect through epochMu. It reports whether the error was recorded.
+//
+// Both the tools/call path and the health loop use it: Disconnect closes the
+// transport (every in-flight request then fails with "transport closed")
+// BEFORE it bumps the epoch and Resets the state, so a verdict computed from
+// that failure must not land on the freshly Disconnected client.
+func (mc *Client) setErrorIfCurrentConnection(err error, epoch int64) bool {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+		return false
 	}
 	mc.StateManager.SetError(err)
+	return true
 }
 
 // recordCallToolOAuthSignal inspects a failed tools/call error and, when it is an
@@ -1731,6 +1745,10 @@ func (mc *Client) performHealthCheck() {
 	if prober == nil {
 		prober = mc.coreClient
 	}
+	// The generation this ping runs on: a Disconnect racing the ping closes
+	// the transport (the ping fails with "transport closed") and only then
+	// bumps the epoch, so the verdict below must land on this generation only.
+	pingEpoch := mc.connectionEpoch.Load()
 	err := prober.Ping(ctx)
 
 	if err != nil {
@@ -1780,11 +1798,16 @@ func (mc *Client) performHealthCheck() {
 				mc.resetInFlightSuppression()
 			}
 			if mc.recordHealthCheckFailure(err) {
-				mc.logger.Warn("Health check failed repeatedly, marking as error",
-					zap.String("server", mc.GetConfig().Name),
-					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
-					zap.Error(err))
-				mc.StateManager.SetError(err)
+				if mc.setErrorIfCurrentConnection(err, pingEpoch) {
+					mc.logger.Warn("Health check failed repeatedly, marking as error",
+						zap.String("server", mc.GetConfig().Name),
+						zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+						zap.Error(err))
+				} else {
+					mc.logger.Debug("Health check failure belongs to a connection that is already gone; not marking",
+						zap.String("server", mc.GetConfig().Name),
+						zap.Error(err))
+				}
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
 					zap.String("server", mc.GetConfig().Name),
@@ -2180,27 +2203,40 @@ func (mc *Client) waitForReconnectCompletion(ctx context.Context) error {
 // none of isConnectionError's markers, so the health loop ignored it as a
 // "high activity timeout" and the server stayed Ready with every call failing.
 //
-// Sentinels are matched through the error chain; the text fallbacks cover
-// chains flattened before they reach us. Bare "EOF" is deliberately NOT
-// matched as text: a live server's JSON-RPC error can mention it.
+// The classifier is shared by every protocol, so it only accepts evidence that
+// the LOCAL end of the transport is closed:
+//   - io.EOF / io.ErrUnexpectedEOF are deliberately NOT matched. net/http wraps
+//     them for a single truncated or reset response on a live HTTP/SSE
+//     upstream (LB idle timeout, keep-alive race), which must stay subject to
+//     the normal flap tolerance. A stdio child's death never surfaces as them:
+//     mcp-go's stdio reader turns its EOF into ErrTransportClosed.
+//   - The text fallbacks (for chains flattened before they reach us) only
+//     count after mcp-go's "transport error: " prefix, i.e. text produced by
+//     transport.Error — never a live server's JSON-RPC error message, which
+//     mcp-go returns unwrapped and which may echo errno text such as
+//     "file already closed".
 func isDeadTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, mcptransport.ErrTransportClosed) ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, os.ErrClosed) {
 		return true
 	}
 	msg := err.Error()
+	const transportPrefix = "transport error: "
+	idx := strings.Index(msg, transportPrefix)
+	if idx < 0 {
+		return false
+	}
+	transportMsg := msg[idx+len(transportPrefix):]
 	for _, marker := range []string{
 		mcptransport.ErrTransportClosed.Error(), // "transport closed"
 		os.ErrClosed.Error(),                    // "file already closed"
 		io.ErrClosedPipe.Error(),                // "io: read/write on closed pipe"
 	} {
-		if containsString(msg, marker) {
+		if strings.Contains(transportMsg, marker) {
 			return true
 		}
 	}
