@@ -233,6 +233,10 @@ Edit `~/.mcpproxy/mcp_config.json`:
 }
 ```
 
+:::note First-time config-file servers are held for review
+A server you add by editing this file for the first time is **held for review** (quarantined) until you approve it in the **Review queue**. The examples above omit the `quarantined` key on purpose. Writing `"quarantined": false` admits a server right away, so use it only for servers you have already vetted. A server that MCPProxy already knows keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](/features/security-quarantine#servers-added-by-hand-editing-mcp_configjson).
+:::
+
 ## 5. Approve It Out of Quarantine
 
 However you added it, the server is now **quarantined** - its tools are withheld

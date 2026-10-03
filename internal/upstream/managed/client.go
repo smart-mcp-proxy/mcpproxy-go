@@ -419,6 +419,10 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	return mc, nil
 }
 
+// ErrConnectAlreadyActive is returned by Connect when another caller's connect
+// is in flight or the client is already Ready. It is a guard, not a failure.
+var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
+
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
@@ -430,7 +434,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
 		mc.mu.Unlock()
-		return fmt.Errorf("connection already in progress or established (state: %s)", mc.StateManager.GetState().String())
+		return fmt.Errorf("%w (state: %s)", ErrConnectAlreadyActive, mc.StateManager.GetState().String())
 	}
 
 	// Snapshot the server name while mc.mu is held. Phase 3 below runs WITHOUT
