@@ -31,8 +31,11 @@ jobs:
       - name: Get previous tag
         id: prev_tag
         run: |
-          # Get the tag before the current one
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # Get the previous STABLE tag. This job runs for stable tags only,
+          # and after an RC cycle the nearest tag is the last RC, which
+          # would summarize only the final RC delta instead of everything
+          # since the last release (v0.70.0 shipped notes covering rc.4..rc.5).
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' HEAD^ 2>/dev/null || echo "")
           echo "tag=$PREV_TAG" >> $GITHUB_OUTPUT
           if [ -n "$PREV_TAG" ]; then
             echo "Previous tag: $PREV_TAG"
