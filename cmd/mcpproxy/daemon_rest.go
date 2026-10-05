@@ -414,8 +414,14 @@ func confirmYes(prompt string, yes bool) (bool, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false, flagValidationError{errors.New("confirmation required; pass --yes")}
 	}
-	fmt.Printf("%s [y/N]: ", prompt)
-	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	// The prompt goes to stderr so `-o json` stdout stays pure JSON.
+	return readConfirmation(os.Stdin, os.Stderr, prompt)
+}
+
+// readConfirmation writes the [y/N] prompt to out and reads one answer from in.
+func readConfirmation(in io.Reader, out io.Writer, prompt string) (bool, error) {
+	fmt.Fprintf(out, "%s [y/N]: ", prompt)
+	answer, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil {
 		return false, fmt.Errorf("failed to read confirmation: %w", err)
 	}
