@@ -55,7 +55,7 @@ Priority order for `actions`: `login` > `set_secret` > `configure` > `edit_url` 
 | `error` | Error | "<summary>" | Restart |
 | `disabled` | Disabled | "Disabled" | Enable (a disabled server is never an attention item, FR-002, but its card still offers the one step that brings it back) |
 
-The macOS Servers row, the tray server submenu's first line and the Server Detail header all render `ServerStatusLinePresentation.line(for:)` (`native/macos/MCPProxy/MCPProxy/Menu/TrayPresentation.swift`): the label, then ` · <summary>` when `admin_state` is `enabled` and the summary adds information beyond the label (the same rule as the Web card's status detail). Only a core that sends no `status` falls back to the legacy words (`Needs review`, `Disabled`, `Connecting`, `Connected`, `Disconnected`).
+The macOS Servers row, the tray server submenu's first line and the Server Detail header all render `ServerStatusLinePresentation.line(for:)` (`native/macos/MCPProxy/MCPProxy/Menu/TrayPresentation.swift`): the label, then ` · <summary>` when `admin_state` is `enabled` and the summary adds information beyond the label (the same rule as the Web card's status detail). A core that sends `health` without a `status` shows `health.summary` with a tone derived from `level`; only a core that sends neither falls back to the legacy words (`Needs review`, `Disabled`, `Connecting`, `Connected`, `Disconnected`).
 
 Button labels per action: `login` Sign in · `set_secret` Add secret · `configure` Fix config · `edit_url` Edit URL · `approve` Review (opens the review screen; never approves directly, FR-005) · `restart` Restart · `view_logs` View logs · `enable` Enable.
 

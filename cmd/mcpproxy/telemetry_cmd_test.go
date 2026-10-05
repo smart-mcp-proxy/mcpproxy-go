@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -233,5 +235,42 @@ func TestRunTelemetryDisable_SendsBeacon(t *testing.T) {
 	enabled := readTelemetryEnabled(t, configFile)
 	if enabled == nil || *enabled {
 		t.Errorf("telemetry.enabled must be persisted false")
+	}
+}
+
+// Parity row 28a: `telemetry status` prints the effective state, including an
+// environment opt-out that overrides an enabled config.
+func TestRunTelemetryStatus_ReportsEnvOverride(t *testing.T) {
+	sandboxHome(t)
+	t.Setenv("CI", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "false")
+
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom_mcp_config.json")
+	writeMinimalConfig(t, customPath, filepath.Join(tmpDir, "data"))
+
+	prevCfg, prevFmt, prevJSON := configFile, globalOutputFormat, globalJSONOutput
+	configFile, globalOutputFormat, globalJSONOutput = customPath, "", false
+	t.Cleanup(func() { configFile, globalOutputFormat, globalJSONOutput = prevCfg, prevFmt, prevJSON })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStdout := os.Stdout
+	os.Stdout = w
+	runErr := runTelemetryStatus(nil, nil)
+	os.Stdout = prevStdout
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if runErr != nil {
+		t.Fatalf("runTelemetryStatus: %v", runErr)
+	}
+	s := string(out)
+	for _, want := range []string{"Telemetry Status", "Disabled", "Override:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("status output missing %q:\n%s", want, s)
+		}
 	}
 }
