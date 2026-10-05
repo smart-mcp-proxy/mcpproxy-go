@@ -114,7 +114,7 @@ enum TrayClientsMenu {
     /// Two profiles may share a title (`Work Read-only` twice); the menu would
     /// then show indistinguishable entries, so a shared title carries the slug.
     static func distinctTitle(for profile: ProfileView, in profiles: [ProfileView]) -> String {
-        distinctTitle(profile.displayTitle, name: profile.name, in: profiles)
+        profile.pickerTitle(in: profiles)
     }
 
     private static func distinctTitle(_ title: String, name: String, in profiles: [ProfileView]) -> String {

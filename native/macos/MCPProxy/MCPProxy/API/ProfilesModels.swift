@@ -496,6 +496,13 @@ struct ProfileView: Codable, Identifiable, Equatable {
         return name
     }
 
+    /// The title a picker shows. Two profiles may share a title, which would
+    /// make their entries indistinguishable, so a shared title carries the slug.
+    func pickerTitle(in profiles: [ProfileView]) -> String {
+        let clashes = profiles.filter { $0.displayTitle == displayTitle }.count > 1
+        return clashes && displayTitle != name ? "\(displayTitle) (\(name))" : displayTitle
+    }
+
     /// "Work · Read-only" style label used on rows and in the tray.
     var menuLabel: String { displayTitle }
 

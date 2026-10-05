@@ -1429,4 +1429,37 @@ final class ConnectClientPresentationTests: XCTestCase {
         let status = try JSONDecoder().decode(APIClient.ClientStatus.self, from: Data(json.utf8))
         XCTAssertEqual(status.credentialState, .adminKey)
     }
+
+    // MARK: - Live profile refresh (#1449-3) and picker titles (#1449-2)
+
+    func testRefreshProfilesKeepsASelectionThatStillExists() async {
+        let ro = ProfileView(name: "work-ro", title: "Work Read-only", servers: ["github"], managementTools: false)
+        let model = await selectedModel(FakeConnectSource(), profiles: [ro])
+        model.chooseProfile("work-ro")
+        model.refreshProfiles([ro, ProfileView(name: "extra")])
+        XCTAssertEqual(model.profiles.map(\.name), ["work-ro", "extra"])
+        XCTAssertEqual(model.profile, "work-ro")
+        XCTAssertEqual(model.mode, .locked)
+    }
+
+    func testRefreshProfilesFallsBackToAllServersWhenTheSelectionIsGone() async {
+        let ro = ProfileView(name: "work-ro", title: "Work Read-only", servers: ["github"], managementTools: false)
+        let model = await selectedModel(FakeConnectSource(), profiles: [ro])
+        model.chooseProfile("work-ro")
+        model.refreshProfiles([])
+        XCTAssertEqual(model.profile, "")
+        XCTAssertEqual(model.mode, .switchable)
+    }
+
+    func testPickerTitleAddsTheSlugOnlyWhenTitlesClash() {
+        let a = ProfileView(name: "work-a", title: "Work")
+        let b = ProfileView(name: "work-b", title: "Work")
+        let c = ProfileView(name: "solo", title: "Solo")
+        let bare = ProfileView(name: "bare")
+        let all = [a, b, c, bare]
+        XCTAssertEqual(a.pickerTitle(in: all), "Work (work-a)")
+        XCTAssertEqual(b.pickerTitle(in: all), "Work (work-b)")
+        XCTAssertEqual(c.pickerTitle(in: all), "Solo")
+        XCTAssertEqual(bare.pickerTitle(in: all), "bare")
+    }
 }
