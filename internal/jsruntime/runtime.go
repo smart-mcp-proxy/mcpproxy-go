@@ -11,6 +11,8 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/google/uuid"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // ExecutionOptions contains optional parameters for JavaScript execution
@@ -582,15 +584,23 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	// AuthInfo at all (authInfo == nil) — both fall through to the
 	// profile-only branch below, unchanged from pre-105.
 	profileDenies := (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName]
+	// The typed block_reason is recorded only when the PROFILE excluded the
+	// server (profileDenies). The refusal text is unchanged either way
+	// (Spec 105 G7); a legacy token whose own server list is the only thing
+	// excluding it keeps an empty reason (the Spec 105 out-of-scope row).
+	scopeReason := ""
+	if profileDenies {
+		scopeReason = string(profile.BlockReasonServerScope)
+	}
 	if ec.authInfo != nil && !ec.authInfo.isAdmin() {
 		if profileDenies || !ec.authInfo.CanAccessServer(serverName) {
 			message := fmt.Sprintf("token does not have access to server '%s'", serverName)
-			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, "", args, "")
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, "", args, scopeReason)
 			return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
 		}
 	} else if profileDenies {
 		message := fmt.Sprintf("server not allowed: %s", serverName)
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, message, "", args, "")
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, message, "", args, scopeReason)
 		return errorEnvelope(ErrorCodeServerNotAllowed, message), "", nil
 	}
 

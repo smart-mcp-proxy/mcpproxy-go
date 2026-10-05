@@ -21,7 +21,8 @@
     "profile_rule",
     "profile_unannotated",
     "profile_code_execution",
-    "profile_management"
+    "profile_management",
+    "profile_server_scope"
   ],
   "change_kind": [
     "create",
