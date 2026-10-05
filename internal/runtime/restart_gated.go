@@ -54,6 +54,12 @@ func pinRestartGated(live, desired *config.Config) *config.Config {
 	// pending a restart, leaving Runtime.Config() readers disagreeing with
 	// the sink actually still writing).
 	pinned.AuditLog = live.AuditLog
+	// Bound once at startup (#1435): the unix-socket listener, the tray
+	// endpoint, the search debug flag and the tokenizer.
+	pinned.TrayEndpoint = live.TrayEndpoint
+	pinned.EnableSocket = live.EnableSocket
+	pinned.DebugSearch = live.DebugSearch
+	pinned.Tokenizer = live.Tokenizer
 	// server_edition's restart-pinned subset (enabled, oauth.*, public_url,
 	// session_cookie_secure, session_ttl, bearer_token_ttl,
 	// credential_encryption_key — Spec 107 FR-039 part 2) is bound at login
