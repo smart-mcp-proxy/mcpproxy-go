@@ -394,7 +394,7 @@ func (m *RefreshManager) executeImmediateRefresh(serverName string) {
 	}
 
 	if refreshErr != nil {
-		m.handleRefreshFailure(serverName, refreshErr)
+		m.handleRefreshFailureFor(serverName, refreshErr, sameSchedule(schedule))
 	} else {
 		m.handleRefreshSuccess(serverName)
 	}
@@ -603,7 +603,7 @@ func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time
 // executeRefresh performs the token refresh for a server.
 func (m *RefreshManager) executeRefresh(serverName string) {
 	m.mu.Lock()
-	_, ok := m.schedules[serverName]
+	started, ok := m.schedules[serverName]
 	if !ok {
 		m.mu.Unlock()
 		return // Schedule was cancelled
@@ -647,7 +647,7 @@ func (m *RefreshManager) executeRefresh(serverName string) {
 	}
 
 	if refreshErr != nil {
-		m.handleRefreshFailure(serverName, refreshErr)
+		m.handleRefreshFailureFor(serverName, refreshErr, sameSchedule(started))
 	} else {
 		m.handleRefreshSuccess(serverName)
 	}
@@ -683,13 +683,26 @@ func (m *RefreshManager) handleRefreshSuccess(serverName string) {
 // Terminal errors (invalid_grant, server not found) stop immediately.
 // Transient errors retry with exponential backoff up to maxRetries.
 func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
+	m.handleRefreshFailureFor(serverName, err, nil)
+}
+
+// sameSchedule matches only the schedule an attempt started from: a login
+// whose OnTokenSaved replaced it meanwhile supersedes the attempt's failure.
+func sameSchedule(started *RefreshSchedule) func(*RefreshSchedule) bool {
+	return func(s *RefreshSchedule) bool { return s == started }
+}
+
+// handleRefreshFailureFor is handleRefreshFailure applied only when match
+// accepts the current schedule (nil matches any). It keeps the failure off a
+// schedule a login created after the failed attempt (Spec 113 FR-006a).
+func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, match func(*RefreshSchedule) bool) {
 	// Classify the error for metrics and handling (Spec 113 FR-007/FR-008).
 	cls, httpStatus := ClassifyRefreshError(err)
 	errorType := cls.MetricLabel()
 
 	m.mu.Lock()
 	schedule := m.schedules[serverName]
-	if schedule == nil {
+	if schedule == nil || (match != nil && !match(schedule)) {
 		m.mu.Unlock()
 		return
 	}
@@ -809,7 +822,12 @@ func (m *RefreshManager) onRefreshOutcome(o RefreshOutcome) {
 	if o.Trigger != RefreshTriggerReactive || !o.Class.IsTerminal() || o.Err == nil {
 		return
 	}
-	m.handleRefreshFailure(o.ServerName, o.Err)
+	var match func(*RefreshSchedule) bool
+	if !o.ExpiresAt.IsZero() {
+		// Only the schedule built for the token the flight failed on.
+		match = func(s *RefreshSchedule) bool { return s.ExpiresAt.Equal(o.ExpiresAt) }
+	}
+	m.handleRefreshFailureFor(o.ServerName, o.Err, match)
 }
 
 // lookupToken finds the token record of a server by display name (Spec 113

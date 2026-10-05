@@ -313,3 +313,21 @@ func TestOAuthRefresh_ExtraParamsClientID(t *testing.T) {
 	defer as.mu.Unlock()
 	assert.Equal(t, []string{"xp-client"}, as.clientIDs)
 }
+
+// Review round 2: the stored-DCR request removes the credentials it sent
+// from the error detail even when the AS echoes them without a key=value
+// shape the pattern scrubber would recognise.
+func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
+	const rt, secret = "opaque-rt-4711", "opaque-secret-0815"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "rejected "+rt+" for client with "+secret)
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{config: &config.ServerConfig{Name: "s"}, logger: zap.NewNop()}
+	_, err := c.refreshTokenWithStoredCredentials(context.Background(), srv.URL,
+		&storage.OAuthTokenRecord{RefreshToken: rt, ClientID: "cid", ClientSecret: secret})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), rt)
+	assert.NotContains(t, err.Error(), secret)
+}

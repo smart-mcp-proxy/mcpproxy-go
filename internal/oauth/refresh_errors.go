@@ -8,6 +8,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"unicode/utf8"
 
@@ -179,7 +180,7 @@ func ClassifyRefreshError(err error) (RefreshErrorClass, int) {
 		return RefreshClassNetwork, status
 	}
 
-	return classifyBySubstring(err.Error()), status
+	return classifyBySubstring(rawErrorText(err)), status
 }
 
 func classifyOAuthCode(code string) (RefreshErrorClass, bool) {
@@ -226,7 +227,7 @@ func statusOf(err error) int {
 	if errors.As(err, &httpErr) {
 		return httpErr.Status
 	}
-	if m := mcpGoStatusRe.FindStringSubmatch(err.Error()); m != nil {
+	if m := mcpGoStatusRe.FindStringSubmatch(rawErrorText(err)); m != nil {
 		if n, convErr := strconv.Atoi(m[1]); convErr == nil {
 			return n
 		}
@@ -278,6 +279,27 @@ func classifyBySubstring(errStr string) RefreshErrorClass {
 	return RefreshClassOther
 }
 
+// redactValues replaces every occurrence of each non-empty value in s.
+func redactValues(s string, values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "[REDACTED]")
+		}
+	}
+	return s
+}
+
+// rawErrorText is the text classification reads: the original error text
+// under a scrubbedRefreshError (whose rendered message is capped), else
+// err.Error(). It is only matched, never logged.
+func rawErrorText(err error) string {
+	var sc *scrubbedRefreshError
+	if errors.As(err, &sc) {
+		return err.Error() + " " + sc.err.Error()
+	}
+	return err.Error()
+}
+
 // refreshErrorTextLimit caps the rendered text of a refresh error.
 const refreshErrorTextLimit = 512
 
@@ -296,8 +318,11 @@ func (e *scrubbedRefreshError) Unwrap() error { return e.err }
 // RFC 6749 error_description, or the whole non-JSON response body, in the
 // error string, and providers echo request parameters (refresh_token,
 // client_secret) back there. The message is scrubbed with ScrubUpstreamText
-// and capped; the wrapped chain is kept for ClassifyRefreshError.
-func ScrubRefreshError(err error) error {
+// and capped; the wrapped chain is kept for ClassifyRefreshError. sent lists
+// the credential values the request carried (refresh token, client secret):
+// they are removed verbatim first, since an opaque value echoed without a
+// recognisable key/value shape is invisible to the pattern scrubber.
+func ScrubRefreshError(err error, sent ...string) error {
 	if err == nil {
 		return nil
 	}
@@ -305,7 +330,7 @@ func ScrubRefreshError(err error) error {
 	if errors.As(err, &already) {
 		return err
 	}
-	msg := ScrubUpstreamText(err.Error())
+	msg := ScrubUpstreamText(redactValues(err.Error(), sent...))
 	if len(msg) > refreshErrorTextLimit {
 		cut := refreshErrorTextLimit
 		for cut > 0 && !utf8.RuneStart(msg[cut]) {

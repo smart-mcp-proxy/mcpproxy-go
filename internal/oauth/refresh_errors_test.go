@@ -118,3 +118,18 @@ func TestScrubRefreshError_KeepsClassDropsSecret(t *testing.T) {
 	assert.Equal(t, 503, code)
 	assert.LessOrEqual(t, len(status.Error()), 600)
 }
+
+// Review round 2: an opaque credential echoed without a key=value shape is
+// removed because the caller passes the values it sent; capping the rendered
+// text does not hide the code from the substring fallback.
+func TestScrubRefreshError_SentValuesAndLongBodies(t *testing.T) {
+	const rt = "r-old-17-opaque"
+	err := ScrubRefreshError(fmt.Errorf("refresh failed: %w",
+		transport.OAuthError{ErrorCode: "invalid_client", ErrorDescription: "Rejected refresh credential " + rt}), rt)
+	assert.NotContains(t, err.Error(), rt)
+
+	long := ScrubRefreshError(fmt.Errorf("refresh token request failed with status 400: %s invalid_grant", strings.Repeat("y", 1500)))
+	assert.NotContains(t, long.Error(), "invalid_grant", "rendered text is capped")
+	cls, _ := ClassifyRefreshError(long)
+	assert.Equal(t, RefreshClassInvalidGrant, cls)
+}

@@ -68,6 +68,11 @@ type RefreshOutcome struct {
 	Trigger    RefreshTrigger
 	Class      RefreshErrorClass
 	Err        error
+	// ExpiresAt is the access-token expiry of the record the flight failed
+	// on. The RefreshManager only applies the outcome to a schedule built
+	// for that token, so a login that replaced the schedule after the
+	// flight's last generation check is not failed by it (FR-006a).
+	ExpiresAt time.Time
 }
 
 type refreshFlight struct {
@@ -328,7 +333,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		hook := c.hook
 		c.mu.Unlock()
 		if hook != nil {
-			hook(RefreshOutcome{ServerName: req.ServerName, Key: req.Key, Trigger: req.Trigger, Class: cls, Err: refreshErr})
+			hook(RefreshOutcome{ServerName: req.ServerName, Key: req.Key, Trigger: req.Trigger, Class: cls, Err: refreshErr, ExpiresAt: latchRec.ExpiresAt})
 		}
 		return nil, false, refreshErr
 	}

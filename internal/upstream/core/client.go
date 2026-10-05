@@ -841,7 +841,16 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		// client_secret and refresh_token), and the body is unbounded, so a
 		// 502 HTML page from a proxy in front of the endpoint went into
 		// main.log whole. Scrub with the free-text rule, then cap.
-		httpErr := &oauth.RefreshHTTPError{Status: resp.StatusCode, Detail: cappedScrub(string(body), 512)}
+		// The exact credentials this request sent are removed verbatim first:
+		// an opaque value echoed without a key=value shape is invisible to
+		// the pattern scrubber.
+		detail := string(body)
+		for _, sent := range []string{record.RefreshToken, record.ClientSecret} {
+			if sent != "" {
+				detail = strings.ReplaceAll(detail, sent, "[REDACTED]")
+			}
+		}
+		httpErr := &oauth.RefreshHTTPError{Status: resp.StatusCode, Detail: cappedScrub(detail, 512)}
 		if jsonErr == nil {
 			httpErr.OAuthCode = tokenResp.Error
 		}

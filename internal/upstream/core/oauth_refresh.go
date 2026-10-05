@@ -23,6 +23,14 @@ func (c *Client) isStaticOAuthClient() bool {
 	return c.config != nil && c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 }
 
+// staticClientSecret is oauth.client_secret (redacted from refresh errors).
+func (c *Client) staticClientSecret() string {
+	if c.config == nil || c.config.OAuth == nil {
+		return ""
+	}
+	return c.config.OAuth.ClientSecret
+}
+
 // extraParamsClientID reports whether oauth.extra_params carries a client_id
 // (injected into every token request by oauth.OAuthTransportWrapper).
 func (c *Client) extraParamsClientID() bool {
@@ -57,7 +65,7 @@ func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.Refresh
 			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
 			// mcp-go embeds the provider's error_description or raw body
 			// in the error text; scrub it before it reaches logs/events.
-			return tok, oauth.ScrubRefreshError(err)
+			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, c.staticClientSecret())
 		case rec.ClientID != "" && c.storage != nil:
 			return c.refreshWithStoredCredentials(ctx, handler, rec)
 		default:

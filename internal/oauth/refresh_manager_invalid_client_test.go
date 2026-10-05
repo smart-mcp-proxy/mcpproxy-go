@@ -145,3 +145,32 @@ func TestRefreshManager_ReadsTokenByServerKey(t *testing.T) {
 	assert.Equal(t, "srv", em.refreshedEvents[0].serverName)
 	assert.True(t, em.refreshedEvents[0].expiresAt.Equal(expires))
 }
+
+// Review round 2 (FR-006a): a reactive terminal outcome for the old token
+// must not fail the schedule a login built for its new token, even when the
+// login replaced the schedule after the flight's last generation check.
+func TestRefreshManager_StaleReactiveOutcomeKeepsLoginSchedule(t *testing.T) {
+	m, _, em, _ := startedManager(t, newMockTokenStore(), nil)
+	oldExpiry := time.Now().Add(-time.Minute)
+	m.OnTokenSaved("srv", time.Now().Add(time.Hour)) // the login's schedule
+
+	m.onRefreshOutcome(RefreshOutcome{
+		ServerName: "srv", Trigger: RefreshTriggerReactive, Class: RefreshClassInvalidGrant,
+		Err: fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_grant"}), ExpiresAt: oldExpiry,
+	})
+	st := m.GetRefreshState("srv")
+	require.NotNil(t, st)
+	assert.NotEqual(t, RefreshStateFailed, st.State)
+	assert.Equal(t, 0, em.GetFailedEvents())
+
+	// The outcome for the token the schedule was built for still applies.
+	m.mu.Lock()
+	cur := m.schedules["srv"].ExpiresAt
+	m.mu.Unlock()
+	m.onRefreshOutcome(RefreshOutcome{
+		ServerName: "srv", Trigger: RefreshTriggerReactive, Class: RefreshClassInvalidGrant,
+		Err: fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_grant"}), ExpiresAt: cur,
+	})
+	assert.Equal(t, RefreshStateFailed, m.GetRefreshState("srv").State)
+	assert.Equal(t, 1, em.GetFailedEvents())
+}
