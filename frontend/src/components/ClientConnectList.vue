@@ -1112,16 +1112,27 @@ async function disconnect(clientId: string) {
     const client = clients.value.find(c => c.id === clientId)
     const response = await api.disconnectClient(clientId, client?.server_name || 'mcpproxy')
     if (response.success && response.data) {
+      const revokeError = response.data.credential_revoke_error
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
-      resultSuccess.value = true
+      if (revokeError) {
+        // The entry is gone but the credential is still live: say so, with the retry.
+        resultMessage.value += `. Its credential was NOT revoked (${revokeError}); retry with: mcpproxy client forget ${clientId}`
+      }
+      resultSuccess.value = !revokeError
       resultBackupPath.value = response.data.backup_path || null
       resultReloadHint.value = response.data.reload_hint || ''
       await refreshAfterWrite(clientId)
-      systemStore.addToast({
-        type: 'info',
-        title: 'Client Disconnected',
-        message: `MCPProxy removed from ${clientId}`,
-      })
+      systemStore.addToast(revokeError
+        ? {
+            type: 'warning',
+            title: 'Disconnected, credential still active',
+            message: `MCPProxy removed from ${clientId}, but its credential was not revoked`,
+          }
+        : {
+            type: 'info',
+            title: 'Client Disconnected',
+            message: `MCPProxy removed from ${clientId}`,
+          })
     } else {
       resultMessage.value = response.error || 'Failed to disconnect'
       resultSuccess.value = false

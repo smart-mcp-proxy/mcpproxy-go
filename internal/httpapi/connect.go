@@ -222,7 +222,6 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Summary     Connect MCPProxy to a client
 // @Description Register MCPProxy as an MCP server in the specified client's configuration file.
 // @Description Creates a backup of the existing config before modifying.
-// @Description Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
 // @Description Optionally accepts precondition_token from a preview (Spec 091): when supplied,
 // @Description the core rechecks the raw pre-write state and the entry it would write, and
 // @Description refuses a drifted write with 409 before taking any backup. The 409 body's
@@ -447,7 +446,9 @@ func (s *Server) revokeCredentialAfterDisconnect(r *http.Request, clientID strin
 		result.CredentialRevokeError = err.Error()
 		return
 	}
-	if cred == nil {
+	if cred == nil || cred.CredentialState == profile.CredentialStateRevoked {
+		// No credential, or a tombstone already revoked (e.g. by `client forget`):
+		// nothing live to cut, and no duplicate forget record.
 		return
 	}
 	forget := svc.Forget

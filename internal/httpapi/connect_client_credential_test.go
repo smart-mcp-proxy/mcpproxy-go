@@ -462,3 +462,27 @@ func TestConnectREST_DisconnectReportsARevokeFailureButStaysOK(t *testing.T) {
 	assert.Contains(t, data["credential_revoke_error"], "disk full")
 	assert.NotContains(t, h.cursorConfig(), "mcp_cli_")
 }
+
+// A credential already revoked (client forget) is a tombstone: disconnecting
+// afterwards must not forget it again or report a live credential was cut.
+func TestConnectREST_DisconnectAfterForgetDoesNotRevokeTwice(t *testing.T) {
+	h := newConnectHarness(t, internalRuntime.ConservativeBindingGuard{})
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/api/v1/connect/cursor", `{"profile":"ro"}`, nil, bindingAdminKey).Code)
+	_, err := h.srv.clientsService.Forget(context.Background(), internalRuntime.Actor{}, "cursor", false)
+	require.NoError(t, err)
+
+	w := h.do(http.MethodDelete, "/api/v1/connect/cursor", ``, nil, bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	data := decodeBody(t, w)["data"].(map[string]interface{})
+	assert.Empty(t, data["credential_revoked"])
+	assert.Empty(t, data["credential_revoke_error"])
+	recs, _, err := h.sm.ListActivities(storage.ActivityFilter{Types: []string{"profile_change"}})
+	require.NoError(t, err)
+	forgets := 0
+	for _, r := range recs {
+		if r.Metadata["change"] == "forget" {
+			forgets++
+		}
+	}
+	assert.Equal(t, 1, forgets)
+}

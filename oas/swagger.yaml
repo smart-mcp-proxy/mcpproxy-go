@@ -6927,7 +6927,6 @@ paths:
       description: |-
         Register MCPProxy as an MCP server in the specified client's configuration file.
         Creates a backup of the existing config before modifying.
-        Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
         Optionally accepts precondition_token from a preview (Spec 091): when supplied,
         the core rechecks the raw pre-write state and the entry it would write, and
         refuses a drifted write with 409 before taking any backup. The 409 body's
