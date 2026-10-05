@@ -936,12 +936,12 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 39/58 (67%) |
 | [002-windows-installer](./specs/002-windows-installer/) | `in-flight` | 35/60 (58%) |
 | [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
-| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 73/101 (72%) |
+| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 75/101 (74%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
 | [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 44/65 (68%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 94/103 (91%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
-| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
+| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 49/87 (56%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 25/36 (69%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
@@ -1000,7 +1000,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) | `shipped` | 25/26 (96%) |
 | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) | `in-flight` | 21/24 (88%) |
 | [071-official-registry-protocol](./specs/071-official-registry-protocol/) | `shipped` | 12/12 (100%) |
-| [073-activity-size-retention](./specs/073-activity-size-retention/) | `in-flight` | 13/14 (93%) |
+| [073-activity-size-retention](./specs/073-activity-size-retention/) | `shipped` | 14/14 (100%) |
 | [074-discovery-intervals](./specs/074-discovery-intervals/) | `in-flight` | 17/19 (89%) |
 | [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `shipped` | 30/30 (100%) |
 | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) | `in-flight` | 22/24 (92%) |
