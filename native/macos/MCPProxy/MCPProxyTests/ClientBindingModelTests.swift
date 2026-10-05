@@ -549,7 +549,9 @@ final class ClientBindingModelTests: XCTestCase {
         XCTAssertNotNil(model.createdClient)
 
         func assertClean(_ phase: String) {
-            XCTAssertFalse(String(reflecting: appState).contains("mcp_cli_"), "\(phase): AppState dump")
+            // String(reflecting:) on a plain class prints only the type name, so walk the
+            // stored properties (including @Published storage) with Mirror instead.
+            XCTAssertFalse(Self.mirrorDump(appState).contains("mcp_cli_"), "\(phase): AppState stored values")
             XCTAssertFalse(appState.clients.contains { "\($0)".contains("mcp_cli_") }, "\(phase): appState.clients")
             XCTAssertNil(UserDefaults.standard.dictionaryRepresentation().values.first { "\($0)".contains("mcp_cli_SECRET") },
                          "\(phase): UserDefaults")
@@ -558,6 +560,29 @@ final class ClientBindingModelTests: XCTestCase {
         model.dismiss()
         XCTAssertNil(model.credential)
         assertClean("after dismiss")
+    }
+
+    /// Recursively renders every stored value reachable from `value` via Mirror.
+    static func mirrorDump(_ value: Any, depth: Int = 0, seen: inout Set<ObjectIdentifier>) -> String {
+        if depth > 8 { return "" }
+        let m = Mirror(reflecting: value)
+        if m.displayStyle == .class, let o = value as AnyObject? {
+            if !seen.insert(ObjectIdentifier(o)).inserted { return "" }
+        }
+        var out = m.children.isEmpty ? "\(value)" : ""
+        var cur: Mirror? = m
+        while let mm = cur {
+            for c in mm.children {
+                out += "\(c.label ?? ""):" + mirrorDump(c.value, depth: depth + 1, seen: &seen) + "\n"
+            }
+            cur = mm.superclassMirror
+        }
+        return out
+    }
+
+    static func mirrorDump(_ value: Any) -> String {
+        var seen = Set<ObjectIdentifier>()
+        return mirrorDump(value, seen: &seen)
     }
 
     func testACustomClientCreateWithoutACoreConnectionShowsNoCredential() async {
