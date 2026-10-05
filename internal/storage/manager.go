@@ -1549,6 +1549,10 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 				existingSession.HasRoots = session.HasRoots
 				existingSession.HasSampling = session.HasSampling
 				existingSession.Experimental = session.Experimental
+				// A re-created session is live again (re-initialize on a
+				// soft-closed id must not leave the record closed).
+				existingSession.Status = "active"
+				existingSession.EndTime = nil
 				session = &existingSession
 				m.logger.Debugw("Updating existing session with new data", "session_id", session.ID, "client_name", session.ClientName)
 				break
@@ -1628,6 +1632,42 @@ func (m *Manager) CloseSession(sessionID string) error {
 
 		m.logger.Debugw("Session closed", "session_id", sessionID)
 		return bucket.Put(sessionKey, data)
+	})
+}
+
+// ReopenSession marks a closed session active again and clears its end time. It
+// is a no-op for an unknown or already-active session (no duplicate record).
+func (m *Manager) ReopenSession(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if !strings.HasSuffix(string(k), "_"+sessionID) {
+				continue
+			}
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				return fmt.Errorf("failed to unmarshal session: %w", err)
+			}
+			if session.Status == "active" {
+				return nil
+			}
+			session.Status = "active"
+			session.EndTime = nil
+			session.LastActivity = time.Now()
+			data, err := json.Marshal(session)
+			if err != nil {
+				return fmt.Errorf("failed to marshal session: %w", err)
+			}
+			return bucket.Put(k, data)
+		}
+		return nil
 	})
 }
 
