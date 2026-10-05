@@ -276,6 +276,13 @@
               <span>{{ conflictOf(client.id)!.message }}</span>
               <span>Revoke or delete token <code>{{ conflictOf(client.id)!.conflicting_token }}</code>, then connect again.</span>
             </div>
+            <!-- A failed re-fetch leaves the old preview up with Connect disabled;
+                 say why. (Mutually exclusive with the no-preview error below.) -->
+            <p
+              v-if="previewError[client.id]"
+              :data-test="`connect-preview-error-${client.id}`"
+              class="text-xs text-error"
+            >{{ previewError[client.id] }}</p>
             <div class="flex items-center gap-2 pt-1">
               <button
                 :data-test="`client-preview-confirm-${client.id}`"
@@ -905,10 +912,12 @@ async function startConnect(clientId: string) {
     } else {
       // The preview read may have been blocked by macOS App-Data — resolve the
       // access state so a denial renders the existing remediation banner.
+      if (previews.value[clientId]) setStale(clientId, true)
       previewError.value = { ...previewError.value, [clientId]: response.error || 'Failed to load preview' }
       void checkAccess(clientId)
     }
   } catch (err) {
+    if (previews.value[clientId]) setStale(clientId, true)
     previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to load preview') }
     void checkAccess(clientId)
   } finally {
@@ -927,13 +936,14 @@ function cancelPreview(clientId: string) {
   const next = { ...previews.value }
   delete next[clientId]
   previews.value = next
+  // Dismissing also drops a failed re-fetch's message.
+  const nextErr = { ...previewError.value }
+  delete nextErr[clientId]
+  previewError.value = nextErr
 }
 
 function clearPreview(clientId: string) {
   cancelPreview(clientId)
-  const nextErr = { ...previewError.value }
-  delete nextErr[clientId]
-  previewError.value = nextErr
 }
 
 // Confirm proceeds with the connect. If an entry already exists, confirming

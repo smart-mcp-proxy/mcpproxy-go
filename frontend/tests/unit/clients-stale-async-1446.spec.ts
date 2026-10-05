@@ -274,6 +274,35 @@ describe('ClientConnectList (1446-7, 1446-11, 1446-12)', () => {
     expect(confirm().attributes('disabled')).toBeDefined()
   })
 
+  it('shows why Connect is disabled after a failed re-fetch and drops the error on Cancel', async () => {
+    ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
+    const wrapper = await open()
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    ;(api.getConnectPreview as any).mockResolvedValueOnce({ success: false, error: 'nope' })
+    await wrapper.get('[data-test="connect-profile-select-cursor"]').setValue('work-ro')
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-preview-confirm-cursor"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-test="connect-preview-error-cursor"]').text()).toContain('nope')
+    await wrapper.get('[data-test="client-preview-cancel-cursor"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="connect-preview-error-cursor"]').exists()).toBe(false)
+  })
+
+  it('keeps Connect disabled when the explicit re-open fetch also fails', async () => {
+    ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
+    const wrapper = await open()
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    ;(api.getConnectPreview as any).mockResolvedValueOnce({ success: false, error: 'nope' })
+    await wrapper.get('[data-test="connect-profile-select-cursor"]').setValue('work-ro')
+    await flushPromises()
+    ;(api.getConnectPreview as any).mockResolvedValueOnce({ success: false, error: 'still nope' })
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-preview-confirm-cursor"]').attributes('disabled')).toBeDefined()
+  })
+
   it('an in-flight refresh does not disable Connect after close and reopen', async () => {
     ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
     const wrapper = await open()
