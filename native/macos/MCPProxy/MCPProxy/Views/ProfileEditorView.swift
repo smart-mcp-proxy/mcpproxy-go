@@ -385,7 +385,21 @@ struct ProfileEditorView: View {
                 Text("The table shows the saved profile. Save to see the effect of your edits, or use Try it below for a preview.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
+            staleOrphanList
             toolTable
+        }
+    }
+
+    @ViewBuilder
+    private var staleOrphanList: some View {
+        ForEach(model.staleOrphans, id: \.id) { orphan in
+            HStack {
+                Text(orphan.id).font(.caption.monospaced())
+                Label(orphan.note, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                Button("Remove classification") { model.removeClassification(id: orphan.id) }
+                    .buttonStyle(.link).font(.caption)
+            }
+            .accessibilityIdentifier("profile-stale-orphan-\(orphan.id)")
         }
     }
 

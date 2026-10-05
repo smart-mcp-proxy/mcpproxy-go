@@ -175,6 +175,7 @@
             :rows="tools?.tools ?? []"
             :counts="tools?.counts"
             :stale="tools?.stale_classifications"
+            :stale-reasons="tools?.stale_classification_reasons"
             :draft-rules="draftTools"
             :profile-label="saved.title || saved.name"
             :servers-chosen="draft.servers.length > 0"

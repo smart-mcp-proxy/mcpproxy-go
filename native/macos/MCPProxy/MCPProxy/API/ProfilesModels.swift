@@ -864,10 +864,14 @@ struct EffectiveToolsResponse: Decodable, Equatable {
     let tools: [EffectiveTool]
     let counts: EffectiveCounts?
     let staleClassifications: [String]?
+    /// Why each stale entry no longer applies ("annotated" or "missing").
+    /// Administrators only; absent from an older daemon.
+    let staleClassificationReasons: [String: String]?
 
     enum CodingKeys: String, CodingKey {
         case profile, tools, counts
         case staleClassifications = "stale_classifications"
+        case staleClassificationReasons = "stale_classification_reasons"
     }
 
     init(from decoder: Decoder) throws {
@@ -876,6 +880,8 @@ struct EffectiveToolsResponse: Decodable, Equatable {
         tools = try c.decodeIfPresent([EffectiveTool].self, forKey: .tools) ?? []
         counts = try c.decodeIfPresent(EffectiveCounts.self, forKey: .counts)
         staleClassifications = try c.decodeIfPresent([String].self, forKey: .staleClassifications)
+        // Tolerant: a malformed map must not fail the whole table.
+        staleClassificationReasons = (try? c.decodeIfPresent([String: String].self, forKey: .staleClassificationReasons)) ?? nil
     }
 }
 

@@ -70,7 +70,8 @@
             "component:frontend/src/components/profiles/ProfileToolTable.vue"
           ],
           "tests": [
-            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts"
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts",
+            "vitest:frontend/tests/unit/profile-stale-reasons.spec.ts"
           ]
         },
         "macos": {
@@ -80,7 +81,8 @@
             "a11y:profile-tool-row-<x>"
           ],
           "tests": [
-            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testTheEditorRendersTheModelSections"
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testTheEditorRendersTheModelSections",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testStaleOrphanNotesComeFromTheServerReasons"
           ]
         },
         "cli": {
@@ -94,7 +96,8 @@
             "server"
           ],
           "tests": [
-            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileShow_EffectiveQueryMapping"
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileShow_EffectiveQueryMapping",
+            "go:cmd/mcpproxy/profile_stale_reason_test.go#TestProfileShow_EffectiveStaleNoteWithServerFilter"
           ]
         },
         "mcp": {
