@@ -163,9 +163,25 @@ func (c *discoveryCache) storeLocked(key discoveryKey, serverURL string, val any
 	}
 }
 
+// discoverySeed is a secondary entry stored atomically with a primary result.
+type discoverySeed struct {
+	key discoveryKey
+	val any
+}
+
 // do returns the cached result for key or runs fn once (single-flight) and caches it.
 // fn may return a non-zero ttl to override the default success/failure TTL.
 func (c *discoveryCache) do(key discoveryKey, serverURL string, fn func() (any, time.Duration, error)) (any, error) {
+	return c.doWith(key, serverURL, func() (any, time.Duration, []discoverySeed, error) {
+		v, ttl, err := fn()
+		return v, ttl, nil, err
+	})
+}
+
+// doWith is do whose loader may also return seeds: secondary success entries
+// stored under the same flight guard and with the primary's expiry, so a result
+// invalidated while its loader ran can neither store them nor outlive its source.
+func (c *discoveryCache) doWith(key discoveryKey, serverURL string, fn func() (any, time.Duration, []discoverySeed, error)) (any, error) {
 	c.mu.Lock()
 	if v, ok, err := c.lookupLocked(key); ok {
 		c.mu.Unlock()
@@ -180,31 +196,24 @@ func (c *discoveryCache) do(key discoveryKey, serverURL string, fn func() (any, 
 	c.inflight[key] = fl
 	c.mu.Unlock()
 
-	val, ttl, err := fn()
+	val, ttl, seeds, err := fn()
 
 	c.mu.Lock()
 	// An invalidation that ran while fn was in flight removed this flight: its
 	// result is stale and must not repopulate the cache (waiters still get it).
 	if c.inflight[key] == fl {
 		c.storeLocked(key, serverURL, val, err, ttl)
+		if err == nil {
+			for _, sd := range seeds {
+				c.storeLocked(sd.key, serverURL, sd.val, nil, ttl)
+			}
+		}
 		delete(c.inflight, key)
 	}
 	c.mu.Unlock()
 	fl.val, fl.err = val, err
 	close(fl.done)
 	return val, err
-}
-
-// storeIfPresent stores val under key only while guard still has a live entry.
-// A loader seeds a secondary entry with it after its own result was stored; an
-// invalidation in between removed the guard and must win.
-func (c *discoveryCache) storeIfPresent(guard, key discoveryKey, serverURL string, val any) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok, _ := c.lookupLocked(guard); !ok {
-		return
-	}
-	c.storeLocked(key, serverURL, val, nil, 0)
 }
 
 // invalidateServer drops every entry (all override combinations) for serverURL.

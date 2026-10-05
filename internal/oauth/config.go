@@ -2117,7 +2117,7 @@ type metadataPreflight struct {
 // the configured server, once per cache key.
 func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
 	key := makeDiscoveryKey("metadata-url", serverConfig.URL, ov)
-	v, err := globalDiscoveryCache.do(key, serverConfig.URL, func() (any, time.Duration, error) {
+	v, err := globalDiscoveryCache.doWith(key, serverConfig.URL, func() (any, time.Duration, []discoverySeed, error) {
 		// First, try to discover the auth server URL from Protected Resource Metadata
 		// This is necessary for servers like Smithery that use separate domains
 		authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
@@ -2142,7 +2142,7 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 				zap.String("server", serverConfig.Name),
 				zap.String("url_tried", logSafeURL(urlToUse)),
 				logSafeErrorField(err))
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		logger.Info("Using validated OAuth metadata URL",
 			zap.String("server", serverConfig.Name),
@@ -2154,18 +2154,16 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 		if authServerURL == "" {
 			ttl = discoveryFailureTTL
 		}
-		return metadataPreflight{url: workingURL, doc: doc}, ttl, nil
+		// Seed the document cache so mcp-go's own metadata GET (served by the
+		// transport wrapper) needs no second request. Stored atomically with this
+		// result, so an invalidation that raced the fetch discards both.
+		seeds := []discoverySeed{{key: asDocKey(serverConfig.URL, ov, workingURL), val: doc}}
+		return metadataPreflight{url: workingURL, doc: doc}, ttl, seeds, nil
 	})
 	if err != nil {
 		return "", nil
 	}
 	res, _ := v.(metadataPreflight)
-	// Seed the document cache so mcp-go's own metadata GET (served by the
-	// transport wrapper) needs no second request. Guarded by the result entry so
-	// an invalidation that raced the fetch is not undone.
-	if res.doc != nil {
-		globalDiscoveryCache.storeIfPresent(key, asDocKey(serverConfig.URL, ov, res.url), serverConfig.URL, res.doc)
-	}
 	return res.url, res.doc
 }
 

@@ -168,3 +168,45 @@ func TestSameOrigin_DefaultPorts(t *testing.T) {
 	assert.False(t, sameOrigin(u("https://idp.example/token"), u("https://idp.example:8443/x")))
 	assert.False(t, sameOrigin(u("https://idp.example/token"), u("http://idp.example/x")))
 }
+
+func TestDiscoveryCache_SeedsAreAtomicWithThePrimaryResult(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	c := newDiscoveryCache(clk.now)
+	srv := "https://s.example/mcp"
+	primary := makeDiscoveryKey("p", srv, discoveryOverrides{})
+	seed := makeDiscoveryKey("s", srv, discoveryOverrides{})
+
+	_, err := c.doWith(primary, srv, func() (any, time.Duration, []discoverySeed, error) {
+		return 1, 0, []discoverySeed{{key: seed, val: "doc"}}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, c.len())
+
+	// A cache hit never re-seeds or renews the seed's lifetime.
+	clk.advance(59 * time.Minute)
+	_, _ = c.doWith(primary, srv, func() (any, time.Duration, []discoverySeed, error) {
+		t.Fatal("must be a cache hit")
+		return nil, 0, nil, nil
+	})
+	clk.advance(2 * time.Minute)
+	c.mu.Lock()
+	_, ok, _ := c.lookupLocked(seed)
+	c.mu.Unlock()
+	assert.False(t, ok, "the seed expires with its primary")
+
+	// A flight invalidated mid-fetch stores neither.
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.doWith(primary, srv, func() (any, time.Duration, []discoverySeed, error) {
+			close(started)
+			<-release
+			return 2, 0, []discoverySeed{{key: seed, val: "stale"}}, nil
+		})
+	}()
+	<-started
+	c.invalidateServer(srv)
+	close(release)
+	<-done
+	assert.Equal(t, 0, c.len(), "an invalidated flight must not store its seeds")
+}
