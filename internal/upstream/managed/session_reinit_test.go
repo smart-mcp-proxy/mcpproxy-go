@@ -31,8 +31,11 @@ type sessUpstream struct {
 	inits       int
 	noSession   int // non-initialize requests that arrived with no session id
 	executed    map[string]int
-	readDesc    string // description of read_thing; changing it changes its hash
-	rejectAfter bool   // when set, every non-initialize request is 404 (even on a fresh session)
+	readDesc    string        // description of read_thing; changing it changes its hash
+	rejectAfter bool          // when set, every non-initialize request is 404 (even on a fresh session)
+	notReadOnly bool          // when set, read_thing is listed without readOnlyHint
+	listEntered chan struct{} // when non-nil, tools/list signals here then blocks on listRelease
+	listRelease chan struct{}
 }
 
 func newSessUpstream() *sessUpstream {
@@ -93,6 +96,8 @@ func (u *sessUpstream) handler() http.Handler {
 			u.noSession++
 		}
 		desc := u.readDesc
+		notRO := u.notReadOnly
+		entered, release := u.listEntered, u.listRelease
 		u.mu.Unlock()
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -105,8 +110,13 @@ func (u *sessUpstream) handler() http.Handler {
 			u.mu.Unlock()
 			write(map[string]any{"content": []any{map[string]any{"type": "text", "text": "ok"}}})
 		case "tools/list":
+			if entered != nil {
+				entered <- struct{}{}
+				<-release
+			}
+			ann := map[string]any{"readOnlyHint": !notRO}
 			write(map[string]any{"tools": []any{
-				map[string]any{"name": "read_thing", "description": desc, "inputSchema": map[string]any{"type": "object"}, "annotations": map[string]any{"readOnlyHint": true}},
+				map[string]any{"name": "read_thing", "description": desc, "inputSchema": map[string]any{"type": "object"}, "annotations": ann},
 				map[string]any{"name": "write_thing", "description": "writes", "inputSchema": map[string]any{"type": "object"}},
 			}})
 		default:
@@ -294,4 +304,53 @@ func TestSessionReinit_PinnedCallEpochUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, epoch, mc.ConnectionEpoch())
 	assert.Equal(t, int64(1), mc.SessionReinitCount())
+}
+
+// Annotations are not part of the identity hash: a tool that stops being
+// read-only across the re-init (same hash) must not be repeated.
+func TestSessionReinit_ReadOnlyFlippedNotRetried(t *testing.T) {
+	mc, up := newSessionClient(t)
+	up.mu.Lock()
+	up.live = map[string]bool{}
+	up.notReadOnly = true
+	up.mu.Unlock()
+
+	_, err := mc.CallTool(tctx(t), "read_thing", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSessionReestablished)
+	_, _, executed := up.snapshot()
+	assert.Zero(t, executed["read_thing"], "no longer read-only: must not be executed again")
+	assert.Equal(t, "Ready", mc.StateManager.GetState().String())
+}
+
+// FR-082/083a: a caller arriving while a flight is between initialize (new id
+// installed) and its verifying tools/list must wait, not send on the new id.
+func TestSessionReinit_CallerDuringFlightWaits(t *testing.T) {
+	mc, up := newSessionClient(t)
+	up.forget()
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	up.mu.Lock()
+	up.listEntered, up.listRelease = entered, release
+	up.mu.Unlock()
+
+	ctx := tctx(t)
+	errs := make(chan error, 2)
+	go func() { _, err := mc.CallTool(ctx, "read_thing", nil); errs <- err }()
+	select {
+	case <-entered: // flight is inside its tools/list; new session id already installed
+	case <-time.After(10 * time.Second):
+		t.Fatal("re-init flight never reached tools/list")
+	}
+	go func() { _, err := mc.CallTool(ctx, "read_thing", nil); errs <- err }()
+	time.Sleep(300 * time.Millisecond)
+	_, _, executed := up.snapshot()
+	assert.Zero(t, executed["read_thing"], "no call may execute before the flight verified the toolset")
+
+	close(release)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	inits, _, executed := up.snapshot()
+	assert.Equal(t, 2, inits)
+	assert.Equal(t, 2, executed["read_thing"])
 }

@@ -582,6 +582,10 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 
+	// Spec 113-e FR-080: remember the session id this connect obtained, so a
+	// transport that loses it before the first managed request can recover.
+	_, _, _ = mc.sessionState()
+
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)

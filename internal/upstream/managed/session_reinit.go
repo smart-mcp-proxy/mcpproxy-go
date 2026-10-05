@@ -121,18 +121,17 @@ func (mc *Client) sessionState() (current string, known string, applicable bool)
 func (mc *Client) reinitSession(ctx context.Context, stale, method string) error {
 	s := &mc.sess
 	s.mu.Lock()
+	// A running flight wins over the known-id comparison: initialize installs
+	// the new session id before the flight's tools/list has been verified, so
+	// "newer session in place" must not let a caller slip past the flight
+	// (FR-082, FR-083a).
+	if f := s.flight; f != nil {
+		s.mu.Unlock()
+		return waitFlight(ctx, f)
+	}
 	if s.known != stale {
 		s.mu.Unlock()
 		return nil
-	}
-	if f := s.flight; f != nil {
-		s.mu.Unlock()
-		select {
-		case <-f.done:
-			return f.err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 	}
 	f := &reinitFlight{done: make(chan struct{})}
 	s.flight = f
@@ -165,6 +164,15 @@ func (mc *Client) reinitSession(ctx context.Context, stale, method string) error
 		zap.String("stale_session", shortID(stale)), zap.String("new_session", shortID(newID)),
 		zap.Int64("reinit_count", s.count.Load()))
 	return nil
+}
+
+func waitFlight(ctx context.Context, f *reinitFlight) error {
+	select {
+	case <-f.done:
+		return f.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // runReinit is the flight body: initialize on the same transport, then a
@@ -217,6 +225,14 @@ func (mc *Client) scheduleToolRefresh() {
 // but one is known: another request already hit the 404 and mcp-go cleared it,
 // so sending now would go out without a session (FR-080, FR-082).
 func (mc *Client) joinGap(ctx context.Context, method string) error {
+	// A flight in progress (initialize done, tools/list not yet verified) is
+	// joined even though the transport already has a session id again.
+	mc.sess.mu.Lock()
+	f := mc.sess.flight
+	mc.sess.mu.Unlock()
+	if f != nil {
+		return waitFlight(ctx, f)
+	}
 	cur, known, ok := mc.sessionState()
 	if !ok || cur != "" || known == "" {
 		return nil
@@ -240,7 +256,9 @@ func (mc *Client) withSession(ctx context.Context, method string, fn func() erro
 		return err
 	}
 	if rerr := mc.reinitSession(ctx, stale, method); rerr != nil {
-		return err
+		// Keep the original 404 (so the existing connection-error path still
+		// matches) and surface why recovery failed (e.g. an auth error).
+		return errors.Join(err, rerr)
 	}
 	return fn()
 }
@@ -293,7 +311,7 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 		return result, err
 	}
 	if rerr := mc.reinitSession(ctx, stale, string(mcp.MethodToolsCall)); rerr != nil {
-		return nil, err
+		return nil, errors.Join(err, rerr)
 	}
 	post, postKnown := mc.toolIdentityOf(toolName)
 	if !preKnown || !postKnown || post.hash != pre.hash {
@@ -302,7 +320,9 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 		}
 		return nil, fmt.Errorf("%w (tool %q identity not confirmed after re-initialize)", ErrSessionReestablished, toolName)
 	}
-	if !pre.readOnly {
+	// Both the listing the caller was certified against and the re-listed one
+	// must say read-only: annotations are not part of the identity hash.
+	if !pre.readOnly || !post.readOnly {
 		return nil, fmt.Errorf("%w (tool %q is not read-only)", ErrSessionReestablished, toolName)
 	}
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
