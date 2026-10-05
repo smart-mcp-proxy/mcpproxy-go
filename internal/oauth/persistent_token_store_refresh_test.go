@@ -293,3 +293,21 @@ func TestPersistentTokenStore_ExpiryJudgedAfterSlowFlight(t *testing.T) {
 	assert.Nil(t, tok)
 	assert.ErrorIs(t, err, ErrTokenRefreshTransient)
 }
+
+// Review round 6: a logout during a grace-period refresh is not undone by
+// the "still valid" fallback serving the pre-logout access token.
+func TestPersistentTokenStore_LogoutDuringGraceRefreshServesNothing(t *testing.T) {
+	db := newTestBolt(t)
+	name, u := uniqueServerName(t), "https://logout.example.com/mcp"
+	seedToken(t, db, name, u, "rt-0", time.Hour)
+	store := NewPersistentTokenStore(name, u, db).(*PersistentTokenStore)
+	store.now = func() time.Time { return time.Now().Add(58 * time.Minute) } // inside the grace period
+	BindRefresher(store, RefreshBinding{Refresh: func(context.Context, *storage.OAuthTokenRecord) (*client.Token, error) {
+		require.NoError(t, store.ClearToken()) // logout while the request is in flight
+		return nil, errors.New("refresh token request failed with status 503: down")
+	}})
+
+	tok, err := store.GetToken(context.Background())
+	assert.Nil(t, tok)
+	assert.Error(t, err)
+}

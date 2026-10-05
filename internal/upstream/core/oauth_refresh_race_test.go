@@ -318,10 +318,12 @@ func TestOAuthRefresh_ExtraParamsClientID(t *testing.T) {
 // from the error detail even when the AS echoes them without a key=value
 // shape the pattern scrubber would recognise.
 func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
-	const rt, secret = "opaque-rt-4711", "opaque-secret-0815"
+	const rt, secret = "opaque-rt-4711", "opaque&secret<0815>"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, "rejected "+rt+" for client with "+secret)
+		// The secret comes back JSON-escaped (\u0026, \u003c) and URL-escaped.
+		_, _ = io.WriteString(w, `{"error":"invalid_client","error_description":"rejected `+rt+
+			` for client with opaque\u0026secret\u003c0815\u003e (`+url.QueryEscape(secret)+`)"}`)
 	}))
 	t.Cleanup(srv.Close)
 	c := &Client{config: &config.ServerConfig{Name: "s"}, logger: zap.NewNop()}
@@ -330,6 +332,7 @@ func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), rt)
 	assert.NotContains(t, err.Error(), secret)
+	assert.NotContains(t, err.Error(), "0815", "no spelling of the secret survives")
 }
 
 // Review round 3: the error code field is redacted too, and a non-JSON body

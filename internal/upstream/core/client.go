@@ -884,8 +884,8 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 // redactSent removes the exact credential values a token request sent.
 func redactSent(s string, sent ...string) string {
 	for _, v := range sent {
-		if v != "" {
-			s = strings.ReplaceAll(s, v, "[REDACTED]")
+		for _, form := range oauth.SentValueSpellings(v) {
+			s = strings.ReplaceAll(s, form, "[REDACTED]")
 		}
 	}
 	return s

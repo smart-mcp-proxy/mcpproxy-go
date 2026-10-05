@@ -387,6 +387,13 @@ func needsReactiveRefresh(rec *storage.OAuthTokenRecord, now time.Time) bool {
 	return remaining < margin
 }
 
+// accessTokenStillStored reports whether the store still holds rec's access
+// token (it was not cleared or replaced while a refresh flight ran).
+func accessTokenStillStored(t reactiveTarget, rec *storage.OAuthTokenRecord) bool {
+	cur, err := t.load()
+	return err == nil && cur != nil && cur.AccessToken != "" && cur.AccessToken == rec.AccessToken
+}
+
 type reactiveTarget struct {
 	key, name string
 	logger    *zap.Logger
@@ -427,6 +434,10 @@ func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget
 				tok = newTok
 			case ctx.Err() != nil:
 				return nil, ctx.Err()
+			case !expired && !accessTokenStillStored(t, rec):
+				// A logout (or a login) replaced the record while the flight
+				// ran: the pre-flight access token is no longer ours to serve.
+				return nil, fmt.Errorf("%w: OAuth token changed during refresh: %w", ErrTokenRefreshTransient, err)
 			case !expired:
 				// The current access token still works; keep serving it and
 				// let the next request (or the proactive schedule) retry.

@@ -2,10 +2,12 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -279,14 +281,35 @@ func classifyBySubstring(errStr string) RefreshErrorClass {
 	return RefreshClassOther
 }
 
-// redactValues replaces every occurrence of each non-empty value in s.
+// redactValues replaces every occurrence of each non-empty value in s, in
+// its raw, JSON-string-escaped and URL-query-escaped spellings (an AS may echo
+// the value inside a JSON error_description or a form-encoded body).
 func redactValues(s string, values ...string) string {
 	for _, v := range values {
-		if v != "" {
-			s = strings.ReplaceAll(s, v, "[REDACTED]")
+		for _, form := range SentValueSpellings(v) {
+			s = strings.ReplaceAll(s, form, "[REDACTED]")
 		}
 	}
 	return s
+}
+
+// SentValueSpellings returns the spellings of a credential value that a
+// token endpoint may echo back: raw, JSON-string-escaped and
+// URL-query-escaped. An empty value has none.
+func SentValueSpellings(v string) []string {
+	if v == "" {
+		return nil
+	}
+	out := []string{v}
+	if b, err := json.Marshal(v); err == nil && len(b) >= 2 {
+		if j := string(b[1 : len(b)-1]); j != v {
+			out = append(out, j)
+		}
+	}
+	if q := url.QueryEscape(v); q != v {
+		out = append(out, q)
+	}
+	return out
 }
 
 // rawErrorText is the text classification reads: the original error text
