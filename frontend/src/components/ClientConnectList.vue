@@ -281,7 +281,7 @@
                 :data-test="`client-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id] || previews[client.id]!.access_state === 'malformed'"
+                :disabled="loading.clients[client.id] || previewRefreshing[client.id] || previews[client.id]!.access_state === 'malformed'"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>
@@ -846,13 +846,28 @@ async function onBindingToggle(clientId: string) {
   await refreshPreview(clientId)
 }
 
+// One ticket per client: a slow preview for an older intent must not land over
+// the newer one. `previewRefreshing` keeps Connect disabled while the intent on
+// screen and the precondition token in hand disagree.
+const previewTickets: Record<string, number> = {}
+const previewRefreshing = ref<Record<string, boolean>>({})
+function setRefreshing(clientId: string, on: boolean) {
+  previewRefreshing.value = { ...previewRefreshing.value, [clientId]: on }
+}
+
 async function refreshPreview(clientId: string) {
+  const ticket = (previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1)
   setRefusal(clientId, null)
+  setRefreshing(clientId, true)
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
+    if (ticket !== previewTickets[clientId]) return
     if (response.success && response.data) previews.value = { ...previews.value, [clientId]: response.data }
   } catch (err) {
+    if (ticket !== previewTickets[clientId]) return
     setRefusal(clientId, err as ApiError)
+  } finally {
+    if (ticket === previewTickets[clientId]) setRefreshing(clientId, false)
   }
 }
 
@@ -886,6 +901,11 @@ async function startConnect(clientId: string) {
 
 // Cancel dismisses the preview WITHOUT writing anything (Spec 078 US1).
 function cancelPreview(clientId: string) {
+  // Invalidate any preview still in flight and drop its refusal (the bulk path
+  // never goes through here).
+  previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1
+  setRefreshing(clientId, false)
+  setRefusal(clientId, null)
   const next = { ...previews.value }
   delete next[clientId]
   previews.value = next
@@ -970,6 +990,8 @@ async function connect(
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
       resultReloadHint.value = response.data.reload_hint || ''
+      // A stale refusal from an earlier attempt no longer applies.
+      setRefusal(clientId, null)
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
