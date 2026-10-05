@@ -487,7 +487,11 @@ final class ConnectClientModel: ObservableObject {
         profiles = updated
         if !profile.isEmpty, !updated.contains(where: { $0.name == profile }) {
             profile = ""
-            lockedChoice = false
+            lockedChoice = true
+            // Back to "untouched": the write then sends `.unspecified`, which
+            // keeps the client's existing binding instead of forcing
+            // All servers / switchable over it.
+            bindingTouched = false
             invalidatePreview()
         }
     }

@@ -1442,6 +1442,17 @@ final class ConnectClientPresentationTests: XCTestCase {
         XCTAssertEqual(model.mode, .locked)
     }
 
+    func testRefreshProfilesFallbackSendsUnspecifiedSoTheExistingBindingIsKept() async {
+        let ro = ProfileView(name: "ro", title: "Read-only", servers: ["github"], managementTools: false)
+        let model = await selectedModel(FakeConnectSource(), profiles: [ro])
+        model.chooseProfile("ro")
+        XCTAssertTrue(model.bindingTouched)
+        model.refreshProfiles([])
+        XCTAssertEqual(model.profile, "")
+        XCTAssertEqual(model.binding, .unspecified,
+                       "a vanished profile must not turn into an explicit All servers write")
+    }
+
     func testRefreshProfilesFallsBackToAllServersWhenTheSelectionIsGone() async {
         let ro = ProfileView(name: "work-ro", title: "Work Read-only", servers: ["github"], managementTools: false)
         let model = await selectedModel(FakeConnectSource(), profiles: [ro])
