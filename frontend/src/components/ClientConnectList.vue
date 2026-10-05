@@ -887,6 +887,7 @@ async function refreshPreview(clientId: string) {
     if (ticket !== previewTickets[clientId]) return
     setStale(clientId, true)
     setRefusal(clientId, err as ApiError)
+    previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to refresh preview') }
   } finally {
     if (ticket === previewTickets[clientId]) setRefreshing(clientId, false)
   }
@@ -899,7 +900,7 @@ async function startConnect(clientId: string) {
   previewLoading[clientId] = true
   previewError.value = { ...previewError.value, [clientId]: '' }
   setRefusal(clientId, null)
-  previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1
+  const ticket = (previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1)
   setRefreshing(clientId, false)
   setStale(clientId, false)
   // The row's current binding lives in the clients store; make sure it is there.
@@ -907,6 +908,7 @@ async function startConnect(clientId: string) {
   delete forms[clientId]
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
+    if (ticket !== previewTickets[clientId]) return
     if (response.success && response.data) {
       previews.value = { ...previews.value, [clientId]: response.data }
     } else {
@@ -917,6 +919,7 @@ async function startConnect(clientId: string) {
       void checkAccess(clientId)
     }
   } catch (err) {
+    if (ticket !== previewTickets[clientId]) return
     if (previews.value[clientId]) setStale(clientId, true)
     previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to load preview') }
     void checkAccess(clientId)

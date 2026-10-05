@@ -289,6 +289,35 @@ describe('ClientConnectList (1446-7, 1446-11, 1446-12)', () => {
     expect(wrapper.find('[data-test="connect-preview-error-cursor"]').exists()).toBe(false)
   })
 
+  it('shows the error when the preview re-fetch throws', async () => {
+    ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
+    const wrapper = await open()
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    ;(api.getConnectPreview as any).mockRejectedValueOnce(new Error('net down'))
+    await wrapper.get('[data-test="connect-profile-select-cursor"]').setValue('work-ro')
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-preview-confirm-cursor"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-test="connect-preview-error-cursor"]').text()).toContain('net down')
+  })
+
+  it('a late startConnect failure does not stale a newer successful refresh', async () => {
+    ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
+    const wrapper = await open()
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    const late = deferred<any>()
+    ;(api.getConnectPreview as any).mockReturnValueOnce(late.promise)
+    await wrapper.get('[data-test="connect-cursor"]').trigger('click')
+    ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-new'))
+    await wrapper.get('[data-test="connect-profile-select-cursor"]').setValue('work-ro')
+    await flushPromises()
+    late.resolve({ success: false, error: 'late failure' })
+    await flushPromises()
+    expect(wrapper.get('[data-test="client-preview-confirm-cursor"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-test="connect-preview-error-cursor"]').exists()).toBe(false)
+  })
+
   it('keeps Connect disabled when the explicit re-open fetch also fails', async () => {
     ;(api.getConnectPreview as any).mockResolvedValueOnce(previewOf('tok-1'))
     const wrapper = await open()
