@@ -71,7 +71,7 @@ const ImportServersStub = {
   emits: ['imported'],
   props: { detected: Boolean, showMessage: { type: Boolean, default: true } },
   template:
-    '<div><button data-test="stub-import" @click="$emit(\'imported\', 2)">import</button><p v-if="detected && showMessage" data-test="stub-own-message">imported</p></div>',
+    '<div><button data-test="stub-import" @click="$emit(\'imported\', 2, [\'fetchy\', \'thinker\'])">import</button><p v-if="detected && showMessage" data-test="stub-own-message">imported</p></div>',
 }
 
 function makeRouter() {

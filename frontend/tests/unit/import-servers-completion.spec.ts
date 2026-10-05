@@ -66,7 +66,7 @@ describe('ImportServers detected completion state', () => {
     expect(message.text()).toBe('✓ 2 servers imported')
     expect(message.text()).not.toContain('skipped')
     expect(wrapper.find('[data-test="detected-import-empty"]').exists()).toBe(false)
-    expect(wrapper.emitted('imported')?.[0]).toEqual([2])
+    expect(wrapper.emitted('imported')?.[0]).toEqual([2, ['fetchy', 'thinker']])
   })
 
   it('renders nothing for the empty state when showEmpty is false and nothing is detected at mount', async () => {
@@ -89,5 +89,30 @@ describe('ImportServers detected completion state', () => {
       'Nothing left to import — every server in your client configs is on MCPProxy.',
     )
     expect(wrapper.find('[data-test="detected-import-message"]').text()).toBe('✓ 2 servers imported')
+  })
+})
+
+describe('ImportServers paste import count (#1466)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('emits the number the backend actually imported, not the number selected', async () => {
+    ;(api.importServersFromJSON as any)
+      .mockResolvedValueOnce({
+        success: true,
+        data: { imported: [{ name: 'a' }, { name: 'b' }] },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        data: { summary: { imported: 1 }, imported: [{ name: 'a' }], skipped: [{ name: 'b', reason: 'already_exists' }] },
+      })
+    const wrapper = mount(ImportServers, { props: { detected: false } })
+    await wrapper.find('[data-test="import-content-textarea"]').setValue('{"mcpServers":{}}')
+    await wrapper.find('[data-test="import-preview-button"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="import-confirm-button"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('imported')?.[0]).toEqual([1, ['a', 'b']])
   })
 })
