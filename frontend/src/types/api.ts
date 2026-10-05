@@ -1058,6 +1058,22 @@ export interface ActivityRecord {
   token_name?: string
   /** Why a profile refused the call (activity of status "blocked"). */
   block_reason?: ProfileBlockReason
+  /** Spec 113-c: what failed on an errored tool call. Absent on success and on pre-113 records. */
+  error_class?:
+    | 'network'
+    | 'timeout'
+    | 'http'
+    | 'jsonrpc'
+    | 'tool_error'
+    | 'session_terminated'
+    | 'auth'
+    | 'proxy_policy'
+    | 'proxy_internal'
+    | 'cancelled'
+  /** Spec 113-c: whose fault the failure is. */
+  fault_domain?: 'upstream' | 'proxy' | 'client'
+  /** Spec 113-c: upstream HTTP status when known (non-2xx). */
+  upstream_http_status?: number
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean
   detection_types?: string[]

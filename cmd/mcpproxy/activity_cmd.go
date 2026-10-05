@@ -49,6 +49,8 @@ var (
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
 	activityAgent         string // Spec 028: deprecated alias of --token
 	activityAuthType      string // Spec 028: Filter by auth type (admin, agent)
+	activityErrorClass    string // Spec 113-c: Filter by call-error class
+	activityFaultDomain   string // Spec 113-c: Filter by fault domain
 
 	// Spec 108 FR-031 scope filters: the profile, client and token in effect
 	// when a call ran ("-" selects records with none). --client-name is the
@@ -105,12 +107,29 @@ type ActivityFilter struct {
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
 	AuthType      string // Spec 028: Filter by auth type (admin, agent)
+	ErrorClass    string // Spec 113-c: Filter by call-error class
+	FaultDomain   string // Spec 113-c: Filter by fault domain
 
 	// Spec 108 FR-031 scope filters ("-" = unattributed).
 	Profile    string
 	Client     string
 	Token      string // REST also accepts `agent` as an alias
 	ClientName string // advisory; list, export and watch only
+}
+
+// The closed call-error taxonomy vocabularies (Spec 113-c FR-040).
+var (
+	validErrorClasses = []string{"network", "timeout", "http", "jsonrpc", "tool_error", "session_terminated", "auth", "proxy_policy", "proxy_internal", "cancelled"}
+	validFaultDomains = []string{"upstream", "proxy", "client"}
+)
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate validates the filter options
@@ -203,6 +222,14 @@ func (f *ActivityFilter) Validate() error {
 		}
 	}
 
+	// Validate the call-error taxonomy filters (Spec 113-c FR-046)
+	if f.ErrorClass != "" && !containsString(validErrorClasses, f.ErrorClass) {
+		return fmt.Errorf("invalid error-class '%s': must be one of %v", f.ErrorClass, validErrorClasses)
+	}
+	if f.FaultDomain != "" && !containsString(validFaultDomains, f.FaultDomain) {
+		return fmt.Errorf("invalid fault-domain '%s': must be one of %v", f.FaultDomain, validFaultDomains)
+	}
+
 	// Validate time formats
 	if f.StartTime != "" {
 		if _, err := time.Parse(time.RFC3339, f.StartTime); err != nil {
@@ -266,6 +293,13 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	// sandboxed sub-calls it made (child.parent_id == parent.request_id).
 	if f.ParentID != "" {
 		q.Set("parent_id", f.ParentID)
+	}
+	// Spec 113-c FR-046: call-error taxonomy filters
+	if f.ErrorClass != "" {
+		q.Set("error_class", f.ErrorClass)
+	}
+	if f.FaultDomain != "" {
+		q.Set("fault_domain", f.FaultDomain)
 	}
 	// Spec 026: Add sensitive data filters
 	if f.SensitiveData != nil {
@@ -1249,6 +1283,8 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 	activityListCmd.Flags().StringVar(&activityRequestID, "request-id", "", "Filter by HTTP request ID for log correlation")
 	activityListCmd.Flags().StringVar(&activityParentID, "parent-id", "", "List child tool calls of a code_execution activity (value = the parent record request_id)")
+	activityListCmd.Flags().StringVar(&activityErrorClass, "error-class", "", "Filter failed tool calls by error class: network, timeout, http, jsonrpc, tool_error, session_terminated, auth, proxy_policy, proxy_internal, cancelled")
+	activityListCmd.Flags().StringVar(&activityFaultDomain, "fault-domain", "", "Filter failed tool calls by fault domain: upstream, proxy, client")
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 	// Spec 026: Sensitive data detection filters
 	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
@@ -1297,6 +1333,8 @@ func init() {
 	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
+	activityExportCmd.Flags().StringVar(&activityErrorClass, "error-class", "", "Export only failed tool calls of this error class")
+	activityExportCmd.Flags().StringVar(&activityFaultDomain, "fault-domain", "", "Export only failed tool calls of this fault domain: upstream, proxy, client")
 	activityExportCmd.Flags().StringVar(&activityParentID, "parent-id", "", "Export only child tool calls of a code_execution activity (value = the parent record request_id)")
 	registerActivityScopeFlags(activityExportCmd)
 	// Spec 109-k: view + --from/--to (url-filter-contract.md)
@@ -1396,6 +1434,8 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
 		AuthType:      activityAuthType,
+		ErrorClass:    activityErrorClass,
+		FaultDomain:   activityFaultDomain,
 		Profile:       scope.Profile,
 		Client:        scope.Client,
 		Token:         scope.Token,
@@ -2221,6 +2261,7 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
 		fmt.Printf("Error:        %s\n", errMsg)
 	}
+	displayErrorClassLine(activity)
 
 	// Spec 108 FR-029: the profile, client and token in effect for the call.
 	displayScopeAttribution(activity)
@@ -2522,6 +2563,19 @@ func activityExportQueryParams() (url.Values, error) {
 	if activityParentID != "" {
 		q.Set("parent_id", activityParentID)
 	}
+	// Spec 113-c FR-046: call-error taxonomy filters.
+	if activityErrorClass != "" {
+		if !containsString(validErrorClasses, activityErrorClass) {
+			return nil, fmt.Errorf("invalid error-class '%s': must be one of %v", activityErrorClass, validErrorClasses)
+		}
+		q.Set("error_class", activityErrorClass)
+	}
+	if activityFaultDomain != "" {
+		if !containsString(validFaultDomains, activityFaultDomain) {
+			return nil, fmt.Errorf("invalid fault-domain '%s': must be one of %v", activityFaultDomain, validFaultDomains)
+		}
+		q.Set("fault_domain", activityFaultDomain)
+	}
 	// Spec 108 FR-031: scope filters (the advisory client name included).
 	scope, err := resolveActivityScope()
 	if err != nil {
@@ -2638,4 +2692,30 @@ func sessionQueryParam(v string) string {
 		return "work_session_id"
 	}
 	return "session_id"
+}
+
+// displayErrorClassLine prints the Spec 113-c call-error taxonomy of a failed
+// tool call as one "Error class" line: "<class> (fault: <domain>[, HTTP <n>])".
+// Prints nothing for a record that carries no class (a success, or a record
+// written before Spec 113).
+func displayErrorClassLine(activity map[string]interface{}) {
+	class := getStringField(activity, "error_class")
+	if class == "" {
+		return
+	}
+	detail := ""
+	if domain := getStringField(activity, "fault_domain"); domain != "" {
+		detail = "fault: " + domain
+	}
+	if status := getIntField(activity, "upstream_http_status"); status > 0 {
+		if detail != "" {
+			detail += ", "
+		}
+		detail += fmt.Sprintf("HTTP %d", status)
+	}
+	if detail == "" {
+		fmt.Printf("Error class:  %s\n", class)
+		return
+	}
+	fmt.Printf("Error class:  %s (%s)\n", class, detail)
 }

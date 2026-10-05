@@ -574,6 +574,11 @@ func (s *ActivityService) RecordToolCallRejected(evt Event) {
 		Timestamp:    evt.Timestamp,
 		RequestID:    getStringPayload(evt.Payload, "request_id"),
 		Metadata:     metadata,
+		// Spec 113-c FR-041: a limiter shed is mcpproxy's own refusal; nothing
+		// reached the upstream. Same values callerr.Classify gives a
+		// limiter.LimitError.
+		ErrorClass:  "proxy_policy",
+		FaultDomain: "proxy",
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -692,6 +697,10 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
 		ResponseBytes:     responseBytes,
+		// Spec 113-c FR-044: call-error taxonomy (empty on success).
+		ErrorClass:         getStringPayload(evt.Payload, payloadKeyErrorClass),
+		FaultDomain:        getStringPayload(evt.Payload, payloadKeyFaultDomain),
+		UpstreamHTTPStatus: int(getInt64Payload(evt.Payload, payloadKeyUpstreamHTTPStatus)),
 	}
 	// Spec 108 FR-029: the profile/client/token in effect when the call ran.
 	applyAttribution(record, attributionFromPayload(evt.Payload))

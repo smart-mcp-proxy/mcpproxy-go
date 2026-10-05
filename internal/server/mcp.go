@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
@@ -882,7 +883,39 @@ func (p *MCPProxyServer) emitActivityToolCallCompleted(ctx context.Context, serv
 func (p *MCPProxyServer) emitActivityToolCallCompletedWithBlockReason(ctx context.Context, serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID, blockReason string) {
 	p.auditToolCallFromStatus(ctx, status, durationMs, requestBytes, responseBytes)
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID, blockReason, p.activityAttribution(ctx, sessionID))
+		p.mainServer.runtime.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID, blockReason, p.activityAttribution(ctx, sessionID), activityCallOutcome(ctx, status))
+	}
+}
+
+// activityCallOutcome is the call-error taxonomy the completion funnel stamps
+// on a record (Spec 113-c FR-044). Only failed completions carry one: a
+// dispatch path notes its outcome on ctx (callerr.Observe after the upstream
+// call, callerr.NoteOutcome for pre-dispatch refusals). An error completion no
+// path classified is mcpproxy's own failure (proxy_internal); a "blocked"
+// completion is a profile policy refusal (proxy_policy). Success and every
+// other status carry none, so those records are unchanged (FR-048: status is
+// never rewritten).
+func activityCallOutcome(ctx context.Context, status string) runtime.ActivityCallOutcome {
+	var o callerr.Outcome
+	noted := false
+	switch status {
+	case storage.ActivityStatusError:
+		o, noted = callerr.OutcomeFrom(ctx)
+		if !noted {
+			o = callerr.InternalOutcome()
+		}
+	case storage.ActivityStatusBlocked:
+		o, noted = callerr.OutcomeFrom(ctx)
+		if !noted {
+			o = callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy}
+		}
+	default:
+		return runtime.ActivityCallOutcome{}
+	}
+	return runtime.ActivityCallOutcome{
+		ErrorClass:         string(o.Class),
+		FaultDomain:        string(o.Domain),
+		UpstreamHTTPStatus: o.HTTPStatus,
 	}
 }
 
@@ -3142,6 +3175,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			}
 			errMsg := fmt.Sprintf("invalid arguments for %s: %s", toolName, detail)
 			auditNoteErrorClass(ctx, audit.ErrorClassValidation)
+			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
@@ -3165,6 +3199,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -3237,6 +3272,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			intentMap = intent.ToMap()
 		}
 		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+		callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 		p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
@@ -3253,7 +3289,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
+	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
+	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
@@ -3574,6 +3612,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}()
 
+	// Spec 113-c: the legacy call_tool path installs no audit attempt, so it
+	// installs the call-classification note itself.
+	ctx = callerr.WithNote(ctx)
+
 	toolName, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
@@ -3747,6 +3789,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 			}
 			// Log the early failure to activity (Spec 024)
+			callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -3756,6 +3799,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName))
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
+		callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 		p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
@@ -3772,7 +3816,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	startTime := time.Now()
 	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 	result, err := p.upstreamManager.CallTool(dispatchCtx, toolName, args)
+	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 

@@ -213,6 +213,16 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
 
+	// Call-error taxonomy (Spec 113-c FR-043): what failed and whose fault it
+	// is, stamped by internal/callerr at the dispatch site. All omitempty: a
+	// success record, and every record written before Spec 113, carries none
+	// of them and round-trips byte-identical. Display/filter only; Status is
+	// unchanged (an isError result keeps status "error" and is told apart by
+	// ErrorClass "tool_error", FR-048).
+	ErrorClass         string `json:"error_class,omitempty"`          // network|timeout|http|jsonrpc|tool_error|session_terminated|auth|proxy_policy|proxy_internal|cancelled
+	FaultDomain        string `json:"fault_domain,omitempty"`         // upstream|proxy|client
+	UpstreamHTTPStatus int    `json:"upstream_http_status,omitempty"` // upstream HTTP status when known
+
 	// ParentID is the correlation id of the record that CAUSED this one: today
 	// the code_execution call whose sandbox issued this sub-call. It equals the
 	// parent record's RequestID, so the two directions are one query each:
@@ -415,6 +425,12 @@ type ActivityFilter struct {
 	// ActivityRecord.ParentID) — the sub-calls a code_execution script issued.
 	ParentID string
 
+	// ErrorClass and FaultDomain filter by the call-error taxonomy (Spec 113-c
+	// FR-046): exact match on ActivityRecord.ErrorClass / FaultDomain. Records
+	// written before Spec 113 carry neither and never match a set filter.
+	ErrorClass  string
+	FaultDomain string
+
 	// WorkSessionID filters by a unit of user work (Spec 082) — one client, one
 	// project, across reconnects. This is what the UI's "Session" filter means;
 	// SessionID above is the raw transport connection.
@@ -583,6 +599,14 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 
 	// Check status filter
 	if f.Status != "" && record.Status != f.Status {
+		return false
+	}
+
+	// Check call-error taxonomy filters (Spec 113-c FR-046)
+	if f.ErrorClass != "" && record.ErrorClass != f.ErrorClass {
+		return false
+	}
+	if f.FaultDomain != "" && record.FaultDomain != f.FaultDomain {
 		return false
 	}
 

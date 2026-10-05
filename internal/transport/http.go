@@ -178,9 +178,13 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	if cfg.RetryAfter != nil {
 		rt = NewRetryAfterTransport(rt, cfg.RetryAfter, logger)
 	}
-	// Outermost: strips forwarded headers from everything but the tools/call
+	// Spec 113-c FR-042: the call recorder is the outermost layer, so every
+	// branch (plain, headers, trace, Retry-After, OAuth, SSE) reports the
+	// status of the response to the request carrying a recorder ctx.
+	//
+	// Next in: strips forwarded headers from everything but the tools/call
 	// request itself (Spec 112 FR-008), before tracing sees the request.
-	return newForwardGateTransport(rt)
+	return NewCallRecorderTransport(newForwardGateTransport(rt))
 }
 
 // needsCustomTransport reports whether this config requires us to hand mcp-go

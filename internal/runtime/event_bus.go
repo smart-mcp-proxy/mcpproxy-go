@@ -495,7 +495,38 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // parentID is the correlation id of the parent code_execution call for a
 // sandbox sub-call; empty for every top-level dispatch
 func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
-	r.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutput, parentID, "", ActivityAttribution{})
+	r.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutput, parentID, "", ActivityAttribution{}, ActivityCallOutcome{})
+}
+
+// ActivityCallOutcome is the call-error taxonomy of one failed tool call
+// (Spec 113-c FR-044/FR-045): the classifier's error_class, fault_domain and,
+// when known, the upstream HTTP status. The zero value (a success, or a path
+// that has no classification) leaves the payload exactly as it was before
+// Spec 113.
+type ActivityCallOutcome struct {
+	ErrorClass         string
+	FaultDomain        string
+	UpstreamHTTPStatus int
+}
+
+// Payload keys for the taxonomy; they are also the SSE field names because
+// /events forwards the completion payload verbatim.
+const (
+	payloadKeyErrorClass         = "error_class"
+	payloadKeyFaultDomain        = "fault_domain"
+	payloadKeyUpstreamHTTPStatus = "upstream_http_status"
+)
+
+func (o ActivityCallOutcome) addTo(payload map[string]any) {
+	if o.ErrorClass != "" {
+		payload[payloadKeyErrorClass] = o.ErrorClass
+	}
+	if o.FaultDomain != "" {
+		payload[payloadKeyFaultDomain] = o.FaultDomain
+	}
+	if o.UpstreamHTTPStatus > 0 {
+		payload[payloadKeyUpstreamHTTPStatus] = o.UpstreamHTTPStatus
+	}
 }
 
 // EmitActivityToolCallCompletedAttributed is EmitActivityToolCallCompleted plus
@@ -504,7 +535,9 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 // TestActivityCompletionNeverHardcodesSuccess pins does not move; the zero
 // value leaves the payload exactly as it was before Spec 108. blockReason is
 // the profile.BlockReason of a profile-refused sub-call, "" for everything else.
-func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string, blockReason string, attr ActivityAttribution) {
+// outcome (Spec 113-c) is the call-error taxonomy; it is the LAST parameter for
+// the same reason as attr, and its zero value adds nothing to the payload.
+func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string, blockReason string, attr ActivityAttribution, outcome ActivityCallOutcome) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -583,6 +616,8 @@ func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, 
 	if a := attr.payload(); a != nil {
 		payload[attributionPayloadKey] = a
 	}
+	// Spec 113-c FR-044/FR-045: call-error taxonomy, only on failed calls.
+	outcome.addTo(payload)
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }
 

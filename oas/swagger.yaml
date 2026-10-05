@@ -1498,8 +1498,16 @@ components:
         duration_ms:
           description: Execution duration in milliseconds
           type: integer
+        error_class:
+          description: |-
+            Call-error taxonomy (Spec 113-c FR-045): what failed and whose fault it
+            is. Absent on success and on records written before Spec 113.
+          type: string
         error_message:
           description: Error details if status is "error"
+          type: string
+        fault_domain:
+          description: upstream|proxy|client
           type: string
         has_sensitive_data:
           description: Sensitive data detection fields (Spec 026)
@@ -1577,6 +1585,9 @@ components:
           type: string
         type:
           $ref: '#/components/schemas/contracts.ActivityType'
+        upstream_http_status:
+          description: Upstream HTTP status when known
+          type: integer
         work_session_id:
           description: 'Spec 082: one client, one project, across reconnects'
           type: string
@@ -5317,6 +5328,31 @@ paths:
         name: parent_id
         schema:
           type: string
+      - description: Filter by call-error class (Spec 113-c)
+        in: query
+        name: error_class
+        schema:
+          enum:
+          - network
+          - timeout
+          - http
+          - jsonrpc
+          - tool_error
+          - session_terminated
+          - auth
+          - proxy_policy
+          - proxy_internal
+          - cancelled
+          type: string
+      - description: Filter by fault domain (Spec 113-c)
+        in: query
+        name: fault_domain
+        schema:
+          enum:
+          - upstream
+          - proxy
+          - client
+          type: string
       - description: 'Include successful call_tool_* internal tool calls (default:
           false, excluded to avoid duplicates)'
         in: query
@@ -5560,6 +5596,31 @@ paths:
         in: query
         name: parent_id
         schema:
+          type: string
+      - description: Filter by call-error class (Spec 113-c)
+        in: query
+        name: error_class
+        schema:
+          enum:
+          - network
+          - timeout
+          - http
+          - jsonrpc
+          - tool_error
+          - session_terminated
+          - auth
+          - proxy_policy
+          - proxy_internal
+          - cancelled
+          type: string
+      - description: Filter by fault domain (Spec 113-c)
+        in: query
+        name: fault_domain
+        schema:
+          enum:
+          - upstream
+          - proxy
+          - client
           type: string
       - description: Alias of token (Spec 028)
         in: query

@@ -30,6 +30,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -99,6 +100,11 @@ type auditAttemptSpec struct {
 // installs it on ctx. It is the ONLY constructor of an audit.Attempt in this
 // package. With no sink configured it returns ctx unchanged.
 func (p *MCPProxyServer) installAuditAttempt(ctx context.Context, spec auditAttemptSpec) context.Context {
+	// Spec 113-c: every dispatch path that installs an attempt also gets the
+	// call-classification note, with or without an audit sink, so the
+	// activity funnel can stamp error_class / fault_domain. A fresh note per
+	// attempt: a code_execution sub-call is its own call.
+	ctx = callerr.WithNote(ctx)
 	if p == nil || p.auditSink == nil {
 		return ctx
 	}
@@ -372,6 +378,12 @@ func (p *MCPProxyServer) auditToolCall(ctx context.Context, outcome, reason stri
 	d.toolCallWritten = true
 	noted := d.errClass
 	d.mu.Unlock()
+	// Spec 113-c FR-047: the classifier's outcome is the single source of the
+	// class, so the audit line and the activity record cannot disagree. Paths
+	// that never reached the classifier keep the class they noted themselves.
+	if o, ok := callerr.OutcomeFrom(ctx); ok {
+		noted = o.AuditClass()
+	}
 
 	if durationMs < 0 {
 		durationMs = 0
