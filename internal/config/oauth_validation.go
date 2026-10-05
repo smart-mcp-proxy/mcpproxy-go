@@ -199,7 +199,10 @@ func IsLoopbackHost(host string) bool {
 // validateOAuthEndpointURL checks one override value. The returned message
 // never echoes the value: an operator may have pasted a URL with credentials.
 func validateOAuthEndpointURL(raw string) error {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return fmt.Errorf("must not contain whitespace")
+	}
+	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("is not a valid URL")
 	}
@@ -236,7 +239,7 @@ func ValidateOAuthEndpointOverrides(o *OAuthConfig) []ValidationError {
 	var errs []ValidationError
 	for _, f := range oauthEndpointOverrideFields {
 		v := f.get(o)
-		if strings.TrimSpace(v) == "" {
+		if v == "" {
 			continue
 		}
 		if err := validateOAuthEndpointURL(v); err != nil {
@@ -283,7 +286,7 @@ func NormalizeOAuthEndpointOverrides(cfg *Config) []OAuthEndpointOverrideNormali
 		var dropped []string
 		for _, f := range oauthEndpointOverrideFields {
 			v := f.get(s.OAuth)
-			if strings.TrimSpace(v) == "" {
+			if v == "" {
 				continue
 			}
 			if validateOAuthEndpointURL(v) != nil {

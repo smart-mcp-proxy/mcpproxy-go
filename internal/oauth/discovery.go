@@ -33,6 +33,10 @@ type OAuthServerMetadata struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
 	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+
+	// grantTypesPresent records that the document carried grant_types_supported,
+	// even as an empty list (an empty list is not the same as an absent field).
+	grantTypesPresent bool
 }
 
 // BuildRFC8414MetadataURLs constructs OAuth Authorization Server Metadata URLs per RFC 8414.
@@ -888,7 +892,7 @@ var refreshGrantWarned sync.Map
 // a warning: RFC 8414 says the default is authorization_code + implicit and many
 // servers simply omit it.
 func warnIfNoRefreshGrant(logger *zap.Logger, serverName string, meta *OAuthServerMetadata) {
-	if meta == nil || len(meta.GrantTypesSupported) == 0 {
+	if meta == nil || (len(meta.GrantTypesSupported) == 0 && !meta.grantTypesPresent) {
 		return
 	}
 	for _, g := range meta.GrantTypesSupported {

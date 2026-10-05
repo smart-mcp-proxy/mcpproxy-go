@@ -3,12 +3,14 @@ package oauth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -330,7 +332,10 @@ func (w *OAuthTransportWrapper) isMetadataRequest(req *http.Request) bool {
 func (w *OAuthTransportWrapper) roundTripMetadata(req *http.Request) (*http.Response, error, bool) {
 	ep := w.endpoints
 	doc, err := cachedASMetadataDoc(ep.cache, ep.serverURL, ep.overrides, ep.metadataURL, func() ([]byte, error) {
-		resp, err := w.inner.RoundTrip(req.Clone(req.Context()))
+		// Follow redirects (under the OAuth redirect policy) so a metadata URL
+		// that redirects is fetched, cached and rewritten like a direct one.
+		hc := &http.Client{Transport: w.inner, CheckRedirect: oauthCheckRedirect, Timeout: 30 * time.Second}
+		resp, err := hc.Do(req.Clone(req.Context()))
 		if err != nil {
 			return nil, err
 		}
@@ -364,7 +369,22 @@ func (w *OAuthTransportWrapper) roundTripMetadata(req *http.Request) (*http.Resp
 			w.learnFromDoc(m)
 		}
 	default:
-		return nil, nil, false
+		// Unreachable and nothing to synthesize from. The failure is cached for
+		// 30s by the discovery cache, so answer it from the cache too instead
+		// of re-fetching: a status failure replays its status code, a
+		// transport failure replays the error.
+		var st errHTTPStatus
+		if errors.As(err, &st) {
+			return &http.Response{
+				Status:     strconv.Itoa(int(st)) + " " + http.StatusText(int(st)),
+				StatusCode: int(st),
+				Proto:      "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+				Header:  make(http.Header),
+				Body:    io.NopCloser(bytes.NewReader(nil)),
+				Request: req,
+			}, nil, true
+		}
+		return nil, err, true
 	}
 
 	h := make(http.Header)

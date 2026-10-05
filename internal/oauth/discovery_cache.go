@@ -79,9 +79,10 @@ type discoveryEntry struct {
 }
 
 type discoveryFlight struct {
-	done chan struct{}
-	val  any
-	err  error
+	serverURL string
+	done      chan struct{}
+	val       any
+	err       error
 }
 
 type discoveryCache struct {
@@ -175,15 +176,19 @@ func (c *discoveryCache) do(key discoveryKey, serverURL string, fn func() (any, 
 		<-fl.done
 		return fl.val, fl.err
 	}
-	fl := &discoveryFlight{done: make(chan struct{})}
+	fl := &discoveryFlight{serverURL: serverURL, done: make(chan struct{})}
 	c.inflight[key] = fl
 	c.mu.Unlock()
 
 	val, ttl, err := fn()
 
 	c.mu.Lock()
-	c.storeLocked(key, serverURL, val, err, ttl)
-	delete(c.inflight, key)
+	// An invalidation that ran while fn was in flight removed this flight: its
+	// result is stale and must not repopulate the cache (waiters still get it).
+	if c.inflight[key] == fl {
+		c.storeLocked(key, serverURL, val, err, ttl)
+		delete(c.inflight, key)
+	}
 	c.mu.Unlock()
 	fl.val, fl.err = val, err
 	close(fl.done)
@@ -194,12 +199,22 @@ func (c *discoveryCache) do(key discoveryKey, serverURL string, fn func() (any, 
 func (c *discoveryCache) invalidateServer(serverURL string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.dropServerLocked(serverURL)
+	delete(c.prmURL, serverURL)
+}
+
+// dropServerLocked removes the cached entries AND the in-flight fetches of a server.
+func (c *discoveryCache) dropServerLocked(serverURL string) {
 	for _, e := range c.entries {
 		if e.serverURL == serverURL {
 			c.removeLocked(e)
 		}
 	}
-	delete(c.prmURL, serverURL)
+	for k, fl := range c.inflight {
+		if fl.serverURL == serverURL {
+			delete(c.inflight, k)
+		}
+	}
 }
 
 // noteResourceMetadataURL records the resource_metadata URL a server advertised.
@@ -215,11 +230,7 @@ func (c *discoveryCache) noteResourceMetadataURL(serverURL, prmURL string) bool 
 	c.mu.Unlock()
 	if seen && prev != prmURL {
 		c.mu.Lock()
-		for _, e := range c.entries {
-			if e.serverURL == serverURL {
-				c.removeLocked(e)
-			}
-		}
+		c.dropServerLocked(serverURL)
 		c.mu.Unlock()
 		return true
 	}
@@ -259,6 +270,10 @@ func parseASMetadataDoc(raw []byte) (*asMetadataDoc, error) {
 	var m OAuthServerMetadata
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(raw, &keys) == nil {
+		_, m.grantTypesPresent = keys["grant_types_supported"]
 	}
 	return &asMetadataDoc{raw: raw, meta: &m}, nil
 }
@@ -336,6 +351,20 @@ func oauthCheckRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// sameOrigin compares scheme, hostname and effective port, so an explicit
+// default port (https://h:443) is the same origin as the bare host.
 func sameOrigin(a, b *url.URL) bool {
-	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+	return originKey(a) == originKey(b)
+}
+
+func originKey(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }

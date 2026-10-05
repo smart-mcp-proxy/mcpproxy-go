@@ -188,6 +188,38 @@ func TestWarnIfNoRefreshGrant(t *testing.T) {
 	warnIfNoRefreshGrant(logger, "srv-d", &OAuthServerMetadata{})
 	warnIfNoRefreshGrant(logger, "srv-e", nil)
 	assert.Equal(t, 2, logs.Len(), "present refresh_token or absent field is not a warning")
+
+	// An explicitly empty list is present, and lacks refresh_token.
+	doc, err := parseASMetadataDoc([]byte(`{"issuer":"https://x","grant_types_supported":[]}`))
+	require.NoError(t, err)
+	warnIfNoRefreshGrant(logger, "srv-f", doc.meta)
+	assert.Equal(t, 3, logs.Len())
+	doc, err = parseASMetadataDoc([]byte(`{"issuer":"https://x"}`))
+	require.NoError(t, err)
+	warnIfNoRefreshGrant(logger, "srv-g", doc.meta)
+	assert.Equal(t, 3, logs.Len(), "an absent field stays silent")
+}
+
+// A 401 advertising a different resource_metadata URL invalidates discovery that
+// was learned through the POST preflight (explicit oauth.scopes skips the HEAD one).
+func TestCreateOAuthConfig_ExplicitScopesStillInvalidatedByNewPRMURL(t *testing.T) {
+	resetDiscoveryStateForTest(t)
+	f := newDiscoveryFixture(t)
+	name := "prm-inval-srv"
+	stopCallbackServer(t, name)
+	store := setupTestStorage(t)
+	sc := f.serverConfig(name, &config.OAuthConfig{Scopes: []string{"custom"}})
+	_, err := createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	require.NoError(t, err)
+	_, err = createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.count("POST /mcp"))
+
+	assert.True(t, globalDiscoveryCache.noteResourceMetadataURL(sc.URL, "https://elsewhere.example/prm"),
+		"the PRM URL the POST preflight used was recorded, so a different advertised one invalidates")
+	_, err = createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	require.NoError(t, err)
+	assert.Equal(t, 2, f.count("POST /mcp"))
 }
 
 func TestCreateOAuthConfig_WarnsOnMissingRefreshGrant(t *testing.T) {
@@ -238,4 +270,23 @@ func TestCreateOAuthConfig_EndpointOverridesSetMetadataURL(t *testing.T) {
 	assert.Equal(t, explicit, cfg.AuthServerMetadataURL)
 	assert.Equal(t, before+1, f.count("HEAD /mcp")+f.count("POST /mcp"),
 		"auth_server_metadata_url replaces the auth-server/metadata discovery requests (only the PRM scope preflight HEAD remains)")
+}
+
+// The live read view masks leaves named *auth*/*token*; echoing such a view back
+// on a write must restore the stored override, not persist the mask.
+func TestUnmaskLiveOAuth_RestoresMaskedEndpointOverrides(t *testing.T) {
+	stored := &config.OAuthConfig{
+		AuthorizationEndpoint: "https://idp.example.com/oauth2/v1/authorize",
+		TokenEndpoint:         "https://idp.example.com/oauth2/v1/exchange",
+		RegistrationEndpoint:  "https://idp.example.com/oauth2/v1/clients",
+		AuthServerMetadataURL: "https://idp.example.com/.well-known/custom",
+	}
+	incoming := &config.OAuthConfig{
+		AuthorizationEndpoint: LiveRedaction.Leaf("authorization_endpoint", stored.AuthorizationEndpoint),
+		TokenEndpoint:         LiveRedaction.Leaf("token_endpoint", stored.TokenEndpoint),
+		RegistrationEndpoint:  LiveRedaction.Leaf("registration_endpoint", stored.RegistrationEndpoint),
+		AuthServerMetadataURL: LiveRedaction.Leaf("auth_server_metadata_url", stored.AuthServerMetadataURL),
+	}
+	require.NoError(t, UnmaskLiveOAuth(incoming, stored))
+	assert.Equal(t, stored, incoming)
 }

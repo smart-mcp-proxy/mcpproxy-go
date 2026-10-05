@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"errors"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,4 +128,43 @@ func TestDiscoveryCache_InvalidateOnDifferentResourceMetadataURL(t *testing.T) {
 	_, _ = cachedDiscover(c, k2, srv, fn)
 	c.invalidateServer(srv)
 	assert.Equal(t, 0, c.len())
+}
+
+func TestDiscoveryCache_InFlightFetchDoesNotRepopulateAfterInvalidation(t *testing.T) {
+	c := newDiscoveryCache(time.Now)
+	srv := "https://s.example/mcp"
+	key := makeDiscoveryKey("k", srv, discoveryOverrides{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cachedDiscover(c, key, srv, func() (string, error) {
+			atomic.AddInt32(&calls, 1)
+			close(started)
+			<-release
+			return "stale", nil
+		})
+	}()
+	<-started
+	c.invalidateServer(srv)
+	// A caller arriving after the invalidation starts a fresh fetch, not joins the stale one.
+	v, err := cachedDiscover(c, key, srv, func() (string, error) { atomic.AddInt32(&calls, 1); return "fresh", nil })
+	require.NoError(t, err)
+	assert.Equal(t, "fresh", v)
+	close(release)
+	<-done
+	v, _ = cachedDiscover(c, key, srv, func() (string, error) { return "unexpected", nil })
+	assert.Equal(t, "fresh", v, "the stale in-flight result must not overwrite the fresh entry")
+	assert.EqualValues(t, 2, calls)
+}
+
+func TestSameOrigin_DefaultPorts(t *testing.T) {
+	u := func(s string) *url.URL { x, _ := url.Parse(s); return x }
+	assert.True(t, sameOrigin(u("https://idp.example/token"), u("https://idp.example:443/exchange")))
+	assert.True(t, sameOrigin(u("http://127.0.0.1/token"), u("http://127.0.0.1:80/x")))
+	assert.True(t, sameOrigin(u("https://IDP.example/token"), u("https://idp.example/x")))
+	assert.False(t, sameOrigin(u("https://idp.example/token"), u("https://idp.example:8443/x")))
+	assert.False(t, sameOrigin(u("https://idp.example/token"), u("http://idp.example/x")))
 }

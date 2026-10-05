@@ -142,3 +142,14 @@ func TestOAuthEndpointOverrides_WriteTimeVsLoadTime(t *testing.T) {
 	assert.Empty(t, NormalizeOAuthEndpointOverrides(cfg), "idempotent")
 	assert.Empty(t, NormalizeOAuthEndpointOverrides(nil))
 }
+
+func TestValidateOAuthEndpointOverrides_WhitespaceIsRejectedNotTrimmed(t *testing.T) {
+	for _, v := range []string{" https://idp.example.com/token", "https://idp.example.com/token ", " ", "\thttps://idp.example.com/token"} {
+		errs := ValidateOAuthEndpointOverrides(&OAuthConfig{TokenEndpoint: v})
+		assert.Len(t, errs, 1, "%q", v)
+	}
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{{Name: "w", URL: "https://x.example/mcp", Protocol: "http", OAuth: &OAuthConfig{AuthServerMetadataURL: " "}}}
+	require.Len(t, NormalizeOAuthEndpointOverrides(cfg), 1)
+	assert.Empty(t, cfg.Servers[0].OAuth.AuthServerMetadataURL)
+}

@@ -258,3 +258,40 @@ func TestWrapper_LogsNeverContainQueryStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapper_FailedMetadataIsFetchedOnceThenReplayed(t *testing.T) {
+	var hits int32
+	as := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		rw.WriteHeader(http.StatusNotFound)
+	}))
+	defer as.Close()
+	metaURL := as.URL + testMetaPath
+	w := newEndpointWrapper(t, http.DefaultTransport, nil, wrapperEndpoints{serverURL: "https://mcp.example.com/mcp", overrides: discoveryOverrides{token: "https://login.example.com/token"}, metadataURL: metaURL})
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest(http.MethodGet, metaURL, nil)
+		resp, err := w.RoundTrip(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	}
+	assert.EqualValues(t, 1, atomic.LoadInt32(&hits), "a failing metadata URL is requested once per failure TTL")
+}
+
+func TestWrapper_RewritesMetadataBehindARedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(testMetaPath, func(rw http.ResponseWriter, r *http.Request) {
+		http.Redirect(rw, r, "/real-meta.json", http.StatusFound)
+	})
+	mux.HandleFunc("/real-meta.json", func(rw http.ResponseWriter, r *http.Request) {
+		_, _ = rw.Write([]byte(`{"issuer":"https://idp.example.com","authorization_endpoint":"https://idp.example.com/a","token_endpoint":"https://idp.example.com/t","scopes_supported":["x"]}`))
+	})
+	as := httptest.NewServer(mux)
+	defer as.Close()
+	ov := discoveryOverrides{token: "https://login.example.com/oauth2/exchange"}
+	w := newEndpointWrapper(t, http.DefaultTransport, nil, wrapperEndpoints{serverURL: "https://mcp.example.com/mcp", overrides: ov, metadataURL: as.URL + testMetaPath})
+	_, doc := getJSON(t, w, as.URL+testMetaPath)
+	assert.Equal(t, ov.token, doc["token_endpoint"], "override applied to a document reached through a redirect")
+	assert.Equal(t, "https://idp.example.com/a", doc["authorization_endpoint"])
+	assert.Equal(t, []any{"x"}, doc["scopes_supported"])
+}

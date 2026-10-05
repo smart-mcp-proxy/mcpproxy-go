@@ -307,7 +307,11 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"oauth.token_url": MaskDecisionRefuse,
 
 	// Spec 113-b discovery overrides: https-or-loopback URLs validated at write
-	// time to carry no userinfo, query or fragment, so they hold no credential.
+	// time to carry no userinfo, query or fragment, so they hold no credential
+	// and the typed projection publishes them as-is (the Web UI shows them).
+	// The generic live read view's name rule still masks any leaf whose NAME
+	// contains "auth" or "token", so UnmaskLiveOAuth also reverts an echoed mask
+	// per field name; a read-modify-write never persists the mask.
 	"oauth.authorization_endpoint":   MaskDecisionNotSecret,
 	"oauth.token_endpoint":           MaskDecisionNotSecret,
 	"oauth.registration_endpoint":    MaskDecisionNotSecret,

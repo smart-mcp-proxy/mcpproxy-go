@@ -2116,42 +2116,53 @@ type metadataPreflight struct {
 // preflightMetadataURL finds the working AS metadata URL (and its document) for
 // the configured server, once per cache key.
 func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
-	res, err := cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("metadata-url", serverConfig.URL, ov), serverConfig.URL,
-		func() (metadataPreflight, error) {
-			// First, try to discover the auth server URL from Protected Resource Metadata
-			// This is necessary for servers like Smithery that use separate domains
-			authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
-				return cachedPRM(serverConfig.URL, ov, prmURL, 5*time.Second)
-			})
-			urlToUse := serverConfig.URL
-			if authServerURL != "" {
-				urlToUse = authServerURL
-				logger.Info("Using discovered auth server URL for metadata discovery",
-					zap.String("server", serverConfig.Name),
-					zap.String("mcp_url", logSafeURL(serverConfig.URL)),
-					zap.String("auth_server_url", logSafeURL(authServerURL)))
-			}
-
-			// Now find the working metadata URL using the auth server URL (or server URL as fallback)
-			workingURL, doc, err := findWorkingMetadataDoc(urlToUse, 10*time.Second)
-			if err != nil {
-				logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
-					zap.String("server", serverConfig.Name),
-					zap.String("url_tried", logSafeURL(urlToUse)),
-					logSafeErrorField(err))
-				return metadataPreflight{}, err
-			}
-			// Seed the document cache so mcp-go's own metadata GET (served by the
-			// transport wrapper) needs no second request.
-			globalDiscoveryCache.store(asDocKey(serverConfig.URL, ov, workingURL), serverConfig.URL, doc, nil, 0)
-			logger.Info("Using validated OAuth metadata URL",
-				zap.String("server", serverConfig.Name),
-				zap.String("metadata_url", logSafeURL(workingURL)))
-			return metadataPreflight{url: workingURL, doc: doc}, nil
+	key := makeDiscoveryKey("metadata-url", serverConfig.URL, ov)
+	v, err := globalDiscoveryCache.do(key, serverConfig.URL, func() (any, time.Duration, error) {
+		// First, try to discover the auth server URL from Protected Resource Metadata
+		// This is necessary for servers like Smithery that use separate domains
+		authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
+			// Record the advertised PRM URL so a later 401 that advertises a
+			// different one invalidates this result (FR-026).
+			globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
+			return cachedPRM(serverConfig.URL, ov, prmURL, 5*time.Second)
 		})
+		urlToUse := serverConfig.URL
+		if authServerURL != "" {
+			urlToUse = authServerURL
+			logger.Info("Using discovered auth server URL for metadata discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("mcp_url", logSafeURL(serverConfig.URL)),
+				zap.String("auth_server_url", logSafeURL(authServerURL)))
+		}
+
+		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
+		workingURL, doc, err := findWorkingMetadataDoc(urlToUse, 10*time.Second)
+		if err != nil {
+			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("url_tried", logSafeURL(urlToUse)),
+				logSafeErrorField(err))
+			return nil, 0, err
+		}
+		// Seed the document cache so mcp-go's own metadata GET (served by the
+		// transport wrapper) needs no second request.
+		globalDiscoveryCache.store(asDocKey(serverConfig.URL, ov, workingURL), serverConfig.URL, doc, nil, 0)
+		logger.Info("Using validated OAuth metadata URL",
+			zap.String("server", serverConfig.Name),
+			zap.String("metadata_url", logSafeURL(workingURL)))
+		// When the PRM step yielded no authorization server the result came from
+		// the fallback on the MCP origin; that may be a transient PRM failure, so
+		// keep it only for the failure TTL instead of pinning it for an hour.
+		ttl := time.Duration(0)
+		if authServerURL == "" {
+			ttl = discoveryFailureTTL
+		}
+		return metadataPreflight{url: workingURL, doc: doc}, ttl, nil
+	})
 	if err != nil {
 		return "", nil
 	}
+	res, _ := v.(metadataPreflight)
 	return res.url, res.doc
 }
 
