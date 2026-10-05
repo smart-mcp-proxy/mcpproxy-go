@@ -981,6 +981,8 @@ export interface EffectiveToolsResult {
   counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
   // Administrators only: classify entries for annotated or missing tools.
   stale_classifications?: string[];
+  // Administrators only: why each stale entry no longer applies ("annotated" or "missing").
+  stale_classification_reasons?: Record<string, string>;
 }
 
 // GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.
