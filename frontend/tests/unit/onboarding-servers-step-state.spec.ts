@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { serversStepView, awaitingReviewSentence, importSummary } from '@/utils/onboardingServersStep'
+import { serversStepView, awaitingReviewSentence, importSummary, countImportedStillQuarantined } from '@/utils/onboardingServersStep'
 
 // Spec 109 US7-4 / FR-043 (fix-usertest-web T200): one completion state after
 // an import, and copy that reads as a sentence.
@@ -54,5 +54,15 @@ describe('importSummary', () => {
   })
   it('says so when nothing was imported', () => {
     expect(importSummary({ imported: 0, skipped: [] })).toBe('No servers imported')
+  })
+})
+
+describe('countImportedStillQuarantined (#1466)', () => {
+  it('counts only the imported names that are still quarantined', () => {
+    expect(countImportedStillQuarantined(['a', 'b', 'c'], ['b', 'x', 'y'])).toBe(1)
+  })
+  it('is zero when the imports were not quarantined', () => {
+    expect(countImportedStillQuarantined(['a', 'b'], ['x', 'y'])).toBe(0)
+    expect(countImportedStillQuarantined([], ['x'])).toBe(0)
   })
 })

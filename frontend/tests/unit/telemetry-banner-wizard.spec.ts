@@ -51,6 +51,18 @@ describe('TelemetryBanner (Spec 109-b FR-044)', () => {
     expect(wrapper.find('[data-test="telemetry-banner"]').exists()).toBe(true)
   })
 
+  it('reloads the telemetry state when the window regains focus and stops after unmount (#1466)', async () => {
+    const store = useOnboardingStore()
+    const load = vi.spyOn(store, 'loadTelemetryState').mockResolvedValue(undefined as never)
+    const wrapper = await mountBanner()
+    expect(load).toHaveBeenCalledTimes(1)
+    window.dispatchEvent(new Event('focus'))
+    expect(load).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+    window.dispatchEvent(new Event('focus'))
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
   it('does not render while the wizard is open', async () => {
     const store = useOnboardingStore()
     store.wizardOpen = true

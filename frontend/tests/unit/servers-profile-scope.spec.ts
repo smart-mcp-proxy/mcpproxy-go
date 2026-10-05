@@ -130,6 +130,37 @@ describe('Servers page — profile scope (Spec 109-l)', () => {
     expect(shownNames(wrapper, ServerCard)).toEqual(['filesystem', 'github', 'notion'])
   })
 
+  it('refetches the scoped list when a profile changes elsewhere (#1460)', async () => {
+    const { PROFILES_CHANGED_EVENT } = await import('@/stores/profiles')
+    const { wrapper } = await mountServersAt('/servers?profile=work-readonly')
+    const before = getServers.mock.calls.length
+    window.dispatchEvent(new Event(PROFILES_CHANGED_EVENT))
+    await flushPromises()
+    expect(getServers.mock.calls.length).toBe(before + 1)
+    expect(getServers).toHaveBeenLastCalledWith({ profile: 'work-readonly' })
+    wrapper.unmount()
+    window.dispatchEvent(new Event(PROFILES_CHANGED_EVENT))
+    await flushPromises()
+    expect(getServers.mock.calls.length).toBe(before + 1)
+  })
+
+  it('refetches the scoped list when only a security scan verdict changes (#1460)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { wrapper } = await mountServersAt('/servers?profile=work-readonly')
+      const before = getServers.mock.calls.length
+      const { useServersStore } = await import('@/stores/servers')
+      const store = useServersStore()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      store.servers = store.servers.map(s => (s.name === 'github' ? { ...s, security_scan: { status: 'warnings', finding_counts: { warning: 2 } } } : s)) as any
+      await vi.advanceTimersByTimeAsync(400)
+      expect(getServers.mock.calls.length).toBe(before + 1)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('profile=- renders a disabled chip and is never sent', async () => {
     const { wrapper, ServerCard } = await mountServersAt('/servers?profile=-')
     expect(getServers).not.toHaveBeenCalled()

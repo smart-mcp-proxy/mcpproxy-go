@@ -137,7 +137,7 @@ struct BulkMoveSheet: View {
     @ViewBuilder
     private var profileChoices: some View {
         Text("All servers").tag("")
-        ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+        ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
     }
 }
 
@@ -169,7 +169,7 @@ struct AdminKeyUpgradeSheet: View {
                     get: { model.profile ?? "" },
                     set: { model.profile = $0.isEmpty ? nil : $0 })) {
                     Text("All servers").tag("")
-                    ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                    ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                 }
                 .frame(maxWidth: 320)
                 .disabled(model.phase == .applying)
@@ -311,6 +311,7 @@ struct OtherClientSheet: View {
                 Spacer()
                 Button(model.credential == nil ? "Cancel" : "Done") { finish() }
                     .keyboardShortcut(model.credential == nil ? .cancelAction : .defaultAction)
+                    .disabled(model.isCreating)
                     .accessibilityIdentifier("other-client-done")
                 if model.credential == nil {
                     Button("Create") { Task { await model.create() } }
@@ -321,6 +322,7 @@ struct OtherClientSheet: View {
             }
         }
         .padding(20).frame(width: 500)
+        .interactiveDismissDisabled(model.isCreating)
         .onDisappear { model.dismiss() }
     }
 
@@ -346,7 +348,7 @@ struct OtherClientSheet: View {
         TextField("Display name (optional)", text: $model.displayName).textFieldStyle(.roundedBorder)
         Picker("Profile", selection: $model.profile) {
             Text("All servers").tag("")
-            ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+            ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
         }
         .accessibilityIdentifier("other-client-profile")
         Toggle("Locked — the client cannot switch to another profile", isOn: $model.locked)
@@ -524,6 +526,7 @@ struct ForgetClientSheet: View {
             }
         }
         .padding(20).frame(width: 440)
+        .onAppear { model.clearError() }
     }
 
     @ViewBuilder

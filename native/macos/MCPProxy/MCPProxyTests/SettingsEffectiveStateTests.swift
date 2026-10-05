@@ -94,6 +94,30 @@ final class SettingsEffectiveStateTests: XCTestCase {
                       "a Save must never PATCH an adopted listen")
     }
 
+    func testClearedListenIsNotRefilledByAStatusRefresh() async {
+        let store = makeStore(
+            configJSON: #"{"quarantine_enabled":true}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:18666"}"#)
+        await store.load()
+        store.setValue("listen", "")
+        await store.refreshStatus()
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "",
+                       "a field the user emptied stays empty")
+    }
+
+    func testTypedListenIsNotMarkedCleanWhenTheCoreRestartsOntoIt() async {
+        let store = makeStore(
+            configJSON: #"{"quarantine_enabled":true}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:18666"}"#)
+        await store.load()
+        store.setValue("listen", "127.0.0.1:9999")
+        SettingsStubURLProtocol.bodies["/api/v1/status"] =
+            envelope(#"{"running":true,"listen_addr":"127.0.0.1:9999"}"#)
+        await store.refreshStatus()
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "127.0.0.1:9999")
+        XCTAssertTrue(store.isDirty("listen"), "a typed value stays an edit")
+    }
+
     func testListenNoteNamesTheConnectedCore() async throws {
         let store = makeStore(
             configJSON: #"{"listen":"127.0.0.1:18666"}"#,

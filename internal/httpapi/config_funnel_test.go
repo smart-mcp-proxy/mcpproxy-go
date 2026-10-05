@@ -134,3 +134,25 @@ func TestPatchConfig_FunnelValidationErrorIs400WithField(t *testing.T) {
 	assert.Equal(t, "anonymous_profile", body["field"])
 	assert.Equal(t, `unknown profile "ghost"`, body["error"])
 }
+
+// #1466: with the env telemetry lock active, a case-variant duplicate of the
+// locked key cannot smuggle a change past the lock — the comparison is on the
+// typed value the document resolves to.
+func TestApplyConfig_TelemetryLockRefusesCaseVariantDuplicate(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "1")
+	off := false
+	ctrl := &funnelController{desired: &config.Config{Listen: "127.0.0.1:8080", Telemetry: &config.TelemetryConfig{Enabled: &off}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	docs := []string{
+		`{"telemetry":{"enabled":false},"Telemetry":{"ENABLED":true}}`,
+		`{"Telemetry":{"ENABLED":true},"telemetry":{"anonymous_id":"x"}}`,
+		`{"telemetry":{"anonymous_id":"x"},"Telemetry":{"ENABLED":true}}`,
+	}
+	for _, doc := range docs {
+		w := funnelRequest(t, srv, http.MethodPost, "/api/v1/config/apply", doc)
+		assert.Equal(t, http.StatusUnprocessableEntity, w.Code, "doc %s: %s", doc, w.Body.String())
+	}
+	require.NotNil(t, ctrl.desired.Telemetry.Enabled)
+	assert.False(t, *ctrl.desired.Telemetry.Enabled, "the locked value was not changed")
+}

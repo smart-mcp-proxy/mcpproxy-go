@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -42,6 +43,32 @@ func refuseLockedTelemetryChange(stored, edited *config.Config) error {
 		status: http.StatusUnprocessableEntity,
 		msg: "telemetry.enabled is locked: telemetry is off — disabled by " + string(reason) +
 			" in the environment. Unset it and restart MCPProxy to change this setting.",
+	}
+}
+
+// refuseAmbiguousLockedTelemetryKeys refuses, while the env telemetry lock is
+// active, a raw document that spells the telemetry section more than once
+// under case variants ("telemetry" and "Telemetry"). encoding/json decodes keys
+// case-insensitively, so which spelling wins would depend on map iteration /
+// marshal order; a locked setting must not hinge on that.
+func refuseAmbiguousLockedTelemetryKeys(document map[string]interface{}) error {
+	disabled, reason := telemetry.IsDisabledByEnv()
+	if !disabled {
+		return nil
+	}
+	n := 0
+	for k := range document {
+		if strings.EqualFold(k, "telemetry") {
+			n++
+		}
+	}
+	if n < 2 {
+		return nil
+	}
+	return &configMutationRefusal{
+		status: http.StatusUnprocessableEntity,
+		msg: "telemetry is locked: the document repeats the telemetry section under different key spellings, which is ambiguous while telemetry is disabled by " +
+			string(reason) + " in the environment.",
 	}
 }
 

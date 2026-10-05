@@ -451,7 +451,7 @@ struct ConnectClientView: View {
                 get: { model.profile },
                 set: { model.chooseProfile($0) })) {
                 Text("All servers").tag("")
-                ForEach(model.profiles) { Text($0.displayTitle).tag($0.name) }
+                ForEach(model.profiles) { Text($0.pickerTitle(in: model.profiles)).tag($0.name) }
             }
             .frame(maxWidth: 320)
             .disabled(model.keyless || model.isBusy)

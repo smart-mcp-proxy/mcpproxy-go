@@ -27,7 +27,8 @@ struct ActivityFoldRow: Identifiable, Equatable {
         if lead.type == "tool_quarantine_change" {
             // One record per tool in a server's baseline: report the batch.
             // `status` is the action the core stamps ("approved", "changed").
-            return "\(prefix)\(count) tools \(lead.status)"
+            let verb = lead.status.isEmpty ? "changed" : lead.status
+            return "\(prefix)\(count) tools \(verb)"
         }
         return "\(prefix)\(count) \(lead.type.replacingOccurrences(of: "_", with: " ")) events"
     }

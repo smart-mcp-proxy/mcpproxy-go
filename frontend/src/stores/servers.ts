@@ -205,7 +205,21 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  // Optimistic admin-state flip. The Health tile and badges read health.admin_state
+  // and health.status ahead of enabled/connected, so updating only the booleans
+  // left a stale "Online"/"Healthy" until the SSE refresh landed (#1466).
+  function applyOptimisticAdminState(server: Server, adminState: 'disabled' | 'quarantined') {
+    if (!server.health) return
+    server.health = {
+      ...server.health,
+      admin_state: adminState,
+      status: adminState === 'disabled' ? 'disabled' : 'needs_review',
+      usable: false,
+    }
+  }
+
   async function disableServer(serverName: string) {
+    const prevHealth = servers.value.find(s => s.name === serverName)?.health
     try {
       const server = servers.value.find(s => s.name === serverName)
 
@@ -214,6 +228,7 @@ export const useServersStore = defineStore('servers', () => {
         server.enabled = false
         server.connecting = false
         server.connected = false
+        applyOptimisticAdminState(server, 'disabled')
       }
 
       const response = await api.disableServer(serverName)
@@ -224,6 +239,7 @@ export const useServersStore = defineStore('servers', () => {
         // Revert optimistic update on error
         if (server) {
           server.enabled = true
+          server.health = prevHealth
         }
         throw new Error(response.error || 'Failed to disable server')
       }
@@ -233,6 +249,7 @@ export const useServersStore = defineStore('servers', () => {
       const server = servers.value.find(s => s.name === serverName)
       if (server) {
         server.enabled = true
+        server.health = prevHealth
       }
       throw error
     }
@@ -311,6 +328,7 @@ export const useServersStore = defineStore('servers', () => {
         const server = servers.value.find(s => s.name === serverName)
         if (server) {
           server.quarantined = true
+          applyOptimisticAdminState(server, 'quarantined')
         }
         return true
       } else {
