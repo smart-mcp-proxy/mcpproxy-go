@@ -589,7 +589,11 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	// (Spec 105 G7); a legacy token whose own server list is the only thing
 	// excluding it keeps an empty reason (the Spec 105 out-of-scope row).
 	scopeReason := ""
-	if profileDenies {
+	// Keyed on restrictToAllowed, which only the profile path sets: a
+	// caller-supplied options.allowed_servers with no profile is not a
+	// profile refusal. When a profile IS active the merged (profile ∩ caller)
+	// set cannot say which side excluded the server; it stays profile-labeled.
+	if profileDenies && ec.restrictToAllowed {
 		scopeReason = string(profile.BlockReasonServerScope)
 	}
 	if ec.authInfo != nil && !ec.authInfo.isAdmin() {

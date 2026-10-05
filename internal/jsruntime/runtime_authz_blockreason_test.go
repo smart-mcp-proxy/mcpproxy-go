@@ -54,7 +54,7 @@ func TestAuthzObserver_ProfileRefusalReportsBlockReason(t *testing.T) {
 			// Profile-only caller (admin / anonymous under a profile): the
 			// server is outside the profile's scope.
 			name:       "profile-only server-scope refusal carries profile_server_scope",
-			opts:       ExecutionOptions{AllowedServers: []string{"other"}},
+			opts:       ExecutionOptions{AllowedServers: []string{"other"}, RestrictToAllowed: true},
 			wantCode:   ErrorCodeServerNotAllowed,
 			wantReason: "profile_server_scope",
 			wantMsg:    "server not allowed: s",
@@ -70,12 +70,22 @@ func TestAuthzObserver_ProfileRefusalReportsBlockReason(t *testing.T) {
 			// Token holder whose profile excludes the server.
 			name: "agent token under a profile carries profile_server_scope",
 			opts: ExecutionOptions{
-				AllowedServers: []string{"other"},
-				AuthContext:    &AuthInfo{Type: "agent", AgentName: "a", AllowedServers: []string{"s", "other"}, Permissions: []string{"read"}},
+				AllowedServers:    []string{"other"},
+				RestrictToAllowed: true,
+				AuthContext:       &AuthInfo{Type: "agent", AgentName: "a", AllowedServers: []string{"s", "other"}, Permissions: []string{"read"}},
 			},
 			wantCode:   ErrorCodeAccessDenied,
 			wantReason: "profile_server_scope",
 			wantMsg:    "token does not have access to server 's'",
+		},
+		{
+			// Caller-supplied options.allowed_servers with NO profile
+			// (RestrictToAllowed false): no profile excluded the server.
+			name:       "caller allowed_servers without a profile carries no reason",
+			opts:       ExecutionOptions{AllowedServers: []string{"other"}},
+			wantCode:   ErrorCodeServerNotAllowed,
+			wantReason: "",
+			wantMsg:    "server not allowed: s",
 		},
 		{
 			// Spec 105 out-of-scope row: only the token's own list excludes
