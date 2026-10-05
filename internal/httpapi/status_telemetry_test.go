@@ -105,3 +105,14 @@ func TestStatusTelemetry_SocketCallerIsServed(t *testing.T) {
 	require.True(t, ok, "socket/tray caller must be served the telemetry block")
 	assert.Equal(t, "env", block["source"])
 }
+
+// Parity row 29a: GET /api/v1/status names the running listen address, which
+// Settings (macOS) and `mcpproxy status` render.
+func TestStatus_ReportsListenAddr(t *testing.T) {
+	setStatusTelemetryEnv(t, "")
+	srv, _ := statusTelemetryServer(t, nil)
+
+	rec := scopeGet(t, srv, "/api/v1/status", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, ":8080", scopeDecodeData(t, rec)["listen_addr"])
+}
