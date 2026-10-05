@@ -68,7 +68,4 @@ func TestClassify_StrippedCancelNeedsDoneCallerContext(t *testing.T) {
 
 	counted, failed, _ := Classify(context.Background(), nil, err)
 	assert.True(t, counted && failed, "live caller ctx: an upstream error that mentions cancellation is a failure")
-
-	counted, failed, _ = Classify(nil, nil, err) //nolint:staticcheck // nil ctx is documented as allowed
-	assert.True(t, counted && failed)
 }

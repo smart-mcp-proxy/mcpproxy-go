@@ -1803,7 +1803,7 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 // RecordClientCallOutcome, which also refuses to resurrect the window of a
 // server that was removed while the call was in flight.
 func (m *Manager) RecordCallOutcome(server string, result *mcp.CallToolResult, err error) {
-	counted, failed, kind := callstats.Classify(nil, result, err)
+	counted, failed, kind := callstats.Classify(context.Background(), result, err)
 	if !counted {
 		return
 	}
