@@ -134,13 +134,8 @@ func (c *discoveryCache) lookupLocked(key discoveryKey) (any, bool, error) {
 	return e.val, true, e.err
 }
 
-// store records a result. ttl <= 0 selects the default for success/failure.
-func (c *discoveryCache) store(key discoveryKey, serverURL string, val any, err error, ttl time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.storeLocked(key, serverURL, val, err, ttl)
-}
-
+// storeLocked records a result; c.mu must be held. ttl <= 0 selects the
+// default for success/failure.
 func (c *discoveryCache) storeLocked(key discoveryKey, serverURL string, val any, err error, ttl time.Duration) {
 	if ttl <= 0 {
 		ttl = discoverySuccessTTL
