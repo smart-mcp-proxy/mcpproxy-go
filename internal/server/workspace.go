@@ -71,26 +71,10 @@ func fetchWorkspaceRoot(ctx context.Context, srv *mcpserver.MCPServer, store *Se
 	// client answers, and its context dies with it.
 	base := context.WithoutCancel(ctx)
 
-	var result *mcp.ListRootsResult
-	var err error
-	for attempt := 1; attempt <= workspaceFetchAttempts; attempt++ {
-		// Stop if the client went away mid-fetch — no point asking a ghost, and
-		// no point holding a goroutine open for it.
-		if store.GetSession(sessionID) == nil {
-			return
-		}
-
-		fetchCtx, cancel := context.WithTimeout(base, workspaceFetchTimeout)
-		result, err = srv.RequestRoots(fetchCtx, mcp.ListRootsRequest{})
-		cancel()
-
-		if err == nil && result != nil && len(result.Roots) > 0 {
-			break
-		}
-		if attempt < workspaceFetchAttempts {
-			time.Sleep(workspaceFetchRetryDelay)
-		}
-	}
+	result, err := fetchRootsWithRetry(base, store, sessionID, workspaceFetchRetryDelay,
+		func(fetchCtx context.Context) (*mcp.ListRootsResult, error) {
+			return srv.RequestRoots(fetchCtx, mcp.ListRootsRequest{})
+		})
 
 	if err != nil {
 		// Entirely expected for clients that do not support roots (measured:
@@ -119,6 +103,43 @@ func fetchWorkspaceRoot(ctx context.Context, srv *mcpserver.MCPServer, store *Se
 		zap.String("workspace", workspaceDisplayName(root)),
 		zap.Int("roots_reported", len(result.Roots)),
 	)
+}
+
+// fetchRootsWithRetry runs request up to workspaceFetchAttempts times, stopping
+// early on a non-empty answer or once the session is gone.
+//
+// "Gone" includes soft-closed: RemoveSession keeps the entry (marked closed) for
+// closedSessionTTL, so a plain GetSession()==nil test would keep asking a
+// disconnected client for the rest of the retry budget. A session reopened on
+// the same id is open again and keeps fetching.
+func fetchRootsWithRetry(
+	base context.Context,
+	store *SessionStore,
+	sessionID string,
+	retryDelay time.Duration,
+	request func(context.Context) (*mcp.ListRootsResult, error),
+) (*mcp.ListRootsResult, error) {
+	var result *mcp.ListRootsResult
+	var err error
+	for attempt := 1; attempt <= workspaceFetchAttempts; attempt++ {
+		// Stop if the client went away mid-fetch — no point asking a ghost, and
+		// no point holding a goroutine open for it.
+		if info := store.GetSession(sessionID); info == nil || info.closed {
+			return result, err
+		}
+
+		fetchCtx, cancel := context.WithTimeout(base, workspaceFetchTimeout)
+		result, err = request(fetchCtx)
+		cancel()
+
+		if err == nil && result != nil && len(result.Roots) > 0 {
+			break
+		}
+		if attempt < workspaceFetchAttempts {
+			time.Sleep(retryDelay)
+		}
+	}
+	return result, err
 }
 
 // principalFromContext identifies who is making the request, for work-session
