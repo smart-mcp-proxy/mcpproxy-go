@@ -70,7 +70,6 @@ import { useProfilesStore } from '@/stores/profiles'
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import { CONNECT_CLIENT_EVENT } from '@/navigation/navModel'
 import { STEP_LABELS, describeError, reasonText } from '@/utils/profiles'
-import { profileEditorLink } from '@/utils/profileRoute'
 import type { AccessExplanation, ExplainSubjectQuery } from '@/types/api'
 
 // Spec 108-i T099 / FR-046: "Why can't this client use this tool?" The steps are
@@ -175,22 +174,24 @@ function follow(fix: { action: string; target: string }) {
     case 'allow_in_profile':
     case 'classify_in_profile':
     case 'add_server_to_profile':
-      void router.push(profileEditorLink(fix.target, tool))
+      void router.push(scope.linkTo('profile-editor', { focus: tool }, { name: fix.target }))
       break
     case 'move_client':
+      // Deliberately unscoped: a sticky profile/client filter could hide the
+      // very client row this fix is about to move.
       void router.push({ name: 'clients', query: { focus: fix.target, move: '1' } })
       break
     case 'edit_token':
       void router.push(scope.linkTo('tokens', { token: fix.target }))
       break
     case 'enable_server':
-      void router.push({ name: 'server-detail', params: { serverName: fix.target || server } })
+      void router.push(scope.linkTo('server-detail', {}, { serverName: fix.target || server }))
       break
     case 'approve_tool':
-      void router.push({ name: 'review', query: { server: fix.target || server } })
+      void router.push(scope.linkTo('review', { server: fix.target || server }))
       break
     case 'change_setting':
-      void router.push({ path: '/settings', query: { tab: 'security', focus: fix.target } })
+      void router.push(scope.linkTo('settings', { tab: 'security', focus: fix.target }))
       break
     case 'reconnect_client':
       window.dispatchEvent(new CustomEvent(CONNECT_CLIENT_EVENT, { detail: { client: fix.target } }))
