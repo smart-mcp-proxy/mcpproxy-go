@@ -48,6 +48,10 @@ func TestPinRestartGatedCoversEveryRestartGatedField(t *testing.T) {
 		// the apply as pending a restart, leaving Runtime.Config() readers
 		// disagreeing with the sink actually in effect.
 		"audit_log": func(c *config.Config) { c.AuditLog = &config.AuditLogConfig{Path: "/tmp/two.jsonl"} },
+		// Read once when each MCP server is constructed (mcp.go), never
+		// re-read: a PATCH must report requires_restart, not applied.
+		"enable_prompts": func(c *config.Config) { c.EnablePrompts = !c.EnablePrompts },
+		"instructions":   func(c *config.Config) { c.Instructions = "changed instructions" },
 	}
 
 	for name, mutate := range mutations {
