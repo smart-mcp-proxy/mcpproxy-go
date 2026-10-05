@@ -12,7 +12,7 @@ import (
 )
 
 // Classify decides how one dispatched tool call affects the failure-rate
-// window. It is a denylist over typed proxy-side outcomes (Spec 113 FR-061):
+// window. ctx is the caller's dispatch context (nil is allowed). It is a denylist over typed proxy-side outcomes (Spec 113 FR-061):
 //
 //   - isError:true results are tool-level answers, not transport failures:
 //     uncounted.
@@ -23,7 +23,7 @@ import (
 //
 // Profile/quarantine refusals and argument validation happen before dispatch
 // and never reach this predicate.
-func Classify(result *mcp.CallToolResult, err error) (counted, failed bool, kind Kind) {
+func Classify(ctx context.Context, result *mcp.CallToolResult, err error) (counted, failed bool, kind Kind) {
 	if err == nil {
 		if result != nil && result.IsError {
 			return false, false, KindNone
@@ -38,8 +38,11 @@ func Classify(result *mcp.CallToolResult, err error) (counted, failed bool, kind
 	}
 	msg := strings.ToLower(err.Error())
 	// Some transports (mcp-go SSE) surface a caller cancellation as plain text
-	// with the sentinel stripped; it is still the caller going away.
-	if containsAny(msg, "context canceled", "context cancelled") {
+	// with the sentinel stripped; it is still the caller going away. Only trust
+	// the text when the caller's own context is actually done, otherwise an
+	// upstream JSON-RPC error that merely mentions "context canceled" would be
+	// silently excluded from the failure rate.
+	if ctx != nil && ctx.Err() != nil && containsAny(msg, "context canceled", "context cancelled") {
 		return false, false, KindNone
 	}
 	if isAuthRequired(msg) {

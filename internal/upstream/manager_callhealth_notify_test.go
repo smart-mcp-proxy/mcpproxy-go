@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -143,12 +144,36 @@ func TestManager_RecordClientCallOutcome_IgnoresRemovedClient(t *testing.T) {
 	client, ok := m.GetClient("gone-server")
 	require.True(t, ok)
 
-	m.RecordClientCallOutcome(client, nil, errors.New("connection reset"))
+	m.RecordClientCallOutcome(context.Background(), client, nil, errors.New("connection reset"))
 	calls, _, _ := m.CallStats("gone-server")
 	require.Equal(t, 1, calls)
 
 	m.RemoveServer("gone-server")
-	m.RecordClientCallOutcome(client, nil, errors.New("transport closed"))
+	m.RecordClientCallOutcome(context.Background(), client, nil, errors.New("transport closed"))
 	calls, _, _ = m.CallStats("gone-server")
 	assert.Zero(t, calls, "an in-flight failure after removal must not resurrect the window")
+}
+
+// Reviewer finding (round 1): replacing a client through a changed config must
+// not hand the new endpoint the old client's failure history.
+func TestManager_AddServerConfig_ReplacementDropsWindow(t *testing.T) {
+	serverCfg := limitedServerConfig("swap-server")
+	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
+	m := newConcurrencyManager(t, cfg, serverCfg)
+	client, ok := m.GetClient("swap-server")
+	require.True(t, ok)
+
+	for i := 0; i < 5; i++ {
+		m.RecordClientCallOutcome(context.Background(), client, nil, errors.New("connection reset"))
+	}
+	calls, failures, _ := m.CallStats("swap-server")
+	require.Equal(t, 5, calls)
+	require.Equal(t, 5, failures)
+
+	changed := *serverCfg
+	changed.URL = "http://127.0.0.1:2"
+	require.NoError(t, m.AddServerConfig("swap-server", &changed))
+
+	calls, _, _ = m.CallStats("swap-server")
+	assert.Zero(t, calls, "a replaced client starts with a clean window")
 }

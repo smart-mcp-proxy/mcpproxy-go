@@ -96,9 +96,11 @@ func (m *Manager) noteCallHealth(server string) {
 	if calls > 0 && st.recheck == nil {
 		st.recheck = time.AfterFunc(n.recheckEvery(), func() {
 			n.mu.Lock()
-			if cur := n.servers[server]; cur != nil {
-				cur.recheck = nil
+			if n.servers[server] != st {
+				n.mu.Unlock()
+				return
 			}
+			st.recheck = nil
 			n.mu.Unlock()
 			m.noteCallHealth(server)
 		})
@@ -126,10 +128,14 @@ func (m *Manager) noteCallHealth(server string) {
 	if st.notifyTimer == nil {
 		st.notifyTimer = time.AfterFunc(wait, func() {
 			n.mu.Lock()
-			if cur := n.servers[server]; cur != nil {
-				cur.notifyTimer = nil
-				cur.lastNotify = time.Now()
+			// A timer stopped by dropCallHealth/shutdown may already be
+			// running; it must not touch or notify for a replacement state.
+			if n.servers[server] != st {
+				n.mu.Unlock()
+				return
 			}
+			st.notifyTimer = nil
+			st.lastNotify = time.Now()
 			n.mu.Unlock()
 			observer(server)
 		})

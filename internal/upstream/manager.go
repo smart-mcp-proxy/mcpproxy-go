@@ -468,6 +468,16 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Spec 113-d FR-066: the replacement connects to a different
+			// endpoint/command/credentials, so the old client's failure
+			// history must not degrade it. Same critical section as the
+			// delete, mirroring RemoveServer.
+			statsName := id
+			if existingConfig != nil && existingConfig.Name != "" {
+				statsName = existingConfig.Name
+			}
+			m.callStats.Drop(statsName)
+			m.dropCallHealth(statsName)
 			// Save reference to disconnect outside lock
 			clientToDisconnect = existingClient
 		} else {
@@ -1724,7 +1734,7 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 	result, err := dispatch(ctx, actualToolName, args)
 	// Spec 113-d FR-062: record the raw dispatch outcome before any error
 	// enrichment below. Pre-dispatch refusals above never reach this line.
-	m.RecordClientCallOutcome(targetClient, result, err)
+	m.RecordClientCallOutcome(ctx, targetClient, result, err)
 
 	m.logger.Debug("CallTool: client.CallTool returned",
 		zap.String("server_name", serverName),
@@ -1793,7 +1803,7 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 // RecordClientCallOutcome, which also refuses to resurrect the window of a
 // server that was removed while the call was in flight.
 func (m *Manager) RecordCallOutcome(server string, result *mcp.CallToolResult, err error) {
-	counted, failed, kind := callstats.Classify(result, err)
+	counted, failed, kind := callstats.Classify(nil, result, err)
 	if !counted {
 		return
 	}
@@ -1811,11 +1821,11 @@ func (m *Manager) RecordCallOutcome(server string, result *mcp.CallToolResult, e
 // inherit. The check and the Record happen under the manager read lock, which
 // RemoveServer's delete takes for writing, so either the record lands before
 // the drop (and is wiped by it) or the check fails.
-func (m *Manager) RecordClientCallOutcome(client *managed.Client, result *mcp.CallToolResult, err error) {
+func (m *Manager) RecordClientCallOutcome(ctx context.Context, client *managed.Client, result *mcp.CallToolResult, err error) {
 	if client == nil {
 		return
 	}
-	counted, failed, kind := callstats.Classify(result, err)
+	counted, failed, kind := callstats.Classify(ctx, result, err)
 	if !counted {
 		return
 	}

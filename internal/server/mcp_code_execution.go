@@ -1040,7 +1040,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// upstream.Manager.callTool, so it feeds the failure-rate window itself.
 	// Recorded before sanitisation so a policy block of the RESULT is not
 	// mistaken for an upstream failure.
-	u.upstreamManager.RecordClientCallOutcome(client, result, err)
+	u.upstreamManager.RecordClientCallOutcome(ctx, client, result, err)
 	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
 		duration := time.Since(startTime)
