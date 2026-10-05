@@ -354,9 +354,17 @@ const pageRouteNames: Partial<Record<PageId, string>> = {
 }
 
 /** The page a route name belongs to (the inverse of the map above), or
- * undefined for a route outside the contract (Settings, a server detail...). */
-export function pageIdForRouteName(name: unknown): PageId | undefined {
+ * undefined for a route outside the contract (Settings, a server detail...).
+ * `tab` is the route's `?tab=` value, which splits the Clients route. */
+export function pageIdForRouteName(name: unknown, tab?: unknown): PageId | undefined {
   if (typeof name !== 'string') return undefined
+  // The Clients route hosts three tabs: the agent-tokens tab is the 'tokens'
+  // page, and the endpoint tab is outside the scope contract.
+  if (name === pageRouteNames.clients) {
+    const value = Array.isArray(tab) ? tab[0] : tab
+    if (value === 'tokens') return 'tokens'
+    if (value === 'endpoint') return undefined
+  }
   for (const [page, routeName] of Object.entries(pageRouteNames)) {
     if (routeName === name) return page as PageId
   }

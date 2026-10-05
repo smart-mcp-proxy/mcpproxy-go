@@ -88,6 +88,16 @@ export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
     if (onClose && isOpen()) onClose()
   }
 
+  // Escape followed at once by a reopen (Escape, then Ctrl+K): the keydown
+  // already closed the dialog and the reopen made `isOpen()` true again before
+  // the post-flush watcher ran, but the browser's `cancel` for that Escape is
+  // still queued and would otherwise close the freshly reopened dialog. A
+  // synchronous watcher records when state last went closed so such a stale
+  // `cancel` can be recognised and ignored.
+  const STALE_CANCEL_MS = 100
+  let closedAt = Number.NEGATIVE_INFINITY
+  watch(isOpen, (open) => { if (!open) closedAt = Date.now() }, { flush: 'sync' })
+
   function handleCancel(event: Event) {
     // Always block the browser's own Escape-triggered close, so the actual
     // `el.close()` only ever happens via the `watch(isOpen, sync)` below,
@@ -98,6 +108,8 @@ export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
     // act on the same keypress would double-handle it and, for a dialog
     // whose `close()` is currently a no-op, close it anyway.
     event.preventDefault()
+
+    if (Date.now() - closedAt < STALE_CANCEL_MS) return
 
     // Escape's native `cancel` is a browser-queued task (per the HTML
     // spec), so it always runs after a synchronous `keydown` listener such
