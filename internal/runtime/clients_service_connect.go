@@ -31,6 +31,13 @@ type pendingBinding struct {
 	mode string
 }
 
+// connectClaim is one in-flight connect: when it started and the token that
+// proves ownership to Release, Commit and Abort.
+type connectClaim struct {
+	started time.Time
+	token   string
+}
+
 // ConnectMinter adapts the service to connect.CredentialMinter.
 func (s *ClientsService) ConnectMinter() connect.CredentialMinter { return connectMinter{s: s} }
 
@@ -59,18 +66,38 @@ const connectInFlightTTL = 2 * time.Minute
 // connectInFlight reports whether a connect of clientID holds a live claim
 // (s.mu held).
 func (s *ClientsService) connectInFlight(clientID string) bool {
-	started, ok := s.inflight[clientID]
-	return ok && s.now().Sub(started) < connectInFlightTTL
+	claim, ok := s.inflight[clientID]
+	return ok && s.now().Sub(claim.started) < connectInFlightTTL
 }
 
-func (s *ClientsService) claimConnect(clientID string) {
+// claimConnect takes the in-flight claim for clientID and returns the
+// per-connect token that identifies it. Release, Commit and Abort act only
+// while the claim still carries their token, so a connect whose claim expired
+// (connectInFlightTTL) and was taken over by another connect can never release
+// or roll back the newer connect's state.
+func (s *ClientsService) claimConnect(clientID string) string {
 	if s.inflight == nil {
-		s.inflight = map[string]time.Time{}
+		s.inflight = map[string]connectClaim{}
 	}
-	s.inflight[clientID] = s.now()
+	s.claimSeq++
+	token := fmt.Sprintf("%s-%d", clientID, s.claimSeq)
+	s.inflight[clientID] = connectClaim{started: s.now(), token: token}
+	return token
 }
 
-func (s *ClientsService) releaseConnect(clientID string) { delete(s.inflight, clientID) }
+// ownsClaim reports whether token is the token of clientID's current claim
+// (s.mu held).
+func (s *ClientsService) ownsClaim(clientID, token string) bool {
+	claim, ok := s.inflight[clientID]
+	return ok && token != "" && claim.token == token
+}
+
+// releaseConnect drops the claim only when token still owns it (s.mu held).
+func (s *ClientsService) releaseConnect(clientID, token string) {
+	if s.ownsClaim(clientID, token) {
+		delete(s.inflight, clientID)
+	}
+}
 
 // resolveBindingLocked is THE rule for the binding a connect applies, shared by
 // the write (issueLocked) and the reconnect preview (PreviewBinding) so the two
@@ -177,7 +204,7 @@ func (m connectMinter) Issue(clientID string, intent connect.CredentialIntent) (
 	if err != nil {
 		return nil, err
 	}
-	m.s.claimConnect(clientID)
+	issued.ClaimToken = m.s.claimConnect(clientID)
 	return issued, nil
 }
 
@@ -212,10 +239,12 @@ func (m connectMinter) PreviewBinding(clientID string, intent connect.Credential
 
 // Release implements connect.CredentialMinter: it ends the in-flight claim
 // without committing or aborting, leaving an ambiguous write to the reconciler.
-func (m connectMinter) Release(clientID string, _ *connect.IssuedCredential) {
+func (m connectMinter) Release(clientID string, issued *connect.IssuedCredential) {
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
-	m.s.releaseConnect(clientID)
+	if issued != nil {
+		m.s.releaseConnect(clientID, issued.ClaimToken)
+	}
 }
 
 // verifyIssuedLocked is Commit's fail-closed check (s.mu held): the secret it
@@ -247,11 +276,17 @@ func (s *ClientsService) verifyIssuedLocked(clientID string, issued *connect.Iss
 }
 
 // Commit implements connect.CredentialMinter.
+//
+// For a rotation the requested binding is applied BEFORE the new secret is
+// finalized (plan D12): a failure or crash between the two steps then leaves
+// the old secret live under the old binding, never the new secret under a
+// stale, possibly wider one. If finalizing fails after the binding moved, the
+// previous binding is restored.
 func (m connectMinter) Commit(clientID string, intent connect.CredentialIntent, issued *connect.IssuedCredential) error {
 	s := m.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	defer s.releaseConnect(clientID)
+	defer s.releaseConnect(clientID, issued.ClaimToken)
 	ctx := context.Background()
 	a := actorOf(intent)
 	alreadyFinal, err := s.verifyIssuedLocked(clientID, issued)
@@ -262,26 +297,50 @@ func (m connectMinter) Commit(clientID string, intent connect.CredentialIntent, 
 		s.recordMint(ctx, a, clientID, issued)
 		return nil
 	}
-	if !alreadyFinal {
-		if _, err := s.finalizeLocked(ctx, a, clientID); err != nil {
-			return err
-		}
-	}
+	var prevPin, prevMode string
+	restore := false
 	if pb, ok := issued.Pending.(pendingBinding); ok {
+		if all, err := s.records(); err == nil {
+			if rec := clientRecord(all, clientID); rec != nil {
+				prevPin, prevMode = rec.ProfilePin, rec.ProfileMode
+			}
+		}
 		mode := pb.mode
 		if _, err := s.setBindingLocked(ctx, a, clientID, pb.pin, &mode); err != nil {
+			return err
+		}
+		restore = !alreadyFinal && (prevPin != pb.pin || prevMode != pb.mode)
+	}
+	if !alreadyFinal {
+		if _, err := s.finalizeLocked(ctx, a, clientID); err != nil {
+			if restore {
+				// Best effort: put the previous binding back so the old secret
+				// is not left under the new, possibly wider, one.
+				_, _, _ = s.store.UpdateClientCredentialBinding(clientID, prevPin, prevMode)
+			}
 			return err
 		}
 	}
 	return nil
 }
 
-// Abort implements connect.CredentialMinter.
+// Abort implements connect.CredentialMinter. It rolls back only while the
+// claim still belongs to this connect AND the pending (or fresh) secret is
+// still the one this connect issued; otherwise another connect has taken over
+// and its credential must survive (CredentialSupersededError).
 func (m connectMinter) Abort(clientID string, intent connect.CredentialIntent, issued *connect.IssuedCredential) error {
 	s := m.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	defer s.releaseConnect(clientID)
+	if !s.ownsClaim(clientID, issued.ClaimToken) {
+		return &CredentialSupersededError{ClientID: clientID}
+	}
+	defer s.releaseConnect(clientID, issued.ClaimToken)
+	if alreadyFinal, err := s.verifyIssuedLocked(clientID, issued); err != nil {
+		return err
+	} else if alreadyFinal {
+		return &CredentialSupersededError{ClientID: clientID}
+	}
 	if issued.Rotating {
 		return s.rollbackLocked(context.Background(), actorOf(intent), clientID)
 	}

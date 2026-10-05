@@ -627,10 +627,10 @@ func parseAPIError(body []byte, statusCode int, operation string) error {
 				// other flag-validation failure.
 				return flagValidationError{fmt.Errorf("failed to %s: %s (field: %s)", operation, errMsg, field)}
 			}
-			return fmt.Errorf("failed to %s: %s", operation, errMsg)
+			return cliRefusalError{fmt.Errorf("failed to %s: %s", operation, errMsg)}
 		}
 	}
-	return fmt.Errorf("failed to %s: HTTP %d: %s", operation, statusCode, string(body))
+	return cliRefusalError{fmt.Errorf("failed to %s: HTTP %d: %s", operation, statusCode, string(body))}
 }
 
 func getMapString(m map[string]interface{}, key string) string {

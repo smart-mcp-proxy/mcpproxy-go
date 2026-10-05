@@ -962,6 +962,14 @@ func applyServeRuntimeFlags(cmd *cobra.Command, cfg *config.Config) {
 // valid-values list happens not to contain "config").
 type flagValidationError struct{ error }
 
+// cliRefusalError marks a refusal reported by the daemon's REST API. Its text
+// is the daemon's, so classifyError must not run the config/permission string
+// heuristics over it (a message mentioning "config" is not a config-file
+// error); it exits 1.
+type cliRefusalError struct{ error }
+
+func (e cliRefusalError) Unwrap() error { return e.error }
+
 func newFlagValidationError(format string, args ...any) error {
 	return flagValidationError{fmt.Errorf(format, args...)}
 }
@@ -974,6 +982,10 @@ func classifyError(err error) int {
 
 	var flagErr flagValidationError
 	if errors.As(err, &flagErr) {
+		return ExitCodeGeneralError
+	}
+	var refusalErr cliRefusalError
+	if errors.As(err, &refusalErr) {
 		return ExitCodeGeneralError
 	}
 
