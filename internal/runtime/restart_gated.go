@@ -60,6 +60,9 @@ func pinRestartGated(live, desired *config.Config) *config.Config {
 	pinned.EnableSocket = live.EnableSocket
 	pinned.DebugSearch = live.DebugSearch
 	pinned.Tokenizer = live.Tokenizer
+	// Read once at MCP server construction (mcp.go), never re-read.
+	pinned.EnablePrompts = live.EnablePrompts
+	pinned.Instructions = live.Instructions
 	// server_edition's restart-pinned subset (enabled, oauth.*, public_url,
 	// session_cookie_secure, session_ttl, bearer_token_ttl,
 	// credential_encryption_key — Spec 107 FR-039 part 2) is bound at login

@@ -534,7 +534,8 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		}
 	}
 	// These are bound once at startup (the unix-socket listener, the tray
-	// endpoint, the search index debug flag, the tokenizer): an edit is saved
+	// endpoint, the search index debug flag, the tokenizer, and the MCP
+	// prompts capability / server instructions read at server construction): an edit is saved
 	// and takes effect on the next start. They are pinned to the live value by
 	// pinRestartGated, like the other restart-gated fields.
 	for _, name := range restartGatedConfigFields {
@@ -595,19 +596,19 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 // adopted into the live config, and reported by its JSON key.
 var undiffedHotConfigFields = []string{
 	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
-	"RequireMCPAuth", "EnablePrompts", "CheckServerRepo", "DockerRecovery",
+	"RequireMCPAuth", "CheckServerRepo", "DockerRecovery",
 	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
 	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
 	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
 	"ActivityMaxResponseSize", "ActivityCleanupIntervalMin",
 	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
 	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
-	"OutputSanitisation", "Telemetry", "Instructions",
+	"OutputSanitisation", "Telemetry",
 	"QuarantineEnabled", "RevealSecretHeaders",
 }
 
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.
-var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer"}
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
 
 func configFieldValue(cfg *config.Config, goName string) interface{} {
 	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()
