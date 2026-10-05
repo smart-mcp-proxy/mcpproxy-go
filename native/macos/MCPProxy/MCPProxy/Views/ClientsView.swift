@@ -563,6 +563,7 @@ struct ClientsView: View {
 /// "Loading clients…" (its `.task` runs once). `@StateObject` keeps one.
 private struct ConnectClientSheetHost: View {
     @StateObject private var model: ConnectClientModel
+    @ObservedObject private var appState: AppState
     let preselect: String?
     let presetProfile: String?
     let onClose: () -> Void
@@ -577,9 +578,11 @@ private struct ConnectClientSheetHost: View {
         self.presetProfile = presetProfile
         self.onClose = onClose
         self.onRoute = onRoute
+        self.appState = appState
     }
 
     var body: some View {
         ConnectClientView(model: model, onClose: onClose, preselect: preselect, presetProfile: presetProfile, onRoute: onRoute)
+            .onChange(of: appState.profiles) { model.refreshProfiles($0) }
     }
 }
