@@ -195,6 +195,18 @@ func (c *discoveryCache) do(key discoveryKey, serverURL string, fn func() (any, 
 	return val, err
 }
 
+// storeIfPresent stores val under key only while guard still has a live entry.
+// A loader seeds a secondary entry with it after its own result was stored; an
+// invalidation in between removed the guard and must win.
+func (c *discoveryCache) storeIfPresent(guard, key discoveryKey, serverURL string, val any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok, _ := c.lookupLocked(guard); !ok {
+		return
+	}
+	c.storeLocked(key, serverURL, val, nil, 0)
+}
+
 // invalidateServer drops every entry (all override combinations) for serverURL.
 func (c *discoveryCache) invalidateServer(serverURL string) {
 	c.mu.Lock()

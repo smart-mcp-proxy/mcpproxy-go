@@ -2144,9 +2144,6 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 				logSafeErrorField(err))
 			return nil, 0, err
 		}
-		// Seed the document cache so mcp-go's own metadata GET (served by the
-		// transport wrapper) needs no second request.
-		globalDiscoveryCache.store(asDocKey(serverConfig.URL, ov, workingURL), serverConfig.URL, doc, nil, 0)
 		logger.Info("Using validated OAuth metadata URL",
 			zap.String("server", serverConfig.Name),
 			zap.String("metadata_url", logSafeURL(workingURL)))
@@ -2163,6 +2160,12 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 		return "", nil
 	}
 	res, _ := v.(metadataPreflight)
+	// Seed the document cache so mcp-go's own metadata GET (served by the
+	// transport wrapper) needs no second request. Guarded by the result entry so
+	// an invalidation that raced the fetch is not undone.
+	if res.doc != nil {
+		globalDiscoveryCache.storeIfPresent(key, asDocKey(serverConfig.URL, ov, res.url), serverConfig.URL, res.doc)
+	}
 	return res.url, res.doc
 }
 
