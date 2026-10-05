@@ -118,13 +118,21 @@ final class ConfigStore: ObservableObject {
     /// every status refresh (a restart onto another address must not leave the
     /// old one in the field), unless the user has typed their own value into it.
     private func adoptRunningListenIfBlank() {
-        guard loaded, let running = runningListenAddr, isBlankValue(configGet(raw, "listen")) else { return }
+        guard loaded, let running = runningListenAddr, isBlankValue(configGet(raw, "listen")),
+              !listenCleared else { return }
         let unedited = isBlankValue(configGet(working, "listen"))
             || (configGet(working, "listen") as? String) == adoptedListen
-        if unedited { configSet(&working, "listen", running) }
+        // A field the user typed into is theirs: leave it, and leave `original`
+        // alone so a typed value equal to the running address stays an edit.
+        guard unedited else { return }
+        configSet(&working, "listen", running)
         configSet(&original, "listen", running)
         adoptedListen = running
     }
+
+    /// The user emptied the Listen field after it was adopted: stay empty
+    /// (never refill) until the next hydrate.
+    private var listenCleared = false
 
     /// The value `adoptRunningListenIfBlank` last put in the field, so a refresh
     /// can tell an untouched field from one the user edited.
@@ -160,6 +168,7 @@ final class ConfigStore: ObservableObject {
     func hydrate(from cfg: [String: Any]) {
         raw = cfg
         adoptedListen = nil
+        listenCleared = false
         let normalized = SettingsCatalog.normalizeDefaults(cfg)
         working = normalized
         original = normalized
@@ -197,6 +206,7 @@ final class ConfigStore: ObservableObject {
     func value(_ key: String) -> Any? { configGet(working, key) }
 
     func setValue(_ key: String, _ value: Any?) {
+        if key == "listen" { listenCleared = adoptedListen != nil && isBlankValue(value) }
         configSet(&working, key, value)
         revision += 1
     }
@@ -217,6 +227,8 @@ final class ConfigStore: ObservableObject {
 
     /// Apply the given keys via PATCH. Returns (requiresRestart, restartReason)
     /// on success; throws on failure (incl. validation errors).
+    func navigate(_ route: AppRoute) { appState.navigate(route) }
+
     func save(_ keys: [String]) async throws -> (requiresRestart: Bool, reason: String?) {
         guard let api = appState.apiClient else {
             throw APIClientError.httpError(statusCode: 0, message: "Not connected to the core.")
@@ -373,6 +385,7 @@ struct ConfigSectionView: View {
     @State private var saving = false
     @State private var savedNote: String?
     @State private var errorNote: String?
+    @State private var guardRefusal: ServiceErrorBody?
     @State private var showConfirm = false
     @State private var confirmMessages: [String] = []
     @State private var confirmInfoOnly = false
@@ -393,6 +406,10 @@ struct ConfigSectionView: View {
                 Divider()
             }
 
+            if let guardRefusal {
+                GuardRefusalView(body: guardRefusal) { route in store.navigate(route) }
+                    .padding(.top, 10)
+            }
             HStack {
                 Group {
                     if let savedNote { Text(savedNote).foregroundColor(.green) }
@@ -402,7 +419,7 @@ struct ConfigSectionView: View {
                 .font(.callout)
                 Spacer()
                 if !dirty.isEmpty {
-                    Button("Discard") { store.revert(dirty); savedNote = nil; errorNote = nil }
+                    Button("Discard") { store.revert(dirty); savedNote = nil; errorNote = nil; guardRefusal = nil }
                         .buttonStyle(.borderless)
                 }
                 Button {
@@ -457,12 +474,15 @@ struct ConfigSectionView: View {
         saving = true
         savedNote = nil
         errorNote = nil
+        guardRefusal = nil
         let keys = dirty
         do {
             let r = try await store.save(keys)
             savedNote = r.requiresRestart
                 ? "Saved — restart required\(r.reason.map { ": \($0)" } ?? "")"
                 : "Saved"
+        } catch APIClientError.service(_, let body) where body.isGuardRefusal {
+            guardRefusal = body
         } catch {
             errorNote = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }

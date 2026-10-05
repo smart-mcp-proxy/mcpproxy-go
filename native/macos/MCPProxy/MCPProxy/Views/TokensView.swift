@@ -254,7 +254,7 @@ struct TokensView: View {
                 token: token,
                 onRevoke: { Task { await revokeToken(token.name) } },
                 onShowActivity: appState.scopeFiltersAvailable
-                    ? { appState.openActivity(with: .forToken(token.name)) }
+                    ? { appState.openActivity(with: filter.linked(.forToken(token.name))) }
                     : nil,
                 onMigrate: { migrating = token }
             )
