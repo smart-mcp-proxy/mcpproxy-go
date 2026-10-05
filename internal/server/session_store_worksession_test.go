@@ -28,7 +28,7 @@ func TestSessionStore_HandshakeOnlyIsNotPersisted(t *testing.T) {
 		"a session that never worked has no work session")
 
 	store.RemoveSession("s1")
-	assert.Nil(t, store.GetSession("s1"))
+	assert.Zero(t, store.Count(), "a soft-closed session is not live")
 }
 
 // GetSession must hand back a COPY. The roots goroutine writes Workspace under

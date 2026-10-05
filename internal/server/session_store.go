@@ -93,20 +93,38 @@ type SessionInfo struct {
 	// initialize so a binding change can send tools/list_changed on the right
 	// instance (Spec 108 FR-026, plan D18). Never persisted or serialised.
 	server *mcpserver.MCPServer
+
+	// closed marks a soft-closed session: the transport unregistered it, but the
+	// entry (client name, workspace, persisted flag, work session) is kept so a
+	// client that re-registers on the same id without a new initialize keeps its
+	// attribution (#1205). Cleared by the next activity or register; evicted
+	// after closedSessionTTL.
+	closed   bool
+	closedAt time.Time
 }
+
+// closedSessionTTL is how long a soft-closed session is retained. It matches the
+// storage inactivity timeout (runtime.backgroundSessionCleanup).
+const closedSessionTTL = 30 * time.Minute
 
 // SessionStore manages MCP session information
 type SessionStore struct {
 	sessions map[string]*SessionInfo
 	// activeProfiles holds the per-session active profile slug selected via the
 	// set_profile MCP tool (Profiles v2 T2). Kept orthogonal to sessions so a
-	// re-initialize (SetSession) never clobbers a live selection. Cleared on
-	// session close (RemoveSession) — covering both the OnUnregisterSession hook
-	// and the background inactivity cleanup, which both call RemoveSession.
+	// re-initialize (SetSession) never clobbers a live selection. Kept across
+	// a soft close (RemoveSession) and dropped with the closed entry on eviction.
 	activeProfiles map[string]string
 	mu             sync.RWMutex
 	logger         *zap.Logger
 	storageManager *storage.Manager
+
+	// now is the clock (test seam for closed-entry eviction); nil means time.Now.
+	now func() time.Time
+	// lifecycleMu serializes the storage close/reopen reconciliation so a
+	// concurrent unregister and re-activity cannot leave the stored status
+	// disagreeing with the in-memory one.
+	lifecycleMu sync.Mutex
 
 	// profileWriter, when non-nil, replaces the storage write-through of a
 	// changed profile resolution. Test seam only (counts writes).
@@ -122,6 +140,81 @@ func NewSessionStore(logger *zap.Logger) *SessionStore {
 		sessions:       make(map[string]*SessionInfo),
 		activeProfiles: make(map[string]string),
 		logger:         logger,
+	}
+}
+
+func (s *SessionStore) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// evictClosedLocked drops soft-closed sessions older than closedSessionTTL,
+// along with their set_profile selection. Caller must hold the write lock.
+func (s *SessionStore) evictClosedLocked() {
+	cutoff := s.clock().Add(-closedSessionTTL)
+	for id, info := range s.sessions {
+		if info.closed && info.closedAt.Before(cutoff) {
+			delete(s.sessions, id)
+			delete(s.activeProfiles, id)
+		}
+	}
+}
+
+// reconcileStorage brings the stored status of a persisted session in line with
+// its current in-memory open/closed state. Called only after a transition.
+func (s *SessionStore) reconcileStorage(sessionID string) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	s.mu.RLock()
+	info, ok := s.sessions[sessionID]
+	persisted, closed := ok && info.persisted, ok && info.closed
+	done := (chan struct{})(nil)
+	if ok {
+		done = info.persistDone
+	}
+	mgr := s.storageManager
+	s.mu.RUnlock()
+
+	if !persisted || mgr == nil {
+		return
+	}
+	<-done // the row may still be in flight
+	if closed {
+		if err := mgr.CloseSession(sessionID); err != nil {
+			s.logger.Warn("failed to close session in storage",
+				zap.String("session_id", sessionID), zap.Error(err))
+		}
+		return
+	}
+	if err := mgr.ReopenSession(sessionID); err != nil {
+		s.logger.Debug("failed to reopen session in storage",
+			zap.String("session_id", sessionID), zap.Error(err))
+	}
+}
+
+// reopenLocked clears the soft-close flag. It reports whether the session was
+// closed. Caller must hold the write lock.
+func (s *SessionStore) reopenLocked(info *SessionInfo) bool {
+	if !info.closed {
+		return false
+	}
+	info.closed = false
+	info.closedAt = time.Time{}
+	return true
+}
+
+// Reopen revives a soft-closed session (the transport re-registered the same id
+// without a new initialize). A no-op for unknown or already-open sessions.
+func (s *SessionStore) Reopen(sessionID string) {
+	s.mu.Lock()
+	info, ok := s.sessions[sessionID]
+	revived := ok && s.reopenLocked(info)
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
 	}
 }
 
@@ -162,6 +255,7 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string, h
 		close(info.workspaceReady)
 	}
 	s.sessions[sessionID] = info
+	s.evictClosedLocked()
 
 	s.logger.Debug("session registered (not yet persisted — awaiting first activity)",
 		zap.String("session_id", sessionID),
@@ -226,10 +320,14 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 		return ""
 	}
 
+	revived := s.reopenLocked(info)
 	if info.persisted {
 		workSessionID := info.workSessionID
 		done := info.persistDone
 		s.mu.Unlock()
+		if revived {
+			s.reconcileStorage(sessionID)
+		}
 		<-done // the row may still be in flight; stats callers need it to exist
 		return workSessionID
 	}
@@ -385,31 +483,38 @@ func (s *SessionStore) AbandonWorkspaceFetch(sessionID string) {
 	}
 }
 
-// RemoveSession removes session information.
+// RemoveSession soft-closes a session (#1205).
+//
+// The entry is KEPT, marked closed: a client that re-registers on the same id
+// (e.g. a GET stream ending and being re-opened) sends no new initialize, so
+// dropping the entry would lose its client name, workspace, persisted flag and
+// work session for good. The next activity or Reopen revives it; otherwise it is
+// evicted after closedSessionTTL.
 //
 // Only sessions that were actually persisted are closed in storage. A session
 // that never did any work has no stored record (Spec 082), and asking storage to
-// close it would return "session not found" on every idle disconnect — trading
-// a flood of junk records for a flood of junk warnings.
+// close it would return "session not found" on every idle disconnect.
 func (s *SessionStore) RemoveSession(sessionID string) {
 	s.mu.Lock()
 	info, ok := s.sessions[sessionID]
 	wasPersisted := ok && info.persisted
-	delete(s.sessions, sessionID)
-	delete(s.activeProfiles, sessionID)
-	mgr := s.storageManager
+	transition := ok && !info.closed
+	if ok {
+		info.closed = true
+		if transition {
+			info.closedAt = s.clock()
+		}
+	} else {
+		delete(s.activeProfiles, sessionID)
+	}
+	s.evictClosedLocked()
 	s.mu.Unlock()
 
-	if wasPersisted && mgr != nil {
-		if err := mgr.CloseSession(sessionID); err != nil {
-			s.logger.Warn("failed to close session in storage",
-				zap.String("session_id", sessionID),
-				zap.Error(err),
-			)
-		}
+	if transition && wasPersisted {
+		s.reconcileStorage(sessionID)
 	}
 
-	s.logger.Debug("session info removed",
+	s.logger.Debug("session soft-closed",
 		zap.String("session_id", sessionID),
 		zap.Bool("was_persisted", wasPersisted),
 	)
@@ -422,13 +527,17 @@ func (s *SessionStore) RemoveSession(sessionID string) {
 // until the session does its first piece of work. We skip the write for a
 // never-persisted session rather than logging a warning for it.
 func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
-	s.mu.RLock()
-	persisted := false
+	s.mu.Lock()
+	persisted, revived := false, false
 	if info, ok := s.sessions[sessionID]; ok {
 		persisted = info.persisted
+		revived = s.reopenLocked(info)
 	}
 	mgr := s.storageManager
-	s.mu.RUnlock()
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
+	}
 
 	if !persisted || mgr == nil {
 		return
@@ -447,13 +556,17 @@ func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
 // not gain one here, since merely exchanging MCP messages is not "work"
 // (Spec 082): that is exactly what the handshake-only agents do.
 func (s *SessionStore) UpdateActivity(sessionID string) {
-	s.mu.RLock()
-	persisted := false
+	s.mu.Lock()
+	persisted, revived := false, false
 	if info, ok := s.sessions[sessionID]; ok {
 		persisted = info.persisted
+		revived = s.reopenLocked(info)
 	}
 	mgr := s.storageManager
-	s.mu.RUnlock()
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
+	}
 
 	if !persisted || mgr == nil {
 		return
@@ -527,7 +640,7 @@ func (s *SessionStore) SessionsMatching(pred func(*SessionInfo) bool) []sessionT
 	defer s.mu.RUnlock()
 	var out []sessionTarget
 	for id, info := range s.sessions {
-		if pred(info) {
+		if !info.closed && pred(info) {
 			out = append(out, sessionTarget{ID: id, Server: info.server})
 		}
 	}
@@ -595,7 +708,7 @@ func (s *SessionStore) NotifyTargets(tokenName string) []sessionTarget {
 	defer s.mu.RUnlock()
 	var out []sessionTarget
 	for id, info := range s.sessions {
-		if info.TokenName == tokenName {
+		if !info.closed && info.TokenName == tokenName {
 			out = append(out, sessionTarget{ID: id, Server: info.server})
 		}
 	}
@@ -676,7 +789,7 @@ func (s *SessionStore) SessionsForToken(tokenName string) []string {
 	defer s.mu.RUnlock()
 	var ids []string
 	for id, info := range s.sessions {
-		if info.TokenName == tokenName {
+		if !info.closed && info.TokenName == tokenName {
 			ids = append(ids, id)
 		}
 	}
@@ -694,12 +807,18 @@ func (s *SessionStore) GetActiveProfile(sessionID string) string {
 	return s.activeProfiles[sessionID]
 }
 
-// Count returns the number of active sessions
+// Count returns the number of open (not soft-closed) sessions
 func (s *SessionStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return len(s.sessions)
+	n := 0
+	for _, info := range s.sessions {
+		if !info.closed {
+			n++
+		}
+	}
+	return n
 }
 
 // workspaceDisplayName is the basename of a workspace root. Only the basename is
