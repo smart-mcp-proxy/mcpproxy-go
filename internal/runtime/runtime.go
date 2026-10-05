@@ -2858,6 +2858,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		// Spec 113-d: rolling tool-call failure rate (same source at all sites).
+		if r.upstreamManager != nil {
+			healthInput.CallsInWindow, healthInput.CallFailuresInWindow, healthInput.DominantCallFailureKind =
+				r.upstreamManager.CallStats(serverStatus.Name)
+		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt
 		}

@@ -170,6 +170,16 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Upstream prompts-changed callback registered on upstream manager")
 	}
 
+	// Spec 113-d FR-068: a rolling call-failure-rate flip changes a server's
+	// computed health level with no connection-state event, so nudge the
+	// (coalesced) servers.changed stream. The manager already debounces
+	// per server.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetCallHealthObserver(func(serverName string) {
+			r.emitServersChanged("call_failure_rate", map[string]any{"server": serverName})
+		})
+	}
+
 	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)
 	// and hot-reload them through the canonical disk-reload path. Failure
 	// degrades gracefully to no hot-reload (warning logged inside).

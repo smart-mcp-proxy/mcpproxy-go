@@ -89,7 +89,26 @@ type HealthCalculatorInput struct {
 	RefreshRetryCount  int          // Number of retry attempts
 	RefreshLastError   string       // Human-readable error message
 	RefreshNextAttempt *time.Time   // When next retry will occur
+
+	// Rolling tool-call failure rate (Spec 113-d). CallsInWindow counts only
+	// calls that say something about the upstream (successes and transport/
+	// HTTP/JSON-RPC/timeout failures); isError tool results and proxy-side
+	// refusals are excluded by the recorder. DominantCallFailureKind is a short
+	// label ("timeout", "network", ...) used only in the detail text.
+	CallsInWindow           int
+	CallFailuresInWindow    int
+	DominantCallFailureKind string
 }
+
+// Call failure rate thresholds (Spec 113 FR-065). Constants, not config.
+const (
+	// CallFailureWindow is the rolling window the recorder keeps.
+	CallFailureWindow = 5 * time.Minute
+	// CallFailureMinSamples is the minimum counted calls before the rate applies.
+	CallFailureMinSamples = 5
+	// CallFailureRatio is the failure ratio that must be exceeded (strictly).
+	CallFailureRatio = 0.5
+)
 
 // HealthCalculatorConfig contains configurable thresholds for health calculation.
 type HealthCalculatorConfig struct {
@@ -108,7 +127,42 @@ func DefaultHealthConfig() *HealthCalculatorConfig {
 // CalculateHealth calculates the unified health status for a server.
 // The algorithm uses a priority-based approach where admin state is checked first,
 // followed by connection state, then OAuth state.
+//
+// A server that would otherwise report ready/healthy is downgraded to degraded
+// when its rolling tool-call failure rate is high (Spec 113-d). Every other
+// outcome (disabled, quarantined, connecting, unhealthy, OAuth, refresh) takes
+// precedence and is returned untouched.
 func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
+	return applyCallFailureRate(calculateHealthBase(input, cfg), input)
+}
+
+// applyCallFailureRate downgrades a ready, enabled, healthy result to degraded
+// when failures/total over the window exceeds CallFailureRatio with at least
+// CallFailureMinSamples counted calls. Applied to every healthy return,
+// including the early one for an auto-refreshable OAuth token inside the
+// expiry-warning window.
+func applyCallFailureRate(status *contracts.HealthStatus, input HealthCalculatorInput) *contracts.HealthStatus {
+	if status == nil || status.Level != LevelHealthy || status.AdminState != StateEnabled || status.Status != StatusReady {
+		return status
+	}
+	if input.CallsInWindow < CallFailureMinSamples ||
+		float64(input.CallFailuresInWindow)/float64(input.CallsInWindow) <= CallFailureRatio {
+		return status
+	}
+	detail := "The server is connected but most recent tool calls failed."
+	if input.DominantCallFailureKind != "" {
+		detail = fmt.Sprintf("The server is connected but most recent tool calls failed; the most common failure is %s.", input.DominantCallFailureKind)
+	}
+	status.Level = LevelDegraded
+	status.Summary = fmt.Sprintf("%d of %d tool calls failed in the last %d min",
+		input.CallFailuresInWindow, input.CallsInWindow, int(CallFailureWindow/time.Minute))
+	status.Detail = detail
+	status.Action = ActionViewLogs
+	status.Actions = []string{ActionViewLogs}
+	return status
+}
+
+func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
 	if cfg == nil {
 		cfg = DefaultHealthConfig()
 	}

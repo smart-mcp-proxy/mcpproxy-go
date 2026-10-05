@@ -1705,6 +1705,12 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			healthInput.OAuthRequired = true
 		}
 
+		// Spec 113-d: rolling tool-call failure rate (same source at all sites).
+		if um := s.runtime.UpstreamManager(); um != nil {
+			healthInput.CallsInWindow, healthInput.CallFailuresInWindow, healthInput.DominantCallFailureKind =
+				um.CallStats(serverStatus.Name)
+		}
+
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
