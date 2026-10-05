@@ -120,6 +120,16 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     expect(stripBottom.exists()).toBe(false)
   })
 
+  it('holds the top usage strip back until the server list has loaded (#1466)', async () => {
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    const api = (await import('@/services/api')).default as unknown as { getServers: ReturnType<typeof vi.fn> }
+    // A fresh instance whose server list is still in flight: the strip must not
+    // flash only to be replaced by the getting-started card.
+    api.getServers.mockReturnValueOnce(new Promise(() => {}))
+    const wrapper = await mountHome()
+    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
+  })
+
   it('lists items in the order the API returns them, with fix buttons routing to fix.target', async () => {
     attentionSpy.mockResolvedValue({
       success: true,

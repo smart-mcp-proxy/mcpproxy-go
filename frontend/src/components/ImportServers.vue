@@ -101,7 +101,7 @@ import { importSummary } from '@/utils/onboardingServersStep'
 // showEmpty: the wizard owns its own empty and completion states, so it turns
 // this one off; standalone use keeps the first-load empty line.
 const props = withDefaults(defineProps<{ detected?: boolean; showEmpty?: boolean; showMessage?: boolean }>(), { detected: false, showEmpty: true, showMessage: true })
-const emit = defineEmits<{ imported: [count: number] }>()
+const emit = defineEmits<{ imported: [count: number, names?: string[]] }>()
 
 const content = ref('')
 const loading = ref(false)
@@ -177,6 +177,7 @@ async function importDetected() {
   try {
     let imported = 0
     let renamed = 0
+    const importedNames: string[] = []
     const skipped: Array<{ reason?: string }> = []
     for (const source of detectedSources.value) {
       const server_names = source.servers.filter(server => source.selected[server.name]).map(server => server.name)
@@ -189,12 +190,13 @@ async function importDetected() {
       const response = await api.importServersFromPath({ path: source.path, format: source.format, server_names, rename: Object.keys(rename).length ? rename : undefined, skip_quarantine: !detectedQuarantine.value })
       if (!response.success) throw new Error(response.error || `Could not import ${source.name}`)
       imported += response.data?.summary?.imported ?? server_names.length
+      importedNames.push(...server_names.map(name => (rename as Record<string, string>)[name] ?? name))
       skipped.push(...(response.data?.skipped ?? []))
     }
     detectedMessage.value = importSummary({ imported, renamed, skipped })
     detectedImportedCount.value = imported
     importedOnce.value = true
-    emit('imported', imported)
+    emit('imported', imported, importedNames)
     await loadDetectedSources(false)
   } catch (error) { detectedError.value = error instanceof Error ? error.message : 'Import failed' }
   finally { detectedImporting.value = false }
@@ -264,7 +266,7 @@ async function handleImport() {
       addError.value = resp.error || 'Import failed'
       return
     }
-    emit('imported', names.length)
+    emit('imported', resp.data?.summary?.imported ?? resp.data?.imported?.length ?? names.length, names)
   } catch (e) {
     addError.value = e instanceof Error ? e.message : 'Import failed'
   } finally {
