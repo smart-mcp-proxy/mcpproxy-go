@@ -105,6 +105,9 @@ type Client struct {
 	// (hand-constructed clients in tests).
 	toolInvoker toolCaller
 
+	// sess is the Spec 113-e session re-init state (single-flight, baseline, counter).
+	sess sessionReinit
+
 	// ambiguousProbeInFlight gates the async liveness probe fired after an
 	// ambiguous tools/call cancellation (GH #965) so a burst of canceled calls
 	// results in at most one probe against the upstream.
@@ -838,6 +841,8 @@ func (mc *Client) GetConnectionStatus() map[string]interface{} {
 		"should_retry": mc.ShouldRetry(),
 		"retry_count":  info.RetryCount,
 		"server_name":  info.ServerName,
+		// Spec 113-e FR-085: in-place Streamable HTTP session re-initializations.
+		"session_reinit_count": mc.SessionReinitCount(),
 	}
 
 	if info.LastError != nil {
@@ -1062,7 +1067,7 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	}()
 
 	listEpoch := mc.connectionEpoch.Load()
-	tools, err := mc.coreClient.ListTools(listCtx)
+	tools, err := mc.listToolsUpstream(listCtx)
 	mc.publishListToolsResult(tools, err)
 
 	if err != nil {
@@ -1201,8 +1206,17 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	// wait (a queued call may outlive a reconnect), so a transport failure is
 	// only ever charged to the session that produced it (RC4-STDIO-001).
 	callEpoch := mc.connectionEpoch.Load()
-	result, err := invoker.CallTool(ctx, toolName, args)
+	result, err := mc.callToolWithSession(ctx, invoker, toolName, args, expectedEpoch)
 	if err != nil {
+		if errors.Is(err, ErrSessionReestablished) || errors.Is(err, ErrConnectionGenerationChanged) {
+			// Spec 113-e: the session was re-established and the call was
+			// deliberately not repeated. Not a connection failure.
+			mc.logger.Warn("Tool call not repeated after upstream session re-initialize",
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("tool", toolName),
+				zap.Error(err))
+			return nil, err
+		}
 		mc.recordCallToolOAuthSignal(toolName, err)
 		// A 429 answered to a tools/call is the same instruction as one answered
 		// to connect (#1040). Recording it here does NOT mark the server
@@ -1752,7 +1766,7 @@ func (mc *Client) performHealthCheck() {
 	// the transport (the ping fails with "transport closed") and only then
 	// bumps the epoch, so the verdict below must land on this generation only.
 	pingEpoch := mc.connectionEpoch.Load()
-	err := prober.Ping(ctx)
+	err := mc.probeLiveness(ctx, prober)
 
 	if err != nil {
 		// Pick up any rate-limit hint this ping's response carried, BEFORE the
@@ -2480,7 +2494,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	// Fetch fresh tool count with timeout. Publish the result so any concurrent
 	// ListTools waiter coalesced behind us receives the real tools list.
 	countEpoch := mc.connectionEpoch.Load()
-	tools, err := mc.coreClient.ListTools(listCtx)
+	tools, err := mc.listToolsUpstream(listCtx)
 	mc.publishListToolsResult(tools, err)
 	if err != nil {
 		mc.logger.Debug("Tool count fetch failed, returning cached value",

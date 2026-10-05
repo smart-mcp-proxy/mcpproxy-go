@@ -757,6 +757,10 @@ Get-Content -Path "$env:LOCALAPPDATA\mcpproxy\logs\main.log" -Wait
 tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 ```
 
+**Upstream session lost (HTTP 404):**
+
+A remote Streamable HTTP server that restarts or expires its session answers HTTP 404 to the session id MCPProxy holds. MCPProxy re-initializes the MCP session on the same connection instead of marking the server as errored. List, prompt and health-ping requests are retried once. A `tools/call` is retried once only for read-only tools (`readOnlyHint: true`) whose description and schema did not change; any other tool returns an error saying the session was re-established and the call was not repeated, and the next call uses the new session. Each re-initialization is logged at info level (`Upstream session terminated (HTTP 404); re-initialized in place`) and counted as `session_reinit_count` in the server's connection status. If the re-initialization or the retry also fails, the normal reconnect path applies.
+
 ## Advanced Configuration
 
 **📚 For complete configuration reference:** See [Configuration Documentation](configuration.md) for all available options.
