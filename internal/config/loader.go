@@ -90,6 +90,7 @@ func LoadFromFile(configPath string) (*Config, error) {
 	// BEFORE validating: a bogus value must not brick an existing install.
 	warnNormalizedTrustModes(cfg)
 	warnNormalizedForwardHeaders(cfg)
+	warnNormalizedOAuthEndpointOverrides(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -122,6 +123,17 @@ func warnNormalizedForwardHeaders(cfg *Config) {
 	for _, n := range NormalizeForwardHeaders(cfg) {
 		fmt.Fprintf(os.Stderr,
 			"WARN: server %q forward_headers: dropped unusable entries %q (invalid, denied, duplicate, over the 32-entry cap, or colliding with a static header)\n",
+			n.Server, strings.Join(n.Dropped, ", "))
+	}
+}
+
+// warnNormalizedOAuthEndpointOverrides drops unusable per-server OAuth endpoint
+// overrides and reports each by field name only (Spec 113 FR-023: never the
+// value, which may carry credentials). Boot never fails on them.
+func warnNormalizedOAuthEndpointOverrides(cfg *Config) {
+	for _, n := range NormalizeOAuthEndpointOverrides(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q oauth: dropped invalid endpoint override(s) %q (must be an absolute https URL, or http on a loopback host, without query, fragment or userinfo)\n",
 			n.Server, strings.Join(n.Dropped, ", "))
 	}
 }
@@ -237,6 +249,7 @@ func LoadWithPath() (*Config, string, error) {
 	// Same migration as LoadFromFile: normalize-and-warn, never fail the load.
 	warnNormalizedTrustModes(cfg)
 	warnNormalizedForwardHeaders(cfg)
+	warnNormalizedOAuthEndpointOverrides(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {

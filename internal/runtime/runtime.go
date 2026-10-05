@@ -2556,6 +2556,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					"scopes":       serverStatus.Config.OAuth.Scopes,
 					"extra_params": serverStatus.Config.OAuth.ExtraParams,
 					"pkce_enabled": serverStatus.Config.OAuth.PKCEEnabled,
+					// Spec 113-b discovery overrides (not secret; omitted when empty by the contracts projection)
+					"authorization_endpoint":   serverStatus.Config.OAuth.AuthorizationEndpoint,
+					"token_endpoint":           serverStatus.Config.OAuth.TokenEndpoint,
+					"registration_endpoint":    serverStatus.Config.OAuth.RegistrationEndpoint,
+					"auth_server_metadata_url": serverStatus.Config.OAuth.AuthServerMetadataURL,
 					// auth_url, token_url will be populated from OAuth runtime state if available
 					"auth_url":  "",
 					"token_url": "",
