@@ -109,6 +109,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 	t.Run("P1 dangling pin beats server scope", func(t *testing.T) {
 		p := newPrecedenceFixture(t, nil)
 		dangling := p.call(t, agentCtx([]string{"*"}, allPerms, "gone"), contracts.ToolVariantRead, "github:list_issues")
+		require.Equal(t, []string{"token_scope"}, p.denyReasons(t), "the dangling pin's own deny reason")
 		unpinnedOutOfScope := p.call(t, agentCtx([]string{"notion"}, allPerms, ""), contracts.ToolVariantRead, "github:list_issues")
 		require.Equal(t, precedenceOutOfScopeText, dangling)
 		require.Equal(t, unpinnedOutOfScope, dangling, "a dangling pin answers with the bytes of an out-of-scope token")

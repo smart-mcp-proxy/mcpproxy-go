@@ -86,6 +86,15 @@ var guardedOps = map[string][]guardedOpCase{
 		},
 		bind: func(f *profilesToolFixture) { f.mintClient("cursor", "work-readonly", auth.ProfileModeLocked) },
 		args: map[string]any{"operation": "create", "name": "future", "servers": []any{"github", "notion", "filesystem"}},
+	}, {
+		name: "a name the anonymous profile's switchable_to lists",
+		configure: func(cfg *config.Config) {
+			guardAnon(cfg)
+			dangling := []string{"wide"}
+			cfg.Profiles[len(cfg.Profiles)-1].SwitchableTo = &dangling
+		},
+		bind: func(f *profilesToolFixture) { f.mintClient("cursor", "work-readonly", auth.ProfileModeLocked) },
+		args: map[string]any{"operation": "create", "name": "wide", "servers": []any{"github", "notion", "filesystem"}},
 	}},
 	"rename": {{
 		name: "onto a name the anonymous profile's switchable_to lists",
