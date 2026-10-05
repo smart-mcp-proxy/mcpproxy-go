@@ -5,7 +5,7 @@
       <div>
         <h1 class="text-3xl font-bold">Settings</h1>
         <p class="text-base-content/70 mt-1">
-          Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
+          Edit a section, then press {{ SAVE_CHANGES_LABEL }} to apply it. A badge marks fields that need a restart.
           <a
             :href="`${DOCS_BASE}/configuration/config-file`"
             target="_blank"
@@ -32,7 +32,7 @@
     <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
       <div class="card-body">
         <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
-        <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
+        <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
       </div>
     </div>
 
@@ -83,7 +83,8 @@
               {{ p.label }}: {{ p.on ? 'on' : 'off' }}
             </span>
           </div>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
+          <AnonymousProfileSetting :require-mcp-auth="!!state.working.require_mcp_auth" />
           <ScannerSettings />
         </div>
       </div>
@@ -92,7 +93,7 @@
       <div v-show="activeTab === 'general'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg">⚙️ General</h2>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
         </div>
       </div>
 
@@ -119,7 +120,7 @@
                 :data-test="`settings-accordion-docs-${acc.id}`"
               >Learn more ↗</a>
             </p>
-            <SettingsSection :key="`acc-${acc.id}-${formEpoch}`" :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
+            <SettingsSection :key="`acc-${acc.id}-${formEpoch}`" :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
           </div>
         </details>
         <div class="text-xs text-base-content/50 px-1">
@@ -132,7 +133,7 @@
       <div v-if="hasServerEdition" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg" data-test="settings-server-edition-title">{{ serverEditionTitle }}</h2>
-          <SettingsSection :key="`sec-${formEpoch}`" section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
+          <SettingsSection :key="`sec-${formEpoch}`" section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
         </div>
       </div>
 
@@ -192,6 +193,7 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import CatalogSourcesSettings from '@/components/CatalogSourcesSettings.vue'
 import ScannerSettings from '@/components/ScannerSettings.vue'
+import AnonymousProfileSetting from '@/components/settings/AnonymousProfileSetting.vue'
 import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,
@@ -204,10 +206,15 @@ import {
   isBlankInstructions,
   restartRequiredLabels,
   hydrateConfigState,
+  refreshEditionDefaults,
+  effectiveBool,
+  SAVE_CHANGES_LABEL,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
 import api from '@/services/api'
+import { useOnboardingStore } from '@/stores/onboarding'
+import { lockedKeysChanged, telemetrySettingLock } from '@/utils/telemetryState'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -308,7 +315,7 @@ const filteredFields = computed<SettingField[]>(() => {
 const posture = computed(() => {
   const w: any = state.working || {}
   const sdd = w.sensitive_data_detection?.enabled !== false
-  const quarantine = w.quarantine_enabled !== false // default-on
+  const quarantine = effectiveBool(w, 'quarantine_enabled') // nil = on, same rule as the toggle
   return [
     { label: 'Quarantine', on: quarantine, good: quarantine },
     { label: 'MCP auth', on: !!w.require_mcp_auth, good: !!w.require_mcp_auth },
@@ -386,6 +393,16 @@ const editorOptions = {
   lineNumbers: 'on' as const,
 }
 
+// The untouched /config response of the last load; the edition-dependent
+// defaults are re-resolved from it if /status arrives after the config did.
+let rawConfig: any = null
+watch(
+  () => systemStore.status?.edition,
+  (edition) => {
+    if (loaded.value && rawConfig) refreshEditionDefaults(state, rawConfig, { edition })
+  }
+)
+
 async function loadConfig() {
   loading.value = true
   loadError.value = ''
@@ -401,9 +418,10 @@ async function loadConfig() {
       // keys the API omits (the serialization modes: absent means "full"), so
       // their <select> shows the real default instead of an empty box. Applied
       // to both copies — otherwise the untouched field would read as dirty.
-      const hydrated = hydrateConfigState(cfg)
+      const hydrated = hydrateConfigState(cfg, { edition: systemStore.status?.edition })
       state.working = hydrated.working
       state.original = hydrated.original
+      rawConfig = hydrated.raw
       formEpoch.value++
       // hydrated.raw, not cfg: the Raw tab must show the untouched response,
       // and this makes that dependency explicit rather than relying on the
@@ -458,6 +476,15 @@ async function applyConfig() {
   configErrors.value = []
   try {
     const cfg = JSON.parse(configJson.value)
+    // FR-044a: the form fields are locked, but this posts the whole document.
+    const lockedEdits = lockedKeysChanged(cfg, rawConfig, fieldLocks.value)
+    if (lockedEdits.length > 0) {
+      configErrors.value = lockedEdits.map((key) => ({
+        field: key,
+        message: fieldLocks.value[key].reason,
+      }))
+      return
+    }
     const response = await api.applyConfig(cfg)
     if (response.success && response.data) {
       systemStore.addToast({
@@ -466,6 +493,9 @@ async function applyConfig() {
       })
       if (response.data.applied_immediately) await serversStore.fetchServers()
       await loadConfig()
+      // The document may have changed telemetry.enabled; the banner and the
+      // lock follow the effective state, like after a section save.
+      void onboarding.loadTelemetryState(true)
     } else {
       configErrors.value = [{ field: 'apply', message: response.error || 'Failed to apply configuration' }]
     }
@@ -505,6 +535,8 @@ function handleConfigSaved() {
 // it, switch to that tab, open the enclosing accordion if it lives under
 // Advanced, then scroll to and briefly highlight the field row.
 function tabForFieldKey(key: string): string {
+  // Spec 108-i: the anonymous-callers control is not a fields.ts entry.
+  if (key === 'anonymous_profile') return 'security'
   if (securityFields.some((f) => f.key === key)) return 'security'
   if (generalFields.some((f) => f.key === key)) return 'general'
   if (advancedAccordions.value.some((a) => a.fields.some((f) => f.key === key))) return 'advanced'
@@ -535,12 +567,32 @@ async function focusField(key: string) {
   setTimeout(() => row.classList.remove(...highlight), 2500)
 }
 
+// Spec 109 FR-044a: an environment opt-out (MCPPROXY_TELEMETRY=false,
+// DO_NOT_TRACK, CI) forces telemetry off regardless of the config file. The
+// config document stays the stored value (it is a GET-then-POST-back document),
+// so the effective state read off /status locks the toggle instead.
+const onboarding = useOnboardingStore()
+const fieldLocks = computed<Record<string, { reason: string; value?: unknown }>>(() => {
+  const locks: Record<string, { reason: string; value?: unknown }> = {}
+  const lock = telemetrySettingLock(onboarding.telemetryState)
+  if (lock) locks['telemetry.enabled'] = lock
+  return locks
+})
+
+// After a save that touched telemetry.enabled, refresh the effective state so
+// the banner and the lock follow.
+function onSectionSaved(changed: string[]) {
+  if (changed.includes('telemetry.enabled')) void onboarding.loadTelemetryState(true)
+}
+
 // Fetch the resolved built-in MCP instructions default for the textarea
-// placeholder (MCP-2175). Non-fatal: a failure or an older core just leaves the
-// static catalogue placeholder in place.
-async function loadDefaultInstructions() {
+// placeholder (MCP-2175) and the effective telemetry state (FR-044a).
+// Non-fatal: a failure or an older core just leaves the static catalogue
+// placeholder in place and the telemetry toggle unlocked.
+async function loadStatusExtras() {
   try {
     const resp = await api.getStatus()
+    if (resp.success) onboarding.setTelemetryState(resp.data?.telemetry ?? null)
     if (resp.success && typeof resp.data?.default_instructions === 'string') {
       defaultInstructions.value = resp.data.default_instructions
       // In case loadConfig already ran and set loaded=true, prefill now.
@@ -622,7 +674,7 @@ onMounted(async () => {
       tabParamPending = false
     })
   }
-  loadDefaultInstructions()
+  loadStatusExtras()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
   await loadConfig()
   const focus = route.query.focus

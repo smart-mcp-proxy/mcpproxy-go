@@ -133,8 +133,9 @@ func TestRetrieveTools_ProfileV3_DecisionMatrix(t *testing.T) {
 }
 
 // TestRetrieveTools_ProfileV3_ProfileFieldSourceGating pins FR-011's `profile`
-// field rule: present only for url/session sources, absent for a pin — for
-// the SAME non-legacy profile and tool.
+// field rule (Spec 108 D39, which narrows research D27): present for the
+// caller's OWN profile (pin, binding, url, session), absent for anonymous and
+// for a dangling base — for the SAME non-legacy profile and tool.
 func TestRetrieveTools_ProfileV3_ProfileFieldSourceGating(t *testing.T) {
 	proxy, _ := newProfilesV3Fixture(t)
 	indexEnforcementMatrixFixtureTools(t, proxy)
@@ -152,18 +153,20 @@ func TestRetrieveTools_ProfileV3_ProfileFieldSourceGating(t *testing.T) {
 		assert.Equal(t, "work-readonly", *resp.Profile)
 	})
 
-	t.Run("pin source: profile field absent", func(t *testing.T) {
+	t.Run("pin source: the caller's own profile is reported (Spec 108 D39)", func(t *testing.T) {
 		resp := callRetrieveToolsV3(t, proxy, pinnedProfileCtx("work-readonly"), "list_issues", 5)
-		assert.Nil(t, resp.Profile, "a pinned caller must never learn it is pinned or to what (research D27)")
+		require.NotNil(t, resp.Profile, "a pinned caller learns its own profile; nothing is confirmed to a third party")
+		assert.Equal(t, "work-readonly", *resp.Profile)
 		require.NotNil(t, resp.HiddenByProfile, "hidden_by_profile is independent of source and still applies")
 	})
 
-	t.Run("switchable client binding: policy applies without disclosing the base", func(t *testing.T) {
+	t.Run("switchable client binding: the bound profile is reported to its own credential", func(t *testing.T) {
 		resp := callRetrieveToolsV3(t, proxy, clientCtx("desktop", "work-readonly", "switchable"), "create_issue", 5)
 		assert.Empty(t, resp.Tools)
 		require.NotNil(t, resp.HiddenByProfile)
 		assert.Equal(t, 1, *resp.HiddenByProfile)
-		assert.Nil(t, resp.Profile)
+		require.NotNil(t, resp.Profile)
+		assert.Equal(t, "work-readonly", *resp.Profile)
 	})
 
 	t.Run("switchable client session selection: selected profile is reported", func(t *testing.T) {
@@ -209,7 +212,7 @@ func TestRetrieveTools_ProfileV3_ProfileFieldSourceGating(t *testing.T) {
 
 // TestRetrieveTools_ProfileV3_DanglingPinDenyAll pins FR-020: a legacy agent
 // token pinned to a profile hand-deleted from config resolves deny-all, with
-// hidden_by_profile: 0 and NO profile field (base source, never disclosed).
+// hidden_by_profile: 0 and NO profile field (a dangling base has no profile to name).
 func TestRetrieveTools_ProfileV3_DanglingPinDenyAll(t *testing.T) {
 	proxy, _ := newProfilesV3Fixture(t)
 	indexEnforcementMatrixFixtureTools(t, proxy)

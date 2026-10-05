@@ -135,7 +135,7 @@ func TestHandleCallTool_ShedReturns429WithRetryAfter(t *testing.T) {
 
 func TestHandleCallTool_ProfileBlockedReturns403(t *testing.T) {
 	apiKey := "test-profile-api-key"
-	message := "blocked by profile: github:create_issue is a write tool; this profile allows read tools only"
+	message := p108DisclosedToolRefusal(t, "tier")
 	ctrl := &shedController{
 		apiKey: apiKey,
 		err:    &profile.ToolBlockedError{Reason: profile.BlockReasonTier, Message: message},
@@ -145,7 +145,7 @@ func TestHandleCallTool_ProfileBlockedReturns403(t *testing.T) {
 	w := postToolCall(t, srv, apiKey)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), message)
+	assert.Contains(t, p108ErrorText(w.Body.String()), message)
 }
 
 // TestHandleCallTool_ServerUnavailableIsNot429 keeps FR-009 separate from
@@ -204,7 +204,7 @@ func TestHandleReplayToolCall_ShedReturns429(t *testing.T) {
 
 func TestReplayToolCall_ProfileGateUses403AndNonDisclosing404(t *testing.T) {
 	apiKey := "test-replay-profile-api-key"
-	message := "blocked by profile: github:create_issue is denied by a profile rule"
+	message := p108DisclosedToolRefusal(t, "rule")
 	cases := []struct {
 		name string
 		err  error
@@ -223,7 +223,7 @@ func TestReplayToolCall_ProfileGateUses403AndNonDisclosing404(t *testing.T) {
 			w := httptest.NewRecorder()
 			srv.ServeHTTP(w, req)
 			require.Equal(t, tc.want, w.Code)
-			assert.Contains(t, w.Body.String(), tc.body)
+			assert.Contains(t, p108ErrorText(w.Body.String()), tc.body)
 		})
 	}
 }

@@ -18,6 +18,8 @@ combine counts from different services:
   `docker-mcp-catalog` listing. Docker's `star_count` is ignored; it is not
   comparable to GitHub stars.
 
+GitHub stars count only for the publisher's own repository: an official-registry entry that names someone else's repository keeps no stars. For a typed query MCPProxy asks GitHub about at most as many repositories as the search returns (`limit`), the best-ranked first, so one search cannot spend the hourly budget. Popularity breaks ties inside a match tier; how well the name matches the query ranks first.
+
 On a cold cache, a catalog search waits for at most 800 ms by default. Missing
 GitHub values are fetched in the background and can appear in a later search.
 GitHub is not a catalog source, so GitHub request failures do not add an entry

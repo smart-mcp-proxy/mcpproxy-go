@@ -59,7 +59,7 @@ The macOS Servers row, the tray server submenu's first line and the Server Detai
 
 Button labels per action: `login` Sign in · `set_secret` Add secret · `configure` Fix config · `edit_url` Edit URL · `approve` Review (opens the review screen; never approves directly, FR-005) · `restart` Restart · `view_logs` View logs · `enable` Enable.
 
-Colors (Web DaisyUI / macOS): `ready` success/green · `connecting` neutral/gray · `sign_in_required`, `needs_review`, `needs_secret`, `needs_config` warning/orange · `error` error/red · `disabled` neutral/gray. The tray badge keeps its Spec 044 rules (it reads `level` and diagnostics, not `status`).
+Colors (Web DaisyUI / macOS): `ready` success/green · `connecting` neutral/gray · `sign_in_required`, `needs_review`, `needs_secret`, `needs_config` warning/orange · `error` error/red · `disabled` neutral/gray. Colour keys on `status`, never `level`, on every element that renders a status label (Server Detail header badge, Health tile, Configuration → Health badge). `level` colours only a payload without `status`. The tray badge keeps its Spec 044 rules (it reads `level` and diagnostics, not `status`).
 
 ## CLI
 

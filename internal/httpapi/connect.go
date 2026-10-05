@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -140,6 +141,9 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
+	// Every on-demand classification is remembered, so the stat-only clients
+	// list can still report who holds the admin key (Spec 108-f F11).
+	s.recordCredentialObservation(clientID, profile.CredentialState(status.CredentialState))
 	s.writeSuccess(w, status)
 }
 
@@ -246,7 +250,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless)"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
-// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse)"
+// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress (another connect of this client is mid-write) or credential_superseded (the written credential was replaced or revoked before it could be finalized; reconnect)"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable (or no credential store wired while require_mcp_auth is on)"
 // @Router      /api/v1/connect/{client} [post]
 func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +318,12 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 
 	if result.Success {
 		s.recordClientConnected(clientID)
+		switch {
+		case result.Credential != "":
+			s.recordCredentialObservation(clientID, profile.CredentialStateClient)
+		case result.Keyless:
+			s.recordCredentialObservation(clientID, profile.CredentialStateNone)
+		}
 	}
 
 	s.writeSuccess(w, result)
@@ -437,6 +447,8 @@ func applyClientDisconnected(state *storage.OnboardingState, clientID string, no
 	}
 	state.ClientDisconnectedAt[clientID] = now
 	delete(state.ClientConnectedAt, clientID)
+	// The entry is gone, so what it held is no longer observable (Spec 108-f F11).
+	delete(state.ClientCredentialObserved, clientID)
 }
 
 type clientPresenceNotifier interface{ NotifyClientPresenceChanged() }
@@ -627,6 +639,8 @@ func (s *Server) reconcileClient(r *http.Request, clientID string) {
 // their wire shapes and reports whether it handled err:
 //
 //   - FR-008a guard refusal            -> 409 binding_bypassable_without_auth
+//   - another connect in flight        -> 409 connect_in_progress
+//   - credential replaced before commit -> 409 credential_superseded
 //   - token name held by a regular one -> 409 {error, conflicting_token}
 //   - invalid profile/mode/id          -> 400 {error, field}
 //   - keyless with auth on / a profile -> 400 {error, field:"keyless"}
@@ -634,6 +648,11 @@ func (s *Server) reconcileClient(r *http.Request, clientID string) {
 func (s *Server) writeCredentialFailure(w http.ResponseWriter, r *http.Request, clientID string, err error) bool {
 	if s.writeIfBindingGuardRefusal(w, r, err) {
 		return true
+	}
+	var busy *internalRuntime.ConnectInProgressError
+	var superseded *internalRuntime.CredentialSupersededError
+	if errors.As(err, &busy) || errors.As(err, &superseded) {
+		return s.writeProfilesError(w, r, err)
 	}
 	switch {
 	case errors.Is(err, storage.ErrClientCredentialConflict):
@@ -670,4 +689,26 @@ func (s *Server) getConnectService() *connect.Service {
 		return s.connectService
 	}
 	return nil
+}
+
+// recordCredentialObservation persists the last on-demand classification of a
+// client's config (F11), only when it CHANGED. Best effort: an observation is an
+// optimisation of the list, never a reason to fail a read.
+func (s *Server) recordCredentialObservation(clientID string, state profile.CredentialState) {
+	if clientID == "" || state == "" || state == profile.CredentialStateUnknown {
+		return
+	}
+	err := s.controller.UpdateOnboardingState(func(st *storage.OnboardingState) error {
+		if cur, ok := st.ClientCredentialObserved[clientID]; ok && cur.State == string(state) {
+			return nil
+		}
+		if st.ClientCredentialObserved == nil {
+			st.ClientCredentialObserved = map[string]storage.ClientCredentialObservation{}
+		}
+		st.ClientCredentialObserved[clientID] = storage.ClientCredentialObservation{State: string(state), At: time.Now().UTC()}
+		return nil
+	})
+	if err != nil && s.logger != nil {
+		s.logger.Debugf("clients: failed to record the credential observation of %s: %v", clientID, err)
+	}
 }

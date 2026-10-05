@@ -53,7 +53,7 @@ func init() {
 	doctorFixCmd.Flags().BoolVar(&doctorFixExecute, "execute", false, "Apply the fix (default: dry_run)")
 	doctorFixCmd.Flags().StringVarP(&doctorFixOutput, "output", "o", "pretty", "Output format (pretty, json)")
 	doctorFixCmd.Flags().StringVarP(&doctorFixLogLevel, "log-level", "l", "warn", "Log level")
-	doctorFixCmd.Flags().StringVarP(&doctorFixConfigPth, "config", "c", "", "Path to config file")
+	addConfigFlag(doctorFixCmd.Flags(), &doctorFixConfigPth, "Path to config file")
 	_ = doctorFixCmd.MarkFlagRequired("server")
 	doctorCmd.AddCommand(doctorFixCmd)
 }

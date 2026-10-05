@@ -105,6 +105,12 @@ export interface HealthStatus {
 // Needs-attention list (Spec 109 FR-001-007) - generated from
 // internal/contracts/attention.go. One list, one count, every surface (Web
 // UI, macOS tray/Home, CLI) reads from GET /api/v1/attention.
+export const AttentionKindAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const AttentionKindClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const AttentionKindClientTokenNameConflict = 'client_token_name_conflict' as const;
+export const AttentionKindProfileMissing = 'profile_missing' as const;
+export const AttentionKindClientRotationPending = 'client_rotation_pending' as const;
+export const AttentionKindClientCredentialExpiring = 'client_credential_expiring' as const;
 export const AttentionKindSignInRequired = 'sign_in_required' as const;
 export const AttentionKindMissingSecret = 'missing_secret' as const;
 export const AttentionKindConfigError = 'config_error' as const;
@@ -114,6 +120,12 @@ export const AttentionKindToolReview = 'tool_review' as const;
 export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
 
 export type AttentionKind =
+  | typeof AttentionKindAnonymousDeniedByBindingGuard
+  | typeof AttentionKindClientHoldsAdminKey
+  | typeof AttentionKindClientTokenNameConflict
+  | typeof AttentionKindProfileMissing
+  | typeof AttentionKindClientRotationPending
+  | typeof AttentionKindClientCredentialExpiring
   | typeof AttentionKindSignInRequired
   | typeof AttentionKindMissingSecret
   | typeof AttentionKindConfigError
@@ -123,7 +135,7 @@ export type AttentionKind =
   | typeof AttentionKindClientNeverSeen;
 
 export interface AttentionSubject {
-  type: 'server' | 'tool' | 'client';
+  type: 'server' | 'tool' | 'client' | 'setting';
   id: string;
   name: string;
 }
@@ -382,6 +394,39 @@ export type Tier =
   | typeof TierDestructive
   | typeof TierUnannotated
   | typeof TierUnknown;
+
+// Tool review states (approval_status) - generated from internal/contracts/terminology.go
+export const ToolApprovalApproved = 'approved' as const;
+export const ToolApprovalPending = 'pending' as const;
+export const ToolApprovalChanged = 'changed' as const;
+export type ToolApprovalState =
+  | typeof ToolApprovalApproved
+  | typeof ToolApprovalPending
+  | typeof ToolApprovalChanged;
+
+// Activity views (the `view` URL parameter; the CLI has no `sessions`) - generated from internal/contracts/terminology.go
+export const ActivityViewCalls = 'calls' as const;
+export const ActivityViewSessions = 'sessions' as const;
+export const ActivityViewSystem = 'system' as const;
+export const ActivityViewAll = 'all' as const;
+export type ActivityView =
+  | typeof ActivityViewCalls
+  | typeof ActivityViewSessions
+  | typeof ActivityViewSystem
+  | typeof ActivityViewAll;
+
+// Client presence states (GET /clients row state) - generated from internal/contracts/terminology.go
+export const ClientPresenceConnectedSeen = 'connected_seen' as const;
+export const ClientPresenceConnectedNeverSeen = 'connected_never_seen' as const;
+export const ClientPresenceInstalled = 'installed' as const;
+export const ClientPresenceNotInstalled = 'not_installed' as const;
+export const ClientPresenceOther = 'other' as const;
+export type ClientPresenceState =
+  | typeof ClientPresenceConnectedSeen
+  | typeof ClientPresenceConnectedNeverSeen
+  | typeof ClientPresenceInstalled
+  | typeof ClientPresenceNotInstalled
+  | typeof ClientPresenceOther;
 
 export interface Tool {
   name: string;
@@ -762,6 +807,13 @@ export type CredentialState =
 
 export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
 export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+export const ErrorCodeConnectInProgress = 'connect_in_progress' as const;
+export const ErrorCodeCredentialSuperseded = 'credential_superseded' as const;
+export const ErrorCodeProfileInUse = 'profile_in_use' as const;
+export const ErrorCodeProfileIsAnonymousProfile = 'profile_is_anonymous_profile' as const;
+export const ErrorCodeProfileExists = 'profile_exists' as const;
+export const ErrorCodeNameMismatch = 'name_mismatch' as const;
+export const ErrorCodePreconditionFailed = 'precondition_failed' as const;
 
 export const GuardFixRequireMCPAuth = 'require_mcp_auth' as const;
 export const GuardFixSetAnonymousProfile = 'set_anonymous_profile' as const;
@@ -823,3 +875,162 @@ export type ClientWarningCode =
   | typeof WarningClientRotationPending
   | typeof WarningProfileMissing
   | typeof WarningClientTokenNameConflict;
+
+// Spec 108-f: warning severity and action, the access explainer and the REST
+// view shapes of GET /profiles, GET /clients and GET /access/explain.
+export const WarningSeverityWarn = 'warn' as const;
+export const WarningSeverityInfo = 'info' as const;
+export type WarningSeverity = typeof WarningSeverityWarn | typeof WarningSeverityInfo;
+
+// A warning's action.kind is a FixAction spelling or this one (the bulk admin-key upgrade).
+export const WarningActionUpgradeAdminKeyHolders = 'upgrade_admin_key_holders' as const;
+
+export const ExplainVerdictAllowed = 'allowed' as const;
+export const ExplainVerdictBlocked = 'blocked' as const;
+export const ExplainVerdictHidden = 'hidden' as const;
+export type ExplainVerdict =
+  | typeof ExplainVerdictAllowed
+  | typeof ExplainVerdictBlocked
+  | typeof ExplainVerdictHidden;
+
+export const ExplainStepStatusPass = 'pass' as const;
+export const ExplainStepStatusFail = 'fail' as const;
+export const ExplainStepStatusSkip = 'skip' as const;
+export type ExplainStepStatus =
+  | typeof ExplainStepStatusPass
+  | typeof ExplainStepStatusFail
+  | typeof ExplainStepStatusSkip;
+
+export const AccessSubjectClient = 'client' as const;
+export const AccessSubjectToken = 'token' as const;
+export const AccessSubjectProfile = 'profile' as const;
+export const AccessSubjectAnonymous = 'anonymous' as const;
+export type AccessSubjectKind =
+  | typeof AccessSubjectClient
+  | typeof AccessSubjectToken
+  | typeof AccessSubjectProfile
+  | typeof AccessSubjectAnonymous;
+
+export interface ProfileToolRules {
+  allow?: string[];
+  deny?: string[];
+  classify?: Record<string, string>;
+}
+
+export interface ProfileToolCounts {
+  read: number;
+  write: number;
+  destructive: number;
+  unannotated_hidden: number;
+}
+
+// used_by is administrator-only: it is omitted, never emptied, for every other caller.
+export interface ProfileUsedBy {
+  clients: { id: string; mode: string }[];
+  tokens: string[];
+  anonymous_profile: boolean;
+}
+
+// GET /api/v1/profiles row and GET /api/v1/profiles/{name} (Spec 108-f FR-034).
+export interface ProfileView {
+  name: string;
+  title?: string;
+  description?: string;
+  servers: string[];
+  max_tier?: string;
+  unannotated?: string;
+  tools?: ProfileToolRules;
+  code_execution?: boolean;
+  management_tools?: boolean;
+  switchable_to?: string[];
+  effective_servers: string[];
+  effective_unannotated: string;
+  effective_code_execution: boolean;
+  is_legacy: boolean;
+  tool_counts: ProfileToolCounts;
+  // Deprecated v2 field: indexed tools on the effective servers.
+  tool_count: number;
+  calls_24h: number;
+  blocked_24h: number;
+  used_by?: ProfileUsedBy;
+}
+
+export interface ProfileList {
+  profiles: ProfileView[];
+  anonymous_profile?: string;
+}
+
+export interface ProfileWriteResult {
+  profile: ProfileView;
+  warnings: string[];
+}
+
+// GET /api/v1/profiles/{name}/effective-tools (Spec 108-f FR-005, FR-032).
+export interface EffectiveTool {
+  server: string;
+  tool: string;
+  intrinsic_tier: string;
+  profile_tier: string;
+  access: { visible: boolean; callable: boolean; reason: ProfileReason | string };
+  classification_stale: boolean;
+}
+
+export interface EffectiveToolsResult {
+  profile: string;
+  tools: EffectiveTool[];
+  counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
+  // Administrators only: classify entries for annotated or missing tools.
+  stale_classifications?: string[];
+}
+
+// GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.
+export interface AccessExplanation {
+  subject: { kind: AccessSubjectKind; name?: string };
+  tool: string;
+  profile: { name: string; source: string };
+  steps: { step: ExplainStep; status: ExplainStepStatus; detail: string }[];
+  verdict: ExplainVerdict;
+  first_failure: ExplainStep | '';
+  fixes: { step: ExplainStep; action: FixAction; target: string; label: string }[];
+}
+
+// One Clients-surface warning (GET /api/v1/clients warnings[]).
+export interface ClientWarning {
+  code: ClientWarningCode;
+  severity: WarningSeverity;
+  client_id?: string;
+  message: string;
+  action?: { kind: FixAction | typeof WarningActionUpgradeAdminKeyHolders; target?: string };
+  bindings?: { client_id: string; token_name: string; profile: string; mode: string }[];
+  fixes?: { kind: string; target?: string }[];
+}
+
+// GET /api/v1/clients row: Spec 109's presence fields plus the Spec 108-f credential and binding fields.
+export interface ClientView {
+  id: string;
+  display_name: string;
+  kind: 'supported' | 'other' | 'custom';
+  icon?: string;
+  state: string;
+  installed: boolean;
+  connected: boolean;
+  connection_unverified?: boolean;
+  config_path?: string;
+  display_path?: string;
+  last_seen: string | null;
+  active_sessions: number;
+  calls_24h: number;
+  reload_hint?: string;
+  sessions?: { id: string; work_session_id?: string; started_at: string; last_activity: string; profile?: string; profile_source?: string }[];
+  credential_state: CredentialState;
+  credential_checked_at?: string;
+  token_name?: string;
+  profile?: string;
+  profile_title?: string;
+  profile_mode?: 'locked' | 'switchable';
+  profile_source?: 'pin' | 'binding';
+  profile_missing?: boolean;
+  expires_at?: string;
+  rotation_pending?: boolean;
+  blocked_24h: number;
+}

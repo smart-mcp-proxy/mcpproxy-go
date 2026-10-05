@@ -28,9 +28,16 @@ func TestPutClientBinding_HappyPathShapeAndRecord(t *testing.T) {
 	body := decodeBody(t, w)
 	require.Equal(t, true, body["success"])
 	data := body["data"].(map[string]interface{})
-	require.Equal(t, map[string]interface{}{
-		"id": "cursor", "token_name": "client-cursor", "profile": "full", "mode": "locked", "credential_state": "client",
-	}, data["client"], "mode omitted keeps locked (US2-2)")
+	// Spec 108-f F17: the response is the full decorated client row (ClientView),
+	// whose binding fields are profile / profile_mode / profile_source.
+	client := data["client"].(map[string]interface{})
+	require.Equal(t, "cursor", client["id"])
+	require.Equal(t, "client-cursor", client["token_name"])
+	require.Equal(t, "full", client["profile"])
+	require.Equal(t, "locked", client["profile_mode"], "mode omitted keeps locked (US2-2)")
+	require.Equal(t, "pin", client["profile_source"])
+	require.Equal(t, "client", client["credential_state"])
+	require.NotContains(t, client, "mode", "the 108-c2 ClientBindingView is gone")
 	require.Equal(t, []interface{}{}, data["warnings"])
 
 	_, err := h.sm.ValidateAgentToken(secret, h.key)
@@ -60,7 +67,8 @@ func TestPutClientBinding_ModeSemantics(t *testing.T) {
 	w := h.put("cursor", `{"profile":""}`, nil, bindingAdminKey)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	client := decodeBody(t, w)["data"].(map[string]interface{})["client"].(map[string]interface{})
-	require.Equal(t, "switchable", client["mode"], `profile "" with mode omitted is All servers, switchable`)
+	require.Equal(t, "switchable", client["profile_mode"], `profile "" with mode omitted is All servers, switchable`)
+	require.Equal(t, "binding", client["profile_source"])
 
 	w = h.put("cursor", `{"profile":"","mode":"locked"}`, nil, bindingAdminKey)
 	require.Equal(t, http.StatusBadRequest, w.Code)
@@ -73,7 +81,7 @@ func TestPutClientBinding_ModeSemantics(t *testing.T) {
 	w = h.put("cursor", `{"profile":"full"}`, nil, bindingAdminKey)
 	require.Equal(t, http.StatusOK, w.Code)
 	client = decodeBody(t, w)["data"].(map[string]interface{})["client"].(map[string]interface{})
-	require.Equal(t, "locked", client["mode"], "omitted mode keeps the current mode")
+	require.Equal(t, "locked", client["profile_mode"], "omitted mode keeps the current mode")
 }
 
 func TestPutClientBinding_BadInput(t *testing.T) {

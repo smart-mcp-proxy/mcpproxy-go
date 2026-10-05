@@ -26,6 +26,8 @@ struct ServersView: View {
     @State private var selectedServerInitialFocusField: TrayConfigFocusField?
     @State private var showAddServer = false
     @State private var addServerInitialTab: AddServerTab = .catalog
+    /// Spec 108-k K18: only the servers a profile reaches (`GET /servers?profile=`).
+    @State private var profileFilter: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -37,6 +39,9 @@ struct ServersView: View {
                     initialFocusField: selectedServerInitialFocusField,
                     onDismiss: { selectedServer = nil }
                 )
+                // The detail keeps its server in @State(initialValue:); a route
+                // or notification for another server must remount it.
+                .id(server.id)
             } else {
                 serverListView
             }
@@ -45,6 +50,20 @@ struct ServersView: View {
             AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab, onOpenServer: openServerAfterAddSheetDismisses)
                 .id(addServerInitialTab)
         }
+        // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
+        // AppState (a view created by the sidebar switch reads it on appear; one
+        // already showing reads it here). The pending route (a profile filter or
+        // a server detail from a link) is consumed the same way. These live on
+        // `body`, which stays mounted while a server detail is open: on
+        // `serverListView` (unmounted then) the action was lost and replayed when
+        // the detail closed (108-retro-mac G). The tray's `.showAddServer`
+        // notification below stays as it was.
+        .onAppear {
+            consumeRoute()
+            consumePendingAddAction()
+        }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
+        .onChange(of: appState.pendingAddAction) { _ in consumePendingAddAction() }
         // Review finding (this round): these two `.onReceive` handlers used to
         // live on `serverListView`'s own VStack, a computed property this
         // body's `else` branch only includes while `selectedServer == nil`.
@@ -112,6 +131,30 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
                 Text("\(appState.totalTools) tools")
                     .foregroundStyle(.secondary)
+
+                if appState.scopeFiltersAvailable {
+                    Picker("Profile", selection: Binding(
+                        get: { profileFilter ?? "" },
+                        set: { profileFilter = $0.isEmpty ? nil : $0 })) {
+                        Text("All profiles").tag("")
+                        ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                        if let current = profileFilter, !appState.profiles.contains(where: { $0.name == current }) {
+                            Text(current).tag(current)
+                        }
+                    }
+                    .frame(maxWidth: 200)
+                    .accessibilityIdentifier("servers-profile-filter")
+                    if let profile = profileFilter {
+                        HStack(spacing: 4) {
+                            Text("Profile: \(profile)").font(.caption)
+                            Button { profileFilter = nil } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Clear profile filter")
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15)).clipShape(Capsule())
+                    }
+                }
 
                 Button {
                     // Spec 109 FR-062: the generic entry point opens on the
@@ -237,18 +280,11 @@ struct ServersView: View {
         }
         .onAppear {
             triggerLoad()
-            consumePendingAddAction()
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
         }
-        // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
-        // AppState (a view created by the sidebar switch reads it on appear; one
-        // already showing reads it here). The tray's `.showAddServer`
-        // notification below stays as it was.
-        .onChange(of: appState.pendingAddAction) { _ in
-            consumePendingAddAction()
-        }
+        .onChange(of: profileFilter) { _ in triggerLoad() }
         .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
             if let tab = notification.object as? AddServerTab {
                 addServerInitialTab = tab
@@ -275,18 +311,44 @@ struct ServersView: View {
         showAddServer = true
     }
 
+    /// Routes this view owns (Spec 108-k): a profile filter from a link, and a
+    /// server's detail from an explainer fix.
+    private func consumeRoute() {
+        enum Landing { case filter(String?), detail(String) }
+        let landing: Landing? = appState.consumeRoute { route in
+            switch route {
+            case .servers(let filter): return .filter(filter?.profile)
+            case .serverDetail(let name): return .detail(name)
+            default: return nil
+            }
+        }
+        switch landing {
+        case .filter(let profile)?:
+            selectedServer = nil
+            profileFilter = profile
+        case .detail(let name)?:
+            if let server = servers.first(where: { $0.name == name }) ?? appState.servers.first(where: { $0.name == name }) {
+                selectedServerInitialTab = .tools
+                selectedServer = server
+            }
+        case nil:
+            break
+        }
+    }
+
     private func triggerLoad() {
         loadTask?.cancel()
         loadTask = Task {
             guard let client = appState.apiClient else {
-                servers = appState.servers
+                servers = profileFilter == nil ? appState.servers : []
                 return
             }
             isLoading = true
             do {
-                servers = try await client.servers()
+                // The profile parameter rides only when the core advertises it.
+                servers = try await client.servers(profile: appState.scopeFiltersAvailable ? profileFilter : nil)
             } catch {
-                servers = appState.servers
+                servers = profileFilter == nil ? appState.servers : []
             }
             isLoading = false
         }

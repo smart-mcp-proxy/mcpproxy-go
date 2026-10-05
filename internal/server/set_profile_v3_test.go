@@ -71,7 +71,8 @@ func TestSetProfileV3SwitchableClientCanSelectDeclaredTarget(t *testing.T) {
 		result, err := proxy.handleSetProfile(ctx, request)
 		require.NoError(t, err)
 		require.True(t, result.IsError)
-		require.Equal(t, "unknown profile 'work-full'", resultText(t, result))
+		require.Equal(t, expectedSetProfileRefusal(t, ctx, "work-full"), resultText(t, result))
+		require.Equal(t, "cannot switch to profile 'work-full': this client's profile is locked", resultText(t, result))
 		require.Empty(t, proxy.sessionStore.GetActiveProfile("locked-set-profile"))
 	})
 
@@ -103,8 +104,11 @@ func TestSetProfileV3ConfinedAnonymousHonorsSwitchableTo(t *testing.T) {
 }
 
 // Spec 108 PR 108-bd-tests, T048: the "Management and switching" table of
-// contracts/enforcement-matrix.md, every column except `profiles` (which only
-// exists from 108-h). One row per caller class, each in its own configuration.
+// contracts/enforcement-matrix.md, every column. The `profiles` column (the
+// Spec 108-h admin tool) is asserted by wantProfiles: an administrator
+// credential (api_key or socket) sees it under no profile or a management_tools:
+// true profile, nobody else does. One row per caller class, each in its own
+// configuration.
 //
 // Fixtures: client rows use clientCtx (no stored credential), so the FR-008a
 // binding guard stays inert exactly as the matrix preamble requires; only the
@@ -142,8 +146,12 @@ type managementMatrixRow struct {
 	// active and visible again once the selection is cleared.
 	hiddenWhilePreSelected bool
 	wantUpstreamServers    bool
-	wantWorkFull           bool
-	wantLegacy             bool
+	// wantProfiles: the `profiles` admin tool is listed and callable (108-h,
+	// FR-017). profilesWhilePreSelected is the same while preSelect is active.
+	wantProfiles             bool
+	profilesWhilePreSelected bool
+	wantWorkFull             bool
+	wantLegacy               bool
 	// wantOwnBase: set_profile(<own pinned/bound/anonymous base>) is admitted
 	// (naming the own base is not a switch, FR-022).
 	ownBase    string
@@ -163,21 +171,34 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 	rows := []managementMatrixRow{
 		{
 			name:   "1 API key, no profile",
-			caller: adminCtx, wantUpstreamServers: true, wantWorkFull: true, wantLegacy: true,
+			caller: apiKeyCtx, wantUpstreamServers: true, wantProfiles: true, wantWorkFull: true, wantLegacy: true,
 			afterClear: managementMatrixClear{source: string(profile.SourceNone)},
 		},
 		{
-			name:   "2 API key, session on work-readonly",
-			caller: adminCtx, preSelect: "work-readonly", hiddenWhilePreSelected: true,
-			wantUpstreamServers: true, wantWorkFull: true, wantLegacy: true,
+			name:   "2 API key, session on work-readonly (management_tools false)",
+			caller: apiKeyCtx, preSelect: "work-readonly", hiddenWhilePreSelected: true,
+			wantUpstreamServers: true, wantProfiles: true, wantWorkFull: true, wantLegacy: true,
 			afterClear: managementMatrixClear{source: string(profile.SourceNone)},
 		},
 		{
-			name: "3 socket",
-			caller: func() context.Context {
-				return auth.WithAuthContext(context.Background(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
-			},
-			wantUpstreamServers: true, wantWorkFull: true, wantLegacy: true,
+			name:      "2b API key, session on a management_tools:true profile",
+			configure: withManagementOnProfile,
+			caller:    apiKeyCtx, preSelect: managementMatrixProfile,
+			wantUpstreamServers: true, wantProfiles: true, profilesWhilePreSelected: true, wantWorkFull: true, wantLegacy: true,
+			afterClear: managementMatrixClear{source: string(profile.SourceNone)},
+		},
+		{
+			// A legacy profile leaves management_tools unset: upstream_servers keeps
+			// its pre-108 visibility, `profiles` has no legacy and is hidden.
+			name:   "2c API key, session on a legacy profile (field unset)",
+			caller: apiKeyCtx, preSelect: "legacy", wantUpstreamServers: true, wantProfiles: true,
+			wantWorkFull: true, wantLegacy: true,
+			afterClear: managementMatrixClear{source: string(profile.SourceNone)},
+		},
+		{
+			name:                "3 socket",
+			caller:              socketCtx,
+			wantUpstreamServers: true, wantProfiles: true, wantWorkFull: true, wantLegacy: true,
 			afterClear: managementMatrixClear{source: string(profile.SourceNone)},
 		},
 		{
@@ -286,7 +307,7 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				row.setup(t, proxy, rt)
 			}
 			idx := proxy.profileIndexFor(proxy.currentConfig())
-			tools := []mcp.Tool{{Name: "upstream_servers"}, {Name: "quarantine_security"}, {Name: "call_tool_read"}}
+			tools := []mcp.Tool{{Name: "upstream_servers"}, {Name: "quarantine_security"}, {Name: "profiles"}, {Name: "call_tool_read"}}
 			sessions := 0
 			session := func() context.Context {
 				sessions++
@@ -307,7 +328,7 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				require.True(t, result.IsError, "%s: set_profile(%q) must be refused", row.name, slug)
 				text := resultText(t, result)
 				require.Equal(t, "", proxy.sessionStore.GetActiveProfile(sessionIDFromContext(ctx)), "a refusal leaves the session unchanged")
-				require.Equal(t, fmt.Sprintf("unknown profile '%s'", slug), text)
+				require.Equal(t, expectedSetProfileRefusal(t, ctx, slug), text)
 				if row.base != "" && row.base != slug {
 					require.NotContains(t, text, row.base, "a refusal must not name the caller's base profile (FR-018)")
 				}
@@ -339,13 +360,25 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				require.Contains(t, names, "call_tool_read")
 				return got
 			}
+			// profiles visibility (108-h): tools/list and the handler's own
+			// re-check must agree, and a hidden call is the uniform refusal.
+			profilesVisible := func(ctx context.Context) bool {
+				got := containsName(profileV3ToolNames(proxy.filterProfileV3Tools(ctx, tools)), "profiles")
+				admin, handlerVisible := proxy.profilesToolAccess(ctx)
+				_ = admin
+				require.Equal(t, got, handlerVisible, "tools/list and the handler's visibility check must agree")
+				return got
+			}
 			if row.preSelect != "" {
 				pre := session()
 				require.False(t, setProfile(pre, row.preSelect).IsError)
 				require.Equal(t, !row.hiddenWhilePreSelected, visible(pre),
 					"upstream_servers while the session is on %s", row.preSelect)
+				require.Equal(t, row.profilesWhilePreSelected, profilesVisible(pre),
+					"profiles while the session is on %s", row.preSelect)
 			}
 			require.Equal(t, row.wantUpstreamServers, visible(session()), "upstream_servers visibility")
+			require.Equal(t, row.wantProfiles, profilesVisible(session()), "profiles visibility")
 			if !row.wantUpstreamServers {
 				require.NotContains(t, profileV3ToolNames(proxy.filterProfileV3Tools(session(), tools)), "quarantine_security")
 			}
@@ -469,9 +502,10 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 
 		other := mcp.CallToolRequest{}
 		other.Params.Arguments = map[string]interface{}{"profile": "legacy"}
-		refused, err := proxy.handleSetProfile(sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid), other)
+		lockedCtx := sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid)
+		refused, err := proxy.handleSetProfile(lockedCtx, other)
 		require.NoError(t, err)
 		require.True(t, refused.IsError)
-		require.Equal(t, "unknown profile 'legacy'", resultText(t, refused))
+		require.Equal(t, expectedSetProfileRefusal(t, lockedCtx, "legacy"), resultText(t, refused))
 	})
 }

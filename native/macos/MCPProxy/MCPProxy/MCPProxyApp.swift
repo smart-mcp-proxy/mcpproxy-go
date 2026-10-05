@@ -227,6 +227,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             DispatchQueue.main.async { self?.restoreAccessoryIfNoVisibleWindows() }
         }
 
+        // Spec 108-k: a fix button (binding guard, explainer) asks for Settings
+        // through `AppState.navigate(.settings)`; the Settings window itself is
+        // ours, so this is where it opens.
+        NotificationCenter.default.addObserver(
+            forName: .openSettings, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showSettingsWindow() }
+        }
+
         // Create the status bar item with the MCPProxy monochrome icon
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
@@ -631,6 +640,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         window.contentView = NSHostingView(
             rootView: ConnectClientView(model: model, onClose: { [weak self] in
                 self?.dismissConnectClientForm()
+            }, onRoute: { [weak self] route in
+                // A guard fix ("Require authentication…") opens Settings.
+                self?.appState.navigate(route)
             })
         )
         // A sheet on the main window when there is one — the form belongs to the
@@ -711,6 +723,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // reachability poll alive inside a retained, invisible window.
         MainActor.assumeIsolated {
             connectClientForm.windowWillClose(notification.object as? NSWindow)
+            // A closed Settings window keeps its SwiftUI tree alive
+            // (isReleasedWhenClosed = false), and that hidden SettingsView
+            // would win the race to consume a guard-fix route meant for the
+            // window about to be built. Drop the tree with the window.
+            if let closing = notification.object as? NSWindow, closing === settingsWindow {
+                SettingsWindowRetirement.retire(closing)
+                settingsWindow = nil
+            }
         }
         // Defer so the closing window has already left the visible set.
         DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
@@ -1199,8 +1219,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         ? attentionItem.subject.name
                         : attentionDetailTarget(for: attentionItem)
                 }
-                // A client-subject item (109-h) has no native screen yet:
-                // shown for disclosure, not yet actionable from the tray.
+                // Spec 109-l: a Spec 108 warning (a client or the binding-guard
+                // setting) opens the screen that fixes it, through the same
+                // mapper Home uses. It only navigates; the tray never mutates
+                // config or a credential. Other client items (client_never_seen)
+                // stay disclosure rows.
+                if attentionItem.subject.type != "server", AttentionWarningAction.isActionable(attentionItem) {
+                    item.action = #selector(performAttentionWarningFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem
+                }
                 submenu.addItem(item)
             }
             parent.submenu = submenu
@@ -1284,48 +1312,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
-        // Profile switcher (Profiles v2 T5) — only shown when profiles are
-        // configured. Lists "All servers" (clears the profile) plus each profile
-        // with its tool count; the active selection carries a checkmark. Clicking
-        // switches the server-level default active profile via REST; a switch made
-        // by another client arrives over SSE (`active_profile.changed`) and
-        // repaints this submenu.
-        if !appState.profiles.isEmpty {
-            let activeLabel = appState.activeProfile.isEmpty ? "All servers" : appState.activeProfile
-            let profileMenuItem = NSMenuItem(title: "Profile: \(activeLabel)", action: nil, keyEquivalent: "")
-            let profileSubmenu = NSMenu()
-
-            let allItem = NSMenuItem(title: "All servers", action: #selector(switchProfile(_:)), keyEquivalent: "")
-            allItem.target = self
-            allItem.representedObject = ""
-            allItem.state = appState.activeProfile.isEmpty ? .on : .off
-            profileSubmenu.addItem(allItem)
-            profileSubmenu.addItem(.separator())
-
-            // F11: the tray showed only a tool count, so a profile whose
-            // servers are not in the config read as "empty" rather than
-            // "switching to this scopes every agent to nothing".
-            let knownServers = Set(appState.servers.map(\.name))
-            for profile in appState.profiles {
-                let title = TrayProfileDisplay.label(
-                    name: profile.name,
-                    servers: profile.servers,
-                    toolCount: profile.toolCount,
-                    knownServers: knownServers)
-                let item = NSMenuItem(title: title,
-                                      action: #selector(switchProfile(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = profile.name
-                item.state = profile.name == appState.activeProfile ? .on : .off
-                if profile.servers.filter({ knownServers.contains($0) }).isEmpty {
-                    item.toolTip = "None of this profile’s servers (\(profile.servers.joined(separator: ", "))) "
-                        + "are in the configuration. Switching to it would leave agents with no tools."
-                }
-                profileSubmenu.addItem(item)
+        // Clients submenu (Spec 108-k FR-048). Replaces the v2 "Profile:"
+        // switcher: a profile is now a property of a CLIENT, not of the whole
+        // instance. One row per client that holds a client credential or is
+        // connected (`name — profile 🔒`); its submenu picks the profile and
+        // locks or unlocks it. A client without a credential offers only the
+        // way to get one. The rows are built by `TrayClientsMenu` (pure).
+        let clientRows = TrayClientsMenu.build(
+            clients: appState.clients, profiles: appState.profiles,
+            knownServers: Set(appState.servers.map(\.name)))
+        if !clientRows.isEmpty {
+            let clientsMenuItem = NSMenuItem(title: TrayClientsMenu.title, action: nil, keyEquivalent: "")
+            let clientsSubmenu = NSMenu()
+            for row in clientRows {
+                let rowItem = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+                let rowMenu = TrayClientsMenu.render(
+                    row, target: self,
+                    profileAction: #selector(setClientProfile(_:)),
+                    lockAction: #selector(setClientLock(_:)),
+                    upgradeAction: #selector(upgradeClientCredential(_:)))
+                rowItem.submenu = rowMenu
+                clientsSubmenu.addItem(rowItem)
             }
-
-            profileMenuItem.submenu = profileSubmenu
-            menu.addItem(profileMenuItem)
+            clientsMenuItem.submenu = clientsSubmenu
+            menu.addItem(clientsMenuItem)
             menu.addItem(.separator())
         }
 
@@ -1850,6 +1860,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.runModal()
     }
 
+    /// Spec 109-l: a Spec 108 warning row (a client or the binding-guard
+    /// setting). Navigates to the fix's screen and brings the main window
+    /// forward; a Settings route opens its own window (`navigate` posts
+    /// `openSettings`). Never a mutation.
+    @objc private func performAttentionWarningFromMenu(_ sender: NSMenuItem) {
+        guard let item = sender.representedObject as? AttentionItem,
+              let route = AttentionWarningAction.route(for: item) else { return }
+        appState.navigate(route)
+        if let sidebar = route.sidebarItem {
+            showMainWindow(tab: sidebar)
+        }
+    }
+
     /// Run the remediation a "Needs Attention" row offers — from the row's own
     /// submenu, under its own verb, never as a side effect of clicking the row
     /// (F4).
@@ -1997,15 +2020,56 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         perform(.restart, on: id, id: id)
     }
 
-    /// Switch the server-level default active profile (Profiles v2 T5). The
-    /// represented object is the profile slug ("" clears it / all servers). The
-    /// explicit refresh gives immediate feedback; the core also emits
-    /// `active_profile.changed` over SSE which repaints every client.
-    @objc private func switchProfile(_ sender: NSMenuItem) {
-        guard let slug = sender.representedObject as? String else { return }
-        Task {
-            try? await appState.apiClient?.setActiveProfile(slug)
-            await coreManager?.refreshProfiles()
+    /// Bind a client to the chosen profile (FR-026). The mode is omitted so the
+    /// credential keeps its own (except All servers, which is switchable).
+    @objc private func setClientProfile(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction, let profile = action.profile else { return }
+        applyClientBinding(clientId: action.clientId, profile: profile, mode: nil)
+    }
+
+    /// Lock or unlock a client at its current profile.
+    @objc private func setClientLock(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction, let mode = action.mode else { return }
+        let current = appState.clients.first { $0.id == action.clientId }?.boundProfile ?? ""
+        applyClientBinding(clientId: action.clientId, profile: current, mode: mode)
+    }
+
+    /// A client without a client credential: open the connect sheet on it (the
+    /// upgrade is a connect with a profile).
+    @objc private func upgradeClientCredential(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction else { return }
+        appState.navigate(.connectSheet(clientId: action.clientId))
+        showMainWindow(tab: .clients)
+    }
+
+    private func applyClientBinding(clientId: String, profile: String, mode: BindingMode?) {
+        Task { @MainActor in
+            guard let apiClient = appState.apiClient else { return }
+            do {
+                _ = try await apiClient.setBinding(clientId, profile: profile, mode: mode)
+                await coreManager?.refreshClients()
+            } catch {
+                presentBindingFailure(error)
+            }
+        }
+    }
+
+    /// A refused binding change is shown, never swallowed: the guard's text
+    /// says why, and "Open Settings…" goes to the setting that fixes it.
+    private func presentBindingFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Could not change the client’s profile"
+        alert.informativeText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        alert.alertStyle = .warning
+        var opensSettings = false
+        if case .service(_, let body) = (error as? APIClientError), body.isGuardRefusal {
+            alert.addButton(withTitle: "Open Settings…")
+            opensSettings = true
+        }
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn, opensSettings {
+            appState.navigate(.settings(.requireMCPAuth))
         }
     }
 
@@ -2056,17 +2120,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// and seeds ActivityView's session filter, which is what makes a glance row parent↔child navigable.
     @objc private func openActivityForSession(_ sender: NSMenuItem) {
         let sessionId = sender.representedObject as? String
+        // Spec 108-k K14: a client row opens that CLIENT's activity once the
+        // core attributes calls (`features.scope_filters`); otherwise the
+        // session's, exactly as before.
+        let filter = sessionId.flatMap { id -> ScopeFilter? in
+            guard !id.isEmpty else { return nil }
+            return GlanceClientLink.filter(
+                forSession: id, sessions: appState.glanceSessions,
+                scopeFiltersAvailable: appState.scopeFiltersAvailable)
+        }
         // Published BEFORE the window is built, so a view created by this very
         // click picks the filter up on appear. A delayed notification would be
         // a race: too early and nothing is subscribed, too late and the user
         // has already read an unfiltered log.
-        if let sessionId, !sessionId.isEmpty {
-            appState.handOffScopeFilter(.forSession(sessionId))
+        if let filter {
+            appState.handOffScopeFilter(filter)
         }
         showMainWindow(tab: Self.glanceActivityDestination)
-        guard let sessionId, !sessionId.isEmpty else { return }
+        guard let filter else { return }
         // Covers the already-open window, whose observers are live now.
-        NotificationCenter.default.post(name: .activityFilter, object: ScopeFilter.forSession(sessionId))
+        NotificationCenter.default.post(name: .activityFilter, object: filter)
     }
 
     /// Where a glance row click lands. A constant so tests can pin the
@@ -2259,5 +2332,15 @@ private struct SettingsSceneBridge: View {
         Color.clear
             .frame(width: 1, height: 1)
             .onAppear { controller.openSettingsFromScene() }
+    }
+}
+
+/// Tears the SwiftUI content of a closed Settings window down so it cannot
+/// consume `AppState.pendingRoute` (scroll target, anonymous preselect) that
+/// belongs to the next Settings window (Spec 108-k K13/K20).
+enum SettingsWindowRetirement {
+    @MainActor
+    static func retire(_ window: NSWindow) {
+        window.contentView = nil
     }
 }

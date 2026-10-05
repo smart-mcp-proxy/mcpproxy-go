@@ -169,10 +169,11 @@ func parseConnectResponse(status int, raw []byte, clientID string) (*connect.Con
 // --- offline --------------------------------------------------------------
 
 // offlineConnectBackend runs the clients service locally over config.db when
-// no daemon is reachable. Its guard is the conservative one: it cannot
-// evaluate the tool-dependent reachability comparison without a published
-// snapshot, so it refuses any named binding while require_mcp_auth is off —
-// only ever stricter than the daemon's.
+// no daemon is reachable. Its guard is runtime.StrictOfflineBindingGuard: it
+// cannot evaluate the tool-dependent reachability comparison without a
+// published snapshot, so while require_mcp_auth is off it refuses any new or
+// changed named binding; a reconnect that keeps the recorded binding is
+// allowed. Only ever stricter than the daemon's.
 type offlineConnectBackend struct {
 	sm  *storage.Manager
 	svc *connect.Service
@@ -194,6 +195,7 @@ func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error
 		Store:    sm,
 		HMACKey:  func() ([]byte, error) { return auth.GetOrCreateHMACKey(cfg.DataDir) },
 		Config:   func() *config.Config { return cfg },
+		Guard:    func() runtime.BindingGuard { return runtime.StrictOfflineBindingGuard{} },
 		Activity: sm.SaveActivity,
 	})
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).
@@ -226,8 +228,14 @@ func describeConnectFailure(err error, clientID string) error {
 	var guardErr *runtime.BindingGuardError
 	var conflict *connectConflictError
 	var val *runtime.ValidationError
+	var busy *runtime.ConnectInProgressError
+	var superseded *runtime.CredentialSupersededError
 	var b strings.Builder
 	switch {
+	case errors.As(err, &busy):
+		b.WriteString(busy.Error())
+	case errors.As(err, &superseded):
+		b.WriteString(superseded.Error())
 	case errors.As(err, &guardErr):
 		b.WriteString(guardErr.Error())
 		b.WriteString("\nFixes:")
@@ -254,23 +262,11 @@ func describeConnectFailure(err error, clientID string) error {
 }
 
 func guardFixText(fix runtime.GuardFix, guardErr *runtime.BindingGuardError) string {
-	switch fix.Kind {
-	case profile.GuardFixRequireMCPAuth:
-		return "set require_mcp_auth: true (config or Settings → Security)"
-	case profile.GuardFixSetAnonymousProfile:
-		if fix.Target != "" {
-			// `mcpproxy profile anonymous <p>` lands in 108-g; until then the
-			// config key is the way.
-			return fmt.Sprintf("set anonymous_profile: %q in the config", fix.Target)
-		}
-		name := ""
-		if len(guardErr.Bindings) > 0 {
-			name = guardErr.Bindings[0].Profile
-		}
-		return fmt.Sprintf("set anonymous_profile in the config to a profile not wider than %s", name)
-	default:
-		return fix.Kind
+	name := ""
+	if len(guardErr.Bindings) > 0 {
+		name = guardErr.Bindings[0].Profile
 	}
+	return guardFixLine(fix, name)
 }
 
 // connectCredentialLine is the credential line of a successful connect:

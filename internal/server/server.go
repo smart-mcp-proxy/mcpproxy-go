@@ -151,6 +151,13 @@ type Server struct {
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
 
+	// Automatic tool definition capture after a settled scan (see
+	// review_capture.go). reviewCaptureFn defaults to
+	// runtime.RefreshServerTools and is replaceable in tests;
+	// reviewCaptureInFlight is the per-server single-flight guard.
+	reviewCaptureFn       func(ctx context.Context, serverName string) error
+	reviewCaptureInFlight sync.Map
+
 	// Informational Pass-1 baseline scanning (see scan_informational.go).
 	// infoScanKnown holds every server name observed since process start, so a
 	// servers.changed carrying a name that is not in it is a NEW admission;
@@ -379,6 +386,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// FR-008a: the one evaluator behind every guarded write (config routes,
 	// connect, client bindings) and the runtime anonymous guard.
 	rt.SetBindingGuard(mcpProxy)
+	// Spec 108-f: the profiles service asks the same proxy for effective tools,
+	// try, explain and tool counts, and tells it to rewrite live sessions'
+	// stored selections on a rename or delete.
+	rt.SetProfileEvaluator(mcpProxy)
+	rt.ProfilesService().SetSessionHook(mcpProxy)
 	// FR-026: a binding change clears the stored set_profile selection of every
 	// live session of that credential and sends tools/list_changed to each.
 	rt.ClientsService().SetNotifier(mcpProxy)
@@ -405,14 +417,41 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the observer runs on the exact *Config about to be stored — and the
 	// startup snapshot now, which NewService stored without running any
 	// observer (see warmProfileIndex).
-	if svc := server.runtime.ConfigService(); svc != nil {
-		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
-	}
+	server.installProfilePublishObserver(mcpProxy)
 	server.warmProfileIndex()
 
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
+}
+
+// installProfilePublishObserver registers the pre-publish observer that indexes
+// every config snapshot (Spec 105 FR-004) and, for a snapshot that changed a
+// profile or the anonymous_profile, enqueues the FR-027 notification and the
+// profiles.changed event (Spec 108-f F9, F10). One observer covers a
+// profiles-service write and a hand edit alike. It returns the notifier (nil
+// when the runtime has no config service).
+func (s *Server) installProfilePublishObserver(mcpProxy *MCPProxyServer) *profileChangeNotifier {
+	svc := s.runtime.ConfigService()
+	if svc == nil {
+		return nil
+	}
+	notifier := newProfileChangeNotifier(mcpProxy, func(name, change string) { s.runtime.EmitProfilesChanged(name, change, "") })
+	mcpProxy.profileNotifier = notifier
+	notifier.start()
+	svc.AddPrePublishObserver(func(cfg *config.Config) {
+		// The snapshot this one replaces, read BEFORE the warm path stores the
+		// new pair: the FR-027 delta is computed between the two.
+		var previous *config.Config
+		if old := s.profileIndexes.Current(); old != nil {
+			previous = old.cfg
+		}
+		s.profileIndexes.warmPublishing(cfg)
+		if previous != nil && previous != cfg {
+			notifier.enqueue(previous, cfg)
+		}
+	})
+	return notifier
 }
 
 // trustedProxiesProvider yields the LIVE trusted_proxies list (Spec 107
@@ -749,6 +788,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 				s.mcpProxy.RefreshPrompts()
+				// retrieve_tools' description names the reachable servers;
+				// re-list clients when that set changes.
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
 			// and must have its baseline scan triggered so the settle handler can
@@ -790,6 +832,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// session, so an unguarded call would make any unrelated config
 				// edit look, to a client, exactly like the tool set changing.
 				s.mcpProxy.RefreshDirectModeToolsOnSerializationChange()
+				// advertise_upstream_servers is hot-reloadable: re-list
+				// retrieve_tools clients when it flips (guarded on change).
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced
@@ -808,6 +853,10 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
 			serverName, _ := evt.Payload["server_name"].(string)
 			s.maybeAutoApproveScanSettled(context.Background(), serverName)
+			// A freshly scanned, still-quarantined server has its tool
+			// definitions captured for review (never blocks this loop).
+			status, _ := evt.Payload["status"].(string)
+			s.maybeCaptureReviewDefinitions(serverName, status)
 		}
 	}
 }
@@ -2003,11 +2052,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	if updates.Protocol != "" {
 		existing.Protocol = updates.Protocol
 	}
-	// Booleans are always applied since the handler only calls UpdateServer
-	// when the caller explicitly provided these fields
+	// Enabled and ReconnectOnUse are always applied: the REST handler resolves
+	// them against the existing server before calling UpdateServer.
 	existing.Enabled = updates.Enabled
-	existing.Quarantined = updates.Quarantined
 	existing.ReconnectOnUse = updates.ReconnectOnUse
+	// Quarantine is applied only when the caller stated it (the REST PATCH
+	// handler marks the explicit bit when the body carries `quarantined`).
+	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+	// false copied from a config snapshot, which must never un-quarantine.
+	if updates.QuarantineExplicitlySet() {
+		existing.Quarantined = updates.Quarantined
+		existing.MarkQuarantineExplicitlySet(true)
+	}
 
 	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
 	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
@@ -3036,6 +3092,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// MCP-32: pass the observability manager so /metrics is served (and HTTP
 	// request metrics/tracing middleware applied) when enabled.
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
+	// Spec 108-f: the profiles service behind /profiles and /access/explain
+	// (both editions: profiles are admin-owned config in either).
+	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
+	// Spec 108-h: the `profiles` admin MCP tool reads the same admin views the
+	// REST routes do (one implementation, FR-037).
+	s.mcpProxy.SetAdminViews(httpAPIServer)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()
@@ -3616,6 +3678,20 @@ func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.Confi
 	return s.runtime.GuardedApplyConfig(cfg, cfgPath)
 }
 
+// MutateConfig is the config funnel (Spec 108-f F2): the read of the desired
+// config, the caller's mutation, the FR-008a guard, an optional token re-pin and
+// the write run under one lock, and the write's profile_change records are
+// attributed to actor. PATCH /config, POST /config/apply, PATCH
+// /config/docker-isolation and every profiles-service mutation go through it.
+func (s *Server) MutateConfig(
+	ctx context.Context,
+	actor runtime.Actor,
+	mutate func(desired *config.Config) (runtime.ChangeHint, error),
+	tokens runtime.TokenRewrite,
+) (*runtime.ConfigApplyResult, *runtime.ConfigDiff, error) {
+	return s.runtime.MutateConfig(ctx, actor, mutate, tokens)
+}
+
 // GetTokenSavings calculates and returns token savings statistics
 func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
 	return s.runtime.CalculateTokenSavings()
@@ -4051,7 +4127,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	// audit authorization or upstream I/O. Profile server scope is concealed
 	// as not-found; tool policy denials retain the shared refusal text.
 	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
-	profileResolution := s.mcpProxy.ResolveProfileV3(ctx, profileIndex)
+	ctx, profileResolution := s.mcpProxy.resolveForDispatch(ctx, profileIndex)
 	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
 		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
@@ -4061,7 +4137,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
 		intrinsic := profile.IntrinsicTier(annotations, found)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
-			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
 			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
@@ -4159,8 +4235,8 @@ func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int, scop
 
 // GetRecentSessions retrieves recent MCP sessions, optionally filtered by
 // status ("active" / "closed"; empty means no filter).
-func (s *Server) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
-	return s.runtime.GetRecentSessions(limit, status)
+func (s *Server) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	return s.runtime.GetRecentSessions(f)
 }
 
 // GetSessionByID retrieves a session by its ID

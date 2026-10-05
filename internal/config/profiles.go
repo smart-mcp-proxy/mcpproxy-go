@@ -224,7 +224,44 @@ func indexByte(s string, b byte) int {
 	return -1
 }
 
-// ValidateProfiles enforces the Spec 057/108 profile rules (data-model.md
+// ValidateProfiles is ValidateProfilesDetailed with the warnings flattened to
+// their messages and the error typed as a plain error (the pre-108-f
+// signature every existing caller uses).
+func ValidateProfiles(cfg *Config) (warnings []string, err error) {
+	detailed, err := ValidateProfilesDetailed(cfg)
+	for _, w := range detailed {
+		warnings = append(warnings, w.Message)
+	}
+	return warnings, err
+}
+
+// ProfileValidationError is a fatal profile rule violation, typed so REST can
+// answer `400 {error, field}` without parsing the message (Spec 108-f F6).
+// Error() is the unchanged FR-007 text, so every surface still shows identical
+// messages. Index is the profile's position in Config.Profiles (-1 when the
+// rule is not about one profile); Field is one of name, servers, title,
+// description, max_tier, unannotated, tools.allow, tools.deny, tools.classify,
+// code_execution, management_tools, switchable_to, anonymous_profile.
+type ProfileValidationError struct {
+	Index   int
+	Field   string
+	Message string
+}
+
+func (e *ProfileValidationError) Error() string { return e.Message }
+
+func profileErr(index int, field, format string, args ...interface{}) *ProfileValidationError {
+	return &ProfileValidationError{Index: index, Field: field, Message: fmt.Sprintf(format, args...)}
+}
+
+// ProfileWarning is a non-fatal profile diagnostic attributed to the profile
+// it is about ("" for one that is not, such as the anonymous_profile warning).
+type ProfileWarning struct {
+	Profile string
+	Message string
+}
+
+// ValidateProfilesDetailed enforces the Spec 057/108 profile rules (data-model.md
 // §1). It is the ONE function used by config load, REST, CLI (via REST), MCP
 // `profiles` and the editors' live validation (through REST) — FR-007 — so
 // every surface returns identical messages. Fatal rules (invalid/reserved/
@@ -235,15 +272,16 @@ func indexByte(s string, b byte) int {
 // naming something outside scope) return human-readable warnings without
 // failing the load — the offending entry is saved but ignored (FR-004,
 // FR-007). A nil/empty Profiles slice is fully valid (returns no warnings, no
-// error) — preserving zero-config behaviour (SC-004).
-func ValidateProfiles(cfg *Config) (warnings []string, err error) {
+// error) — preserving zero-config behaviour (SC-004). A fatal error is a
+// *ProfileValidationError naming the field; each warning names its profile.
+func ValidateProfilesDetailed(cfg *Config) (warnings []ProfileWarning, err error) {
 	// FR-009a rollout gate, anonymous_profile row (data-model.md §1): a
 	// non-empty anonymous_profile is fatal while the gate is closed,
 	// regardless of whether it names a known or unknown profile, and
 	// regardless of whether cfg has any profiles at all — checked first so
 	// it applies even on the cfg==nil/no-profiles early return below.
 	if cfg != nil && cfg.AnonymousProfile != "" && !PolicyEnforcementReady() {
-		return nil, fmt.Errorf("anonymous_profile is not supported by this build (Profiles v3 enforcement incomplete)")
+		return nil, &ProfileValidationError{Index: -1, Field: "anonymous_profile", Message: "anonymous_profile is not supported by this build (Profiles v3 enforcement incomplete)"}
 	}
 	if cfg == nil || len(cfg.Profiles) == 0 {
 		return validateAnonymousProfile(cfg, nil), nil
@@ -266,15 +304,15 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 	for i, p := range cfg.Profiles {
 		// Fatal: slug format.
 		if !profileSlugPattern.MatchString(p.Name) {
-			return warnings, fmt.Errorf("profiles[%d]: invalid profile name %q: must match %s (lowercase alphanumeric, '-'/'_', 1-63 chars)", i, p.Name, profileSlugPattern.String())
+			return warnings, profileErr(i, "name", "profiles[%d]: invalid profile name %q: must match %s (lowercase alphanumeric, '-'/'_', 1-63 chars)", i, p.Name, profileSlugPattern.String())
 		}
 		// Fatal: reserved slug.
 		if _, reserved := reservedProfileSlugs[p.Name]; reserved {
-			return warnings, fmt.Errorf("profiles[%d]: profile name %q is reserved and cannot be used", i, p.Name)
+			return warnings, profileErr(i, "name", "profiles[%d]: profile name %q is reserved and cannot be used", i, p.Name)
 		}
 		// Fatal: duplicate name (name both occurrences).
 		if first, dup := seen[p.Name]; dup {
-			return warnings, fmt.Errorf("profiles[%d]: duplicate profile name %q (already defined at profiles[%d])", i, p.Name, first)
+			return warnings, profileErr(i, "name", "profiles[%d]: duplicate profile name %q (already defined at profiles[%d])", i, p.Name, first)
 		}
 		seen[p.Name] = i
 
@@ -285,36 +323,36 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 		// cannot enforce.
 		if !PolicyEnforcementReady() {
 			if field, set := firstSetPolicyField(p); set {
-				return warnings, fmt.Errorf("profiles[%d]: %s is not supported by this build (Profiles v3 enforcement incomplete)", i, field)
+				return warnings, profileErr(i, field, "profiles[%d]: %s is not supported by this build (Profiles v3 enforcement incomplete)", i, field)
 			}
 		}
 
 		// Fatal: max_tier enum.
 		if p.MaxTier != "" {
 			if _, ok := validProfileTiers[p.MaxTier]; !ok {
-				return warnings, fmt.Errorf("profiles[%d]: invalid max_tier %q: must be one of read, write, destructive", i, p.MaxTier)
+				return warnings, profileErr(i, "max_tier", "profiles[%d]: invalid max_tier %q: must be one of read, write, destructive", i, p.MaxTier)
 			}
 		}
 		// Fatal: unannotated enum.
 		if p.Unannotated != "" {
 			if _, ok := validUnannotatedPolicies[p.Unannotated]; !ok {
-				return warnings, fmt.Errorf("profiles[%d]: invalid unannotated %q: must be one of deny, as_write, as_read", i, p.Unannotated)
+				return warnings, profileErr(i, "unannotated", "profiles[%d]: invalid unannotated %q: must be one of deny, as_write, as_read", i, p.Unannotated)
 			}
 		}
 		// Fatal: title / description length (FR-001 limits). Counted in
 		// runes, not bytes: a multi-byte character (e.g. Cyrillic, CJK,
 		// emoji) must count once against the limit, not once per UTF-8 byte.
 		if n := utf8.RuneCountInString(p.Title); n > 80 {
-			return warnings, fmt.Errorf("profiles[%d]: title too long (%d chars, max 80)", i, n)
+			return warnings, profileErr(i, "title", "profiles[%d]: title too long (%d chars, max 80)", i, n)
 		}
 		if n := utf8.RuneCountInString(p.Description); n > 500 {
-			return warnings, fmt.Errorf("profiles[%d]: description too long (%d chars, max 500)", i, n)
+			return warnings, profileErr(i, "description", "profiles[%d]: description too long (%d chars, max 500)", i, n)
 		}
 		// Fatal: switchable_to self-reference.
 		if p.SwitchableTo != nil {
 			for _, target := range *p.SwitchableTo {
 				if target == p.Name {
-					return warnings, fmt.Errorf("profiles[%d]: switchable_to cannot include the profile itself", i)
+					return warnings, profileErr(i, "switchable_to", "profiles[%d]: switchable_to cannot include the profile itself", i)
 				}
 			}
 		}
@@ -323,12 +361,12 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 			// Fatal: pattern syntax, then classify value enum.
 			for _, pat := range p.Tools.Allow {
 				if !isValidToolPattern(pat) {
-					return warnings, fmt.Errorf("profiles[%d]: invalid tool pattern %q", i, pat)
+					return warnings, profileErr(i, "tools.allow", "profiles[%d]: invalid tool pattern %q", i, pat)
 				}
 			}
 			for _, pat := range p.Tools.Deny {
 				if !isValidToolPattern(pat) {
-					return warnings, fmt.Errorf("profiles[%d]: invalid tool pattern %q", i, pat)
+					return warnings, profileErr(i, "tools.deny", "profiles[%d]: invalid tool pattern %q", i, pat)
 				}
 			}
 			for pat, tier := range p.Tools.Classify {
@@ -340,22 +378,22 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 				// never match anything rather than classifying every tool
 				// it looks like it should.
 				if !isValidToolPattern(pat) || indexByte(pat, '*') >= 0 {
-					return warnings, fmt.Errorf("profiles[%d]: invalid tool pattern %q", i, pat)
+					return warnings, profileErr(i, "tools.classify", "profiles[%d]: invalid tool pattern %q", i, pat)
 				}
 				if _, ok := validProfileTiers[tier]; !ok {
-					return warnings, fmt.Errorf("profiles[%d]: invalid classify tier %q: must be one of read, write, destructive", i, tier)
+					return warnings, profileErr(i, "tools.classify", "profiles[%d]: invalid classify tier %q: must be one of read, write, destructive", i, tier)
 				}
 			}
 		}
 
 		// Warning: empty server list (legal deny-all).
 		if len(p.Servers) == 0 {
-			warnings = append(warnings, fmt.Sprintf("profile %q has no servers; it will expose zero tools (deny-all placeholder)", p.Name))
+			warnings = append(warnings, ProfileWarning{Profile: p.Name, Message: fmt.Sprintf("profile %q has no servers; it will expose zero tools (deny-all placeholder)", p.Name)})
 		}
 		// Warning: unknown server references (warn-and-skip).
 		for _, srv := range p.Servers {
 			if _, ok := known[srv]; !ok {
-				warnings = append(warnings, fmt.Sprintf("profile %q references unknown server %q; it will be skipped", p.Name, srv))
+				warnings = append(warnings, ProfileWarning{Profile: p.Name, Message: fmt.Sprintf("profile %q references unknown server %q; it will be skipped", p.Name, srv)})
 			}
 		}
 		// Warning: rule/classify entries naming a server outside `servers`
@@ -371,7 +409,7 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 					return
 				}
 				if _, ok := inProfile[server]; !ok {
-					warnings = append(warnings, fmt.Sprintf("profile %q rule %q names server %q outside the profile; ignored", p.Name, pat, server))
+					warnings = append(warnings, ProfileWarning{Profile: p.Name, Message: fmt.Sprintf("profile %q rule %q names server %q outside the profile; ignored", p.Name, pat, server)})
 				}
 			}
 			for _, pat := range p.Tools.Allow {
@@ -391,7 +429,7 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 		if p.SwitchableTo != nil {
 			for _, target := range *p.SwitchableTo {
 				if _, ok := profileNames[target]; !ok {
-					warnings = append(warnings, fmt.Sprintf("profile %q switchable_to references unknown profile %q; ignored", p.Name, target))
+					warnings = append(warnings, ProfileWarning{Profile: p.Name, Message: fmt.Sprintf("profile %q switchable_to references unknown profile %q; ignored", p.Name, target)})
 				}
 			}
 		}
@@ -426,14 +464,14 @@ func firstSetPolicyField(p ProfileConfig) (field string, set bool) {
 // AnonymousProfile names a profile that does not exist. profileNames is nil
 // when cfg has no profiles at all (every non-empty AnonymousProfile is then
 // unknown).
-func validateAnonymousProfile(cfg *Config, profileNames map[string]struct{}) []string {
+func validateAnonymousProfile(cfg *Config, profileNames map[string]struct{}) []ProfileWarning {
 	if cfg == nil || cfg.AnonymousProfile == "" {
 		return nil
 	}
 	if _, ok := profileNames[cfg.AnonymousProfile]; ok {
 		return nil
 	}
-	return []string{fmt.Sprintf("anonymous_profile %q does not exist; anonymous callers are denied all tools", cfg.AnonymousProfile)}
+	return []ProfileWarning{{Message: fmt.Sprintf("anonymous_profile %q does not exist; anonymous callers are denied all tools", cfg.AnonymousProfile)}}
 }
 
 // ProfileWarnings returns the non-fatal profile diagnostics captured by the most

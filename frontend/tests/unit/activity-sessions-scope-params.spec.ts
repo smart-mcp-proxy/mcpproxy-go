@@ -80,12 +80,57 @@ describe('Activity Sessions view — scope params to GET /sessions (Spec 108 FR-
     wrapper.unmount()
   })
 
-  it('does not send scope params outside the Sessions view', async () => {
+  it('a late unscoped on-mount /sessions response never overwrites the scoped rows (live QA failure 1)', async () => {
+    setAvailableFeatures(['scope_filters'])
+    const row = (id: string, client: string) => ({
+      id,
+      work_session_id: `ws-${id}`,
+      client_name: client,
+      status: 'active',
+      tool_call_count: 1,
+      total_tokens: 10,
+      start_time: '2026-09-28T10:00:00Z',
+      last_activity: '2026-09-28T10:01:00Z',
+    })
+    const api = (await import('@/services/api')).default
+    ;(api.getSessions as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_limit: number, _status?: string, scope?: { client?: string }) => {
+        if (scope && scope.client) {
+          return Promise.resolve({ success: true, data: { sessions: [row('c1', 'cursor')] } })
+        }
+        // The unscoped fetch resolves LAST, as it did in the live repro.
+        return new Promise(resolve =>
+          setTimeout(
+            () => resolve({ success: true, data: { sessions: [row('c1', 'cursor'), row('x1', 'other'), row('x2', 'other')] } }),
+            30
+          )
+        )
+      }
+    )
+    const { wrapper } = await mountActivityAt('/activity?view=sessions&client=cursor')
+    await new Promise(r => setTimeout(r, 80))
+    await flushPromises()
+    const rows = wrapper.findAll('[data-test="session-view-activity"]').length
+    wrapper.unmount()
+    // vi.clearAllMocks keeps implementations: restore the file-wide default.
+    ;(api.getSessions as unknown as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      Promise.resolve({ success: true, data: { sessions: sessionsFixture } })
+    )
+    expect(rows).toBe(1)
+  })
+
+  // Spec 108-j T107 (inverted from "does not send scope params outside the
+  // Sessions view"): the calls view now sends profile/client/token to
+  // GET /activity (list, summary and export), so the scope narrows the table. The
+  // general /sessions fetch that feeds session-name resolution stays unscoped,
+  // because every other view relies on it.
+  it('outside the Sessions view the scope narrows /activity, and the general /sessions fetch stays unscoped', async () => {
     setAvailableFeatures(['scope_filters'])
     const { wrapper } = await mountActivityAt('/activity?view=calls&client=cursor')
     for (const call of getSessionsMock.mock.calls) {
       expect(call[2]).toBeUndefined()
     }
+    expect(getActivitiesMock).toHaveBeenCalledWith(expect.objectContaining({ client: 'cursor' }))
     wrapper.unmount()
   })
 

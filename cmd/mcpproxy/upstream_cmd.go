@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -337,8 +338,9 @@ func init() {
 	upstreamToolsCmd.AddCommand(upstreamToolsDisableAllCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
+	upstreamListCmd.Flags().StringVar(&upstreamListProfile, "profile", "", "Show only the servers of this profile's effective server set; TOOLS is the number of tools visible under it (Spec 108)")
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
-	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(upstreamListCmd.Flags(), &upstreamConfigPath, "Path to MCP configuration file")
 	upstreamListCmd.Flags().StringArrayVar(&upstreamListStatus, "status", nil,
 		"Filter by health status (repeatable; a comma-separated value is equivalent to repeating the flag): "+
 			"ready, connecting, sign_in_required, needs_review, needs_secret, needs_config, error, disabled")
@@ -346,7 +348,7 @@ func init() {
 	upstreamLogsCmd.Flags().IntVarP(&upstreamLogsTail, "tail", "n", 50, "Number of log lines to show")
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level")
-	upstreamLogsCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to config file")
+	addConfigFlag(upstreamLogsCmd.Flags(), &upstreamConfigPath, "Path to config file")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server")
 
 	// Add --all and --force flags to enable/disable/restart
@@ -423,15 +425,34 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		logger.Info("Detected running daemon, using client mode")
 		return runUpstreamListClientMode(ctx, client, logger)
 	}
+	if upstreamListProfile != "" {
+		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed,
+			"--profile needs the running daemon: profile scope and tool visibility are resolved there").
+			WithGuidance("Start the daemon and retry").
+			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
+	}
 
 	// No daemon - load from config file
 	logger.Info("No daemon detected, reading from config file")
 	return runUpstreamListFromConfig(globalConfig)
 }
 
+// upstreamListProfile is `upstream list --profile` (Spec 108 FR-032): the REST
+// `profile` filter on GET /api/v1/servers.
+var upstreamListProfile string
+
+// upstreamListQuery is the REST query of the list flags.
+func upstreamListQuery() url.Values {
+	q := url.Values{}
+	if upstreamListProfile != "" {
+		q.Set("profile", upstreamListProfile)
+	}
+	return q
+}
+
 func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
-	servers, err := client.GetServers(ctx)
+	servers, err := client.GetServersWithQuery(ctx, upstreamListQuery())
 	if err != nil {
 		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed, err.Error()).
 			WithGuidance("Ensure the mcpproxy daemon is running").
@@ -919,11 +940,8 @@ func outputError(err error, code string) error {
 // subcommand. Config-mode mutations must use this same path as loading so an
 // explicit root --config file is never redirected to DataDir/mcp_config.json.
 func upstreamConfigFilePath(globalConfig *config.Config) string {
-	if upstreamConfigPath != "" {
-		return upstreamConfigPath
-	}
-	if configFile != "" {
-		return configFile
+	if p := resolveCLIConfigPath(upstreamConfigPath); p != "" {
+		return p
 	}
 	if globalConfig != nil {
 		return config.GetConfigPath(globalConfig.DataDir)
@@ -1698,6 +1716,12 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		Enabled:     true,
 		Quarantined: quarantined,
 		TrustMode:   req.TrustMode,
+	}
+	if req.Quarantined != nil {
+		// A stated --quarantine/--no-quarantine is written to the file as an
+		// operator statement; otherwise SaveConfig drops quarantined:false
+		// and the admission gate holds the server on the next start.
+		newServer.MarkQuarantineExplicitlySet(true)
 	}
 
 	// Add to config

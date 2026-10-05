@@ -11,113 +11,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
-// ProfileSummary is one entry of the GET /api/v1/profiles listing (Profiles v2 T2).
-type ProfileSummary struct {
-	Name      string   `json:"name"`
-	Servers   []string `json:"servers"`
-	ToolCount int      `json:"tool_count"`
-}
-
-// serverToolCounts builds a server-name → indexed-tool-count map from the
-// controller's server listing, tolerating the numeric type the map value is
-// decoded as.
-func (s *Server) serverToolCounts() map[string]int {
-	counts := map[string]int{}
-	servers, err := s.controller.GetAllServers()
-	if err != nil {
-		return counts
-	}
-	for _, sv := range servers {
-		name, _ := sv["name"].(string)
-		if name == "" {
-			continue
-		}
-		switch v := sv["tool_count"].(type) {
-		case int:
-			counts[name] = v
-		case int64:
-			counts[name] = int(v)
-		case float64:
-			counts[name] = int(v)
-		}
-	}
-	return counts
-}
-
-// handleListProfiles godoc
-// @Summary List configured profiles
-// @Description List all configured profiles with their effective servers and indexed tool count (Profiles v2). A profile scopes tool discovery and calls to a named subset of upstream servers.
-// @Tags profiles
-// @Produce json
-// @Security ApiKeyAuth
-// @Security ApiKeyQuery
-// @Success 200 {object} contracts.SuccessResponse "Profile list"
-// @Failure 500 {object} contracts.ErrorResponse "Configuration unavailable"
-// @Router /api/v1/profiles [get]
-func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.controller.GetConfig()
-	if err != nil || cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration unavailable")
-		return
-	}
-
-	// Spec 107 T085: a tenant SESSION principal (cookie/bearer-JWT, never an
-	// agent token) omits a profile ENTIRELY when its effective server set has
-	// empty intersection with her entitlement, rather than merely narrowing
-	// `servers` to []. Narrowing alone still names the profile and hands back
-	// a tool_count of 0 for servers she may not otherwise enumerate — a count
-	// oracle. Agent-token behaviour (#1166 per-server narrowing) is
-	// unchanged: this omission is session-principal-only.
-	ac := auth.AuthContextFromContext(r.Context())
-	omitHiddenProfiles := ac.IsSessionPrincipal() && !ac.IsAdmin()
-
-	toolCounts := s.serverToolCounts()
-	out := make([]ProfileSummary, 0, len(cfg.Profiles))
-	for i := range cfg.Profiles {
-		// #1166: profiles[].servers enumerates upstream server names a second
-		// time, independently of mcpServers — which is precisely why
-		// GET /api/v1/config denies a scoped caller rather than filtering. The
-		// denial buys nothing if this sibling route hands the same names back,
-		// so narrow the list here too. EffectiveServers returns a fresh slice,
-		// but it is rebuilt anyway rather than compacted, so nothing derived
-		// from the live config is ever mutated.
-		eff := cfg.Profiles[i].EffectiveServers(cfg)
-		if auth.IsScopedCaller(r.Context()) {
-			scoped := make([]string, 0, len(eff))
-			for _, name := range eff {
-				if canSeeServer(r.Context(), name) {
-					scoped = append(scoped, name)
-				}
-			}
-			// FR-002: omit whenever the intersection is empty — including
-			// when the profile's effective server set was ALREADY empty
-			// before scoping (a profile naming only a server absent from the
-			// admin configuration, or configured with no servers at all).
-			// There is no carve-out for that case: an empty intersection is
-			// an empty intersection regardless of which side was empty
-			// (cross-review round 2, chunk 3 P3).
-			if omitHiddenProfiles && len(scoped) == 0 {
-				continue
-			}
-			eff = scoped
-		}
-		tc := 0
-		for _, name := range eff {
-			tc += toolCounts[name]
-		}
-		out = append(out, ProfileSummary{
-			Name:      cfg.Profiles[i].Name,
-			Servers:   eff,
-			ToolCount: tc,
-		})
-	}
-
-	s.writeSuccess(w, map[string]interface{}{"profiles": out})
+// setActiveProfileDeprecation marks /profiles/active deprecated (Spec 108
+// FR-039): a client reads the header, the behaviour is unchanged. The
+// successor is the profile listing; the route is removed in a later minor.
+func setActiveProfileDeprecation(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</api/v1/profiles>; rel="successor-version"`)
 }
 
 // handleGetActiveProfile godoc
 // @Summary Get the default active profile
-// @Description Get the server-level default active profile used by UI surfaces (Web UI / tray). Empty string means "all servers". Note: within a live MCP session, the set_profile tool selection takes precedence over this default.
+// @Description Deprecated (Spec 108 FR-039; sends a Deprecation header, successor GET /api/v1/profiles). Get the server-level default active profile used by UI surfaces (Web UI / tray). Empty string means "all servers". Note: within a live MCP session, the set_profile tool selection takes precedence over this default.
 // @Tags profiles
 // @Produce json
 // @Security ApiKeyAuth
@@ -125,6 +29,7 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SuccessResponse "Active profile"
 // @Router /api/v1/profiles/active [get]
 func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) {
+	setActiveProfileDeprecation(w)
 	s.activeProfileMu.RLock()
 	active := s.activeProfile
 	s.activeProfileMu.RUnlock()
@@ -142,7 +47,7 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 			// checked (cross-review round 3 — handleListProfiles already
 			// refuses outright on the same error; this door has no such
 			// escape hatch, so it clears the value instead).
-			if err != nil || cfg == nil || !activeProfileVisible(r.Context(), cfg, active) {
+			if err != nil || cfg == nil || !profileReachable(r.Context(), cfg, active) {
 				active = ""
 			}
 		}
@@ -151,10 +56,10 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, map[string]interface{}{"active_profile": active})
 }
 
-// activeProfileVisible reports whether the named profile's effective server
+// profileReachable reports whether the named profile's effective server
 // set has non-empty intersection with the caller's entitlement (Spec 107
 // T085) — the same rule handleListProfiles applies per row.
-func activeProfileVisible(ctx context.Context, cfg *config.Config, name string) bool {
+func profileReachable(ctx context.Context, cfg *config.Config, name string) bool {
 	for i := range cfg.Profiles {
 		if cfg.Profiles[i].Name != name {
 			continue
@@ -179,7 +84,7 @@ type SetActiveProfileRequest struct {
 
 // handleSetActiveProfile godoc
 // @Summary Set the default active profile
-// @Description Set the server-level default active profile for UI surfaces. The slug must match a configured profile; pass an empty string to clear. This does not affect live MCP sessions, which use the set_profile tool.
+// @Description Deprecated (Spec 108 FR-039; sends a Deprecation header, successor GET /api/v1/profiles). Set the server-level default active profile for UI surfaces. The slug must match a configured profile; pass an empty string to clear. This does not affect live MCP sessions, which use the set_profile tool.
 // @Tags profiles
 // @Accept json
 // @Produce json
@@ -192,6 +97,7 @@ type SetActiveProfileRequest struct {
 // @Failure 404 {object} contracts.ErrorResponse "Unknown profile"
 // @Router /api/v1/profiles/active [put]
 func (s *Server) handleSetActiveProfile(w http.ResponseWriter, r *http.Request) {
+	setActiveProfileDeprecation(w)
 	var req SetActiveProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")

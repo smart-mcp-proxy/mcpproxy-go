@@ -19,15 +19,19 @@
     <template v-else>
       <div v-if="addError && !pendingResult" class="alert alert-error text-sm mb-3" data-test="catalog-add-error">{{ addError }}</div>
       <div v-if="unavailable.length > 0" class="alert alert-warning text-sm mb-3" data-test="catalog-unavailable-notice">
-        <span>{{ unavailable.map((u) => `${u.source} (${u.reason})`).join(', ') }} unavailable</span>
+        <div>
+          <div v-for="line in unavailableLines" :key="line">{{ line }}</div>
+        </div>
       </div>
 
       <template v-if="sections">
-        <div v-if="sections.official.length > 0" data-test="catalog-section-official">
-          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Official</h4>
+        <!-- Popular first when it has entries (popularity if available), then the
+             curated Official list (Spec 109 D35, amends Spec 110 FR-005). -->
+        <div v-if="sections.popular.length > 0" data-test="catalog-section-popular">
+          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Popular</h4>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
             <CatalogResultCard
-              v-for="r in sections.official"
+              v-for="r in sections.popular"
               :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
@@ -37,11 +41,11 @@
             />
           </div>
         </div>
-        <div v-if="sections.popular.length > 0" data-test="catalog-section-popular">
-          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Popular</h4>
+        <div v-if="sections.official.length > 0" data-test="catalog-section-official">
+          <h4 class="font-semibold text-sm text-base-content/70 mb-2">Official</h4>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <CatalogResultCard
-              v-for="r in sections.popular"
+              v-for="r in sections.official"
               :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
@@ -117,7 +121,7 @@
 import { ref, reactive, computed, watch, onMounted, defineComponent, h } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
-import type { CatalogResult, CatalogSections } from '@/types'
+import type { CatalogResult, CatalogSections, CatalogSourceError } from '@/types'
 import SecretToggle from '@/components/SecretToggle.vue'
 import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useDialogOpen } from '@/composables/useDialogOpen'
@@ -132,7 +136,17 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const results = ref<CatalogResult[]>([])
 const sections = ref<CatalogSections | null>(null)
-const unavailable = ref<{ source: string; reason: string }[]>([])
+const unavailable = ref<CatalogSourceError[]>([])
+
+// One line per source that failed. A source that answered from its cached
+// listing says so (Spec 109 D35); the others keep the original wording.
+const unavailableLines = computed(() =>
+  unavailable.value.map((u) =>
+    u.fallback === 'cached_listing'
+      ? `${u.source}: live search unavailable (${u.reason}); showing matches from its cached list`
+      : `${u.source} (${u.reason}) unavailable`
+  )
+)
 const addingKey = ref<string | null>(null)
 // FR-063: once added this page-visit, the entry's button flips to "Added ✓ ·
 // Open" and stays that way (a fresh search doesn't re-fetch config, so an
@@ -325,6 +339,24 @@ async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
     : 'More than one installed server matches this catalog entry. Open the intended server from Servers.'
 }
 
+// formatCount renders a popularity count compactly: 950, 1.2k, 21k, 1.2M.
+function formatCount(n: number): string {
+  if (n < 1000) return String(n)
+  const compact = (v: number, suffix: string) => `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10}${suffix}`
+  if (Math.round(n / 1000) < 1000) return compact(n / 1000, 'k')
+  return compact(n / 1_000_000, 'M')
+}
+
+// popularityLabel is the card's popularity signal (FR-061): GitHub stars when
+// known ("★ 21k"), else source-native installs ("1.2M installs"), else nothing.
+function popularityLabel(r: CatalogResult): string {
+  const p = r.popularity
+  if (!p) return ''
+  if (p.stars && p.stars > 0) return `★ ${formatCount(p.stars)}`
+  if (p.installs && p.installs > 0) return `${formatCount(p.installs)} installs`
+  return ''
+}
+
 // CatalogResultCard is a small local functional-ish component (kept in this
 // file rather than a separate SFC: it is presentational-only and has no
 // reason to be reused outside CatalogSearch).
@@ -354,10 +386,22 @@ const CatalogResultCard = defineComponent({
                 // interpolation already escapes this.
                 h('h3', { class: 'font-semibold truncate', 'data-test': 'catalog-result-title' }, r.title),
                 h('p', { class: 'text-xs text-base-content/60 font-mono truncate' }, r.id),
+                r.publisher || popularityLabel(r)
+                  ? h('p', { class: 'text-xs text-base-content/60 mt-0.5 flex gap-2' }, [
+                      r.publisher ? h('span', { class: 'truncate', 'data-test': 'catalog-result-publisher' }, `by ${r.publisher}`) : null,
+                      popularityLabel(r) ? h('span', { class: 'shrink-0', 'data-test': 'catalog-result-popularity' }, popularityLabel(r)) : null,
+                    ])
+                  : null,
               ]),
               h('div', { class: 'flex gap-1 shrink-0' }, [
-                r.official ? h('span', { class: 'badge badge-sm badge-primary' }, 'Official') : null,
-                r.verified && !r.official ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
+                // Spec 109 D37.6: no per-card "Official" badge. Every default
+                // source is official, so it carried no signal; the Official
+                // section heading says it once. Verified means the publisher
+                // owns the source repository (D37.5).
+                r.verified ? h('span', { class: 'badge badge-sm badge-success' }, 'Verified') : null,
+                r.from_cache
+                  ? h('span', { class: 'badge badge-sm badge-warning badge-outline', title: 'The source\u2019s live search is unavailable; this entry is from its cached list.', 'data-test': `catalog-from-cache-${r.source}-${r.id}` }, 'From cached list')
+                  : null,
                 h('span', { class: 'badge badge-sm badge-ghost' }, r.transport),
               ]),
             ]),

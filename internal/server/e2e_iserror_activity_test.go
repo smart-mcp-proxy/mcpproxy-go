@@ -112,6 +112,7 @@ func TestE2E_UpstreamIsErrorRecordedAsActivityError(t *testing.T) {
 	serverConfig, err := rt.StorageManager().GetUpstreamServer("flaky")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, rt.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := rt.StorageManager().ListUpstreamServers()

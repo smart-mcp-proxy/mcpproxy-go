@@ -70,6 +70,16 @@ type SessionInfo struct {
 	// the credential does not change mid-connection.
 	TokenName string
 	ClientID  string
+	// TokenPrefix is the credential's 12-char display prefix (Spec 108-j J15).
+	// It is INTERNAL (never persisted or serialized): the activity funnels with
+	// no request context read it back so an event carries the same ownership
+	// proof the SSE renderer checks (name AND prefix).
+	TokenPrefix string
+
+	// Anonymous marks a session that presented no credential (Spec 108-f F10):
+	// its base is the snapshot's anonymous_profile, read at notify time. Memory
+	// only, stamped once at initialize.
+	Anonymous bool
 
 	// Profile and ProfileSource are the LATEST effective resolution for this
 	// session (data-model.md §6 "latest effective, updated on each call").
@@ -97,6 +107,13 @@ type SessionStore struct {
 	mu             sync.RWMutex
 	logger         *zap.Logger
 	storageManager *storage.Manager
+
+	// profileWriter, when non-nil, replaces the storage write-through of a
+	// changed profile resolution. Test seam only (counts writes).
+	profileWriter func(sessionID, profile, source string)
+	// writeThroughMu serializes the storage write-throughs of profile
+	// resolutions (see UpdateSessionProfile).
+	writeThroughMu sync.Mutex
 }
 
 // NewSessionStore creates a new session store
@@ -238,6 +255,11 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 		WorkspaceRoot: info.Workspace,
 		WorkspaceName: workspaceDisplayName(info.Workspace),
 		WorkSessionID: info.workSessionID,
+		// Spec 108 FR-033: the credential and the latest resolution so far.
+		TokenName:     info.TokenName,
+		ClientID:      info.ClientID,
+		Profile:       info.Profile,
+		ProfileSource: info.ProfileSource,
 	}
 	workSessionID := info.workSessionID
 	done := info.persistDone
@@ -472,6 +494,77 @@ func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string)
 	}
 }
 
+// SetSessionTokenPrefix records the display prefix of the credential that
+// authenticated a session (Spec 108-j J15), next to SetSessionIdentity.
+func (s *SessionStore) SetSessionTokenPrefix(sessionID, prefix string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.TokenPrefix = prefix
+	}
+}
+
+// SetSessionAnonymous records whether a session presented no credential.
+func (s *SessionStore) SetSessionAnonymous(sessionID string, anonymous bool) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.Anonymous = anonymous
+	}
+}
+
+// SessionsMatching returns every live session for which pred is true, with its
+// serving instance (the FR-027 fan-out seam). pred runs under the store's read
+// lock and must not call back into the store.
+func (s *SessionStore) SessionsMatching(pred func(*SessionInfo) bool) []sessionTarget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []sessionTarget
+	for id, info := range s.sessions {
+		if pred(info) {
+			out = append(out, sessionTarget{ID: id, Server: info.server})
+		}
+	}
+	return out
+}
+
+// RenameSelection rewrites every stored set_profile selection of profile
+// `from` to `to` (a profile rename must not strand a session on a name that
+// no longer exists).
+func (s *SessionStore) RenameSelection(from, to string) {
+	if from == "" || to == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == from {
+			s.activeProfiles[id] = to
+		}
+	}
+}
+
+// ClearSelection drops every stored set_profile selection of the named
+// profile (it was deleted): those sessions fall back to their base.
+func (s *SessionStore) ClearSelection(name string) {
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == name {
+			delete(s.activeProfiles, id)
+		}
+	}
+}
+
 // SetSessionServer records the MCP server instance serving a session (the
 // session -> server-instance map, data-model.md §6). Called once at initialize.
 func (s *SessionStore) SetSessionServer(sessionID string, srv *mcpserver.MCPServer) {
@@ -516,15 +609,58 @@ func (s *SessionStore) NotifyTargets(tokenName string) []sessionTarget {
 // time from TokenName -> the token's current profile_pin, or, for a session
 // with no TokenName, from the snapshot's anonymous_profile — never from a
 // value cached here.
+//
+// Spec 108 FR-033: a CHANGED resolution of a persisted session is written
+// through to its row (one small write per change, never per call), so
+// /sessions?profile= filters on the latest effective profile. A session that
+// is not persisted yet is copied at EnsurePersisted instead.
 func (s *SessionStore) UpdateSessionProfile(sessionID, profileName, source string) {
 	if sessionID == "" {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if info, ok := s.sessions[sessionID]; ok {
-		info.Profile = profileName
-		info.ProfileSource = source
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	changed := info.Profile != profileName || info.ProfileSource != source
+	info.Profile = profileName
+	info.ProfileSource = source
+	persisted := info.persisted
+	done := info.persistDone
+	mgr := s.storageManager
+	writer := s.profileWriter
+	s.mu.Unlock()
+
+	if !changed || !persisted {
+		return
+	}
+	// The row may still be in flight (EnsurePersisted flips persisted before
+	// CreateSession returns); wait so the write lands on an existing row.
+	<-done
+
+	// Concurrent updates of one session must not persist an older resolution
+	// after a newer one: serialize the write-throughs and persist the CURRENT
+	// in-memory value at write time, so the last writer always leaves the
+	// latest resolution behind.
+	s.writeThroughMu.Lock()
+	defer s.writeThroughMu.Unlock()
+	s.mu.RLock()
+	if cur, ok := s.sessions[sessionID]; ok {
+		profileName, source = cur.Profile, cur.ProfileSource
+	}
+	s.mu.RUnlock()
+	if writer != nil {
+		writer(sessionID, profileName, source)
+		return
+	}
+	if mgr == nil {
+		return
+	}
+	if err := mgr.SetSessionProfile(sessionID, profileName, source); err != nil {
+		s.logger.Debug("failed to write session profile through to storage",
+			zap.String("session_id", sessionID), zap.Error(err))
 	}
 }
 

@@ -209,6 +209,7 @@ func TestE2E_ToonOutputModeFlip(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("toonserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()

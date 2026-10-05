@@ -1,22 +1,45 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import api from '@/services/api'
-import type { ClientPresence, RoutingInfo } from '@/types/api'
+import type { ClientPresence, ClientWarning, RoutingInfo } from '@/types/api'
+
+// Spec 108-f: a binding changed (any surface). Like profiles.changed it is an
+// invalidation; the rows and warnings are refetched, never patched from it.
+export const CLIENT_BINDING_CHANGED_EVENT = 'mcpproxy:client.binding_changed'
 
 export const useClientsStore = defineStore('clients', () => {
   const clients = ref<ClientPresence[]>([])
+  // Instance-level warnings from GET /clients (Spec 108-f): never filtered away
+  // by the profile/client scope.
+  const warnings = ref<ClientWarning[]>([])
+  // The REST scope (profile/client) of the last page load, so a silent refresh
+  // keeps showing the same rows.
+  let scope: { profile?: string; client?: string } = {}
   const routing = ref<RoutingInfo | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
   // Client ids whose detail-resolved fields must survive a metadata-only refresh.
   const detailLoaded = new Set<string>()
 
-  async function load() {
+  // A response is applied only while it is still the latest of its kind and the
+  // scope it was asked for is still the active one: changing ?profile= / ?client=
+  // must not let the previous scope's rows land afterwards.
+  let loadTicket = 0
+  let presenceTicket = 0
+  const scopeKey = () => JSON.stringify(scope)
+
+  async function load(nextScope?: { profile?: string; client?: string }) {
+    if (nextScope) scope = nextScope
+    const ticket = ++loadTicket
+    const asked = scopeKey()
     loading.value = true
     error.value = null
-    const [clientResponse, routingResponse] = await Promise.all([api.getClients(), api.getRouting()])
+    const [clientResponse, routingResponse] = await Promise.all([api.getClients(scope), api.getRouting()])
+    // A newer load owns the loading flag and the rows.
+    if (ticket !== loadTicket || asked !== scopeKey()) return
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
+      warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
     } else error.value = clientResponse.error || 'Unable to load clients'
     if (routingResponse.success && routingResponse.data) routing.value = routingResponse.data
@@ -30,9 +53,13 @@ export const useClientsStore = defineStore('clients', () => {
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
+    const ticket = ++presenceTicket
+    const asked = scopeKey()
     try {
-      const response = await api.getClients()
+      const response = await api.getClients(scope)
+      if (ticket !== presenceTicket || asked !== scopeKey()) return
       if (response.success && Array.isArray(response.data?.clients)) {
+        warnings.value = response.data.warnings ?? []
         // GET /clients is metadata-only. For rows whose detail was loaded via
         // loadDetail(), keep every detail-resolved field (state, installed,
         // connected, connection_unverified, config paths, sessions) and take
@@ -62,6 +89,16 @@ export const useClientsStore = defineStore('clients', () => {
     }
   }
 
+  // A row answered by a binding route replaces the loaded one; the warnings are
+  // recomputed by the next refresh.
+  function replaceRow(row: ClientPresence) {
+    const index = clients.value.findIndex(client => client.id === row.id)
+    if (index >= 0) clients.value[index] = { ...clients.value[index], ...row }
+    else clients.value.push(row)
+  }
+
+  function clearScope() { scope = {} }
+
   async function loadDetail(id: string) {
     const response = await api.getClient(id)
     if (!response.success || !response.data) return
@@ -72,5 +109,15 @@ export const useClientsStore = defineStore('clients', () => {
     }
   }
 
-  return { clients, routing, loading, error, liveCount, load, refreshPresence, loadDetail }
+  if (typeof window !== 'undefined') {
+    const refresh = () => { void refreshPresence() }
+    window.addEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+    window.addEventListener('mcpproxy:profiles.changed', refresh)
+    onScopeDispose(() => {
+      window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+      window.removeEventListener('mcpproxy:profiles.changed', refresh)
+    })
+  }
+
+  return { clients, warnings, routing, loading, error, liveCount, load, refreshPresence, loadDetail, replaceRow, clearScope }
 })

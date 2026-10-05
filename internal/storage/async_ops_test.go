@@ -540,3 +540,49 @@ func TestForwardHeadersRoundTrip(t *testing.T) {
 		t.Error("quarantined server not listed")
 	}
 }
+
+// saveServerSync is a second writer of the upstream record and must honour the
+// same invariant as Manager.SaveUpstreamServer: it never lowers a recorded
+// quarantine without an explicit decision.
+func TestSaveServerSync_DoesNotLowerRecordedQuarantine(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	manager, err := NewManager(t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("Failed to create storage manager: %v", err)
+	}
+	defer manager.Close()
+
+	am := NewAsyncManager(manager.db, logger)
+	am.Start()
+	defer am.Stop()
+
+	sc := &config.ServerConfig{Name: "s", Command: "true", Protocol: "stdio", Enabled: true, Quarantined: true, Created: time.Now()}
+	if err := am.saveServerSync(sc); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	lower := &config.ServerConfig{Name: "s", Command: "true", Protocol: "stdio", Enabled: true, Created: time.Now()}
+	if err := am.saveServerSync(lower); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	rec, err := manager.db.GetUpstream("s")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !rec.Quarantined {
+		t.Fatal("saveServerSync lowered a recorded quarantine without an explicit decision")
+	}
+
+	explicit := &config.ServerConfig{Name: "s", Command: "true", Protocol: "stdio", Enabled: true, Created: time.Now()}
+	explicit.MarkQuarantineExplicitlySet(true)
+	if err := am.saveServerSync(explicit); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	rec, err = manager.db.GetUpstream("s")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if rec.Quarantined {
+		t.Fatal("an explicit decision must lower the quarantine")
+	}
+}

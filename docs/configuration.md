@@ -7,18 +7,19 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 1. [Configuration File Location](#configuration-file-location)
 2. [Basic Configuration](#basic-configuration)
 3. [Server Configuration](#server-configuration)
-4. [Security Settings](#security-settings)
-5. [Tokenizer Configuration](#tokenizer-configuration)
-6. [TLS/HTTPS Configuration](#tlshttps-configuration)
-7. [Logging Configuration](#logging-configuration)
-8. [Docker Isolation](#docker-isolation)
-9. [Docker Recovery](#docker-recovery)
-10. [Environment Configuration](#environment-configuration)
-11. [Code Execution](#code-execution)
-12. [Feature Flags](#feature-flags)
-13. [Registries](#registries)
-14. [Update Check](#update-check)
-15. [Complete Example](#complete-example)
+4. [Profiles](#profiles-profiles-and-anonymous_profile)
+5. [Security Settings](#security-settings)
+6. [Tokenizer Configuration](#tokenizer-configuration)
+7. [TLS/HTTPS Configuration](#tlshttps-configuration)
+8. [Logging Configuration](#logging-configuration)
+9. [Docker Isolation](#docker-isolation)
+10. [Docker Recovery](#docker-recovery)
+11. [Environment Configuration](#environment-configuration)
+12. [Code Execution](#code-execution)
+13. [Feature Flags](#feature-flags)
+14. [Registries](#registries)
+15. [Update Check](#update-check)
+16. [Complete Example](#complete-example)
 
 ---
 
@@ -414,7 +415,7 @@ it and none can double-report it.
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
-| `quarantined` | boolean | No | Security quarantine status (default: `false` for manually added servers, `true` for LLM-added servers) |
+| `quarantined` | boolean | No | Security quarantine status. The default depends on how the server arrives. A server added through the UI, CLI, REST API or an AI agent follows its [trust mode](features/security-quarantine.md#trust-modes-auto--scan--manual) at add time (quarantined under the default `manual` mode). A server you add by editing this file, with no `quarantined` key and no prior `config.db` record, is **held for review** on first load when quarantine is enabled and its trust mode is not `auto` (no `trust_mode` means `manual`, unless a legacy `auto_approve_tool_changes: true` or `skip_quarantine: true` resolves it to `auto`). An explicit `"quarantined": false` admits it, and an explicit `true` holds it. A server that is already recorded in `config.db` keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](features/security-quarantine.md#servers-added-by-hand-editing-mcp_configjson) for the full admission rules. |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
 | `expose_prompts` | boolean | No | Per-server override for whether this server's MCP prompts are aggregated into mcpproxy's `prompts/list`. Only takes effect when the global `aggregate_upstream_prompts` master switch is on. Omit to expose prompts whenever the server advertises `Capabilities.Prompts`; `false` opts this server out even if it does. |
 | `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
@@ -685,6 +686,58 @@ the next login re-registers against the pinned URL; a statically configured
 `client_id` is never cleared.
 
 See [OAuth Documentation](mcp-go-oauth.md) for complete details.
+
+---
+
+## Profiles (`profiles`) and `anonymous_profile`
+
+A profile is a named view over your upstream servers with a tool policy. The full model, the resolution order and the refusal texts are in [Profiles](features/profiles.md); this is the configuration reference.
+
+```json
+{
+  "require_mcp_auth": true,
+  "anonymous_profile": "",
+  "profiles": [
+    {
+      "name": "work-readonly",
+      "title": "Work · Read-only",
+      "description": "GitHub and Notion, read tools only",
+      "servers": ["github", "notion"],
+      "max_tier": "read",
+      "unannotated": "deny",
+      "tools": {
+        "allow": ["notion:update_page"],
+        "deny": ["github:*secret*"],
+        "classify": { "github:search_code": "read" }
+      },
+      "code_execution": false,
+      "management_tools": false,
+      "switchable_to": ["work-full"]
+    },
+    { "name": "work-full", "servers": ["github", "notion", "filesystem"] }
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `profiles[].name` | string | required | Slug `^[a-z0-9][a-z0-9_-]{0,62}$`. Reserved: `all`, `code`, `call`, `p` (URL segments), `active`, `try` (REST routes). Duplicates are a fatal error |
+| `profiles[].servers` | string[] | required | Servers the profile reaches. An unknown server is a warning and is skipped; an empty list denies everything |
+| `profiles[].title` | string | name | Display title, at most 80 characters |
+| `profiles[].description` | string | none | At most 500 characters |
+| `profiles[].max_tier` | `read` \| `write` \| `destructive` | no cap | The highest tool tier the profile admits |
+| `profiles[].unannotated` | `deny` \| `as_write` \| `as_read` | `deny` under a `read` or `write` cap, otherwise `as_read` | How to treat a tool that declares no tier |
+| `profiles[].tools.allow` | string[] | none | `server:tool` patterns (`*` is the only wildcard) admitted even above the cap. Cannot add a server |
+| `profiles[].tools.deny` | string[] | none | Patterns hidden from the profile. Deny beats allow |
+| `profiles[].tools.classify` | object | none | `server:tool` to `read`, `write` or `destructive`; applies only to tools with no annotations |
+| `profiles[].code_execution` | boolean | off under a `read` or `write` cap, otherwise inherits `enable_code_execution` | `false` removes the `code_execution` tool for the profile; the global flag always wins |
+| `profiles[].management_tools` | boolean | inherit | `true` shows `upstream_servers` and `quarantine_security` (still limited by the caller's own permissions); `false` hides them |
+| `profiles[].switchable_to` | string[] | unset (none) | Profiles a client bound to this profile, or a confined anonymous caller, may switch to with `set_profile` |
+| `anonymous_profile` | string | empty (unconfined) | Confines every caller that presents no credential, or an unrecognised token while `require_mcp_auth` is off, to this profile. A missing profile denies everything and logs a warning |
+
+A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
+
+With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](features/profiles.md#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
 
 ---
 
@@ -1329,6 +1382,20 @@ Text returned in the MCP `initialize` response to guide AI agents on how to use 
 You can edit this from the Web UI under **Settings → Advanced → MCP server instructions**. The textarea shows the built-in default as a greyed-out placeholder; clearing it restores that default.
 
 **Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
+
+Whatever the base text, each connection also gets a per-caller **YOUR ACCESS** block appended. It lists the active profile, the connected servers that caller can reach and its allowed operations, all filtered to its profile and agent-token scope. See [Agent Instructions](/features/agent-instructions).
+
+### Advertising upstream servers
+
+```json
+{
+  "advertise_upstream_servers": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `advertise_upstream_servers` | bool | `true` | Name the caller's reachable upstream servers in the initialize instructions and in the `retrieve_tools` description, so agents use proxied tools instead of shell CLIs. Names are always filtered to the caller's profile and agent-token scope. Set `false` to keep server names out of client context; operation limits are still stated. Read live. |
 
 **Warning:** the text is operator-published content, returned verbatim to **every** client that initializes — including [agent tokens](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn) scoped to a subset of servers. Do not put server names, hostnames, credentials or other secrets in it.
 

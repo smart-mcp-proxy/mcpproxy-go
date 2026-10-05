@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,7 +64,7 @@ func TestDirectProtocol_ProfileV3CallRefusalOnWire(t *testing.T) {
 	require.NoError(t, json.Unmarshal(callPayload, &call), string(callPayload))
 	require.True(t, call.Result.IsError, string(callPayload))
 	require.NotEmpty(t, call.Result.Content)
-	assert.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", call.Result.Content[0].Text)
+	assert.Equal(t, v3TierRefusal(t), call.Result.Content[0].Text)
 	assert.Empty(t, up.dispatched(), "a direct-mode refusal must precede upstream I/O")
 }
 
@@ -85,7 +86,7 @@ func TestDirectCall_ProfileV3PolicyRefusesBeforeUpstream(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.IsError)
-	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", resultText(t, result))
+	require.Equal(t, v3TierRefusal(t), resultText(t, result))
 	require.Empty(t, up.dispatched(), "direct-mode profile denials must happen before upstream I/O")
 }
 
@@ -112,7 +113,7 @@ func TestDirectCall_ProfileV3DeniesUnannotatedTool(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.IsError)
-	require.Equal(t, "blocked by profile: github:search_code has no tier annotation; an operator can classify it in the profile to allow it", resultText(t, result))
+	require.Equal(t, v3Disclosed(t, "unannotated", "github", "search_code", profile.TierUnannotated, "read", "work-full"), resultText(t, result))
 	require.Empty(t, up.dispatched(), "an unannotated tool denied by profile policy must never reach the upstream")
 }
 

@@ -55,7 +55,8 @@ func (c *clientPresenceController) GetConfig() (*config.Config, error) {
 	return &config.Config{APIKey: "clients-admin-key", RoutingMode: config.RoutingModeRetrieveTools}, nil
 }
 
-func (c *clientPresenceController) GetRecentSessions(limit int, _ string) ([]*contracts.MCPSession, int, error) {
+func (c *clientPresenceController) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	limit := f.Limit
 	c.limits = append(c.limits, limit)
 	if c.sessions != nil {
 		if len(c.sessions) > limit {
@@ -407,11 +408,16 @@ func TestClientsPresence_InitializeAndSessionShareUnknownIdentity(t *testing.T) 
 func TestClientsPresence_RejectsUnsupportedScopeBeforeReadingSessions(t *testing.T) {
 	ctrl := &clientPresenceController{}
 	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients?client=cursor", nil)
-	req.Header.Set("X-API-Key", "clients-admin-key")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	// Spec 108-f honours profile and client on the list; token is not a client
+	// filter and the detail route honours none.
+	for _, path := range []string{"/api/v1/clients?token=ci-bot", "/api/v1/clients/cursor?client=cursor", "/api/v1/clients/cursor?profile=x"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "clients-admin-key")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", path, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "unsupported_scope_filter")
+	}
 	require.Empty(t, ctrl.limits, "scope rejection must precede session access")
 }
 

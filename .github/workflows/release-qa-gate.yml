@@ -220,7 +220,7 @@ jobs:
     name: Suite — race (personal + server)
     needs: build-candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -256,7 +256,7 @@ jobs:
         run: |
           ./dist-bin/release-gate run-suite \
             --name suite/unit-race --report-dir "${GATE_REPORT_DIR}" \
-            -- go test -short -race \
+            -- go test -short -race -timeout 30m \
                  -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" \
                  ./internal/...
 
@@ -265,7 +265,7 @@ jobs:
         run: |
           ./dist-bin/release-gate run-suite \
             --name suite/server-race --report-dir "${GATE_REPORT_DIR}" \
-            -- go test -tags server -race ./internal/serveredition/... ./internal/oauth/...
+            -- go test -tags server -race -timeout 20m ./internal/serveredition/... ./internal/oauth/...
 
       - name: Upload report fragment
         if: always()

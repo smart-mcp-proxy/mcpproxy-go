@@ -191,7 +191,7 @@ type ServerController interface {
 
 	// Session management. status filters on session status ("active" /
 	// "closed"); an empty string means no filter.
-	GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error)
+	GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error)
 	GetSessionByID(sessionID string) (*contracts.MCPSession, error)
 
 	// Configuration management
@@ -305,6 +305,7 @@ type Server struct {
 	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
 	connectService     *connect.Service                // Client connect/disconnect operations
 	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	profilesService    ProfilesAPI                     // Profiles service (Spec 108-f FR-034)
 	securityController SecurityController              // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
@@ -463,12 +464,28 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+	s.wireClientsService()
 }
 
 // SetClientsService configures the clients service behind the client
 // binding route and the connect credential path (Spec 108).
 func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
 	s.clientsService = svc
+	s.wireClientsService()
+}
+
+// wireClientsService connects the clients service to the REST server's
+// on-demand credential observations and, when the connect service is set, to
+// the connect port behind the admin-key upgrade (Spec 108-f F11, F22). Either
+// setter may run first.
+func (s *Server) wireClientsService() {
+	if s.clientsService == nil {
+		return
+	}
+	s.clientsService.SetObserver(s.recordCredentialObservation)
+	if s.connectService != nil {
+		s.clientsService.SetUpgradePort(s.connectService)
+	}
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of
@@ -1012,7 +1029,22 @@ func (s *Server) setupRoutes() {
 
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
+		// Spec 108-f: profile CRUD, rename, try, effective tools and the access
+		// explainer, in BOTH editions (profiles are admin-owned config in either).
+		// The static /profiles/active and /profiles/try routes win over {name}.
+		// guarded: BindingGuardDelta (FR-008a) - every write goes through the
+		// profiles service, whose MutateConfig runs the guard over the whole
+		// candidate state before anything is written.
+		r.Post("/profiles", s.requireServerOp(auth.ServerOpConfigWrite, s.handleCreateProfile))
+		// exempt: nothing is written (a draft is searched against the index).
+		r.Post("/profiles/try", s.requireServerOp(auth.ServerOpConfigWrite, s.handleTryProfile))
 		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Get("/profiles/{name}", s.handleGetProfile)
+		r.Put("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUpdateProfile))         // guarded: MutateConfig
+		r.Delete("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDeleteProfile))      // guarded: MutateConfig
+		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
+		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
+		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent
@@ -1406,6 +1438,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // handleGetStatus godoc
 // @Summary Get server status
 // @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Description telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
 // @Tags status
 // @Produce json
 // @Security ApiKeyAuth
@@ -1420,7 +1453,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// lives. It is not always ~/.mcpproxy — MCPPROXY_HOME relocates the whole
 	// instance root, tray and core together (GH #936).
 	autostartDataDir := ""
+	var runningCfg *config.Config
 	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		runningCfg = cfg
 		if cfg.RoutingMode != "" {
 			routingMode = cfg.RoutingMode
 		}
@@ -1491,6 +1526,17 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Spec 109 FR-044a (user-test F-03): the EFFECTIVE telemetry state, so the
+	// Web and macOS notices and the Settings toggle can say "off, disabled by
+	// MCPPROXY_TELEMETRY=false" instead of a fixed "sends anonymous usage
+	// statistics". Operator plane like `activation`: withheld from scoped
+	// callers. Resolved from the RUNNING config (telemetry.enabled hot-reloads;
+	// env is process-wide). GET /api/v1/config deliberately stays the stored
+	// value, because it is a GET-then-POST-back document.
+	if !auth.IsScopedCaller(r.Context()) && runningCfg != nil {
+		response["telemetry"] = telemetry.ResolveEffectiveState(runningCfg)
 	}
 
 	// Spec 044 (US3): expose launch_source + autostart_enabled. launch_source
@@ -1860,15 +1906,29 @@ func getSocketPath() string {
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param profile query string false "Restrict to the profile's effective servers; tool_count becomes the number of that server's tools visible under the profile (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
-// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (client/token), or '-' on a server filter"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable profile"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
-	// Spec 109-k FR-080a: GET /servers parses no query string today (`status`,
-	// `q` are client-side) — profile/client/token gated like everywhere else.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-032: GET /servers honours profile (rows limited to the
+	// profile's effective servers, tool_count = the tools visible under it);
+	// client and token are not server filters, and `status`/`q` stay
+	// client-side.
+	if !rejectUnsupportedScopeFilters(w, r, "profile") {
 		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
 	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
@@ -1918,6 +1978,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// stays an exact count oracle for what the filter just hid.
 		serverValues = visibleServers(r.Context(), serverValues)
 		statsValue = recomputeServerStats(r.Context(), serverValues, statsValue)
+		if viewAsEval != nil {
+			serverValues = s.limitServersToProfile(r.Context(), serverValues, viewAs, viewAsEval)
+			statsValue = statsForServers(serverValues)
+		}
 
 		response := contracts.GetServersResponse{
 			Servers: serverValues,
@@ -1952,6 +2016,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// correctness: ConvertUpstreamStatsToServerStats derives every counter by
 	// walking stats["servers"], so the counts narrow with it.
 	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
+	if viewAsEval != nil {
+		servers = s.limitServersToProfile(r.Context(), servers, viewAs, viewAsEval)
+		stats = statsForServers(servers)
+	}
 
 	response := contracts.GetServersResponse{
 		Servers: servers,
@@ -2445,6 +2513,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		Enabled:     enabled,
 		Quarantined: quarantined,
 	}
+	if req.Quarantined != nil {
+		// The caller stated the value: record it as an operator statement so
+		// the admission gate obeys it on later loads (it is written to
+		// mcp_config.json instead of being dropped as a default).
+		serverConfig.MarkQuarantineExplicitlySet(true)
+	}
 	if req.ReconnectOnUse != nil {
 		serverConfig.ReconnectOnUse = *req.ReconnectOnUse
 	}
@@ -2761,6 +2835,9 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Quarantined != nil {
 		updates.Quarantined = *req.Quarantined
+		// Only a body that carries the field is an operator decision; UpdateServer
+		// and the storage guard lower a recorded quarantine only for this case.
+		updates.MarkQuarantineExplicitlySet(true)
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.Quarantined = existingSrv.Quarantined
@@ -3911,16 +3988,30 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param client query string false "View-as (administrator only): the tools this client would see, each with its access verdict {visible, callable, reason} and profile_tier (Spec 108 FR-032)"
+// @Param profile query string false "View-as: the tools this profile would expose. An administrator gets every row with a verdict; any other caller gets only the visible rows plus counts {visible, hidden} (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
-// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (token), both client and profile, or '-' on a tools filter"
+// @Failure 403 {object} contracts.ErrorResponse "client= requires administrator credentials"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable client / profile"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
-	// Spec 109-k FR-080a: GET /tools parses no query string today (`server`,
-	// `tool`, `status` etc. are client-side per url-filter-contract.md) —
-	// profile/client/token are gated exactly like everywhere else.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-032: GET /tools honours profile and client (view-as); the
+	// other filters (`server`, `tool`, `status` ...) stay client-side per
+	// url-filter-contract.md, and token is not a tools filter.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client") {
 		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
 	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
@@ -4007,6 +4098,15 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Tools = append(resp.Tools, typed...)
+	}
+
+	// Spec 108 FR-032: view-as stamps each surviving row with the subject's
+	// verdict AFTER the caller's own scope, its own profile and the
+	// quarantine rule have removed rows (so a verdict never re-adds a row the
+	// caller may not see). A non-administrator keeps only the visible rows and
+	// gets counts; the stats below are recomputed over what is returned.
+	if viewAsEval != nil {
+		resp.Tools, resp.Counts = applyViewAs(viewAsEval, viewAs, resp.Tools)
 	}
 
 	for i := range resp.Tools {
@@ -4406,7 +4506,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 //     client re-fetches through the gated REST door. Costs one extra GET per
 //     coalescing window, and only when reveal_secret_headers is on.
 func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
-	payload := evt.Payload
+	payload := renderActivityAttributionForCaller(ctx, evt.Type, evt.Payload)
 	if evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return renderAttentionChangedForCaller(ctx, payload)
 	}
@@ -5576,6 +5676,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
 // @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the write would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
@@ -5603,31 +5704,23 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to read configuration for apply", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
 	// Revert what binds to a key, refuse what does not. Without this the
-	// raw-JSON editor's own GET → edit → POST round trip would write the read
-	// door's masks over the operator's credentials.
-	resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	cfg := *resolved
-
-	// Get config path from controller
-	cfgPath := s.controller.GetConfigPath()
-
-	// Apply configuration
-	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration", result, err)
+	// raw-JSON editor's own GET -> edit -> POST round trip would write the read
+	// door's masks over the operator's credentials. The unmask runs INSIDE the
+	// config funnel, against the desired config it read under the lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration", func(stored *config.Config) error {
+		resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
+		if err != nil {
+			s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
+			return &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		if err := refuseLockedTelemetryChange(stored, resolved); err != nil {
+			return err
+		}
+		*stored = *resolved
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5673,32 +5766,22 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch current config, mutate the single field, and push it back through
-	// the existing apply pipeline so we benefit from validation, change
-	// detection, disk persistence, and hot-reload without duplicating any of
-	// that logic here.
-	// Desired, not running: same reason as handlePatchConfig — a read-modify-
-	// write of the running config discards any restart-pending field.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for docker-isolation patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	if cfg.DockerIsolation == nil {
-		cfg.DockerIsolation = config.DefaultDockerIsolationConfig()
-	}
-	cfg.DockerIsolation.Enabled = *payload.Enabled
-
-	cfgPath := s.controller.GetConfigPath()
-	result, err := s.controller.ApplyConfig(cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply docker-isolation toggle", result, err)
+	// Mutate the single field on the desired config (what is on disk, not the
+	// running one: a read-modify-write of the running config discards any
+	// restart-pending field) and push it back through the config funnel, so
+	// validation, change detection, disk persistence, hot-reload and the
+	// FR-008a guard all run under one lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply docker-isolation toggle", func(cfg *config.Config) error {
+		isolation := config.DefaultDockerIsolationConfig()
+		if cfg.DockerIsolation != nil {
+			copied := *cfg.DockerIsolation // never edit a shared pointee in place
+			isolation = &copied
+		}
+		isolation.Enabled = *payload.Enabled
+		cfg.DockerIsolation = isolation
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5727,6 +5810,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
 // @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the patch would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
@@ -5750,86 +5834,29 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the REAL config (secrets intact — redaction only happens on the GET
+	// The merge runs INSIDE the config funnel, on the desired config it reads
+	// under the write lock (secrets intact - redaction only happens on the GET
 	// response path). We deep-merge only the client-sent keys so untouched
 	// fields, including masked secrets, are preserved verbatim.
 	//
-	// The merge base is the DESIRED config — what is on disk — not the running
+	// The merge base is the DESIRED config - what is on disk - not the running
 	// one. They differ only while a restart-gated field (routing_mode, listen,
-	// api_key, …) has been saved but not yet adopted, and merging onto the
+	// api_key, ...) has been saved but not yet adopted, and merging onto the
 	// running config there silently reverted it: an operator who switched to
 	// Direct and then changed any other setting lost the routing switch with no
 	// warning, on disk, with a success toast.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	// Round-trip the live config through JSON to get a generic map we can
-	// deep-merge the patch onto without enumerating every field.
-	baseBytes, err := json.Marshal(cfg)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
-	baseDecoder.UseNumber()
-	var baseMap map[string]interface{}
-	if err := baseDecoder.Decode(&baseMap); err != nil {
-		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
-	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
-	// merge. A patch is exactly the shape that used to corrupt — the client
-	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
-	// it back — and the merge would have written the mask straight over the
-	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
-	// renamed server) the write is refused.
-	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, cfg)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	if m, ok := resolvedPatch.(map[string]interface{}); ok {
-		patchMap = m
-	}
-
-	deepMergeJSON(baseMap, patchMap)
-
-	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
-	// modes on the MERGED generic map, before the typed decode drops them
-	// without a trace (json.Unmarshal into config.Config ignores unknown
-	// keys, so Config.Validate can never see them). No-op in the personal
-	// build.
-	if s.refuseRemovedConfigKeys(w, r, baseMap, "Invalid configuration patch") {
-		return
-	}
-
-	mergedBytes, err := json.Marshal(baseMap)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to build configuration")
-		return
-	}
-	var merged config.Config
-	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid configuration patch: %v", err))
-		return
-	}
-
-	result, err := s.controller.ApplyConfig(&merged, s.controller.GetConfigPath())
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration patch", result, err)
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration patch", func(cfg *config.Config) error {
+		merged, refusal := s.mergeConfigPatch(cfg, patchMap)
+		if refusal != nil {
+			return refusal
+		}
+		if err := refuseLockedTelemetryChange(cfg, merged); err != nil {
+			return err
+		}
+		*cfg = *merged
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5842,6 +5869,68 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 	s.writeSuccess(w, response)
+}
+
+// mergeConfigPatch deep-merges patchMap onto a JSON round trip of base and
+// returns the typed result: the merge PATCH /config performs. A refusal is the
+// response the handler must answer (unbindable mask, removed keys, a patch
+// that does not decode into a config).
+func (s *Server) mergeConfigPatch(base *config.Config, patchMap map[string]interface{}) (*config.Config, *configMutationRefusal) {
+	// Round-trip the live config through JSON to get a generic map we can
+	// deep-merge the patch onto without enumerating every field.
+	baseBytes, err := json.Marshal(base)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
+	baseDecoder.UseNumber()
+	var baseMap map[string]interface{}
+	if err := baseDecoder.Decode(&baseMap); err != nil {
+		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+
+	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
+	// merge. A patch is exactly the shape that used to corrupt - the client
+	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
+	// it back - and the merge would have written the mask straight over the
+	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
+	// renamed server) the write is refused.
+	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, base)
+	if err != nil {
+		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+	}
+	if m, ok := resolvedPatch.(map[string]interface{}); ok {
+		patchMap = m
+	}
+
+	deepMergeJSON(baseMap, patchMap)
+
+	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
+	// modes on the MERGED generic map, before the typed decode drops them
+	// without a trace (json.Unmarshal into config.Config ignores unknown
+	// keys, so Config.Validate can never see them). No-op in the personal
+	// build.
+	if errs := config.ValidateRemovedKeys(baseMap); len(errs) > 0 {
+		return nil, &configMutationRefusal{
+			result:   &internalRuntime.ConfigApplyResult{Success: false, ValidationErrors: errs},
+			applyMsg: "Invalid configuration patch",
+			err:      fmt.Errorf("%s", errs[0].Error()),
+		}
+	}
+
+	mergedBytes, err := json.Marshal(baseMap)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to build configuration"}
+	}
+	var merged config.Config
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: fmt.Sprintf("Invalid configuration patch: %v", err)}
+	}
+	return &merged, nil
 }
 
 // writeApplyConfigError reports an ApplyConfig failure with the right status
@@ -6551,8 +6640,12 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Param        limit   query     int                               false  "Maximum number of sessions to return (1-100, default 10)"
 // @Param        offset  query     int                               false  "Number of sessions to skip for pagination (default 0)"
 // @Param        status  query     string                            false  "Filter by session status"  Enums(active, closed)
+// @Param        profile query     string                            false  "Filter by the session's latest effective profile; - selects sessions with none (Spec 108)"
+// @Param        client  query     string                            false  "Filter by the client id the session's credential is bound to; - selects sessions with none (Spec 108)"
+// @Param        token   query     string                            false  "Filter by the token name the session initialized with; - selects sessions with none (Spec 108)"
+// @Param        agent   query     string                            false  "Alias of token"
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
-// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
+// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter, token and agent naming different tokens, or client_name (not supported here; filter by client)"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
 // @Failure      403     {object}  contracts.ErrorResponse           "Agent tokens cannot read MCP session history"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
@@ -6570,8 +6663,12 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Spec 109-k FR-080a: /sessions ignores `agent` today — gated like `token`.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-031: /sessions honours profile, client and token (`agent` is
+	// an alias of token). client_name is advisory and not filterable here.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client", "token") {
+		return
+	}
+	if !s.rejectClientNameParam(w, r) {
 		return
 	}
 
@@ -6602,8 +6699,14 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionFilter, err := sessionFilterFromQuery(r.URL.Query(), limit, status)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Get recent sessions from controller
-	sessions, total, err := s.controller.GetRecentSessions(limit, status)
+	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
 	if err != nil {
 		s.logger.Errorw("Failed to get sessions", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")

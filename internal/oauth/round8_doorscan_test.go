@@ -87,10 +87,17 @@ var rawServerLeafDoors = map[string]string{
 		"health.CalculateHealth from a fixed disconnected input; no upstream text and no config string reaches it.",
 	"cmd/mcpproxy/registry_cmd.go:newRegistrySearchCmd":     "registry SEARCH results are catalogue entries fetched from a remote registry, not operator configuration.",
 	"internal/runtime/runtime.go:(m).SearchRegistryServers": "same remote catalogue entries; the urls are the catalogue's.",
+	"internal/server/access_explain.go:(m).Explain": "GET /api/v1/access/explain — every step Detail is a fixed " +
+		"string chosen by the evaluator (\"a deny rule matches\", \"the server is quarantined\", a tier or approval " +
+		"class name); no configured URL, header, env value or upstream text reaches it.",
 	"internal/runtime/attention.go:computeServerItems": "Detail here is AttentionServer.Detail, built exclusively " +
 		"by attention_subscriber.go's attentionServerDetail from transport + URL HOST ONLY (e.g. " +
 		"\"OAuth · api.githubcopilot.com\", data-model.md §4) — never a path, query, header or credential. " +
 		"It is prose derived from an already-public field, not the operator's raw config.",
+	"internal/httpapi/server.go:(m).handleGetStatus": "the telemetry field is telemetry.EffectiveState: a bool, " +
+		"a fixed source enum (env|config|default) and an env-var-name reason enum. It reads one boolean from the " +
+		"running config and the process environment's presence flags; no operator-supplied string, URL, header or " +
+		"credential reaches it.",
 }
 
 // openDoors is the third state a door can be in, and the only honest one for a
@@ -144,7 +151,8 @@ var routedDoors = map[string]string{
 	"internal/httpapi/server.go:(m).handleApplyConfig": "POST /api/v1/config/apply — the write twin of the " +
 		"above: oauth.UnmaskLiveConfigDocument reverts what binds to a key and REFUSES what does not, " +
 		"before anything is typed or persisted",
-	"internal/httpapi/server.go:(m).handlePatchConfig": "PATCH /api/v1/config — oauth.UnmaskLiveConfigTree " +
+	"internal/httpapi/server.go:(m).mergeConfigPatch": "PATCH /api/v1/config (the merge half of handlePatchConfig, " +
+		"run inside the config funnel) — oauth.UnmaskLiveConfigTree " +
 		"resolves the patch against the stored config BEFORE the deep merge, so an echoed mask is reverted " +
 		"or refused instead of being written over the credential",
 	"internal/httpapi/import.go:(m).runImport": "POST /api/v1/servers/import{,/json,/path} preview — " +

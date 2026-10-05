@@ -20,13 +20,13 @@
           role="combobox"
           aria-expanded="true"
           aria-autocomplete="list"
-          aria-label="Search servers, tools, settings"
+          aria-label="Search servers, tools, profiles, clients, settings"
           :aria-controls="listboxId"
           :aria-activedescendant="activeId"
           autocomplete="off"
           spellcheck="false"
           class="grow min-w-0 bg-transparent outline-none text-base"
-          placeholder="Search servers, tools, settings…"
+          placeholder="Search servers, tools, profiles, clients, settings…"
           data-test="palette-input"
           @keydown="onInputKeydown"
         />
@@ -72,8 +72,11 @@ import { useRouter, type RouteLocationRaw } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useServersStore } from '@/stores/servers'
+import { useProfilesStore } from '@/stores/profiles'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { allCatalogFields, SERVER_EDITION_FIELDS } from '@/views/settings/fields'
+import { profileEditorLink } from '@/utils/profileRoute'
+import { clientLink, tokenLink } from '@/utils/scopeLinks'
 import {
   CONNECT_CLIENT_EVENT,
   PALETTE_ACTIONS,
@@ -85,7 +88,7 @@ import {
   type NavItem,
 } from '@/navigation/navModel'
 
-type SectionId = 'search' | 'pages' | 'actions' | 'servers' | 'tools' | 'settings'
+type SectionId = 'search' | 'pages' | 'actions' | 'servers' | 'tools' | 'profiles' | 'clients' | 'tokens' | 'settings'
 
 interface Row {
   key: string
@@ -104,6 +107,10 @@ interface ToolRow {
   name: string
   server: string
 }
+interface ClientRow {
+  id: string
+  name: string
+}
 
 const SEARCH_DEBOUNCE_MS = 150
 const RESULT_LIMIT = 8
@@ -112,10 +119,13 @@ const open = defineModel<boolean>('open', { default: false })
 const router = useRouter()
 const authStore = useAuthStore()
 const serversStore = useServersStore()
+const profilesStore = useProfilesStore()
 
 const query = ref('')
 const active = ref(0)
 const toolRows = ref<ToolRow[]>([])
+const clientRows = ref<ClientRow[]>([])
+const tokenNames = ref<string[]>([])
 const inputEl = ref<HTMLInputElement | null>(null)
 const listboxId = `palette-listbox-${Math.random().toString(36).slice(2, 8)}`
 
@@ -201,6 +211,34 @@ const toolSpecs = computed<RowSpec[]>(() =>
       })),
 )
 
+// Profiles, clients and agent tokens (needle-only, like settings). A tenant and
+// the server edition have no Clients hub, so none of the three exist there.
+const hasDirectory = computed(() => !isTenant.value && !authStore.isTeamsEdition)
+
+const profileSpecs = computed<RowSpec[]>(() => {
+  if (!hasDirectory.value || !needle.value || !hasRoutePath('/profiles')) return []
+  return profilesStore.profiles
+    .filter((p) => matches(p.title || p.name) || matches(p.name))
+    .slice(0, RESULT_LIMIT)
+    .map((p) => ({ key: `profile:${p.name}`, label: p.title || p.name, hint: `Profile · ${p.name}`, run: () => go(profileEditorLink(p.name)) }))
+})
+
+const clientSpecs = computed<RowSpec[]>(() => {
+  if (!hasDirectory.value || !needle.value || !hasRoutePath('/clients')) return []
+  return clientRows.value
+    .filter((c) => matches(c.name) || matches(c.id))
+    .slice(0, RESULT_LIMIT)
+    .map((c) => ({ key: `client:${c.id}`, label: c.name, hint: `Client · ${c.id}`, run: () => go(clientLink(c.id)) }))
+})
+
+const tokenSpecs = computed<RowSpec[]>(() => {
+  if (!hasDirectory.value || !needle.value || !hasRoutePath('/clients')) return []
+  return tokenNames.value
+    .filter((name) => matches(name))
+    .slice(0, RESULT_LIMIT)
+    .map((name) => ({ key: `token:${name}`, label: name, hint: 'Agent token', run: () => go(tokenLink(name)) }))
+})
+
 const sections = computed<Section[]>(() => {
   const defs: Array<[SectionId, string, RowSpec[]]> = [
     ['search', 'Search', text.value
@@ -210,6 +248,9 @@ const sections = computed<Section[]>(() => {
     ['actions', 'Actions', actionSpecs.value],
     ['servers', 'Servers', serverSpecs.value],
     ['tools', 'Tools', toolSpecs.value],
+    ['profiles', 'Profiles', profileSpecs.value],
+    ['clients', 'Clients', clientSpecs.value],
+    ['tokens', 'Agent tokens', tokenSpecs.value],
     ['settings', 'Settings', settingSpecs.value],
   ]
   let index = 0
@@ -253,10 +294,39 @@ async function runSearch(value: string) {
   }
 }
 
+// --- profiles / clients / tokens: one lazy load per open -----------------------
+
+let directoryState: 'idle' | 'loading' | 'done' = 'idle'
+let directoryEpoch = 0
+
+// Each source is isolated: a failure (or a missing endpoint) yields an empty
+// group and never an error, and never blocks the other two. The clients list is
+// fetched directly and unscoped; the `clients` store is page-scoped (`load(scope)`)
+// and would answer with whatever filter the previous page left behind.
+async function loadDirectory() {
+  if (directoryState !== 'idle' || !hasDirectory.value) return
+  directoryState = 'loading'
+  const epoch = directoryEpoch
+  const [, clients, tokens] = await Promise.allSettled([
+    Promise.resolve().then(() => (profilesStore.loaded ? undefined : profilesStore.fetchProfiles())),
+    Promise.resolve().then(() => api.getClients()),
+    Promise.resolve().then(() => api.listAgentTokens()),
+  ])
+  if (epoch !== directoryEpoch) return // closed meanwhile; the next open starts fresh
+  const clientList = clients.status === 'fulfilled' && clients.value?.success ? clients.value.data?.clients ?? [] : []
+  clientRows.value = clientList.map((c) => ({ id: c.id, name: c.display_name || c.id }))
+  const tokenList = tokens.status === 'fulfilled' && tokens.value?.success ? tokens.value.data?.tokens ?? [] : []
+  // Agent tokens only: a client credential is reached as a client, and a
+  // revoked token has nothing left to open.
+  tokenNames.value = tokenList.filter((t) => t.kind !== 'client' && !t.revoked).map((t) => t.name)
+  directoryState = 'done'
+}
+
 watch(query, (raw) => {
   active.value = 0
   const value = raw.trim()
   cancelSearch()
+  if (value) void loadDirectory()
   if (!value || isTenant.value) {
     toolRows.value = []
     return
@@ -280,6 +350,10 @@ watch(open, async (isOpen) => {
   cancelSearch()
   query.value = ''
   toolRows.value = []
+  clientRows.value = []
+  tokenNames.value = []
+  directoryState = 'idle'
+  directoryEpoch++
   active.value = 0
   // Hand focus back to whatever opened the palette; with no opener, just let go
   // of the (now hidden) input so a later "/" is not mistaken for typing.

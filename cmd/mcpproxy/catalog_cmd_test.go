@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
@@ -195,8 +196,61 @@ func TestCatalogSearchInProcess_BrowseSections(t *testing.T) {
 			t.Fatalf("render error: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Official:") || !strings.Contains(out, "Popular:") {
-		t.Errorf("expected Official/Popular section headers, got:\n%s", out)
+	// No popularity signal in this fixture: Official only, no empty Popular table.
+	if !strings.Contains(out, "Official:") || strings.Contains(out, "Popular:") {
+		t.Errorf("expected only the Official section header (Popular is empty), got:\n%s", out)
+	}
+}
+
+// Spec 109 D35 (T164): the browse table lists Popular first when it has
+// entries, then Official, and never prints the header and table of an empty
+// section.
+func TestRenderCatalogSearch_PopularBeforeOfficialAndEmptySectionHidden(t *testing.T) {
+	official := []registries.CatalogResult{{Source: "reference", ID: "reference/filesystem", Title: "filesystem", Transport: "stdio"}}
+	popular := []registries.CatalogResult{{Source: "official", ID: "io.github.x/hot", Title: "hot server", Transport: "stdio"}}
+
+	setOutputGlobals(t, "table", false)
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	both := captureOutput(func() {
+		if err := renderCatalogSearch(formatter, &cliclient.CatalogSearchResponse{
+			Sections: &cliclient.CatalogSections{Official: official, Popular: popular},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	pi, oi := strings.Index(both, "Popular:"), strings.Index(both, "Official:")
+	if pi < 0 || oi < 0 || pi > oi {
+		t.Fatalf("expected Popular: before Official:, got:\n%s", both)
+	}
+	if strings.Index(both, "hot server") > strings.Index(both, "filesystem") {
+		t.Errorf("expected the popular row before the official row, got:\n%s", both)
+	}
+
+	onlyOfficial := captureOutput(func() {
+		if err := renderCatalogSearch(formatter, &cliclient.CatalogSearchResponse{
+			Sections: &cliclient.CatalogSections{Official: official},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(onlyOfficial, "Popular:") || !strings.Contains(onlyOfficial, "Official:") {
+		t.Errorf("an empty Popular section must be hidden, got:\n%s", onlyOfficial)
+	}
+	if strings.Count(onlyOfficial, "Found ") != 1 {
+		t.Errorf("expected exactly one results footer, got:\n%s", onlyOfficial)
+	}
+
+	neither := captureOutput(func() {
+		if err := renderCatalogSearch(formatter, &cliclient.CatalogSearchResponse{Sections: &cliclient.CatalogSections{}}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(neither, "Popular:") || strings.Contains(neither, "Official:") {
+		t.Errorf("no section header when both are empty, got:\n%s", neither)
 	}
 }
 

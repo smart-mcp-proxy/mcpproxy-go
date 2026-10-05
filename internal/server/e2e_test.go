@@ -400,6 +400,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -508,6 +509,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("echoserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -1017,6 +1019,14 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	env := NewTestEnvironment(t)
 	defer env.Cleanup()
 
+	// This test pins the manual path: nothing is captured until inspection
+	// fetches definitions itself. The admission baseline scan would otherwise
+	// settle mid-test and trigger the automatic capture (Spec 109
+	// fix-review-screen, D-4), which re-grants the inspection exemption and
+	// races the disconnect assertion below. The automatic path has its own
+	// tests (review_capture_after_scan_test.go).
+	env.proxyServer.reviewCaptureFn = func(context.Context, string) error { return nil }
+
 	// Create MCP client
 	mcpClient := env.CreateProxyClient()
 	env.ConnectClient(mcpClient)
@@ -1170,6 +1180,9 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 			Tier        string          `json:"tier"`
 			ScanVerdict string          `json:"scan_verdict"`
 			Annotations json.RawMessage `json:"annotations"`
+			// default_allowed is always present and false on the live path:
+			// nothing was scanned, so nothing starts pre-selected (D43.7).
+			DefaultAllowed *bool `json:"default_allowed"`
 		} `json:"tools"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(resultText), &liveReview))
@@ -1178,6 +1191,10 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	require.Equal(t, "write", liveReview.Tools[0].Tier)
 	require.Equal(t, "not_scanned", liveReview.Tools[0].ScanVerdict)
 	require.NotEmpty(t, liveReview.Tools[0].Annotations)
+	for _, tool := range liveReview.Tools {
+		require.NotNil(t, tool.DefaultAllowed, "live inspection must carry default_allowed for %s", tool.Name)
+		require.False(t, *tool.DefaultAllowed, "live inspection must start %s unchecked", tool.Name)
+	}
 
 	// After inspection, server should be disconnected again (exemption revoked)
 	time.Sleep(1 * time.Second)
@@ -1573,6 +1590,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("dataserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2782,6 +2800,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2966,6 +2985,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3090,6 +3110,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfigB, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfigB.Quarantined = false
+	serverConfigB.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfigB)
 	require.NoError(t, err)
 
@@ -3270,6 +3291,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("annotated")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3420,6 +3442,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
@@ -3569,6 +3592,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()

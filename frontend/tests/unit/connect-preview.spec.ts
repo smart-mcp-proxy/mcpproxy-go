@@ -93,7 +93,7 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     return wrapper
   }
 
-  it('shows the preview (path, masked entry, api-key note) before writing', async () => {
+  it('shows the preview (path, masked entry, client-credential notice) before writing', async () => {
     const wrapper = await open()
 
     await wrapper.find('[data-test="connect-cursor"]').trigger('click')
@@ -113,7 +113,10 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     // Masked key visible, real key absent.
     expect(entry.text()).toContain('••••')
     expect(entry.text()).not.toContain('apikey=real')
-    expect(wrapper.find('[data-test="client-preview-apikey-cursor"]').exists()).toBe(true)
+    // Spec 108-i (T042w): connect writes the client its own credential and never
+    // the admin API key, so the old API-key notice is replaced.
+    expect(wrapper.find('[data-test="client-preview-apikey-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-credential-notice-cursor"]').text()).toContain('The admin API key is never written.')
   })
 
   it('confirm writes the file; cancel writes nothing', async () => {

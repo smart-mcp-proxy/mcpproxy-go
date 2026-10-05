@@ -1154,3 +1154,47 @@ func TestHandlePatchServer_IsolationPreservesUnexposedFields(t *testing.T) {
 	assert.Equal(t, sandbox, *iso.Mode)
 	assert.Equal(t, "local", iso.LogDriver)
 }
+
+// TestHandlePatchServer_QuarantinedFieldMarksExplicit pins that only a PATCH body
+// that actually carries `quarantined` is an operator decision. Without the
+// explicit bit, UpdateServer must not apply (or storage lower) the quarantine.
+func TestHandlePatchServer_QuarantinedFieldMarksExplicit(t *testing.T) {
+	patch := func(t *testing.T, existingQuarantined bool, body map[string]any) *config.ServerConfig {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name:        "github",
+				Protocol:    "stdio",
+				Enabled:     true,
+				Quarantined: existingQuarantined,
+			},
+		}
+		srv := NewServer(mockCtrl, zap.NewNop().Sugar(), nil)
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		return mockCtrl.capturedUpdates
+	}
+
+	t.Run("explicit false", func(t *testing.T) {
+		got := patch(t, true, map[string]any{"quarantined": false})
+		assert.True(t, got.QuarantineExplicitlySet())
+		assert.False(t, got.Quarantined)
+	})
+	t.Run("explicit true", func(t *testing.T) {
+		got := patch(t, false, map[string]any{"quarantined": true})
+		assert.True(t, got.QuarantineExplicitlySet())
+		assert.True(t, got.Quarantined)
+	})
+	t.Run("omitted", func(t *testing.T) {
+		got := patch(t, true, map[string]any{"args": []string{"x"}})
+		assert.False(t, got.QuarantineExplicitlySet(), "an unrelated PATCH must not carry an operator decision")
+		assert.True(t, got.Quarantined, "existing value is preserved")
+	})
+}

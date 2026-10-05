@@ -11,6 +11,15 @@ MCPProxy provides two command groups:
 
 All commands support both **daemon mode** (fast, via socket) and **standalone mode** (direct connection).
 
+## Global flags
+
+`-c/--config` and `-d/--data-dir` are accepted before or after the command name
+and apply to every management command. An empty value (`-c ""`, `--config=`) is an
+error, never "use the default". A command's own `--config` wins over the global
+one. With only `-d DIR`, management commands read `DIR/mcp_config.json` when it
+exists; they never create a default configuration under `~/.mcpproxy` when a
+path was given.
+
 ## Command Reference
 
 ### `mcpproxy upstream list`
@@ -26,6 +35,9 @@ mcpproxy upstream list [flags]
 - `--output, -o` - Output format (table, json) [default: table]
 - `--log-level, -l` - Log level (trace, debug, info, warn, error) [default: warn]
 - `--config, -c` - Path to config file
+- `--profile` - Show only the servers of this profile's effective server set;
+  the tool count of each row becomes the number of tools visible under the
+  profile (needs the running daemon)
 - `--status` - Filter by health status (repeatable; a comma-separated value is
   equivalent to repeating the flag — several values select the union of their
   statuses): `ready`, `connecting`, `sign_in_required`, `needs_review`,
@@ -402,7 +414,7 @@ mcpproxy doctor [flags]
 ```
 
 **Flags:**
-- `--output, -o` - Output format (pretty, json) [default: pretty]
+- `--output, -o` - Output format (pretty, json, yaml) [default: pretty]; the global `--json` is shorthand for `-o json`
 - `--log-level, -l` - Log level [default: warn]
 - `--config, -c` - Path to config file
 - `--server` - Limit health checks to a single upstream server by name (Spec 044)
@@ -422,12 +434,27 @@ mcpproxy doctor --output=json
 mcpproxy doctor --server=github
 ```
 
+The report is made to be shared, so credentials are always redacted in every
+format: query parameters such as `?apikey=` or `?token=` in any URL (including
+`web_ui_url`) print as `REDACTED`, and so does the admin API key wherever it
+would appear. Use `mcpproxy status --show-key` or `mcpproxy status --web-url`
+when you need the key itself.
+
 **Health Checks:**
 - Upstream server connection errors
 - OAuth authentication requirements
 - Missing secrets (unresolved references)
 - Runtime warnings
 - Docker isolation status
+- **Profiles & clients** (Spec 108): `profiles.binding_bypass` (a client bound to a
+  profile could escape it by omitting its credential while `require_mcp_auth` is off,
+  so anonymous callers are denied) and `connect.admin_key_in_client_config` (a client
+  config still holds the admin API key). Both are read from the `warnings` of
+  `GET /api/v1/clients`, so they always agree with the REST warning and with the
+  refusals of `connect`, `profile` and `client`; doctor never reads a client config.
+  A server edition or an older daemon without `/clients` reports them as `skipped`.
+  `-o json` adds a top-level `profile_checks` list (`id`, `status` of
+  `ok|warn|info|skipped`, `message`, and `bindings`/`fixes` when present)
 
 **Output:**
 - Total issue count
@@ -528,6 +555,10 @@ mcpproxy connect cursor --profile ro           # Bind Cursor to "ro" (locked)
 mcpproxy connect cursor --profile work --switchable
 mcpproxy connect --all --profile all           # Every supported client, all servers
 ```
+
+### Profiles, clients, access explanations and token profiles (Spec 108)
+
+The `profile`, `client` (bindings), `access explain` and `token --profile` commands are documented on the published site: <https://docs.mcpproxy.app/cli/profile-commands> (source: `docs/cli/profile-commands.md`).
 
 ## Common Workflows
 
@@ -683,6 +714,12 @@ mcpproxy tools list [flags]
 - `--status` - Filter by state: `enabled`, `disabled`, `config-denied`
 - `--risk` - Filter by risk level: `read`, `write`, `destructive`
 - `--approval` - Filter by approval: `approved`, `pending`, `changed`
+- `--client` - View as a client (administrator only, global list): adds `ACCESS`
+  (`callable`, `visible`, `hidden`) and `REASON` columns, the verdict of each tool
+  for that client's connection. With a scoped token this exits `1` with
+  `operation requires admin access`
+- `--profile` - View as a profile (global list): adds the same columns. A
+  non-administrator sees only the visible tools and a count of the hidden ones
 - `--output, -o` - Output format: `table`, `json`, `yaml`
 - `--log-level, -l` - Log level [default: info]
 - `--config, -c` - Path to config file

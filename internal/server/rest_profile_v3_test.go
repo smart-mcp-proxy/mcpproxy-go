@@ -33,7 +33,6 @@ import (
 
 const (
 	restV3AdminKey   = "t108-rest-admin"
-	restV3TierText   = "blocked by profile: github:create_issue is a write tool; this profile allows read tools only"
 	restV3ReadonlyID = "work-readonly"
 )
 
@@ -44,6 +43,7 @@ type restV3Fixture struct {
 	proxy     *MCPProxyServer
 	rt        *runtime.Runtime
 	srv       *Server
+	api       *httpapi.Server
 	router    http.Handler
 	cfg       *config.Config
 	upstreams map[string]*countingUpstream
@@ -78,7 +78,7 @@ func newProfilesV3RESTFixture(t *testing.T, configure func(*config.Config)) *res
 		"activity service must subscribe before the first refusal is emitted")
 
 	return &restV3Fixture{
-		t: t, proxy: proxy, rt: rt, srv: srv, router: api.Router(),
+		t: t, proxy: proxy, rt: rt, srv: srv, api: api, router: api.Router(),
 		cfg: rt.Config(), upstreams: upstreams, hmacKey: hmacKey,
 	}
 }
@@ -249,12 +249,12 @@ func TestRESTProfileV3_ToolsCall_PinnedAgentToken(t *testing.T) {
 	t.Run("tier refusal is 403 with the contract text, before upstream I/O", func(t *testing.T) {
 		rec := f.callTool(ro, "call_tool_write", map[string]interface{}{"name": "github:create_issue", "args_json": "{}"}, "")
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		require.Equal(t, restV3TierText, restV3Error(t, rec))
-		require.NotContains(t, rec.Body.String(), "work-readonly")
-		require.NotContains(t, rec.Body.String(), "Work · Read-only")
+		require.Equal(t, v3TierRefusal(t), restV3Error(t, rec))
+		// Spec 108 D39: the pinned token's own profile is named.
+		require.Contains(t, rec.Body.String(), "work-readonly")
 		require.Empty(t, f.upstreams["github"].dispatched())
 		row := f.waitBlocked("github", "create_issue", profile.BlockReasonTier)
-		require.Equal(t, restV3TierText, row.Metadata["reason"], "the persisted refusal text is the caller-visible one")
+		require.Equal(t, v3TierRefusal(t), row.Metadata["reason"], "the persisted refusal text is the caller-visible one")
 	})
 
 	t.Run("hidden built-ins answer exactly like an unknown tool and record profile_* reasons", func(t *testing.T) {
@@ -287,7 +287,7 @@ func TestRESTProfileV3_ToolsCall_PinnedAgentToken(t *testing.T) {
 		require.Empty(t, f.totalDispatched(), "hidden built-ins must never reach an upstream")
 	})
 
-	t.Run("retrieve_tools matches the direct handler and never names the profile (pin source)", func(t *testing.T) {
+	t.Run("retrieve_tools matches the direct handler and names the pinned token's own profile (pin source)", func(t *testing.T) {
 		rec := f.callTool(ro, "retrieve_tools", map[string]interface{}{"query": "create_issue"}, "")
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var envelope struct {
@@ -306,7 +306,7 @@ func TestRESTProfileV3_ToolsCall_PinnedAgentToken(t *testing.T) {
 		var payload map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal([]byte(envelope.Data[0].Text), &payload))
 		require.JSONEq(t, "1", string(payload["hidden_by_profile"]))
-		require.NotContains(t, payload, "profile", "a pin never names its profile in retrieve_tools (FR-011)")
+		require.JSONEq(t, `"work-readonly"`, string(payload["profile"]), "a pinned caller learns its own profile in retrieve_tools (FR-011, Spec 108 D39)")
 		require.NotContains(t, envelope.Data[0].Text, "github:create_issue", "create_issue is over the tier cap and must not be a hit")
 	})
 
@@ -469,8 +469,8 @@ func TestRESTProfileV3_Replay_PinnedAgentToken(t *testing.T) {
 	t.Run("in-scope write over the tier cap is a 403 with the tier text", func(t *testing.T) {
 		rec := replay(ro, ids.writeID, "")
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		require.Equal(t, restV3TierText, restV3Error(t, rec))
-		require.NotContains(t, rec.Body.String(), "work-readonly")
+		require.Equal(t, v3TierRefusal(t), restV3Error(t, rec))
+		require.Contains(t, rec.Body.String(), "work-readonly")
 		require.Empty(t, ids.github.dispatched(), "a refused replay must not reach the upstream")
 		f.waitBlocked("github", "create_issue", profile.BlockReasonTier)
 	})

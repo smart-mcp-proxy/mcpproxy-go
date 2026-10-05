@@ -596,6 +596,16 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
+			// The supervisor's reconcile usually owns the connect at startup;
+			// LoadConfiguredServers' AddServer for the same unchanged server then
+			// hits the in-flight guard. Nothing failed.
+			if errors.Is(err, managed.ErrConnectAlreadyActive) {
+				m.logger.Debug("Connect already in progress or established, not starting another",
+					zap.String("id", id),
+					zap.String("name", serverConfig.Name),
+					zap.String("state", client.GetState().String()))
+				return nil
+			}
 			// Check if this is an OAuth error - don't fail AddServer for OAuth
 			errStr := err.Error()
 			isOAuthError := strings.Contains(errStr, "OAuth") ||

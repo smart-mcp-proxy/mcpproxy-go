@@ -17,6 +17,30 @@ The same operation is available from the CLI, the REST API, and the MCP
 (`AddServerFromRegistry`), so behaviour and error codes are identical everywhere
 (spec 070, CN-001).
 
+## Add to MCPProxy (the catalog)
+
+The Web UI's **+ Add → Server** page, the macOS Add Server sheet and the CLI's
+`mcpproxy catalog` commands are a **catalog** over every enabled registry
+(each registry is a *catalog source*). One search merges the sources and ranks
+the results: the official source first, then verified publishers, then
+popularity, then text relevance, then title. Every surface shows the same order
+and the same words:
+
+- A result shows its title (the id as secondary text), publisher, a verified
+  badge and the stars or installs when the source provides them.
+- The button reads **Add to MCPProxy**. After the add it reads **Added ✓ · Open**
+  and the server is quarantined. The CLI prints
+  `Added <name> to MCPProxy (quarantined for review)`.
+- Env values and headers whose names look like secrets (`*_TOKEN`, `*_KEY`,
+  `*SECRET*`, `*PASSWORD*`) default to **Secret** and are stored in the OS
+  keyring as `${keyring:<server>-env-<name>}`.
+
+From the CLI see [Catalog Commands](../cli/catalog-commands.md); the
+`registry search` and `registry add` commands below are deprecated aliases of
+`catalog search` and `catalog add`. The REST route is
+`GET /api/v1/catalog/search` ([REST API](../api/rest-api.md#catalog)) and the MCP
+tool is `search_servers`.
+
 ## Security model
 
 - **The client never sends a config blob.** Only the registry reference plus
@@ -169,6 +193,7 @@ and `missing_inputs` as the REST and CLI surfaces (CN-001).
 ## See also
 
 - [CLI management commands](../cli/management-commands.md)
+- [Catalog commands](../cli/catalog-commands.md)
 - [Security & quarantine](security-quarantine.md)
 - [Search & discovery](search-discovery.md)
 - [REST API reference](../api/rest-api.md)

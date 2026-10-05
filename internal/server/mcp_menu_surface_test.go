@@ -118,10 +118,14 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 	// registerTools has always gated on the flag, so the default surface never
 	// carried the tool. Since v0.66.0 the flag ships ON, so the fixture
 	// (DefaultConfig) now registers the live tool there.
+	//
+	// profiles is the Spec 108-h administrator tool (FR-017): registered on the
+	// default, call-tool and code-execution servers (never the direct one), and
+	// listed only to an administrator credential (visibility is per session).
 	wantAdded := map[string][]string{
-		"default_server":      {"code_execution", "describe_tool"},
-		"call_tool_mode":      {"describe_tool"},
-		"code_execution_mode": {},
+		"default_server":      {"code_execution", "describe_tool", "profiles"},
+		"call_tool_mode":      {"describe_tool", "profiles"},
+		"code_execution_mode": {"profiles"},
 	}
 	// Nothing is removed. The two routing-mode surfaces carried a "Code
 	// Execution (Disabled)" stub in the pre-feature snapshot; a disabled

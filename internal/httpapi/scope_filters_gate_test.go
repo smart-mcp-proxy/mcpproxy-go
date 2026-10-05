@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,4 +125,28 @@ func TestScopeFiltersFeatureValue(t *testing.T) {
 
 	scopeFilterSupportedFilters = []string{"profile", "client"}
 	assert.Equal(t, []string{"profile", "client"}, scopeFiltersFeatureValue())
+}
+
+// Spec 108-e (T064): the build accepts profile, client and token. This pins
+// the value the whole gate is fed from.
+func TestScopeFilterSupportedList_IsProfileClientToken(t *testing.T) {
+	assert.Equal(t, []string{"profile", "client", "token"}, scopeFilterSupportedFilters)
+	assert.Equal(t, scopeFilterSupportedFilters, scopeFiltersFeatureValue())
+}
+
+// One variable feeds both the gate and GET /status features.scope_filters, so
+// a build advertises a filter exactly when it accepts it.
+func TestStatus_FeaturesScopeFiltersEqualsList(t *testing.T) {
+	srv, _, _ := scopeR9Server(t)
+	rec := scopeGet(t, srv, "/api/v1/status", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Data struct {
+			Features struct {
+				ScopeFilters []string `json:"scope_filters"`
+			} `json:"features"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, scopeFilterSupportedFilters, body.Data.Features.ScopeFilters)
 }

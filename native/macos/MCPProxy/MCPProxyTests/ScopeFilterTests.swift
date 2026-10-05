@@ -57,6 +57,33 @@ final class ScopeFilterTests: XCTestCase {
         XCTAssertEqual(items(activity(f))["type"], ["config_change"])
     }
 
+    /// Spec 108-j/108-l: a call a profile refuses is persisted as a
+    /// `policy_decision` (status blocked), not a `tool_call`, so the default Tool
+    /// calls view must widen its type set for a blocked filter or it hides exactly
+    /// the rows `client=cursor&status=blocked` asks for (the Web UI does the same).
+    func testToolCallsViewWidensToPolicyDecisionsForABlockedFilter() {
+        var f = ScopeFilter(query: ["client": "cursor", "status": "blocked"])
+        XCTAssertEqual(f.view, .calls)
+        let r = f.restRequest(for: .activity, scopeFiltersAvailable: true)
+        XCTAssertEqual(items(r)["type"], ["tool_call,internal_tool_call,policy_decision"])
+        XCTAssertEqual(items(r)["client"], ["cursor"])
+        XCTAssertEqual(items(r)["status"], ["blocked"])
+
+        // Not widened for any other status, nor on the other views.
+        f.status = "success"
+        XCTAssertEqual(items(activity(f))["type"], ["tool_call,internal_tool_call"])
+        f.status = "blocked"
+        f.view = .all
+        XCTAssertNil(items(activity(f))["type"])
+        f.view = .system
+        XCTAssertFalse((items(activity(f))["type"]?.first ?? "").contains("tool_call,"))
+
+        // An explicit type override still wins.
+        f.view = .calls
+        f.type = "tool_call"
+        XCTAssertEqual(items(activity(f))["type"], ["tool_call"])
+    }
+
     func testSegmentsAreToolCallsSessionsSystemAll() {
         XCTAssertEqual(ActivityViewMode.allCases.map(\.label),
                        ["Tool calls", "Sessions", "System events", "All"])
@@ -296,6 +323,166 @@ final class ScopeFilterTests: XCTestCase {
         let without = #"{"running":true}"#
         let s2 = try JSONDecoder().decode(StatusResponse.self, from: Data(without.utf8))
         XCTAssertFalse(s2.scopeFiltersAvailable)
+    }
+
+    // MARK: - Spec 108-k K12 / T113 / T119b: Clients and Tokens pages
+
+    func testClientsPageMapsProfileAndClientOnlyWhenTheCoreAdvertisesThem() {
+        var f = ScopeFilter.forProfile("work-ro")
+        f.client = "cursor"
+        f.token = "ci"
+        let on = f.restRequest(for: .clients, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(on?.path, "/api/v1/clients")
+        XCTAssertEqual(items(on), ["profile": ["work-ro"], "client": ["cursor"]], "token is not a Clients filter")
+        let off = f.restRequest(for: .clients, scopeFiltersAvailable: false, now: now)
+        XCTAssertEqual(off?.path, "/api/v1/clients")
+        XCTAssertTrue(off?.query.isEmpty ?? false, "hidden until features.scope_filters")
+    }
+
+    func testTokensPageMapsProfileAndTokenOnlyWhenTheCoreAdvertisesThem() {
+        var f = ScopeFilter.forProfile("-")
+        f.token = "ci"
+        f.client = "cursor"
+        let on = f.restRequest(for: .tokens, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(on?.path, "/api/v1/tokens")
+        XCTAssertEqual(items(on), ["profile": ["-"], "token": ["ci"]], "unpinned is `-`; client is not a Tokens filter")
+        XCTAssertTrue(f.restRequest(for: .tokens, scopeFiltersAvailable: false, now: now)?.query.isEmpty ?? false)
+    }
+
+    // MARK: - Spec 109-l T153: the scope fields are un-hidden once the core lists them
+
+    /// A /status that lists `features.scope_filters` un-hides profile / client /
+    /// token on every page that honours them (and only those), including 108-k's
+    /// Clients and Tokens pages; the same status without it hides them all.
+    func testScopeFiltersUnhiddenOnceStatusListsThem() throws {
+        let listed = try JSONDecoder().decode(
+            StatusResponse.self,
+            from: Data(#"{"running":true,"features":{"scope_filters":["profile","client","token"]}}"#.utf8))
+        let unlisted = try JSONDecoder().decode(StatusResponse.self, from: Data(#"{"running":true}"#.utf8))
+        var f = ScopeFilter()
+        f.profile = "work"; f.client = "cursor"; f.token = "ci-bot"
+
+        let expected: [(ScopePage, Set<String>)] = [
+            (.activity, ["profile", "client", "token"]),
+            (.usage, ["profile", "client", "token"]),
+            (.tools, ["profile", "client"]),
+            (.servers, ["profile"]),
+            (.clients, ["profile", "client"]),
+            (.tokens, ["profile", "token"]),
+        ]
+        for (page, names) in expected {
+            let shown = f.restRequest(for: page, scopeFiltersAvailable: listed.scopeFiltersAvailable, now: now)
+            XCTAssertEqual(Set(items(shown).keys).intersection(["profile", "client", "token"]), names, "\(page)")
+            let hidden = f.restRequest(for: page, scopeFiltersAvailable: unlisted.scopeFiltersAvailable, now: now)
+            XCTAssertTrue(Set(items(hidden).keys).isDisjoint(with: ["profile", "client", "token"]), "\(page) hidden")
+        }
+        XCTAssertEqual(f.visibleScopeParams(scopeFiltersAvailable: listed.scopeFiltersAvailable), ["profile", "client", "token"])
+        XCTAssertTrue(f.visibleScopeParams(scopeFiltersAvailable: unlisted.scopeFiltersAvailable).isEmpty)
+    }
+
+    /// A Web URL's profile / client / token translate to the same filter and the
+    /// same query string on every page that carries them.
+    func testScopeFiltersRoundTripThroughURLQuery() {
+        let f = ScopeFilter(query: ["profile": "work", "client": "cursor", "token": "ci-bot", "view": "all"])
+        XCTAssertEqual(f.profile, "work")
+        XCTAssertEqual(f.client, "cursor")
+        XCTAssertEqual(f.token, "ci-bot")
+        let expected: [(ScopePage, String)] = [
+            (.activity, "profile=work&client=cursor&token=ci-bot"),
+            (.usage, "profile=work&client=cursor&token=ci-bot"),
+            (.tools, "profile=work&client=cursor"),
+            (.servers, "profile=work"),
+            (.clients, "profile=work&client=cursor"),
+            (.tokens, "profile=work&token=ci-bot"),
+        ]
+        for (page, query) in expected {
+            let request = f.restRequest(for: page, scopeFiltersAvailable: true, now: now)
+            let scopeOnly = (request?.query ?? [])
+                .filter { ["profile", "client", "token"].contains($0.name) }
+                .map { "\($0.name)=\($0.value ?? "")" }
+                .joined(separator: "&")
+            XCTAssertEqual(scopeOnly, query, "\(page)")
+        }
+    }
+
+    /// The Servers page link of a profile (Spec 109-l P10c, Web parity) sends the
+    /// profile and nothing else the page cannot apply.
+    func testForProfileLinksCarryProfile() {
+        let f = ScopeFilter.forProfile("work-ro")
+        let servers = f.restRequest(for: .servers, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(servers?.path, "/api/v1/servers")
+        XCTAssertEqual(items(servers), ["profile": ["work-ro"]])
+        for page in [ScopePage.tools, .clients, .tokens, .usage, .activity] {
+            XCTAssertEqual(items(f.restRequest(for: page, scopeFiltersAvailable: true, now: now))["profile"], ["work-ro"], "\(page)")
+        }
+    }
+
+    func testForProfileCarriesOnlyTheProfile() {
+        let f = ScopeFilter.forProfile("work-ro")
+        XCTAssertEqual(f.profile, "work-ro")
+        XCTAssertNil(f.client)
+        XCTAssertNil(f.token)
+        XCTAssertEqual(f.visibleScopeParams(scopeFiltersAvailable: true), ["profile"])
+    }
+
+    /// The Profiles-card links (Tools · Activity · Clients · Tokens) each produce
+    /// the FR-031 request for that page.
+    func testTheProfilesCardLinksProduceTheirRequests() {
+        let filter = ScopeFilter.forProfile("work-ro")
+        let expected: [(ScopePage, String)] = [
+            (.tools, "/api/v1/tools"), (.activity, "/api/v1/activity"),
+            (.clients, "/api/v1/clients"), (.tokens, "/api/v1/tokens"),
+        ]
+        for (page, path) in expected {
+            let request = filter.restRequest(for: page, scopeFiltersAvailable: true, now: now)
+            XCTAssertEqual(request?.path, path, "\(page)")
+            XCTAssertEqual(items(request)["profile"], ["work-ro"], "\(page)")
+        }
+    }
+
+    func testOpenScopedRoutesEachPageThroughItsChannel() {
+        let appState = AppState()
+        let filter = ScopeFilter.forProfile("work-ro")
+
+        appState.openScoped(page: .clients, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .clients(tab: .clients, filter: filter))
+
+        appState.openScoped(page: .tokens, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .clients(tab: .tokens, filter: filter))
+
+        appState.openScoped(page: .tools, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .tools(filter: filter))
+
+        appState.pendingRoute = nil
+        appState.openScoped(page: .activity, filter: filter)
+        XCTAssertEqual(appState.scopeFilter, filter, "Activity keeps 109-k's own channel")
+        XCTAssertNil(appState.pendingRoute)
+    }
+
+    /// `view=sessions` → `GET /sessions` with profile/client/token (FR-031).
+    func testSessionsCarryTheThreeScopeFilters() {
+        var f = ScopeFilter()
+        f.view = .sessions
+        f.profile = "work-ro"
+        f.client = "cursor"
+        f.token = "ci"
+        let request = f.restRequest(for: .activity, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(request?.path, "/api/v1/sessions")
+        XCTAssertEqual(items(request), ["profile": ["work-ro"], "client": ["cursor"], "token": ["ci"]])
+    }
+
+    func testUsageCarriesTheThreeScopeFiltersAndA24hWindow() {
+        var f = ScopeFilter()
+        f.from = "-24h"
+        f.profile = "work-ro"
+        f.client = "cursor"
+        f.token = "ci"
+        let request = f.restRequest(for: .usage, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(request?.path, "/api/v1/activity/usage")
+        XCTAssertEqual(items(request)["window"], ["24h"])
+        XCTAssertEqual(items(request)["profile"], ["work-ro"])
+        XCTAssertEqual(items(request)["client"], ["cursor"])
+        XCTAssertEqual(items(request)["token"], ["ci"])
     }
 }
 

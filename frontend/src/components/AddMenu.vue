@@ -47,6 +47,7 @@
     <ClientConnectList
       v-if="connectMounted"
       :show="connectOpen"
+      :focus-client="focusClient"
       @close="connectOpen = false"
       @updated="clientsStore.refreshPresence()"
     />
@@ -70,6 +71,8 @@ const trigger = ref<HTMLButtonElement | null>(null)
 const open = ref(false)
 const connectMounted = ref(false)
 const connectOpen = ref(false)
+// Spec 108-i I8: a Clients row's call to action names the client to focus.
+const focusClient = ref('')
 
 const visible = computed(() => authStore.principalKind !== 'tenant')
 
@@ -159,8 +162,10 @@ watch(open, (isOpen) => {
 })
 
 // The command palette's "Connect client" action reuses this one dialog.
-function openConnect() {
+function openConnect(event?: Event) {
   if (!visible.value) return
+  const detail = (event as CustomEvent<{ client?: string } | null> | undefined)?.detail
+  focusClient.value = typeof detail?.client === 'string' ? detail.client : ''
   connectMounted.value = true
   connectOpen.value = true
 }

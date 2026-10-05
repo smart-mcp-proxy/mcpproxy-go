@@ -37,6 +37,7 @@ export type PageId =
   | 'add-server'
   | 'settings'
   | 'server-detail'
+  | 'profiles'
   | 'profile-editor'
 
 /** Context passed to a ParamDef's custom toRest hook. */
@@ -134,7 +135,12 @@ export function setAvailableFeatures(features: readonly string[] | undefined | n
 }
 
 function isAvailable(def: ScopeParamDef): boolean {
-  return !def.requires || availableFeatures.has(def.requires)
+  if (!def.requires) return true
+  // GET /api/v1/status `features.scope_filters` lists the parameter NAMES the
+  // build accepts (["profile","client","token"]), so a parameter is available
+  // when its own name is listed. The feature name itself ("scope_filters")
+  // still enables every parameter that requires it (older tests and callers).
+  return availableFeatures.has(def.requires) || availableFeatures.has(def.name)
 }
 
 /** Reports whether a contract parameter is enabled by this server build. */
@@ -292,23 +298,33 @@ function registerDefaultScopeParams(): void {
   // Spec 108 rows, registered here under the ownership rule (109-k owns the
   // whole contract, incl. profile/client/token) and hidden until
   // features.scope_filters lists them.
+  //
+  // `restPages` is exactly the set of endpoints whose backend honours the
+  // parameter: activity, usage, sessions, tools and servers (Spec 108-e), plus
+  // GET /clients (`profile`, `client`) and GET /tokens (`profile`, `token`)
+  // from Spec 108-f. A page lists the parameters it shows chips for in `pages`
+  // and sends only the `restPages` ones to REST, so no page can receive a 400
+  // for a filter its backend does not honour.
   registerScopeParam({
     name: 'profile',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'servers', 'clients', 'tokens'],
+    restPages: ['activity', 'usage', 'tools', 'servers', 'clients', 'tokens'],
   })
   registerScopeParam({
     name: 'client',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'clients'],
+    restPages: ['activity', 'usage', 'tools', 'clients'],
   })
   registerScopeParam({
     name: 'token',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tokens'],
+    restPages: ['activity', 'usage', 'tokens'],
   })
 }
 
@@ -330,6 +346,28 @@ const pageRouteNames: Partial<Record<PageId, string>> = {
   sessions: 'sessions',
   tokens: 'tokens',
   clients: 'clients',
+  // Spec 108-i I4: the Profiles page and the editor are named routes, so a link
+  // to them goes through this map like every other (FR-045). The editor needs a
+  // `name` param, which a caller passes by building the route object itself.
+  profiles: 'profiles',
+  'profile-editor': 'profile-editor',
+}
+
+/** The page a route name belongs to (the inverse of the map above), or
+ * undefined for a route outside the contract (Settings, a server detail...). */
+export function pageIdForRouteName(name: unknown): PageId | undefined {
+  if (typeof name !== 'string') return undefined
+  for (const [page, routeName] of Object.entries(pageRouteNames)) {
+    if (routeName === name) return page as PageId
+  }
+  return undefined
+}
+
+/** Whether a page registers a parameter (and so applies it). The Viewing chip
+ * uses this to dim a sticky parameter the current page does not use. */
+export function scopeParamAppliesToPage(name: string, page: PageId | undefined): boolean {
+  const def = registry.get(name)
+  return Boolean(def && page && def.pages.includes(page))
 }
 
 // ---------------------------------------------------------------------------
@@ -343,8 +381,11 @@ export interface UseScopeQueryResult {
   /** Rule 8: null when the active parameters are contradictory (today, an
    * explicit `server` that disagrees with `tool`'s server prefix) — the
    * caller must issue no request and render the conflict empty state instead
-   * (chips carry `conflicting: true` for the pair). */
-  toRest: () => Record<string, string> | null
+   * (chips carry `conflicting: true` for the pair). `ignoreConflict` returns
+   * the map the non-conflicting parameters produce anyway, for a caller that
+   * reads only parameters independent of the conflicting pair (a page whose own
+   * state already resolved it while the URL write-back is still in flight). */
+  toRest: (opts?: { ignoreConflict?: boolean }) => Record<string, string> | null
   linkTo: (page: PageId, patch?: Record<string, string>) => RouteLocationRaw
   chips: ComputedRef<ScopeChip[]>
 }
@@ -398,7 +439,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     set(patch)
   }
 
-  function toRest(): Record<string, string> | null {
+  function toRest(opts?: { ignoreConflict?: boolean }): Record<string, string> | null {
     const out: Record<string, string> = {}
     const snapshot: Record<string, string | undefined> = {}
     for (const def of defsForPage(page)) snapshot[def.name] = state[def.name]
@@ -432,7 +473,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     // Rule 8 ("Contradictory parameters"): no REST query could express both
     // active values, so no request is issued at all — never a partial one
     // built from whichever fields didn't conflict.
-    if (conflicted) return null
+    if (conflicted && !opts?.ignoreConflict) return null
 
     // Usage `window` (url-filter-contract.md `from`/`to` row): computed from
     // BOTH values together, including when neither is present (window=all) —
@@ -457,6 +498,9 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
       if (v) query[def.name] = v
     }
     Object.assign(query, patch)
+    // An empty patch value clears a sticky param (the caller names the subject
+    // for the target page and must not inherit a competing one: F5.1).
+    for (const key of Object.keys(query)) if (query[key] === '') delete query[key]
     const name = pageRouteNames[target]
     return name ? { name, query } : { path: `/${target}`, query }
   }

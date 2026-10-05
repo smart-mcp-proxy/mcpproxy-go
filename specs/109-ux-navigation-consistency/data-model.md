@@ -22,6 +22,7 @@ Constants: `internal/health/constants.go` `Status*`, exported by `cmd/generate-t
 |---|---|---|
 | `current_annotations` | `*config.ToolAnnotations` (JSON) | written with `current_description` in `checkToolApprovals`; `omitempty`. A captured tool with no hints is stored as a non-nil empty object `{}`, so nil always means "not captured" (→ `unknown`) and `{}` means "captured, unannotated" |
 | `previous_annotations` | `*config.ToolAnnotations` (JSON) | moved from `current_annotations` when a change is recorded; `omitempty` |
+| `definition_changed_at` | `time.Time` (JSON, omitted when zero) | fix-review-screen. Stamped by `BoltDB.SaveToolApproval` inside its write transaction when a prior record exists and its `current_description`, `current_schema` or `current_output_schema` differ from the incoming record; otherwise the prior value is carried over. A brand-new record stays zero (first capture is not a change). Annotations are excluded and the field is never part of the hash |
 
 The approval hash is unchanged (annotations stay excluded, `tool_quarantine.go:26`). Records without these fields → review `tier: unknown`.
 
@@ -42,7 +43,7 @@ type AttentionItem struct {
     ID      string            `json:"id"`      // kind:type:subject
     Kind    string            `json:"kind"`
     Rank    int               `json:"rank"`
-    Subject AttentionSubject  `json:"subject"` // {type: server|tool|client, id, name}
+    Subject AttentionSubject  `json:"subject"` // {type: server|tool|client|setting, id, name}
     Summary string            `json:"summary"`
     Detail  string            `json:"detail,omitempty"`
     Fix     AttentionFix      `json:"fix"`     // {verb, label, target}
@@ -51,6 +52,7 @@ type AttentionItem struct {
 type AttentionInput struct {
     Servers        []AttentionServer     // minimal subset, defined here (109-d)
     Clients        []AttentionClient     // minimal subset, defined here (109-d)
+    ClientWarnings []AttentionClientWarning // 109-l: the Spec 108 warnings; empty in the server edition
     Now            time.Time
 }
 // AttentionServer is the only server data Compute needs. 109-d defines it and
@@ -72,6 +74,16 @@ type AttentionClient struct {
     ConnectedAt     *time.Time // last successful connect write
     LastSeen        *time.Time // last MCP session mapped to this client
 }
+// AttentionClientWarning is the only Spec 108 data Compute needs (109-l).
+type AttentionClientWarning struct {
+    Code                   string     // a profile.Warning* value; equals the attention kind
+    ClientID, DisplayName  string
+    Profile                string     // profile_missing: the missing slug
+    ExpiresAt              *time.Time // client_credential_expiring
+    BindingCount           int        // the guard: how many bindings are bypassable
+    BindingNames           []string   // display names of the bound clients, for the guard detail
+    Since                  time.Time  // first seen (filled by the subscriber's firstSeen map)
+}
 func Compute(in AttentionInput) []AttentionItem // pure; sorted by rank, subject.name
 ```
 
@@ -83,11 +95,17 @@ The `sign_in_required`, `missing_secret` and `config_error` conditions key on `h
 
 SSE: the runtime `attention.changed` event carries `items: [{id, subject_type, subject_id}]`; `internal/httpapi` renders `{count, ids}` per subscriber (FR-006).
 
+Spec 108 input wiring (109-l): `(*Runtime).AttentionClientWarnings()` calls `ClientsService.Warnings(states)` with `states` from `ClientsService.ObservedCredentialStates(OnboardingState.ClientCredentialObserved)` (the same builder `GET /clients` uses), reads the credential store once per recompute and never a client config. The subscriber keeps a `firstSeen` map keyed by `(code, client id)`, pruned when the warning clears, so `since` survives recomputes (it resets on restart, like `stateSince`). It recomputes on `client.binding_changed`, `profiles.changed`, `config.reloaded`, `config.saved`, re-reads the warnings every `AttentionTimerCap` while a clients service exists (rotations, forget and token creation emit no event of their own) and adds `ExpiresAt − 14 d` of each active client credential to the threshold timer. `attention.changed` still fires only when the id set changes.
+
 `stateSince` (per server, the time `health.status` last changed) is tracked by the runtime subscriber in memory (it resets on restart, which only delays an item by ≤ 60 s). **Recompute triggers**: the debounced events above **and** a threshold timer — after each recompute the subscriber computes `next = min(StateSince+60s over connecting/error servers, ConnectedAt+5min over connected-never-seen clients)` and arms one timer for `min(next, now+30s)`, so a time-based item appears at its threshold even when no event fires (FR-002). Kinds, ranks and fixes are enums in `internal/runtime/attention_contract.go`, exported to `contracts.ts`.
 
 ## 5. Review payloads (derived) — `internal/runtime/review.go`
 
 `ReviewQueue{Count, Servers []ReviewQueueRow}` and `ServerReview{Server ReviewServer, Tools []ReviewTool}` exactly as in contracts/rest-api.md#review. Composed from `ListToolApprovals(server)`, server config (command/url/transport/trust mode — the summary is built from a `contracts.Server` copy passed through `oauth.RedactServerSecretFields` before any field is read, so no raw secret enters the payload, FR-021), and the latest scan summary and per-tool findings (`security/scanner` service). Diff: unified diff computed server-side in `internal/runtime/review_diff.go` (same sections as today's `frontend/src/utils/toolDiff.ts` `computeToolDiffSections`: description, input schema, output schema, plus annotations), so macOS and the CLI get the same text. The Web UI renders the server diff and drops its local computation. The server summary also carries the existing `source_registry_id` / `source_registry_provenance` (MCP-866 origin, `contracts.Server` fields, `omitempty`), so a reviewer sees which catalog the server came from; both are listed in contracts/rest-api.md#review and FR-021.
+
+Scan coverage (fix-review-screen): `ReviewScan` adds `coverage`, `tools_scanned` and `unscanned_tools`. The composer reads the newest baseline job and its `ScanContext` (`tools_exported` and the new `tool_names`: the sorted, de-duplicated names of the exported definitions, recorded by Pass 1) and compares each approval record with it: a record is covered when the scan saw its name and `definition_changed_at` is not after the job's `started_at`. A scan recorded without `tool_names` (older core) covers approved records, and pending records of a quarantined server; it does not cover a pending record of a trusted server or a changed record with no change time. The per-tool `scan_verdict` follows from coverage (`clean` only for a covered tool).
+
+Default selection (fix-review-defaults): `ReviewTool.DefaultAllowed` (`default_allowed`, always serialised) is set by `reviewDefaultAllowed` after `ScanVerdict` and `HeldReason`: false when the tool is disabled; true when `approval_status` is `approved`; otherwise true only for tier `read` with `scan_verdict` `clean` and no `held_reason`. The Web screen, the macOS sheet and `mcpproxy review approve` read it and never recompute it; a missing field reads as false (D43).
 
 ## 6. Client presence (derived) — `internal/runtime/clients_presence.go`
 
@@ -144,8 +162,15 @@ type CatalogHit struct {
     Entry      ServerEntry  // existing Spec 070 type; its JSON (url, installCmd, registry, required_inputs[].secret) is NOT changed
     Source, Title, Publisher string
     Verified, Official       bool
+    Curated    bool          // hit of the built-in reference source; listed first in the Official section (D35 A9)
+    FromCache  bool          // served from the source's cached listing because its live fetch failed (D35 A1/A2)
     Popularity *Popularity   // {stars?, installs?}
+    // unexported starsBorrowed: the publisher does not own the repository the entry names, so GitHub stars are not attributed to it (D37.7)
 }
+// Title: server.json title, then the name segment after the namespace, then the name, then the id (D37.10).
+// Verified: for a built-in official-protocol entry, the namespace owns the repository (D37.5); built-in reference/Docker entries stay "trusted source".
+// Description: "" when the source only had the "No description available" placeholder (D37.9).
+// ServerEntry gains Title and Version, both json:"-" (the Popularity precedent), so its wire JSON is unchanged.
 
 // REST response DTO of GET /catalog/search — a distinct type, built by toCatalogResult(hit, added).
 type CatalogResult struct {
@@ -163,10 +188,12 @@ type CatalogResult struct {
     SourceCodeURL  string          `json:"source_code_url,omitempty"`
     Added          bool            `json:"added"`
     AddedServerName string          `json:"added_server_name,omitempty"` // unique caller-visible installed match; omitted when ambiguous
+    FromCache       bool            `json:"from_cache,omitempty"`        // answered from the source's cached listing (D35)
 }
+// unavailable[] entry: {source, reason, fallback?: "cached_listing", cached_at?: RFC 3339}
 type SearchOptions struct{ SourceTimeout time.Duration } // default 5 s; only tests set another value (T109a)
 func SearchAll(ctx, q, tag string, limit int, opts SearchOptions) (results []CatalogHit, sections *CatalogSections, unavailable []SourceError)
-func Rank(a, b CatalogHit, q string) bool // pure, deterministic
+func Rank(a, b CatalogHit, q string) bool // pure, deterministic: match tier desc (matchTier, D37.1), official desc, verified desc, popularity desc, title asc, id asc; empty q is tier 0 for every hit
 func toCatalogResult(h CatalogHit, added bool) CatalogResult // REST only; golden-tested against the contracts/rest-api.md#catalog example
 ```
 

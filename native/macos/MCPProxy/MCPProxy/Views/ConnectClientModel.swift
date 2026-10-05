@@ -40,9 +40,58 @@ protocol ConnectClientDataSource: Sendable {
 
     /// `DELETE /api/v1/connect/{id}`.
     func disconnect(_ clientId: String, serverName: String) async throws -> APIClient.ConnectResult
+
+    /// Spec 108-k K21: the same preview and write with a binding intent
+    /// (`profile`, `mode`, `keyless`). The defaults below ignore the binding, so
+    /// a source that predates client credentials keeps working unchanged.
+    func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?,
+        binding: ConnectBinding
+    ) async throws -> APIClient.ConnectResult
+
+    /// Profiles and `require_mcp_auth`, best effort (never throws).
+    func bindingContext() async -> ConnectBindingContext
 }
 
-extension APIClient: ConnectClientDataSource {}
+/// What the form needs to offer a binding: the profiles, and whether the
+/// instance requires MCP authentication (keyless is possible only when it does
+/// not).
+struct ConnectBindingContext: Equatable {
+    var profiles: [ProfileView] = []
+    var requireMCPAuth: Bool?
+}
+
+extension ConnectClientDataSource {
+    /// Default: nothing to offer (a source that predates client credentials).
+    func bindingContext() async -> ConnectBindingContext { ConnectBindingContext() }
+
+    func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel {
+        try await connectPreview(clientId, serverName: serverName)
+    }
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?,
+        binding: ConnectBinding
+    ) async throws -> APIClient.ConnectResult {
+        try await connect(clientId, serverName: serverName, force: force, preconditionToken: preconditionToken)
+    }
+}
+
+extension APIClient: ConnectClientDataSource {
+    func bindingContext() async -> ConnectBindingContext {
+        let profiles = (try? await profilesV3().profiles) ?? []
+        let config = try? await getConfig()
+        return ConnectBindingContext(profiles: profiles, requireMCPAuth: config?["require_mcp_auth"] as? Bool)
+    }
+}
 
 /// How the model waits between reachability polls. Injected so tests assert the
 /// interval instead of spending it.
@@ -96,6 +145,27 @@ final class DeferredConnectSource: ConnectClientDataSource, @unchecked Sendable 
     ) async throws -> APIClient.ConnectResult {
         try await client().connect(
             clientId, serverName: serverName, force: force, preconditionToken: preconditionToken)
+    }
+
+    func bindingContext() async -> ConnectBindingContext {
+        guard let client = await resolve() else { return ConnectBindingContext() }
+        return await client.bindingContext()
+    }
+
+    func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel {
+        try await client().connectPreview(clientId, serverName: serverName, binding: binding)
+    }
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?,
+        binding: ConnectBinding
+    ) async throws -> APIClient.ConnectResult {
+        try await client().connect(
+            clientId, serverName: serverName, force: force,
+            preconditionToken: preconditionToken, binding: binding)
     }
 
     func undoConnect(
@@ -234,6 +304,10 @@ final class ConnectClientModel: ObservableObject {
     @Published private(set) var actionDisplayPath: String?
     @Published private(set) var actionReloadHint: String?
 
+    /// The binding guard's refusal of the last connect (FR-008a), shown by
+    /// `GuardRefusalView`; nil otherwise.
+    @Published private(set) var guardRefusal: ServiceErrorBody?
+
     @Published private(set) var undoState: UndoState = .unavailable
     @Published private(set) var pendingDisconnect: DisconnectConfirmation?
 
@@ -252,6 +326,105 @@ final class ConnectClientModel: ObservableObject {
             guard oldValue != entryName else { return }
             invalidatePreview()
         }
+    }
+
+    // MARK: Binding (Spec 108-k K21, T042m)
+
+    /// The D5 notice, verbatim: a client credential cannot reach management
+    /// tools unless its profile says so.
+    static let managementNotice =
+        "This client can no longer add, change or restart servers; manage servers from the Web UI, the macOS app or the CLI"
+
+    /// The profile the credential binds to; `""` is All servers.
+    @Published private(set) var profile = ""
+    /// The mode wanted once a profile is chosen (All servers is always switchable).
+    @Published private(set) var lockedChoice = true
+    /// Write a credential-less entry (only while `require_mcp_auth` is off).
+    @Published private(set) var keyless = false
+    /// Nothing is sent until the user touches the profile, lock or keyless
+    /// controls: a reconnect must KEEP an existing binding, never silently
+    /// widen a locked client by sending `profile: ""`.
+    @Published private(set) var bindingTouched = false
+    /// Profiles, for the D5 notice (`management_tools`). Set by the view.
+    @Published var profiles: [ProfileView] = []
+    /// `require_mcp_auth` as the core reports it; nil until known. Keyless is
+    /// offered only while it is known to be off.
+    @Published var requireMCPAuth: Bool?
+    /// A profile to apply to the first selected client (the "Upgrade to client
+    /// credential…" entry points), consumed once.
+    var initialProfile: String?
+
+    /// The mode the write carries: locked once a profile is chosen and the
+    /// toggle is on, else switchable (the only mode All servers has).
+    var mode: BindingMode { profile.isEmpty ? .switchable : (lockedChoice ? .locked : .switchable) }
+
+    var keylessAvailable: Bool { requireMCPAuth == false }
+
+    /// What the preview and the write send.
+    var binding: ConnectBinding {
+        if keyless { return ConnectBinding(keyless: true) }
+        if bindingTouched { return ConnectBinding(profile: profile, mode: mode) }
+        return .unspecified
+    }
+
+    func chooseProfile(_ name: String) {
+        guard profile != name || !bindingTouched || keyless else { return }
+        profile = name
+        lockedChoice = true
+        keyless = false
+        bindingTouched = true
+        invalidatePreview()
+    }
+
+    func setLocked(_ locked: Bool) {
+        guard !profile.isEmpty, lockedChoice != locked else { return }
+        lockedChoice = locked
+        bindingTouched = true
+        invalidatePreview()
+    }
+
+    /// Keyless carries no profile or mode (the core refuses the combination).
+    func setKeyless(_ on: Bool) {
+        guard keylessAvailable || !on, keyless != on else { return }
+        keyless = on
+        if on {
+            profile = ""
+            lockedChoice = true
+            bindingTouched = true
+        }
+        invalidatePreview()
+    }
+
+    private func resetBinding() {
+        profile = ""
+        lockedChoice = true
+        keyless = false
+        bindingTouched = false
+    }
+
+    /// The display name of the selected client, for the credential disclosure.
+    var selectedClientName: String {
+        guard let selection else { return "this client" }
+        if let resolved = resolvedDetails[selection] { return resolved.displayName }
+        if case .loaded(let clients) = list, let client = clients.first(where: { $0.clientId == selection }) {
+            return client.displayName
+        }
+        return selection
+    }
+
+    /// The credential line of the preview, the disclosure and the D5 notice
+    /// derive from the core's preview, never from the tray's assumption.
+    var credentialDisclosure: String? {
+        currentPreview?.credentialDisclosure(clientName: selectedClientName)
+    }
+
+    /// D5: shown whenever the credential about to be written cannot reach
+    /// management tools: the profile is All servers, or does not enable them.
+    var showsManagementNotice: Bool {
+        guard let preview = currentPreview, preview.credential != nil, !preview.keyless, !keyless else { return false }
+        let name = bindingTouched ? profile : (preview.profile ?? "")
+        if name.isEmpty { return true }
+        return profiles.first { $0.name == name }?.managementTools != true
     }
 
     private let source: ConnectClientDataSource
@@ -274,6 +447,7 @@ final class ConnectClientModel: ObservableObject {
     private struct PreviewKey: Equatable {
         let clientId: String
         let entryName: String
+        let binding: ConnectBinding
     }
 
     init(
@@ -295,6 +469,9 @@ final class ConnectClientModel: ObservableObject {
         while !Task.isCancelled {
             do {
                 list = .loaded(try await source.connectClients())
+                let context = await source.bindingContext()
+                profiles = context.profiles
+                requireMCPAuth = context.requireMCPAuth
                 return
             } catch {
                 list = .coreUnreachable(Self.message(for: error))
@@ -320,12 +497,25 @@ final class ConnectClientModel: ObservableObject {
         return candidate
     }
 
+    /// Select a client from an entry point that carries the profile the client
+    /// was last bound to ("Connect…", "Reconnect…", "Upgrade to client credential…"), so the
+    /// picker opens on it instead of silently widening to All servers (K9).
+    func preselect(_ clientId: String, profile: String?) async {
+        if let profile, !profile.isEmpty { initialProfile = profile }
+        await select(clientId)
+    }
+
     /// Select a client: resolve its authoritative state and a fresh preview.
     /// This is the only place a client config's *contents* are read, and only
     /// because the user explicitly asked for this client (FR-002).
     func select(_ clientId: String) async {
         selection = clientId
         entryName = ConnectPreviewModel.defaultServerName
+        resetBinding()
+        if let preset = initialProfile {
+            initialProfile = nil
+            chooseProfile(preset)
+        }
         invalidatePreview()
         // A confirmation the user walked away from must never survive into
         // another client's config.
@@ -361,14 +551,15 @@ final class ConnectClientModel: ObservableObject {
     /// Fetch the no-write preview for the current (client, entry name).
     func refreshPreview() async {
         guard let clientId = selection else { return }
-        let key = PreviewKey(clientId: clientId, entryName: entryName)
+        let key = PreviewKey(clientId: clientId, entryName: entryName, binding: binding)
         preview = .loading
         previewKey = nil
         do {
-            let fetched = try await source.connectPreview(clientId, serverName: key.entryName)
+            let fetched = try await source.connectPreview(
+                clientId, serverName: key.entryName, binding: key.binding)
             // Inputs may have moved while the request was in flight; a preview
             // for anything but the current inputs must never gate a write.
-            guard selection == key.clientId, entryName == key.entryName else { return }
+            guard selection == key.clientId, entryName == key.entryName, binding == key.binding else { return }
             guard fetched.serverName == key.entryName else {
                 preview = .failed(
                     "The core previewed entry \"\(fetched.serverName)\", not \"\(key.entryName)\".")
@@ -377,7 +568,7 @@ final class ConnectClientModel: ObservableObject {
             preview = .resolved(fetched)
             previewKey = key
         } catch {
-            guard selection == key.clientId, entryName == key.entryName else { return }
+            guard selection == key.clientId, entryName == key.entryName, binding == key.binding else { return }
             preview = .failed(Self.message(for: error))
         }
     }
@@ -501,7 +692,7 @@ final class ConnectClientModel: ObservableObject {
     var currentPreview: ConnectPreviewModel? {
         guard let selection,
               case .resolved(let preview) = preview,
-              previewKey == PreviewKey(clientId: selection, entryName: entryName)
+              previewKey == PreviewKey(clientId: selection, entryName: entryName, binding: binding)
         else { return nil }
         return preview
     }
@@ -576,7 +767,8 @@ final class ConnectClientModel: ObservableObject {
                 clientId,
                 serverName: entryName,
                 force: preview.changeKind.requiresForce,
-                preconditionToken: preview.preconditionToken
+                preconditionToken: preview.preconditionToken,
+                binding: binding
             )
             outcome = .succeeded(result)
             // FR-006: undo becomes available for exactly this connect, carrying
@@ -602,6 +794,17 @@ final class ConnectClientModel: ObservableObject {
                 outcome = .failed(message)
                 conflictDisplayPath = displayPath
                 conflictReloadHint = reloadHint
+            case .service(_, let body):
+                // A binding-guard refusal is shown by its own view (with both
+                // fixes); a name conflict carries its remediation.
+                if body.isGuardRefusal {
+                    guardRefusal = body
+                    outcome = .failed(body.error)
+                } else if let remediation = body.remediation, !remediation.isEmpty {
+                    outcome = .failed("\(body.error) \(remediation)")
+                } else {
+                    outcome = .failed(body.error)
+                }
             default:
                 outcome = .failed(Self.message(for: error))
             }
@@ -624,6 +827,7 @@ final class ConnectClientModel: ObservableObject {
     /// Mark a mutating request as started. `action` carries the marker for the
     /// pane's spinner; `inFlight` is what actually gates the controls.
     private func beginRequest() {
+        guardRefusal = nil
         inFlight = true
         action = .inFlight
         actionDisplayPath = nil

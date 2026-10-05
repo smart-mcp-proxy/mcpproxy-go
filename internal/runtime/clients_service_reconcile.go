@@ -73,6 +73,9 @@ func (s *ClientsService) ReconcileClient(ctx context.Context, clientID string) e
 	if rec == nil || rec.Kind != auth.KindClient || rec.PendingHash == "" || rec.Revoked {
 		return nil
 	}
+	if s.connectInFlight(clientID) {
+		return nil // a connect is mid-write: the file legitimately still holds the old secret
+	}
 	if def := connect.FindClient(clientID); def == nil || !def.Supported {
 		if rec.RotationStartedAt != nil && s.now().Sub(*rec.RotationStartedAt) >= clientRotationCustomOverlap {
 			_, err := s.finalizeLocked(ctx, reconcilerActor, clientID)
@@ -103,18 +106,32 @@ func (s *ClientsService) ReconcileClient(ctx context.Context, clientID string) e
 	}
 }
 
-// Warning is one Clients-surface warning (data-model §7 ClientView.warnings).
+// WarningAction is what a warning's "fix it" control does (data-model §7):
+// kind is a profile.FixAction spelling (change_setting, reconnect_client,
+// move_client, edit_token) or profile.WarningActionUpgradeAdminKeyHolders;
+// target names what to act on (a setting, a client id or a token name).
+type WarningAction struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target,omitempty"`
+}
+
+// Warning is one Clients-surface warning (data-model §7 ClientView.warnings):
+// the ONE shape every surface renders. Severity is info for a rotation that is
+// merely in progress and warn for everything else.
 type Warning struct {
-	Code     profile.WarningCode `json:"code"`
-	ClientID string              `json:"client_id,omitempty"`
-	Message  string              `json:"message"`
-	Bindings []BindingRef        `json:"bindings,omitempty"`
-	Fixes    []GuardFix          `json:"fixes,omitempty"`
+	Code     profile.WarningCode     `json:"code"`
+	Severity profile.WarningSeverity `json:"severity"`
+	ClientID string                  `json:"client_id,omitempty"`
+	Message  string                  `json:"message"`
+	Action   *WarningAction          `json:"action,omitempty"`
+	Bindings []BindingRef            `json:"bindings,omitempty"`
+	Fixes    []GuardFix              `json:"fixes,omitempty"`
 }
 
 // Warnings derives the credential and guard warnings. states maps client id
-// to its classified credential_state where the caller has it (on-demand
-// classification); rows not in the map contribute no admin-key warning.
+// to its classified credential_state where the caller has it (an on-demand
+// classification or the persisted last observation); rows not in the map
+// contribute no admin-key warning.
 func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []Warning {
 	all, err := s.records()
 	if err != nil {
@@ -130,7 +147,9 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 		}
 		out = append(out, Warning{
 			Code:     profile.WarningAnonymousDeniedByBindingGuard,
+			Severity: profile.WarningSeverityWarn,
 			Message:  fmt.Sprintf("anonymous callers are denied while %s could be bypassed without auth", strings.Join(names, ", ")),
+			Action:   &WarningAction{Kind: string(profile.FixChangeSetting), Target: "require_mcp_auth"},
 			Bindings: active,
 			Fixes:    g.BindingGuardFixes(GuardState{Config: cfg, Tokens: clientOnly(all)}, active),
 		})
@@ -141,21 +160,25 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 		switch {
 		case t.Kind == auth.KindClient && s.stateOf(t) == profile.CredentialStateClient:
 			if t.ExpiresAt.Sub(now) <= clientCredentialExpiringWindow {
-				out = append(out, Warning{Code: profile.WarningClientCredentialExpiring, ClientID: t.ClientID,
-					Message: fmt.Sprintf("the credential of %s expires soon; reconnect it", t.ClientID)})
+				out = append(out, Warning{Code: profile.WarningClientCredentialExpiring, Severity: profile.WarningSeverityWarn, ClientID: t.ClientID,
+					Message: fmt.Sprintf("the credential of %s expires soon; reconnect it", t.ClientID),
+					Action:  &WarningAction{Kind: string(profile.FixReconnectClient), Target: t.ClientID}})
 			}
 			if t.PendingHash != "" {
-				out = append(out, Warning{Code: profile.WarningClientRotationPending, ClientID: t.ClientID,
-					Message: fmt.Sprintf("a credential rotation of %s has not finished; reconnect it", t.ClientID)})
+				out = append(out, Warning{Code: profile.WarningClientRotationPending, Severity: profile.WarningSeverityInfo, ClientID: t.ClientID,
+					Message: fmt.Sprintf("a credential rotation of %s has not finished; reconnect it", t.ClientID),
+					Action:  &WarningAction{Kind: string(profile.FixReconnectClient), Target: t.ClientID}})
 			}
 			if t.ProfilePin != "" && !s.profileExists(cfg, t.ProfilePin) {
-				out = append(out, Warning{Code: profile.WarningProfileMissing, ClientID: t.ClientID,
-					Message: fmt.Sprintf("the profile %s bound to %s no longer exists; the client is denied everything", t.ProfilePin, t.ClientID)})
+				out = append(out, Warning{Code: profile.WarningProfileMissing, Severity: profile.WarningSeverityWarn, ClientID: t.ClientID,
+					Message: fmt.Sprintf("the profile %s bound to %s no longer exists; the client is denied everything", t.ProfilePin, t.ClientID),
+					Action:  &WarningAction{Kind: string(profile.FixMoveClient), Target: t.ClientID}})
 			}
 		case t.Kind != auth.KindClient && strings.HasPrefix(t.Name, "client-") && t.UserID == "":
 			id := strings.TrimPrefix(t.Name, "client-")
-			out = append(out, Warning{Code: profile.WarningClientTokenNameConflict, ClientID: id,
-				Message: fmt.Sprintf("token name %s is held by a regular agent token; revoke or delete token %s, then connect again", t.Name, t.Name)})
+			out = append(out, Warning{Code: profile.WarningClientTokenNameConflict, Severity: profile.WarningSeverityWarn, ClientID: id,
+				Message: fmt.Sprintf("token name %s is held by a regular agent token; revoke or delete token %s, then connect again", t.Name, t.Name),
+				Action:  &WarningAction{Kind: string(profile.FixEditToken), Target: t.Name}})
 		}
 	}
 	ids := make([]string, 0, len(states))
@@ -166,8 +189,40 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		out = append(out, Warning{Code: profile.WarningClientHoldsAdminKey, ClientID: id,
-			Message: fmt.Sprintf("%s holds the admin API key; upgrade it to a client credential", id)})
+		out = append(out, Warning{Code: profile.WarningClientHoldsAdminKey, Severity: profile.WarningSeverityWarn, ClientID: id,
+			Message: fmt.Sprintf("%s holds the admin API key; upgrade it to a client credential", id),
+			Action:  &WarningAction{Kind: profile.WarningActionUpgradeAdminKeyHolders}})
 	}
 	return out
+}
+
+// ReconcileTimeOnly is the half of the FR-021a reconciler that needs no config
+// read: a custom client's staged rotation finalizes once the 24 h overlap has
+// passed. The clients LIST runs only this half (Spec 075 keeps a list free of
+// content reads); the detail read runs the full ReconcileClient.
+func (s *ClientsService) ReconcileTimeOnly(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all, err := s.records()
+	if err != nil {
+		return err
+	}
+	for i := range all {
+		rec := &all[i]
+		if rec.Kind != auth.KindClient || rec.PendingHash == "" || rec.Revoked || rec.RotationStartedAt == nil {
+			continue
+		}
+		if s.connectInFlight(rec.ClientID) {
+			continue
+		}
+		if def := connect.FindClient(rec.ClientID); def != nil && def.Supported {
+			continue // a supported client's rotation resolves from its config
+		}
+		if s.now().Sub(*rec.RotationStartedAt) >= clientRotationCustomOverlap {
+			if _, err := s.finalizeLocked(ctx, reconcilerActor, rec.ClientID); err != nil {
+				s.logger.Warn("custom client rotation finalize failed", zap.String("client_id", rec.ClientID), zap.Error(err))
+			}
+		}
+	}
+	return nil
 }

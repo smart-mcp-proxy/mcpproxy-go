@@ -322,5 +322,8 @@ describe('PasteServer', () => {
     await flushPromises()
     expect((wrapper.find('[data-test="paste-add-button"]').element as HTMLButtonElement).disabled).toBe(false)
     expect(wrapper.find('[data-test="paste-keyring-unavailable"]').exists()).toBe(false)
+    // fix-usertest-web T201: Value mode decides storage, not display — the
+    // secret-like GITHUB_TOKEN field stays masked after choosing Value.
+    expect(wrapper.find('[data-test="secret-toggle-value-input"]').attributes('type')).toBe('password')
   })
 })

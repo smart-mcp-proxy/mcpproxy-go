@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -74,15 +75,26 @@ func GetDoctorCommand() *cobra.Command {
 }
 
 func init() {
-	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "pretty", "Output format (pretty, json)")
+	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "pretty", "Output format (pretty, json, yaml)")
 	doctorCmd.Flags().StringVarP(&doctorLogLevel, "log-level", "l", "warn", "Log level")
-	doctorCmd.Flags().StringVarP(&doctorConfigPath, "config", "c", "", "Path to config file")
+	addConfigFlag(doctorCmd.Flags(), &doctorConfigPath, "Path to config file")
 	doctorCmd.Flags().StringVar(&doctorServerFilter, "server", "", "Limit health checks to a single upstream server (by name)")
 }
 
-func runDoctor(_ *cobra.Command, _ []string) error {
+func runDoctor(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// The local -o shadows the root -o/--json; honour the global ones when
+	// doctor's own flag was not given.
+	if !cmd.Flags().Changed("output") {
+		switch {
+		case globalJSONOutput:
+			doctorOutput = "json"
+		case globalOutputFormat != "" && globalOutputFormat != "table":
+			doctorOutput = globalOutputFormat
+		}
+	}
 
 	// Load configuration
 	globalConfig, err := loadDoctorConfig()
@@ -90,6 +102,9 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
 		return err
 	}
+
+	doctorSecretLiterals = []string{globalConfig.APIKey}
+	defer func() { doctorSecretLiterals = nil }()
 
 	// Create logger
 	logger, err := createDoctorLogger(doctorLogLevel)
@@ -169,7 +184,14 @@ func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *
 		attention = filterAttentionByServer(attention, doctorServerFilter)
 	}
 
-	return outputDiagnostics(diag, info, quarantineStats, envHint, attention)
+	// Spec 108-g: profile/client checks derived from GET /clients warnings.
+	// Instance-level, so skipped when the run is scoped to one server.
+	var profileChecks []profileCheck
+	if doctorServerFilter == "" {
+		profileChecks = collectProfileChecks(client)
+	}
+
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, profileChecks)
 }
 
 // filterAttentionByServer narrows an attention response to the items whose
@@ -319,8 +341,22 @@ func printDoctorAttentionSection(attention *cliclient.AttentionResponse) {
 }
 
 func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse) error {
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, nil)
+}
+
+func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse, profileChecks []profileCheck) error {
+	// The one funnel for every doctor format: credentials (the keyed
+	// web_ui_url from GET /api/v1/info, tokens in upstream error messages, the
+	// admin key itself) never reach stdout. The report is made to be shared.
+	diag = redactDoctorMap(diag)
+	info = redactDoctorMap(info)
+	envHint = redactDoctorString(envHint)
+	attention = redactDoctorTyped(attention)
+	profileChecks = redactDoctorTyped(profileChecks)
+	quarantineStats = redactDoctorTyped(quarantineStats)
+
 	switch doctorOutput {
-	case "json":
+	case "json", "yaml":
 		// Combine diagnostics with info for JSON output
 		combined := map[string]interface{}{
 			"diagnostics": diag,
@@ -336,6 +372,21 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		if attention != nil {
 			combined["attention"] = attention
+		}
+		if profileChecks != nil {
+			combined["profile_checks"] = profileChecks
+		}
+		if doctorOutput == "yaml" {
+			formatter, err := clioutput.NewFormatter("yaml")
+			if err != nil {
+				return err
+			}
+			output, err := formatter.Format(combined)
+			if err != nil {
+				return fmt.Errorf("failed to format output: %w", err)
+			}
+			fmt.Print(output)
+			return nil
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -389,13 +440,14 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		// Spec 109 FR-004: doctor's first section, from the same GET
 		// /attention every other surface reads (FR-001/FR-003).
 		printDoctorAttentionSection(attention)
+		printProfileChecksSection(profileChecks)
 
 		// Fix review finding: the "all clear" verdict must also require the
 		// FR-001 attention list (a separate counter from `total_issues`) to
 		// be empty, or a quarantined server / tool awaiting review with no
 		// other diagnostics findings prints two contradicting verdicts back
 		// to back — exactly what FR-004 exists to prevent.
-		attentionClear := attention == nil || attention.Count == 0
+		attentionClear := (attention == nil || attention.Count == 0) && !profileChecksWarn(profileChecks)
 		if totalIssues == 0 && attentionClear {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
@@ -586,6 +638,8 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		displaySecurityFeaturesStatus()
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	default:
+		return fmt.Errorf("unsupported output format %q for doctor (pretty, json, yaml)", doctorOutput)
 	}
 
 	return nil

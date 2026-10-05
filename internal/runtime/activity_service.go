@@ -627,6 +627,9 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	// Correlation id of the parent code_execution call (empty for a top-level
 	// dispatch). First-class on the record so ?parent_id= can filter on it.
 	parentID := getStringPayload(evt.Payload, "parent_id")
+	// Spec 108 FR-029: typed cause of a profile-refused code_execution
+	// sub-call (T166); empty for every other completion.
+	blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason)
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
@@ -635,7 +638,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 
 	// Build metadata with intent information if present
 	var metadata map[string]interface{}
-	if toolVariant != "" || intent != nil || contentTrust != "" || profileSlug != "" || toonOutput != nil {
+	if toolVariant != "" || intent != nil || contentTrust != "" || profileSlug != "" || toonOutput != nil || blockReason != "" {
 		metadata = make(map[string]interface{})
 		if toolVariant != "" {
 			metadata["tool_variant"] = toolVariant
@@ -655,6 +658,11 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		// Spec 084 FR-010: the per-text-block encoding decision record.
 		if toonOutput != nil {
 			metadata["toon_output"] = toonOutput
+		}
+		// Both the metadata key and the first-class field, for one release,
+		// the same rule handlePolicyDecision follows (data-model.md, T062).
+		if blockReason != "" {
+			metadata[storage.MetadataKeyBlockReason] = blockReason
 		}
 	}
 	// Name the MCP client on the record itself, so it survives session eviction.
@@ -680,10 +688,13 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		ParentID:          parentID,
+		BlockReason:       blockReason,
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
 		ResponseBytes:     responseBytes,
 	}
+	// Spec 108 FR-029: the profile/client/token in effect when the call ran.
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
@@ -747,7 +758,8 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		"decision": decision,
 		"reason":   reason,
 	}
-	if blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason); blockReason != "" {
+	blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason)
+	if blockReason != "" {
 		metadata[storage.MetadataKeyBlockReason] = blockReason
 	}
 	record := &storage.ActivityRecord{
@@ -763,7 +775,11 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		// pre-090 payloads, which stays absent rather than becoming "".
 		RequestID:     getStringPayload(evt.Payload, "request_id"),
 		WorkSessionID: s.resolveWorkSession(sessionID),
+		// Spec 108 T062: first-class beside the metadata key (both written for
+		// one release). Display only; no filter reads it.
+		BlockReason: blockReason,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	if err := s.storage.SaveActivity(record); err != nil {
 		s.logger.Error("Failed to save policy decision activity",
@@ -975,6 +991,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		RequestBytes:      internalRequestBytes,
 		ResponseBytes:     internalResponseBytes,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
@@ -1072,6 +1089,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		RequestID:         requestID,
 		Metadata:          metadata,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Server-edition identity, mirroring the tool path.
 	if arguments != nil {

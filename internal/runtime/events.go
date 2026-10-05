@@ -39,6 +39,14 @@ const (
 	// FR-026). Payload: {client_id, token_name, profile, previous_profile,
 	// mode}. It discloses bindings, so it is administrator-only on SSE.
 	EventTypeClientBindingChanged EventType = "client.binding_changed"
+	// EventTypeProfilesChanged is emitted (Spec 108-f F9) once per changed
+	// profile after a config snapshot that changed it is published: payload
+	// {name, change: create|update|delete|anonymous, previous_name?}. It is an
+	// INVALIDATION, not a log: a consumer refetches GET /profiles. It names
+	// profiles a scoped caller may not reach, so it is administrator-only on
+	// SSE. One emitter (the server's snapshot observer) covers service writes
+	// and hand edits alike.
+	EventTypeProfilesChanged EventType = "profiles.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

@@ -108,6 +108,7 @@ func TestE2E_SensitiveData_AWSAccessKey(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -252,6 +253,7 @@ func TestE2E_SensitiveData_FilePath(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("fileserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -644,6 +646,7 @@ func TestE2E_SensitiveData_CreditCard(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("paymentserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 

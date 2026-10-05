@@ -95,6 +95,13 @@ func findClientTokenRecordLocked(tx *bbolt.Tx, clientID string) (hash []byte, to
 // caller must use StageClientCredentialRotation/FinalizeClientCredentialRotation
 // instead.
 func (m *Manager) MintClientCredential(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time) (*auth.AgentToken, error) {
+	return m.MintClientCredentialNamed(clientID, rawToken, hmacKey, mode, pin, expiresAt, "")
+}
+
+// MintClientCredentialNamed is MintClientCredential for a CUSTOM client that
+// also carries a display name (Spec 108-f FR-021). The name is validated with
+// the rest of the record's invariants.
+func (m *Manager) MintClientCredentialNamed(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time, displayName string) (*auth.AgentToken, error) {
 	if !auth.ValidClientID(clientID) {
 		return nil, fmt.Errorf("invalid client id %q", clientID)
 	}
@@ -137,6 +144,7 @@ func (m *Manager) MintClientCredential(clientID, rawToken string, hmacKey []byte
 		ConnectedAt:    &now,
 		TokenHash:      hash,
 		TokenPrefix:    auth.TokenPrefix(rawToken),
+		DisplayName:    displayName,
 	}
 	if err := auth.ValidateTokenInvariants(&token, auth.KindClient); err != nil {
 		return nil, fmt.Errorf("mint produced an invalid client credential record: %w", err)

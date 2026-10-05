@@ -1,21 +1,22 @@
 {
-  "subject": {"client": "cursor"},
+  "subject": {"kind": "client", "name": "cursor"},
   "tool": "github:create_issue",
+  "profile": {"name": "work-readonly", "source": "pin"},
   "steps": [
     {"step": "credential", "status": "pass", "detail": ""},
     {"step": "profile", "status": "pass", "detail": ""},
     {"step": "server_in_scope", "status": "pass", "detail": ""},
     {"step": "tool_rule", "status": "pass", "detail": ""},
-    {"step": "tier_cap", "status": "fail", "detail": "write exceeds max_tier read"},
+    {"step": "tier_cap", "status": "fail", "detail": "above_tier_cap"},
     {"step": "token_permission", "status": "skip", "detail": ""},
     {"step": "global_gate", "status": "skip", "detail": ""},
     {"step": "server_state", "status": "skip", "detail": ""},
     {"step": "tool_approval", "status": "skip", "detail": ""}
   ],
-  "verdict": "blocked",
+  "verdict": "hidden",
   "first_failure": "tier_cap",
   "fixes": [
-    {"step": "tier_cap", "action": "allow_in_profile", "target": "work-readonly", "label": "Allow this tool in Work Read-only"},
-    {"step": "tier_cap", "action": "move_client", "target": "work-full", "label": "Move Cursor to Work Full"}
+    {"step": "tier_cap", "action": "allow_in_profile", "target": "work-readonly", "label": "Allow github:create_issue in Work Read-only"},
+    {"step": "tier_cap", "action": "move_client", "target": "cursor", "profile": "work-full", "label": "Move Cursor to Work Full"}
   ]
 }

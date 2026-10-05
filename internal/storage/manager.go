@@ -113,7 +113,15 @@ func (m *Manager) GetBoltDB() *BoltDB {
 
 // Upstream operations
 
-// SaveUpstreamServer saves an upstream server configuration
+// SaveUpstreamServer saves an upstream server configuration.
+//
+// Invariant: it never lowers a recorded Quarantined=true. Only
+// QuarantineUpstreamServer (the review/approve door) or a config that carries an
+// explicit operator decision (QuarantineExplicitlySet) may clear it. A Go-built
+// or file-decoded ServerConfig that merely says Quarantined=false is
+// indistinguishable from "never stated", so it must not erase a quarantine the
+// admission gate recorded. The guard changes only the persisted record, never
+// the caller's struct.
 func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -154,7 +162,13 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		ExposePrompts:            serverConfig.ExposePrompts,
 	}
 
-	return m.db.SaveUpstream(record)
+	kept, err := m.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		m.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name,
+			"action", "use the quarantine review (QuarantineServer) or state \"quarantined\": false in mcp_config.json")
+	}
+	return err
 }
 
 // GetUpstreamServer retrieves an upstream server by name
@@ -1455,6 +1469,36 @@ type SessionRecord struct {
 	WorkspaceRoot string `json:"workspace_root,omitempty"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
 	WorkSessionID string `json:"work_session_id,omitempty"`
+
+	// Scope attribution (Spec 108 FR-028/FR-033). TokenName and ClientID are the
+	// credential the session initialized with; Profile/ProfileSource are the
+	// session's LATEST resolution (written through on change by
+	// SetSessionProfile). Legacy rows decode empty and read as unattributed.
+	TokenName     string `json:"token_name,omitempty"`
+	ClientID      string `json:"client_id,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	ProfileSource string `json:"profile_source,omitempty"`
+}
+
+// SessionFilter selects sessions for GetRecentSessionsFiltered. Empty string
+// fields are unfiltered; "-" (ScopeFilterUnattributed) selects sessions with
+// no value. Profile is the session's latest effective profile; ClientID and
+// TokenName are the credential at initialize.
+type SessionFilter struct {
+	Limit     int
+	Status    string
+	Profile   string
+	ClientID  string
+	TokenName string
+}
+
+func (f SessionFilter) matches(s *SessionRecord) bool {
+	if f.Status != "" && s.Status != f.Status {
+		return false
+	}
+	return scopeValueMatches(f.Profile, s.Profile) &&
+		scopeValueMatches(f.ClientID, s.ClientID) &&
+		scopeValueMatches(f.TokenName, s.TokenName)
 }
 
 // sessionRetentionLimit is the hard cap on stored session records. The cap is
@@ -1608,6 +1652,15 @@ func (m *Manager) CloseSession(sessionID string) error {
 // returned total counts the whole bucket when unfiltered, and every matching
 // record when filtered.
 func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord, int, error) {
+	return m.GetRecentSessionsFiltered(SessionFilter{Limit: limit, Status: status})
+}
+
+// GetRecentSessionsFiltered is GetRecentSessions with the Spec 108 scope
+// filters. Every filter is applied after the LastActivity sort and BEFORE the
+// limit, so total is the filtered count and an old-but-matching session is
+// never truncated out by a page of newer non-matching ones.
+func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, int, error) {
+	limit := f.Limit
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1645,11 +1698,11 @@ func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord,
 		return all[i].StartTime.After(all[j].StartTime)
 	})
 
-	if status != "" {
+	if f.Status != "" || f.Profile != "" || f.ClientID != "" || f.TokenName != "" {
 		total := 0
 		sessions := make([]*SessionRecord, 0, limit)
 		for _, session := range all {
-			if session.Status != status {
+			if !f.matches(session) {
 				continue
 			}
 			total++
@@ -1789,6 +1842,42 @@ func (m *Manager) SetSessionWorkspace(sessionID, workspaceRoot string) error {
 			return fmt.Errorf("failed to marshal session: %w", err)
 		}
 		return bucket.Put(sessionKey, data)
+	})
+}
+
+// SetSessionProfile writes a session's latest profile resolution through to its
+// persisted row (Spec 108 FR-033). A session that is not persisted yet is a
+// no-op: EnsurePersisted copies the in-memory resolution when it persists.
+func (m *Manager) SetSessionProfile(sessionID, profile, source string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if !strings.HasSuffix(string(k), "_"+sessionID) {
+				continue
+			}
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				return fmt.Errorf("failed to unmarshal session: %w", err)
+			}
+			if session.Profile == profile && session.ProfileSource == source {
+				return nil
+			}
+			session.Profile = profile
+			session.ProfileSource = source
+			data, err := json.Marshal(session)
+			if err != nil {
+				return fmt.Errorf("failed to marshal session: %w", err)
+			}
+			return bucket.Put(append([]byte(nil), k...), data)
+		}
+		return nil
 	})
 }
 

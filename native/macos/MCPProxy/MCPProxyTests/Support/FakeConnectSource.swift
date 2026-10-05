@@ -56,6 +56,32 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
     private(set) var undoCalls: [(clientId: String, backupName: String?)] = []
     private(set) var disconnectCalls: [String] = []
 
+    // MARK: Spec 108-k: the binding the model sent
+
+    /// What the model asked the preview and the write to carry (T042m).
+    private(set) var previewBindings: [ConnectBinding] = []
+    private(set) var connectBindings: [ConnectBinding] = []
+    /// What `bindingContext()` answers (the profiles and `require_mcp_auth`).
+    var contextResult = ConnectBindingContext()
+
+    func bindingContext() async -> ConnectBindingContext { contextResult }
+
+    func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel {
+        previewBindings.append(binding)
+        return try await connectPreview(clientId, serverName: serverName)
+    }
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?,
+        binding: ConnectBinding
+    ) async throws -> APIClient.ConnectResult {
+        connectBindings.append(binding)
+        return try await connect(clientId, serverName: serverName, force: force, preconditionToken: preconditionToken)
+    }
+
     // MARK: ConnectClientDataSource
 
     func connectClients() async throws -> [APIClient.ClientStatus] {

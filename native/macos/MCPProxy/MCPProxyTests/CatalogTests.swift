@@ -13,6 +13,45 @@ final class CatalogTests: XCTestCase {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    // MARK: - Browse section order (Spec 109 D35, T164)
+
+    private func sampleResult(_ id: String) throws -> CatalogResult {
+        try decode(CatalogResult.self, from: """
+        {"source": "official", "id": "\(id)", "title": "\(id)", "verified": true, "official": true,
+         "description": "d", "transport": "stdio", "install": {"command": "npx"}, "added": false}
+        """)
+    }
+
+    // MARK: - Card trust badge (Spec 109 fix-catalog-rank, D37.6)
+
+    /// A card shows Verified, never a per-card Official badge: every default
+    /// source is official, so the badge carried no signal. Mirrors the Web card.
+    func testCardShowsVerifiedNotOfficialBadge() throws {
+        let verifiedOfficial = try sampleResult("filesystem")
+        XCTAssertEqual(CatalogView.trustBadge(verifiedOfficial), "Verified")
+
+        let officialOnly = try decode(CatalogResult.self, from: """
+        {"source": "official", "id": "x", "title": "X", "verified": false, "official": true,
+         "description": "d", "transport": "stdio", "install": {"command": "npx"}, "added": false}
+        """)
+        XCTAssertNil(CatalogView.trustBadge(officialOnly), "official alone shows no badge")
+    }
+
+    /// Popular is rendered first when it has entries, then Official; an empty
+    /// section is never listed (same order as the Web UI and the CLI table).
+    func testPopularSectionRendersFirst() throws {
+        let popular = [try sampleResult("hot")]
+        let official = [try sampleResult("filesystem")]
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: official, popular: popular)),
+            [.popular, .official])
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: official, popular: [])), [.official])
+        XCTAssertEqual(
+            CatalogView.sectionOrder(CatalogSections(official: [], popular: popular)), [.popular])
+        XCTAssertEqual(CatalogView.sectionOrder(CatalogSections(official: [], popular: [])), [])
+    }
+
     // MARK: - CatalogResult decode (contracts/rest-api.md#catalog example)
 
     func testDecodesTheContractExampleShape() throws {

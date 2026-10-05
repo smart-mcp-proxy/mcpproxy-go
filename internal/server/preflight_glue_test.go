@@ -142,11 +142,16 @@ func (f *preflightFixture) snapshot(t *testing.T) stateSnapshot {
 
 	approvals, err := f.storage.ListToolApprovals("gh")
 	require.NoError(t, err)
+	sort.Slice(approvals, func(i, j int) bool { return approvals[i].ToolName < approvals[j].ToolName })
 	approvalsJSON, err := json.Marshal(approvals)
 	require.NoError(t, err)
 
 	tools, err := f.index.GetToolsByServer("gh")
 	require.NoError(t, err)
+	// The index returns hits in Bleve iteration order, which is not
+	// deterministic. Sort so only a change in the SET of indexed tools shows up
+	// as a snapshot difference, never a change in order.
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
 

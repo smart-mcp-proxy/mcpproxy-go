@@ -35,6 +35,10 @@ enum ScopePage {
     case usage
     case tools
     case servers
+    /// Spec 108-k K12: the Clients list (`profile`, `client`).
+    case clients
+    /// Spec 108-k K12: the Agent Tokens list (`profile`, `token`).
+    case tokens
 }
 
 /// A resolved request: path plus query items, in a stable order.
@@ -138,6 +142,14 @@ struct ScopeFilter: Equatable {
         return f
     }
 
+    /// Profiles-card link (requires `scope_filters`): Tools · Activity · Clients
+    /// · Tokens filtered by one profile (Spec 108-k, parity row 20).
+    static func forProfile(_ name: String) -> ScopeFilter {
+        var f = ScopeFilter()
+        f.profile = name
+        return f
+    }
+
     /// Token row link (requires `scope_filters`).
     static func forToken(_ name: String) -> ScopeFilter {
         var f = ScopeFilter()
@@ -234,7 +246,7 @@ struct ScopeFilter: Equatable {
             if Self.usageWindow(from: from, to: to) == nil {
                 add("from", from); add("to", to)
             }
-        case .tools, .servers:
+        case .tools, .servers, .clients, .tokens:
             add("from", from); add("to", to)
         }
         return out
@@ -286,7 +298,12 @@ struct ScopeFilter: Equatable {
                 add("type", type)
             } else {
                 switch view {
-                case .calls: add("type", Self.callTypes.joined(separator: ","))
+                case .calls:
+                    // A call a profile refuses is persisted as a `policy_decision`
+                    // (status blocked), so a blocked filter on this view includes
+                    // that type, as the Web UI does (Spec 108-j).
+                    let types = status == "blocked" ? Self.callTypes + ["policy_decision"] : Self.callTypes
+                    add("type", types.joined(separator: ","))
                 case .system: add("type", Self.systemTypes.joined(separator: ","))
                 case .all, .sessions: break
                 }
@@ -318,6 +335,14 @@ struct ScopeFilter: Equatable {
         case .servers:
             addScope(["profile"])
             return ScopeRequest(path: "/api/v1/servers", query: items)
+
+        case .clients:
+            addScope(["profile", "client"])
+            return ScopeRequest(path: "/api/v1/clients", query: items)
+
+        case .tokens:
+            addScope(["profile", "token"])
+            return ScopeRequest(path: "/api/v1/tokens", query: items)
         }
     }
 }

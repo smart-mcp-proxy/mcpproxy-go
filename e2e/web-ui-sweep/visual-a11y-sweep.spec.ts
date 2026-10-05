@@ -11,6 +11,7 @@
 //
 // Launcher: scripts/run-web-smoke.sh (see docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
+import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -234,6 +235,29 @@ for (const theme of THEMES) {
       ).toEqual([])
     })
   }
+}
+
+// The Home dashboard lists every live MCP session under "Connected" with a relative
+// "Xs ago" timestamp. The loop above only sees that line when some earlier spec happens
+// to leave a session open, which made this gate depend on spec order (Spec 108-j QA.1,
+// follow-up #1433 item 1), so the session is opened here on purpose.
+for (const theme of THEMES) {
+  test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
+    const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
+    try {
+      await goto(page, '/', theme)
+      const age = page.locator('[data-test="dashboard-live-client-age"]').first()
+      await expect(age).toBeVisible()
+      const failures = await contrastFailures(page)
+      expect(
+        failures,
+        `WCAG AA contrast failures on / with a live client (${theme}):\n` +
+          failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+      ).toEqual([])
+    } finally {
+      await session.close()
+    }
+  })
 }
 
 test('contrast AA: filled primary buttons in both themes', async ({ page }) => {
@@ -609,4 +633,100 @@ test('the Add Secret modal takes focus, traps Tab and closes on Escape', async (
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
   await expect(dialog).not.toHaveAttribute('open', '')
   await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null)).toBe('secrets-add-button')
+})
+
+// ---------------------------------------------------------------------------
+// Spec 108-i — the Profiles v3 screens: the Profiles page, the policy editor
+// and the Clients page with the profile chip. The editor and the chip need the
+// seeded profile and client (profiles-seed.ts), so they are skipped on an
+// instance with no fixture upstream.
+// ---------------------------------------------------------------------------
+// Spec 108-j adds the scoped Tools (view-as: greyed rows, banner, reason words) and
+// Activity (scope chips) pages: the greyed rows must still pass AA contrast.
+const PROFILE_ROUTES = ['/profiles', '/clients', `/profiles/${RO_PROFILE}`, `/tools?client=${CLIENT_ID}`, `/activity?client=${CLIENT_ID}&status=blocked`] as const
+
+test.describe('Profiles v3 screens (Spec 108-i)', () => {
+  test.beforeAll(async () => {
+    if (!SERVER) return
+    await cleanupProfiles()
+    await seedProfiles()
+    // A dangling pin: the danger-styled `profile_missing` chip and its warning banner.
+    await seedMissingProfile()
+  })
+  test.afterAll(async () => {
+    if (!SERVER) return
+    await cleanupProfiles()
+  })
+
+  for (const theme of THEMES) {
+    for (const route of PROFILE_ROUTES) {
+      test(`contrast AA: ${route} (${theme})`, async ({ page }) => {
+        test.skip(!SERVER && route !== '/profiles', 'needs the seeded profile and client (no fixture upstream)')
+        await goto(page, route, theme)
+        // The chip, the credential badges and the danger text must be on screen when measured.
+        if (route === '/clients') {
+          await expect(page.locator('[data-test^="client-profile-chip-"]').first()).toBeVisible()
+          await expect(page.locator('[data-test="client-profile-chip-e2e-orphan"]')).toContainText('missing')
+          await expect(page.locator('[data-test="clients-warnings-banner"]')).toBeVisible()
+        }
+        if (route.startsWith('/profiles/')) await expect(page.locator('[data-test="profile-editor"]')).toBeVisible()
+        if (route.startsWith('/tools?client=')) {
+          await expect(page.locator('[data-test="tools-view-as-banner"]')).toBeVisible()
+          await expect(page.locator('[data-test="tool-row"][data-not-callable="true"]').first()).toBeVisible()
+        }
+        if (route.startsWith('/activity?client=')) await expect(page.locator('[data-test="scope-chip-client"]')).toBeVisible()
+        const failures = await contrastFailures(page)
+        expect(
+          failures,
+          `WCAG AA contrast failures on ${route} (${theme}):\n` +
+            failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+        ).toEqual([])
+      })
+    }
+  }
+
+  for (const vp of VIEWPORTS) {
+    test(`layout holds at ${vp.width}px (${vp.name}): profiles and clients`, async ({ page }) => {
+      test.skip(!SERVER, 'needs the seeded profile and client (no fixture upstream)')
+      await page.setViewportSize({ width: vp.width, height: vp.height })
+      for (const route of PROFILE_ROUTES) {
+        await goto(page, route)
+        const overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        )
+        expect(overflow, `horizontal page overflow on ${route} at ${vp.width}px`).toBeLessThanOrEqual(1)
+      }
+    })
+  }
+
+  test('every form control on the Profiles screens has an accessible name', async ({ page }) => {
+    test.skip(!SERVER, 'needs the seeded profile and client (no fixture upstream)')
+    for (const route of PROFILE_ROUTES) {
+      await goto(page, route)
+      const unnamed = await page.evaluate(() => {
+        const out: string[] = []
+        document.querySelectorAll('input, select, textarea').forEach((el) => {
+          const c = el as HTMLInputElement
+          if (c.type === 'hidden') return
+          const rect = c.getBoundingClientRect()
+          if (rect.width < 2 || rect.height < 2) return
+          const labelledBy = (c.getAttribute('aria-labelledby') || '')
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((id) => document.getElementById(id))
+            .filter((n): n is HTMLElement => !!n && !!(n.textContent || '').trim())
+          const labelled =
+            (c.getAttribute('aria-label') || '').trim() ||
+            labelledBy.length > 0 ||
+            (c.getAttribute('placeholder') || '').trim() ||
+            (c.getAttribute('title') || '').trim() ||
+            (c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`)) ||
+            c.closest('label')
+          if (!labelled) out.push(`${c.tagName.toLowerCase()}[type=${c.type}] .${c.className}`)
+        })
+        return out
+      })
+      expect(unnamed, `unnamed form controls on ${route}`).toEqual([])
+    }
+  })
 })

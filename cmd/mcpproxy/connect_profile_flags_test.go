@@ -264,7 +264,7 @@ func TestConnectProfileFlags_DaemonGuardRefusalPrintsBothFixesAndExits1(t *testi
 	want := "a client bound to profile ro could escape it by omitting its credential while require_mcp_auth is off\n" +
 		"Fixes:\n" +
 		"  - set require_mcp_auth: true (config or Settings → Security)\n" +
-		"  - set anonymous_profile: \"ro\" in the config"
+		"  - mcpproxy profile anonymous ro"
 	require.Equal(t, want, err.Error())
 }
 

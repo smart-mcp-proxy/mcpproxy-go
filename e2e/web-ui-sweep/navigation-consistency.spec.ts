@@ -10,6 +10,7 @@
 // Launcher: scripts/run-web-smoke.sh (boots a real mcpproxy instance with its
 // embedded frontend, never a dev server).
 import { test, expect, Page } from '@playwright/test'
+import { RO_PROFILE, SERVER, cleanupProfiles, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -176,6 +177,13 @@ for (const width of WIDTHS) {
       const attention = await apiGet(page, '/api/v1/attention')
       const attentionCount: number = attention.count ?? attention.items?.length ?? 0
       const wide = width >= 1100
+      // Spec 108-i I16: the header's Viewing chip (the viewing slot) renders when
+      // there is a profile or a client with its own credential to filter by.
+      const profilesData = await apiGet(page, '/api/v1/profiles')
+      const clientsData = await apiGet(page, '/api/v1/clients')
+      const hasViewing =
+        (profilesData?.profiles ?? []).length > 0 ||
+        (clientsData?.clients ?? []).some((client: { credential_state?: string }) => client.credential_state === 'client')
 
       for (const route of MATRIX_ROUTES) {
         const where = `${route} at ${width}px (${theme})`
@@ -204,7 +212,7 @@ for (const width of WIDTHS) {
         expect(visible.includes('header-drawer-toggle'), `drawer toggle visibility on ${where}`).toBe(width < 1024)
 
         const pill = (await header.locator('[data-test="header-status-pill"]').innerText()).trim()
-        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ of \d+ online/)
+        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ (of \d+ )?online/)
         else expect(pill, `status pill on ${where}`).toMatch(/^\s*●?\s*\d+\/\d+\s*$/)
 
         const add = (await header.locator('[data-test="header-add-menu"]').innerText()).trim()
@@ -212,7 +220,9 @@ for (const width of WIDTHS) {
         else expect(add, `add button on ${where}`).not.toContain('Add')
 
         if (width === 390) {
-          const expected = ['header-drawer-toggle', 'header-search-icon', 'header-status-pill']
+          const expected = ['header-drawer-toggle', 'header-search-icon']
+          if (hasViewing) expected.push('header-viewing-slot')
+          expected.push('header-status-pill')
           if (attentionCount > 0) expected.push('header-attention-pill')
           expected.push('header-add-menu')
           expect(visible, `the phone header holds exactly these controls on ${where}`).toEqual(expected)
@@ -236,7 +246,7 @@ test('the sidebar has Home, Connect, Protect, Monitor and the footer (Spec 109 F
     els.map((el) => el.getAttribute('data-test')!.replace('sidebar-item-', '')),
   )
   expect(items).toEqual([
-    'home', 'clients', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
+    'home', 'clients', 'profiles', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
     'settings', 'docs', 'feedback', 'theme',
   ])
 
@@ -298,20 +308,20 @@ test('the header search field opens the palette on focus (Spec 109 FR-054)', asy
   await expect(page.locator('dialog[data-test="command-palette"]')).not.toHaveAttribute('open', '')
 })
 
-// FR-052: "+ Add" — Server, Client, Token.
-test('the "+ Add" menu opens Server, Client and Token (Spec 109 FR-052)', async ({ page }) => {
+// FR-052: "+ Add" — Server, Client, Token and (Spec 108-i registers /profiles) Profile.
+test('the "+ Add" menu opens Server, Client, Token and Profile (Spec 109 FR-052, Spec 108-i)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await goto(page, '/activity', 'header [data-test="header-add-menu"]')
 
   const open = async () => {
     await page.locator('[data-test="header-add-menu"]').click()
-    await expect(page.locator('[role="menu"] [role="menuitem"]')).toHaveCount(3)
+    await expect(page.locator('[role="menu"] [role="menuitem"]')).toHaveCount(4)
   }
   await open()
   await expect(page.locator('[data-test="add-menu-server"]')).toBeVisible()
   await expect(page.locator('[data-test="add-menu-client"]')).toBeVisible()
   await expect(page.locator('[data-test="add-menu-token"]')).toBeVisible()
-  await expect(page.locator('[data-test="add-menu-profile"]')).toHaveCount(0)
+  await expect(page.locator('[data-test="add-menu-profile"]')).toBeVisible()
 
   await page.locator('[data-test="add-menu-server"]').click()
   await expect(page).toHaveURL(/\/ui\/add-server(?:\?|$)/)
@@ -327,6 +337,14 @@ test('the "+ Add" menu opens Server, Client and Token (Spec 109 FR-052)', async 
   await open()
   await page.locator('[data-test="add-menu-client"]').click()
   await expect(page.locator('dialog[data-test="client-connect-list"][open]')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  // Profile opens the create dialog on the Profiles page and strips ?create=1.
+  await open()
+  await page.locator('[data-test="add-menu-profile"]').click()
+  await expect(page).toHaveURL(/\/ui\/profiles(?:\?|$)/)
+  await expect(page.locator('dialog[data-test="profile-create-dialog"][open]')).toBeVisible()
+  expect(new URL(page.url()).searchParams.has('create')).toBe(false)
 })
 
 // navigation-map.md "Redirects (query kept)".
@@ -440,15 +458,59 @@ test('the status pill opens Servers and attention "See all" opens Home (Spec 109
 })
 
 // Rows that need features.scope_filters stay hidden until the core lists it.
+// Spec 108-e lists them on current builds, so this checks exactly the names the
+// instance does NOT advertise (an older core); an instance that advertises all
+// three has nothing to hide.
 test('client, profile and token scope links stay hidden without scope_filters (Spec 109 FR-080a)', async ({ page }) => {
+  const status = await page.request.get(`${BASE}/api/v1/status`, { headers: { 'X-API-Key': KEY } })
+  const advertised: string[] = (await status.json())?.data?.features?.scope_filters ?? []
+  const hidden = ['client', 'profile', 'token'].filter((key) => !advertised.includes(key))
+  test.skip(hidden.length === 0, 'this core advertises every scope filter')
   await goto(page, '/clients', '[data-test="clients-page"]')
   await page.waitForTimeout(500)
   const rows = page.locator('[data-test="clients-page"] tbody tr')
   if ((await rows.count()) > 0) await rows.first().click()
-  for (const key of ['client', 'profile', 'token']) {
+  for (const key of hidden) {
     await expect(
       page.locator(`[data-test="clients-page"] a[href*="${key}="]`),
       `a ${key}= link must stay hidden until features.scope_filters lists it`,
     ).toHaveCount(0)
+  }
+})
+
+// Spec 109 D35 (T163): the palette also finds profiles, clients and agent
+// tokens. The three lists load on the first non-empty input, never on open.
+test('the command palette finds a profile and opens its editor (Spec 109 T163)', async ({ page }) => {
+  test.skip(!SERVER, 'needs a fixture upstream (SWEEP_SERVER_NAME) to seed the profile')
+  await seedProfiles()
+  try {
+    const listRequests: string[] = []
+    page.on('request', (request) => {
+      const u = new URL(request.url())
+      if (/^\/api\/v1\/(profiles|clients|tokens)$/.test(u.pathname)) listRequests.push(u.pathname)
+    })
+    await goto(page, '/', 'main')
+    const palette = page.locator('dialog[data-test="command-palette"]')
+    await page.keyboard.press('ControlOrMeta+K')
+    await expect(palette).toHaveAttribute('open', '')
+    const before = listRequests.length
+    await palette.locator('input').fill('e2e')
+    const row = palette.locator('[data-test^="palette-row-profiles-"]').first()
+    await expect(row).toContainText(RO_PROFILE)
+    const during = listRequests.slice(before)
+    expect(during.filter((p) => p === '/api/v1/clients'), 'one /clients request after the first keystroke').toHaveLength(1)
+    expect(during.filter((p) => p === '/api/v1/tokens'), 'one /tokens request after the first keystroke').toHaveLength(1)
+    // The default row is "Search tools for ..."; arrow down to the profile row, then Enter.
+    const options = palette.locator('[role="option"]')
+    const index = await options.evaluateAll(
+      (els, id) => els.findIndex((el) => el.getAttribute('data-test') === id),
+      await row.getAttribute('data-test'),
+    )
+    expect(index).toBeGreaterThan(0)
+    for (let n = 0; n < index; n++) await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(new RegExp(`/ui/profiles/${RO_PROFILE}`))
+  } finally {
+    await cleanupProfiles()
   }
 })

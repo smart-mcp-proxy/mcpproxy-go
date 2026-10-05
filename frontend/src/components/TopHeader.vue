@@ -52,16 +52,12 @@
         </button>
       </div>
 
-      <!-- "Viewing" slot (Spec 109 owns the slot, Spec 108 fills it). Fallback
-           is the interim ProfileSwitcher, unchanged from Spec 109 FR-057:
-           hidden for tenants (PUT /profiles/active is an admin door, Spec 107
-           FR-041) and while no profiles exist ("Profile:" otherwise looked like
-           agent scoping while only setting a UI default). An empty slot renders
-           no element at all. Hidden below 1100px so it can never clip the row. -->
-      <div v-if="$slots.viewing || showProfileSwitcher" class="shrink-0" data-test="header-viewing-slot">
-        <slot name="viewing">
-          <ProfileSwitcher class="hidden min-[1100px]:flex" />
-        </slot>
+      <!-- "Viewing" slot (Spec 109 owns the slot, Spec 108 fills it). App.vue
+           passes the ViewingFilter chip (Spec 108-i FR-044); the chip hides
+           itself for a tenant and while there is nothing to filter by, and the
+           wrapper collapses to nothing when it does (no empty gap). -->
+      <div v-if="$slots.viewing" class="shrink-0 empty:hidden" data-test="header-viewing-slot">
+        <slot name="viewing" />
       </div>
 
       <div class="ml-auto flex items-center gap-2 shrink-0">
@@ -128,8 +124,6 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
 import { useAttentionStore } from '@/stores/attention'
-import { useProfilesStore } from '@/stores/profiles'
-import ProfileSwitcher from './ProfileSwitcher.vue'
 import StatusPill from './StatusPill.vue'
 import AddMenu from './AddMenu.vue'
 import CommandPalette from './CommandPalette.vue'
@@ -137,7 +131,6 @@ import CommandPalette from './CommandPalette.vue'
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
 const attentionStore = useAttentionStore()
-const profilesStore = useProfilesStore()
 
 const showAttentionPopover = ref(false)
 const searchQuery = ref('')
@@ -145,7 +138,6 @@ const paletteOpen = ref(false)
 const palette = ref<InstanceType<typeof CommandPalette> | null>(null)
 
 const isTenant = computed(() => authStore.principalKind === 'tenant')
-const showProfileSwitcher = computed(() => !isTenant.value && profilesStore.hasProfiles)
 const shortcutHint = computed(() =>
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K',
 )
@@ -160,26 +152,15 @@ function openPalette(event?: Event) {
   palette.value?.show(seed)
 }
 
-// Spec 109 FR-057: ProfileSwitcher only renders once profilesStore.hasProfiles
-// is true, but that store is populated by a fetch ProfileSwitcher itself used
-// to trigger on its own mount — a component gated on data only it fetches
-// never mounts to fetch it. The header fetches once up front instead, so
-// hasProfiles reflects reality before the v-if above ever evaluates it.
 onMounted(() => {
   // Spec 109 FR-001/FR-003: the header is global, so it fetches its own copy
   // rather than depending on Home having mounted first.
   attentionStore.fetchAttention()
-  // App only mounts the shell after canLoadCore. The personal branch keeps
-  // isolated component consumers and tests working without inventing a server
-  // session; it is never reached during the browser's pending startup path.
-  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
 })
 
 // #1401: the header now stays mounted through an auth recovery (it used to
 // remount, which re-ran the load above), so reload on the recovery epoch.
 watch(() => systemStore.authEpoch, () => {
   attentionStore.fetchAttention()
-  // Same gate as the mount load: a tenant session never reads admin profiles.
-  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
 })
 </script>

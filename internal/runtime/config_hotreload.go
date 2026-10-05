@@ -203,6 +203,25 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		// These will be applied by triggering server reconnection
 	}
 
+	// Profiles v3 (Spec 108-l L9, config-field-checklist point 1 — hot-reloadable).
+	// The config funnel already rebuilds the profile indexes on a reload and
+	// notifies the sessions a change governs, and every resolver reads the live
+	// snapshot, so neither field needs a restart. Without these clauses a lone
+	// `anonymous_profile` save (Settings -> Anonymous callers, Web and macOS) or a
+	// profile edit made by hand computed empty ChangedFields and was answered
+	// "No configuration changes detected" with applied_immediately:false.
+	//
+	// jsonEqual, not DeepEqual, and the length guard, for the same reasons as the
+	// Servers clause above: PATCH /config hands us a JSON-decoded copy of the live
+	// config, whose nil-vs-empty slices and pointer fields must not read as edits.
+	if len(oldCfg.Profiles) != len(newCfg.Profiles) ||
+		(len(oldCfg.Profiles) > 0 && !jsonEqual(oldCfg.Profiles, newCfg.Profiles)) {
+		result.ChangedFields = append(result.ChangedFields, "profiles")
+	}
+	if oldCfg.AnonymousProfile != newCfg.AnonymousProfile {
+		result.ChangedFields = append(result.ChangedFields, "anonymous_profile")
+	}
+
 	// Tool limits (can be hot-reloaded)
 	if oldCfg.ToolsLimit != newCfg.ToolsLimit {
 		result.ChangedFields = append(result.ChangedFields, "tools_limit")
@@ -274,6 +293,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if normalizeDirectToolResponseMode(oldCfg.DirectToolResponseMode) !=
 		normalizeDirectToolResponseMode(newCfg.DirectToolResponseMode) {
 		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
+	}
+
+	// advertise_upstream_servers is read live per connect/tools/list; this
+	// clause makes a lone toggle emit config.reloaded so connected clients
+	// are re-listed (NotifyUpstreamInventoryChanged). Compared resolved:
+	// unset and true are the same value.
+	if oldCfg.AdvertiseUpstreamServersEnabled() != newCfg.AdvertiseUpstreamServersEnabled() {
+		result.ChangedFields = append(result.ChangedFields, "advertise_upstream_servers")
 	}
 
 	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without

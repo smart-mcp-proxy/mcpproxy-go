@@ -52,12 +52,20 @@ func (r *Runtime) reindexAffectedProfiles(serverName string) {
 	}
 }
 
+// profileIndexInputsChanged reports whether an applied change set touched a
+// field that feeds the per-profile indexes. The names are the literals
+// DetectConfigChanges emits.
+func profileIndexInputsChanged(changed []string) bool {
+	return contains(changed, "profiles") || contains(changed, "anonymous_profile")
+}
+
 // reconcileProfileIndexes reconciles all per-profile indexes against the current
 // config and shared index. It builds new profiles, rebuilds profiles whose
 // effective server set changed since the last sync, and drops profiles that were
 // removed from config (including orphaned index dirs left by a previous run).
 // Profiles whose membership is unchanged are left untouched. Called after each
-// discovery pass and after config reloads.
+// discovery pass, and after every config apply or disk reload that changes
+// profiles or anonymous_profile.
 func (r *Runtime) reconcileProfileIndexes() {
 	if r.indexManager == nil {
 		return

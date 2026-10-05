@@ -115,12 +115,15 @@ func TestForwardedHeaderSuccessEchoScrubbedFromRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"X-Tenant-Id"}, sc.ForwardHeaders)
 	sc.Quarantined = false
+	sc.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
 	servers, err := rt.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := rt.Config()
+	// Load a copy: mutating the live snapshot in place races with any
+	// background reader of rt.Config() (for example the scan-settled handler).
+	cfg := *rt.Config()
 	cfg.Servers = servers
-	require.NoError(t, rt.LoadConfiguredServers(cfg))
+	require.NoError(t, rt.LoadConfiguredServers(&cfg))
 	time.Sleep(3 * time.Second)
 	_ = rt.DiscoverAndIndexTools(ctx)
 	time.Sleep(3 * time.Second)

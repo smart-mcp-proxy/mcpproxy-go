@@ -1,0 +1,138 @@
+{
+  "access_reason": [
+    "server_not_in_profile",
+    "denied_by_rule",
+    "unannotated_hidden",
+    "above_tier_cap",
+    "credential",
+    "profile",
+    "server_in_scope",
+    "token_permission",
+    "global_gate",
+    "server_state",
+    "tool_approval"
+  ],
+  "binding_mode": [
+    "locked",
+    "switchable"
+  ],
+  "block_reason": [
+    "profile_tier",
+    "profile_rule",
+    "profile_unannotated",
+    "profile_code_execution",
+    "profile_management"
+  ],
+  "change_kind": [
+    "create",
+    "update",
+    "delete",
+    "rename",
+    "classify",
+    "assign",
+    "lock",
+    "unlock",
+    "forget",
+    "rotate",
+    "anonymous"
+  ],
+  "credential_state": [
+    "client",
+    "admin_key",
+    "none",
+    "revoked",
+    "expired",
+    "unknown"
+  ],
+  "error_code": [
+    "binding_bypassable_without_auth",
+    "no_client_credential",
+    "connect_in_progress",
+    "credential_superseded",
+    "profile_in_use",
+    "profile_is_anonymous_profile",
+    "profile_exists",
+    "name_mismatch",
+    "precondition_failed"
+  ],
+  "explain_step": [
+    "credential",
+    "profile",
+    "server_in_scope",
+    "tool_rule",
+    "tier_cap",
+    "token_permission",
+    "global_gate",
+    "server_state",
+    "tool_approval"
+  ],
+  "explain_verdict": [
+    "allowed",
+    "blocked",
+    "hidden"
+  ],
+  "fix_action": [
+    "allow_in_profile",
+    "classify_in_profile",
+    "add_server_to_profile",
+    "move_client",
+    "edit_token",
+    "enable_server",
+    "approve_tool",
+    "change_setting",
+    "reconnect_client"
+  ],
+  "guard_fix": [
+    "require_mcp_auth",
+    "set_anonymous_profile"
+  ],
+  "max_tier": [
+    "read",
+    "write",
+    "destructive"
+  ],
+  "reason": [
+    "",
+    "server_not_in_profile",
+    "denied_by_rule",
+    "unannotated_hidden",
+    "above_tier_cap"
+  ],
+  "rotation_state": [
+    "finalized",
+    "rolled_back",
+    "pending"
+  ],
+  "source": [
+    "pin",
+    "binding",
+    "url",
+    "session",
+    "anonymous",
+    "none"
+  ],
+  "surface": [
+    "web",
+    "macos",
+    "cli",
+    "mcp",
+    "api"
+  ],
+  "unannotated": [
+    "deny",
+    "as_write",
+    "as_read"
+  ],
+  "warning_code": [
+    "anonymous_denied_by_binding_guard",
+    "client_holds_admin_key",
+    "client_credential_expiring",
+    "client_rotation_pending",
+    "profile_missing",
+    "client_token_name_conflict"
+  ],
+  "warning_severity": [
+    "warn",
+    "info"
+  ]
+}

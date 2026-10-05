@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Issue #937 — the trust-mode admission gate must apply on the CONFIG-LOAD path,
@@ -149,6 +150,9 @@ func TestConfigLoadAdmissionGate_KnownServerIsNotRequarantined(t *testing.T) {
 	require.NoError(t, rt.storageManager.SaveUpstreamServer(&config.ServerConfig{
 		Name: "longstanding", Command: "./ok", Protocol: "stdio", Enabled: true, Quarantined: false,
 	}))
+	// A server that really ran has an approval baseline (RC-UPG-001: without
+	// one, "known" is not proof of admission).
+	seedApproval(t, rt, "longstanding", "read_graph", storage.ToolApprovalStatusApproved, "h1")
 
 	require.NoError(t, rt.LoadConfiguredServers(cfg))
 

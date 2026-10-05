@@ -7,6 +7,16 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **profiles / tool refusals:** a profile's tool refusal now names the profile to a caller whose
+  effective profile is its own (a pin, a client binding, the URL or `set_profile`):
+  `blocked by profile: github:create_issue is a write tool; profile "Work Read-only" (work-readonly)
+  allows read tools only`, and likewise for the deny-rule and unannotated texts. `retrieve_tools`
+  returns `profile` for the same callers. A caller that connects without a credential keeps the
+  previous, non-disclosing text and gets no `profile` field, so the operator's `anonymous_profile` is
+  never handed out. **Migration:** a consumer that matches the old refusal wording for a pinned or
+  bound credential should match on the `block_reason` (`profile_tier`, `profile_rule`,
+  `profile_unannotated`) instead. (spec 108 D39, narrowing D27)
+
 - **mcp/describe_tool:** the per-id error code `invisible` is retired. An id on a server the
   session cannot see (agent-token scope or active profile) now reports `not_found` — the same
   code, `remediation` text and shape as an id that does not exist. A distinct code confirmed
@@ -20,8 +30,53 @@ Releases follow [Semantic Versioning](https://semver.org/).
   longer receive tool hash pins or `server_not_in_scope` scope diagnostics from
   `POST /api/v1/preflight` and the tool-listing endpoints. Admin API key, Unix socket, Windows
   named pipe and the OAuth **admin** role are unaffected. (spec 099 FR-018a)
+- **connect:** `mcpproxy connect` (and the Web UI and macOS Connect screens) no longer write the
+  instance admin API key into a client's config. Every write now carries a per-client credential
+  (`mcp_cli_...`, token `client-<id>`) bound to a profile, valid on MCP endpoints only; REST
+  answers it with `403`. Existing entries that hold the admin key are reported (Clients page,
+  `mcpproxy doctor`) and are never rewritten automatically: use "Upgrade clients holding the admin
+  key", then rotate the admin API key. **Downgrade precondition:** before downgrading to a binary
+  older than this release, set `require_mcp_auth: true`. A pre-profiles-v3 binary does not know
+  `mcp_cli_` credentials; with `require_mcp_auth` off it treats them like an omitted credential
+  and gives them unconfined access (REST and, with authentication required, MCP reject them with
+  `401`). (spec 108 SC-010,
+  [Profiles](https://docs.mcpproxy.app/features/profiles#upgrading-and-downgrading))
+- **cli (table text only, JSON output unchanged):** `mcpproxy upstream list` now shows the status
+  label in the STATUS column (`Online`, `Sign-in required`, `Needs review`, ...) instead of the
+  free-text health summary, and `--status` filters by it; `mcpproxy status` renames its `MCP
+  Endpoints` section to `Endpoint & mode` and starts with a `Needs attention: N` line;
+  `mcpproxy doctor` leads with the needs-attention list and its diagnostics heading is now
+  `Diagnostics: N findings` instead of "Found N issues that need attention". Scripts that parse
+  these tables should use `-o json`. (spec 109,
+  [Status Command](https://docs.mcpproxy.app/cli/status-command), [Management Commands](https://docs.mcpproxy.app/cli/management-commands))
+
+### Deprecations
+
+- **profiles:** `GET /api/v1/profiles/active` and `PUT /api/v1/profiles/active` send
+  `Deprecation: true` and are removed in the next minor release; no first-party surface calls them.
+  The Web UI header "Profile:" switcher and the macOS tray "Profile:" submenu are gone (a "Viewing"
+  filter chip replaces the former, a Clients submenu the latter). (spec 108)
+- **cli:** `mcpproxy token create --profile-pin` is now `--profile` (the old spelling still works,
+  hidden, and prints a notice); `mcpproxy activity --agent` is now `--token` (a hidden alias). (spec 108)
+- **cli:** `registry search` and `registry add` are deprecated aliases of `catalog search` and
+  `catalog add`; `upstream approve`, `security approve|reject` and `tools approve|reject` are
+  documented aliases of `review approve|reject`; `tools list --risk` is an alias of `--tier`. They
+  all keep working. ([Catalog Commands](https://docs.mcpproxy.app/cli/catalog-commands),
+  [Review Commands](https://docs.mcpproxy.app/cli/review-commands))
+- **web ui:** `/repositories`, `/sessions`, `/tokens`, `/security` and `/overview` redirect to their
+  new homes (`/add-server?tab=catalog`, `/activity?view=sessions`, `/clients?tab=tokens`,
+  `/review`, `/`) and keep the query string. `POST /api/v1/servers/{id}/unquarantine` stays for API
+  compatibility but no first-party surface calls it any more. (spec 109,
+  [Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Features
+
+- **catalog:** a catalog source whose live search times out or fails is now answered from the listing
+  the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
+  `from_cache` ("From cached list" in the Web UI and macOS, `(cached)` in the CLI) and the source
+  stays in `unavailable[]` with `fallback` and `cached_at`. The empty-query browse lists Popular
+  before Official and the curated reference servers first. (spec 109 FR-060, D35)
+- **web:** the command palette (Cmd/Ctrl+K) also finds profiles, clients and agent tokens. (spec 109 FR-054)
 
 - **mcp:** schema-deferred direct mode — a new `direct_tool_response_mode` key (`full` | `deferred`,
   **default `full`, so this is opt-in and changes nothing until you turn it on**). In `deferred`,
@@ -55,8 +110,119 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **server edition / sso:** an attributable JSONL audit line is now emitted at every
   authorization decision and tool-call funnel, so a tenant admin can trace who did what.
   (spec 107 PR-D, [#1296](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1296))
+- **profiles:** Profiles v3. A profile is now a tool policy as well as a server list: `max_tier`
+  (`read`, `write`, `destructive`), `unannotated` handling, `tools.allow`, `tools.deny` and
+  `tools.classify` rules, `code_execution`, `management_tools` and `switchable_to`. It is enforced
+  on every discovery and dispatch path, so a "read-only" profile cannot find, describe or call a
+  write, destructive, denied or unclassified tool, and a refusal is recorded as `blocked` with a
+  `block_reason`. Legacy profiles behave exactly as before. Manage profiles from the Web UI and the
+  macOS app (Profiles in the sidebar), `mcpproxy profile ...` and the MCP `profiles` tool.
+  ([Profiles](https://docs.mcpproxy.app/features/profiles),
+  [Profile and client commands](https://docs.mcpproxy.app/cli/profile-commands))
+- **clients:** bind a client to a profile, locked or switchable, from the Clients page, the macOS
+  Clients view and tray submenu, `mcpproxy client set-profile` or the `profiles` MCP tool. A change
+  takes effect on the client's next request without touching its config file, and its live session
+  is told its tool list changed. Add custom clients, rotate and forget credentials, and upgrade
+  every client that holds the admin key in one previewed action.
+- **profiles:** `anonymous_profile` confines callers that present no credential. While
+  `require_mcp_auth` is off, a change that would let a bound client escape its profile by omitting
+  its credential is refused with `409 binding_bypassable_without_auth` and two fixes. Both settings
+  apply without a restart.
+- **tokens:** `mcpproxy token create --profile <p>` (and the token dialogs) pin a token to a profile
+  without listing servers and permissions; older tokens show their scope as a read-only "legacy
+  scope" with a migrate hint.
+- **activity:** every record carries the profile and how it was resolved, the client and the token.
+  Activity, Sessions, Usage, Tools, Servers, Clients and Tokens filter by `profile`, `client` and
+  `token` (in the URL, `mcpproxy activity list --profile --client --token`, and REST), and
+  `/tools?client=cursor` shows exactly what a client can see and call.
+- **profiles:** an access explainer ("Why can't Cursor use `github:create_issue`?") walks the same
+  chain that enforcement walks and names the fix, in the Web UI, the macOS app, `mcpproxy access
+  explain` and the `profiles` MCP tool.
+- **navigation, attention and review (spec 109):** one needs-attention list, and one set of words,
+  on every surface.
+  - **Home and one list:** the Web UI and macOS landing page is Home, led by a single
+    needs-attention list (sign-in, review, missing secret, configuration error, unseen client).
+    The same count and order appear in the header pill, the sidebar badge, the macOS tray,
+    `mcpproxy attention`, the first line of `mcpproxy status` and the first section of
+    `mcpproxy doctor`. ([Needs Attention](https://docs.mcpproxy.app/features/needs-attention),
+    [Attention Command](https://docs.mcpproxy.app/cli/attention-command))
+  - **Review queue with informed review:** every tool of a quarantined server is visible, with its
+    tier, annotations and scan verdict, before you approve, on the Web UI, macOS, `mcpproxy review`
+    and the MCP inspect operations. Approving goes through the scan gate everywhere: the macOS app
+    now confirms and uses `security/approve` instead of a one-click unquarantine, and the Go tray
+    opens the review location instead of unquarantining. ([Review Commands](https://docs.mcpproxy.app/cli/review-commands))
+  - **Clients hub:** a Clients page shows each client's state (connected, never seen, installed), last
+    seen and sessions, with the connect flow, the Endpoint & mode tab and the Agent tokens tab;
+    `mcpproxy client list|show` prints the same rows. A connect result shows the client's reload hint.
+  - **Catalog-first Add:** one search across every catalog source with a fixed ranking (official,
+    verified, popularity, relevance), the "Add to MCPProxy" button, secret-named values defaulting to
+    the keyring, and `mcpproxy catalog search|show|add`. ([Catalog Commands](https://docs.mcpproxy.app/cli/catalog-commands))
+  - **One status word per server:** the card, the detail header, the macOS row and tray and
+    `upstream list` show the same label and one next step; a server that cannot be used never reads
+    Online, healthy or connected.
+  - **Navigation:** a grouped sidebar (Home, Connect, Protect, Monitor), a compact header with `⌘K`
+    search and a `+ Add` menu, filters kept in the URL so every deep link opens filtered, and Activity
+    views (Tool calls, Sessions, System events, All) with `--view` and `--from/--to` on the CLI.
+    ([Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Bug Fixes
+
+- **Upgrade no longer admits a server an older release held in quarantine (RC-UPG-001).** A v0.69 restart (including the baseline security scan shortly after startup) wrote a keyless server's un-gated config over its recorded quarantine, while v0.69 kept holding it in memory. On upgrade the config-load admission gate read that record as already admitted and auto-baseline approved all of its tools. The gate now also requires an approval baseline: a server recorded as unquarantined whose tools were never approved is quarantined again for review. Servers with approved tools are unaffected; vetted servers with no tool records (zero-tool servers, servers that never connected while live, servers last vetted before v0.21) are also held once — approve them, or set `"quarantined": false` before upgrading.
+
+- **A server added while mcpproxy runs is no longer re-quarantined before its tools are discovered.** The RC-UPG-001 rule now applies only to servers `config.db` already held at startup; adding a server saves it to `config.db` before publishing its config, so an OAuth server added with `quarantined: false` was held again before sign-in (v0.70.0-rc.3 release gate). Adding a server with an explicit `quarantined` value — REST, the `upstream_servers` tool, `upstream add --no-quarantine` without a running daemon, or an import with `skip_quarantine` — now records it as an operator statement in `mcp_config.json`, so it is honoured after a restart.
+
+- **security/quarantine:** a server added by editing `mcp_config.json` (no `quarantined` key,
+  first seen) stayed held for review only until its first restart. Restarting it (by hand, after a
+  secret change, or through the automatic baseline scan's connect) wrote the raw file entry over
+  the recorded quarantine, so the next config write or core restart admitted it and auto-approved
+  its tools. The restart path now runs the entry through the config-load admission gate, and storage
+  never lowers a recorded quarantine unless the operator sets `"quarantined": false` or approves the
+  server. Present since v0.53.0. ([#1463](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1463))
+- **security/cli:** `mcpproxy doctor` no longer prints the admin API key (it was embedded in the Web
+  UI URL) in any output format, and URL credentials are masked in its output. ([#1472](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1472))
+- **review:** the Review screen starts fail-closed: read tools are pre-selected, write, destructive
+  and unannotated tools are not, the button states the exact count ("Approve server (3 of 9
+  tools)"), and approving everything is an explicit action. The same defaults apply on macOS and
+  in `mcpproxy review approve`. ([#1481](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1481))
+- **review:** the scan banner no longer says "clean" for definitions that were never scanned or
+  changed after the scan, an approved server shows its approved state instead of per-tool
+  Approve/Reject buttons, and tool definitions are captured automatically when a quarantined
+  server is imported. ([#1470](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1470))
+- **catalog:** search finds the server you mean: a typed query fetches enough results from each
+  registry, versions of one server collapse to a single entry, an exact owner or name match ranks
+  first (searching "github" now returns GitHub's own server first), and "Verified" means the
+  publisher owns the source repository. ([#1469](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1469))
+- **telemetry:** when telemetry is disabled by `MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK` or `CI`,
+  the setup wizard, Home banner, Settings and the macOS app say so and lock the control instead of
+  showing the opt-out notice; `GET /api/v1/status` reports the effective state and its source.
+  macOS Settings shows the listen address of the core it is connected to. ([#1471](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1471))
+- **cli:** the global `-c/--config` and `-d/--data-dir` flags apply to every management command
+  (`upstream`, `registry`, `catalog` included) in any position, and no command silently creates a
+  default config in `~/.mcpproxy` when one was given; errors are printed once; a locked client
+  credential calling `set_profile` is told that profile changes are locked. ([#1472](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1472))
+- **web:** first-run fixes — the setup wizard shows one completion state after importing servers,
+  previewing an empty client config no longer fails, secret values are masked while you type,
+  the status pill says "awaiting review" for quarantined servers instead of "0 online", and the
+  profile editor's Try it uses your unsaved edits and shows readable reasons. ([#1473](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1473))
+- **profiles:** a call refused inside `code_execution` records the same `block_reason` as a
+  top-level refusal, and `mcpproxy access explain` names the destination profile in its move-client
+  fix. ([#1468](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1468))
+- **web:** token savings are labelled as an estimate on Home and in the macOS app, Activity's
+  "Clear filters" on a server/tool conflict reloads the list, "Needs review" health badges are
+  orange, and a brand-new install shows a getting-started card instead of "All clear". ([#1467](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1467))
+- **logging:** an upgrade start no longer repeats the "predate the config-load admission gate"
+  advisory on every config pass (once per server per process), and the benign startup race
+  "connection already in progress or established" is logged at debug instead of error.
+- **profiles:** `set_profile` from a switchable client credential reports the servers of the
+  profile it just selected instead of the binding's narrower set.
+
+- **web/settings:** toggles for nullable settings (`quarantine_enabled`, `telemetry.enabled` and the
+  `audit_log.*` booleans) show the value the core actually applies instead of OFF when the key is
+  absent, and the page header now says to press Save changes instead of "Changes save instantly".
+  (spec 109 D35)
+- **web/clients:** the token Profile chip stays on one line, radio and checkbox labels sit next to
+  their control, and a client with no mcpproxy entry offers **Connect** (macOS: Connect…) instead of
+  "Upgrade to client credential". (spec 108 D39)
 
 - **security/scope:** `set_profile` and `/mcp/p` now report the intersection of an agent
   token's grant and the requested profile through a single selectable-profile predicate; a
@@ -103,6 +269,12 @@ Releases follow [Semantic Versioning](https://semver.org/).
   ([#1084](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1084))
 
 - **homebrew:** One-line install in docs + guard tap job against pre-release tags (#486) ([#486](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/486)) ([`1098701`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/109870116fe17aa1ce7ecfd603962c1d3de21ba0))
+- **profiles:** the Web UI and macOS words for why a tool is hidden now agree ("Unannotated —
+  classify", "Needs review"), and both show how a call's profile was resolved ("locked by
+  credential", "switchable", "from URL", "switched in session", "anonymous"). (spec 108-l)
+- **config:** saving `anonymous_profile` or editing a profile no longer reports "No configuration
+  changes detected" with `applied_immediately: false`; both are reported in `changed_fields` and
+  applied at once. (spec 108-l)
 
 ### CI/Build
 
@@ -112,6 +284,10 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Documentation
 
+- **docs:** profiles are described as optional (without one, nothing profile-level restricts a
+  caller), and the `quarantined` default for servers added by editing `mcp_config.json` is
+  explained, with the full admission rules in Security Quarantine and a first-run note in the Quick
+  Start.
 - **051:** README hero — frosted-tiles banner + demo GIF (#488) ([#488](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/488)) ([`25731da`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/25731da5e1a26753ee90a173a8ea03a317e82666))
 
 ## [0.33.1] - 2026-05-20

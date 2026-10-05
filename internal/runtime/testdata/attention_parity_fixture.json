@@ -1,0 +1,26 @@
+{
+  "_comment": "Spec 109-m SC-002 (M6): the US1 independent-test state plus one Spec 108 client warning. internal/runtime/attention_parity_test.go computes it; internal/httpapi/spec109_attention_parity_test.go serves it through GET /attention and writes attention_parity_rest.json; the CLI, vitest and XCTest replays render that golden. expected_ids is the order every surface must show.",
+  "now": "2026-10-02T12:00:00Z",
+  "input": {
+    "Servers": [
+      {"Name": "github-oauth", "Enabled": true, "Quarantined": true, "Health": {"level": "degraded", "admin_state": "quarantined", "summary": "Sign-in required", "action": "login", "status": "sign_in_required", "usable": false, "actions": ["login"]}, "StateSince": "2026-10-02T11:00:00Z", "Detail": "OAuth · api.githubcopilot.com"},
+      {"Name": "needs-key", "Enabled": true, "Health": {"level": "degraded", "admin_state": "enabled", "summary": "Missing secret", "action": "set_secret", "status": "needs_secret", "usable": false, "actions": ["set_secret"]}, "StateSince": "2026-10-02T10:30:00Z", "Detail": "env API_KEY"},
+      {"Name": "changed-tools", "Enabled": true, "Changed": 2, "Health": {"level": "healthy", "admin_state": "enabled", "summary": "Connected (5 tools)", "status": "ready", "usable": true, "actions": []}, "StateSince": "2026-10-02T09:00:00Z"},
+      {"Name": "parked", "Enabled": false, "Health": {"level": "unhealthy", "admin_state": "disabled", "summary": "Disabled", "action": "enable", "status": "disabled", "usable": false, "actions": ["enable"]}, "StateSince": "2026-10-01T09:00:00Z"}
+    ],
+    "Clients": [
+      {"ID": "codex", "DisplayName": "Codex", "ConnectedAt": "2026-10-01T08:00:00Z"}
+    ],
+    "ClientWarnings": [
+      {"Code": "client_holds_admin_key", "ClientID": "cursor", "DisplayName": "Cursor", "Since": "2026-10-02T11:30:00Z"}
+    ]
+  },
+  "expected_ids": [
+    "client_holds_admin_key:client:cursor",
+    "sign_in_required:server:github-oauth",
+    "missing_secret:server:needs-key",
+    "server_review:server:github-oauth",
+    "tool_review:server:changed-tools:changed",
+    "client_never_seen:client:codex"
+  ]
+}

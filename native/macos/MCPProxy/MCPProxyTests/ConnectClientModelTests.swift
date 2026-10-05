@@ -1171,6 +1171,262 @@ final class ConnectClientPresentationTests: XCTestCase {
         let identifiers = ConnectClientAccessibility.allIdentifiers
         XCTAssertEqual(Set(identifiers).count, identifiers.count,
                        "two elements sharing an identifier make a UI test ambiguous")
-        XCTAssertTrue(identifiers.allSatisfy { $0.hasPrefix("connect-client-") })
+        // Spec 108-k K22 names three identifiers `connect-profile-picker`,
+        // `connect-lock-toggle` and `connect-mgmt-notice` (what
+        // `mcpproxy-ui-test` looks for), so the contract prefix is `connect-`.
+        XCTAssertTrue(identifiers.allSatisfy { $0.hasPrefix("connect-") })
+    }
+
+    // MARK: - Spec 108-k T042m: profile, mode, masked credential, D5 notice
+
+    private func boundPreview(
+        credential: String? = "mcp_cli_••••", profile: String? = nil, keyless: Bool = false,
+        containsAPIKey: Bool = false
+    ) -> ConnectPreviewModel {
+        ConnectPreviewModel(
+            client: "claude-code", configPath: "/Users/x/.claude-code/config.json", serverName: "mcpproxy",
+            entryText: "{}", entryExists: false, containsAPIKey: containsAPIKey, accessState: .accessible,
+            preconditionToken: "tok", credential: credential, profile: profile, keyless: keyless)
+    }
+
+    private func selectedModel(
+        _ source: FakeConnectSource, profiles: [ProfileView] = [], requireMCPAuth: Bool? = nil
+    ) async -> ConnectClientModel {
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code", name: "Claude Code")])]
+        source.detailResults = [.success(FakeConnectSource.client(id: "claude-code", name: "Claude Code"))]
+        source.contextResult = ConnectBindingContext(profiles: profiles, requireMCPAuth: requireMCPAuth)
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.select("claude-code")
+        return model
+    }
+
+    func testTheDefaultProfileIsAllServersAndNothingIsSent() async {
+        let source = FakeConnectSource()
+        let model = await selectedModel(source)
+        XCTAssertEqual(model.profile, "")
+        XCTAssertEqual(model.mode, .switchable)
+        XCTAssertEqual(model.binding, .unspecified, "untouched: a reconnect keeps its binding")
+        XCTAssertEqual(source.previewBindings, [.unspecified])
+    }
+
+    func testChoosingAProfileMakesTheModeLockedAndRefetchesThePreview() async {
+        let source = FakeConnectSource()
+        let ro = ProfileView(name: "work-ro", title: "Work Read-only", servers: ["github"], managementTools: false)
+        let model = await selectedModel(source, profiles: [ro])
+        model.chooseProfile("work-ro")
+        XCTAssertEqual(model.mode, .locked)
+        XCTAssertEqual(model.binding, ConnectBinding(profile: "work-ro", mode: .locked))
+        XCTAssertEqual(model.preview, .idle, "the stale preview is destroyed at once")
+        XCTAssertFalse(model.connectControlExists)
+
+        await model.refreshPreview()
+        XCTAssertEqual(source.previewBindings.last, ConnectBinding(profile: "work-ro", mode: .locked))
+
+        model.setLocked(false)
+        XCTAssertEqual(model.binding, ConnectBinding(profile: "work-ro", mode: .switchable))
+    }
+
+    func testAllServersIsAlwaysSwitchableAndCannotBeLocked() async {
+        let model = await selectedModel(FakeConnectSource())
+        model.chooseProfile("")
+        XCTAssertEqual(model.mode, .switchable)
+        model.setLocked(true)
+        XCTAssertEqual(model.mode, .switchable, "there is nothing to lock on All servers")
+        XCTAssertEqual(model.binding, ConnectBinding(profile: "", mode: .switchable), "an explicit All servers")
+    }
+
+    func testTheWriteCarriesTheChosenBinding() async {
+        let source = FakeConnectSource()
+        let model = await selectedModel(source, profiles: [ProfileView(name: "work-ro")])
+        model.chooseProfile("work-ro")
+        await model.refreshPreview()
+        await model.connect()
+        XCTAssertEqual(source.connectBindings, [ConnectBinding(profile: "work-ro", mode: .locked)])
+    }
+
+    func testThePreviewShowsAMaskedCredentialAndNoApiKeyNotice() async throws {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(boundPreview())]
+        let model = await selectedModel(source)
+        let preview = try XCTUnwrap(model.currentPreview)
+        XCTAssertEqual(preview.credentialLine, "Credential: mcp_cli_•••• (client credential)")
+        XCTAssertEqual(model.credentialDisclosure,
+                       "MCPProxy writes a client credential for Claude Code. The admin API key is never written.")
+        XCTAssertNil(preview.credentialNotice, "the API-key text is gone")
+        XCTAssertFalse(preview.credentialDisclosure(clientName: "X")?.contains("embeds the MCPProxy API key") ?? false)
+    }
+
+    func testAnOlderCoreThatStillEmbedsTheKeyKeepsTheLegacyNotice() async throws {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(boundPreview(credential: nil, containsAPIKey: true))]
+        let model = await selectedModel(source)
+        XCTAssertEqual(model.credentialDisclosure, "This entry embeds the MCPProxy API key in the client's config file.")
+    }
+
+    // D5: a client credential cannot reach management tools unless its profile says so.
+    func testTheManagementNoticeShowsForAllServersAndForAProfileWithoutManagementTools() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(boundPreview())]
+        let profiles = [
+            ProfileView(name: "ro", managementTools: false),
+            ProfileView(name: "legacy"),
+            ProfileView(name: "mgmt", managementTools: true),
+        ]
+        let model = await selectedModel(source, profiles: profiles)
+        XCTAssertEqual(ConnectClientModel.managementNotice,
+                       "This client can no longer add, change or restart servers; manage servers from the Web UI, the macOS app or the CLI")
+
+        XCTAssertTrue(model.showsManagementNotice, "All servers (untouched)")
+        model.chooseProfile("ro")
+        await model.refreshPreview()
+        XCTAssertTrue(model.showsManagementNotice, "management_tools: false")
+        model.chooseProfile("legacy")
+        await model.refreshPreview()
+        XCTAssertTrue(model.showsManagementNotice, "management_tools unset (legacy)")
+        model.chooseProfile("mgmt")
+        await model.refreshPreview()
+        XCTAssertFalse(model.showsManagementNotice, "management_tools: true hides it")
+        model.chooseProfile("")
+        await model.refreshPreview()
+        XCTAssertTrue(model.showsManagementNotice)
+    }
+
+    func testNoManagementNoticeForAKeylessEntry() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(boundPreview(credential: nil, keyless: true))]
+        let model = await selectedModel(source)
+        XCTAssertFalse(model.showsManagementNotice, "a keyless entry writes no credential")
+    }
+
+    func testKeylessIsOfferedOnlyWhileAuthenticationIsOffAndClearsTheProfile() async {
+        let off = await selectedModel(FakeConnectSource(), profiles: [ProfileView(name: "ro")], requireMCPAuth: false)
+        XCTAssertTrue(off.keylessAvailable)
+        off.chooseProfile("ro")
+        off.setKeyless(true)
+        XCTAssertTrue(off.keyless)
+        XCTAssertEqual(off.profile, "", "keyless clears the profile")
+        XCTAssertEqual(off.binding, ConnectBinding(keyless: true))
+
+        let on = await selectedModel(FakeConnectSource(), requireMCPAuth: true)
+        XCTAssertFalse(on.keylessAvailable)
+        on.setKeyless(true)
+        XCTAssertFalse(on.keyless, "refused while require_mcp_auth is on")
+
+        let unknown = await selectedModel(FakeConnectSource(), requireMCPAuth: nil)
+        XCTAssertFalse(unknown.keylessAvailable, "offered only when known to be off")
+    }
+
+    func testSelectingAnotherClientResetsTheBinding() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code"), FakeConnectSource.client(id: "cursor"),
+        ])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.select("claude-code")
+        model.chooseProfile("ro")
+        await model.select("cursor")
+        XCTAssertEqual(model.binding, .unspecified)
+        XCTAssertEqual(model.profile, "")
+    }
+
+    func testAnInitialProfileIsAppliedOnceToTheFirstSelection() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code")])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        model.initialProfile = "work-ro"
+        await model.loadList()
+        await model.select("claude-code")
+        XCTAssertEqual(model.profile, "work-ro")
+        XCTAssertEqual(source.previewBindings.last, ConnectBinding(profile: "work-ro", mode: .locked))
+        XCTAssertNil(model.initialProfile)
+    }
+
+    func testPreselectCarriesTheClientsPreviousProfileIntoThePicker() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code")])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.preselect("claude-code", profile: "work")
+        XCTAssertEqual(model.profile, "work")
+        XCTAssertEqual(source.previewBindings.last, ConnectBinding(profile: "work", mode: .locked))
+    }
+
+    func testPreselectWithoutAProfileLeavesAllServers() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code")])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.preselect("claude-code", profile: "")
+        XCTAssertEqual(model.profile, "")
+        XCTAssertEqual(model.binding, .unspecified)
+    }
+
+    func testAGuardRefusalOfTheWriteIsKeptForTheGuardView() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(APIClientError.service(status: 409, body: ServiceErrorBody(
+            error: "could escape", code: "binding_bypassable_without_auth",
+            bindings: [BindingRef(clientId: "claude-code", profile: "ro", mode: .locked)],
+            fixes: [GuardFix(kind: "require_mcp_auth", target: nil)])))]
+        let model = await selectedModel(source)
+        model.chooseProfile("ro")
+        await model.refreshPreview()
+        await model.connect()
+        XCTAssertEqual(model.guardRefusal?.fixes?.first?.kind, "require_mcp_auth")
+        if case .failed(let text) = model.action { XCTAssertEqual(text, "could escape") } else { XCTFail("\(model.action)") }
+    }
+
+    func testAConflictingTokenShowsItsRemediation() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(APIClientError.service(status: 409, body: ServiceErrorBody(
+            error: "token name client-claude-code is held by an agent token",
+            conflictingToken: "client-claude-code", remediation: "Revoke that token, then connect again.")))]
+        let model = await selectedModel(source)
+        await model.connect()
+        if case .failed(let text) = model.action {
+            XCTAssertTrue(text.contains("held by an agent token"))
+            XCTAssertTrue(text.contains("Revoke that token"))
+        } else { XCTFail("\(model.action)") }
+        XCTAssertNil(model.guardRefusal)
+    }
+
+    func testTheResultLineUsesTheCliFormat() {
+        let locked = APIClient.ConnectResult(
+            success: true, action: "created", credential: "mcp_cli_••••", tokenName: "client-codex",
+            profile: "work-ro-mac", mode: .locked)
+        XCTAssertEqual(locked.credentialLine, "Credential: mcp_cli_•••• (token client-codex, profile work-ro-mac, locked)")
+        let all = APIClient.ConnectResult(
+            success: true, action: "created", credential: "mcp_cli_••••", tokenName: "client-codex", profile: "", mode: .switchable)
+        XCTAssertEqual(all.credentialLine, "Credential: mcp_cli_•••• (token client-codex, all servers, switchable)")
+        XCTAssertEqual(APIClient.ConnectResult(success: true, keyless: true).credentialLine, "Credential: none (keyless)")
+        XCTAssertNil(APIClient.ConnectResult(success: true, action: "removed").credentialLine, "a disconnect embeds none")
+        XCTAssertNil(APIClient.ConnectResult(success: true).credentialLine)
+    }
+
+    /// 109-b's `reloadHint` / `displayPath` stay intact next to the new fields
+    /// (the later merge keeps both field sets).
+    func testTheSpec109bFieldsSurviveBesideTheBindingFields() throws {
+        let json = """
+        {"success":true,"client":"cursor","config_path":"/Users/x/.cursor/mcp.json","display_path":"~/.cursor/mcp.json",
+         "reload_hint":"Restart Cursor","action":"created","credential":"mcp_cli_••••","token_name":"client-cursor","profile":"ro","mode":"locked","rotation":"finalized"}
+        """
+        let result = try JSONDecoder().decode(APIClient.ConnectResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.effectiveDisplayPath, "~/.cursor/mcp.json")
+        XCTAssertEqual(result.reloadHint, "Restart Cursor")
+        XCTAssertEqual(result.rotation, "finalized")
+        XCTAssertEqual(result.tokenName, "client-cursor")
+    }
+
+    func testAnUndoResultCarriesTheRevokedCredential() throws {
+        let result = try JSONDecoder().decode(APIClient.ConnectResult.self, from: Data(
+            #"{"success":true,"action":"restored","credential_revoked":"client-cursor"}"#.utf8))
+        XCTAssertEqual(result.credentialRevoked, "client-cursor")
+    }
+
+    func testClientStatusDecodesTheCredentialState() throws {
+        let json = #"{"id":"cursor","name":"Cursor","config_path":"/x","exists":true,"connected":true,"supported":true,"credential_state":"admin_key"}"#
+        let status = try JSONDecoder().decode(APIClient.ClientStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.credentialState, .adminKey)
     }
 }

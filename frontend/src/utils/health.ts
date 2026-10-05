@@ -136,10 +136,16 @@ export function healthStatusTextOrEmpty(health: { summary?: string | null; statu
  * @param connected - the server's legacy `connected` field, for the last-resort fallback
  */
 export function healthStatusText(
-  health: { summary?: string | null; status?: string | null },
+  health: { summary?: string | null; status?: string | null; usable?: boolean | null },
   connected: boolean
 ): string {
-  return healthStatusTextOrEmpty(health) || (connected ? 'Connected' : 'Disconnected')
+  const text = healthStatusTextOrEmpty(health)
+  if (text) return text
+  // SC-003: a server the core reported as not usable never reads "Connected",
+  // even when the legacy `connected` field is true (a version-skew payload that
+  // carries neither status nor summary).
+  if (health.usable === false && connected) return 'Unavailable'
+  return connected ? 'Connected' : 'Disconnected'
 }
 
 /**

@@ -3,14 +3,13 @@ import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-// Spec 109 FR-057: ProfileSwitcher now also requires profilesStore.hasProfiles
-// (fetched by TopHeader on mount), so a real profile must be mocked here for
-// the "still renders for an admin principal" case below to hold.
+// Spec 108-i: the profile list is fetched by the Viewing chip (ViewingFilter),
+// which App passes into TopHeader's viewing slot. The startup gating that used
+// to guard TopHeader's own profile fetch (Spec 109 FR-057) now guards the chip.
 vi.mock('@/services/api', () => {
   const ok = (data: unknown = {}) => Promise.resolve({ success: true, data })
   const base: Record<string, unknown> = {
-    getProfiles: vi.fn(() => ok({ profiles: [{ name: 'work', servers: ['alpha'], tool_count: 3 }] })),
-    getActiveProfile: vi.fn(() => ok({ active_profile: '' })),
+    getProfiles: vi.fn(() => Promise.resolve({ profiles: [{ name: 'work', servers: ['alpha'], tool_count: 3 }] })),
     // authStore.principalKind calls this SYNCHRONOUSLY and branches on
     // truthiness — the Proxy fallback below returns a (truthy) Promise for
     // any undeclared method, which would silently reclassify every tenant
@@ -38,6 +37,8 @@ vi.mock('@/services/api', () => {
 // entirely for a tenant principal, not merely suppress its own fetch.
 
 import TopHeader from '@/components/TopHeader.vue'
+import ViewingFilter from '@/components/ViewingFilter.vue'
+import { setAvailableFeatures } from '@/composables/useScopeQuery'
 import { useAuthStore } from '@/stores/auth'
 import { useProfilesStore } from '@/stores/profiles'
 import api from '@/services/api'
@@ -78,7 +79,21 @@ async function mountTopHeaderAs(role: 'user' | 'admin') {
   return wrapper
 }
 
-async function mountTopHeaderForProfileStartup(options: {
+async function mountViewingFilterAs(role: 'user' | 'admin') {
+  const router = makeRouter()
+  router.push('/')
+  await router.isReady()
+  const authStore = useAuthStore()
+  authStore.isTeamsEdition = true
+  authStore.loading = false
+  authStore.authResolvedSuccessfully = true
+  authStore.user = { id: 'u1', email: 'u1@example.com', display_name: 'U1', role, provider: 'oidc', created_at: '', last_login_at: '' }
+  const wrapper = shallowMount(ViewingFilter, { global: { plugins: [router], stubs: { RouterLink: true } } })
+  await flushPromises()
+  return wrapper
+}
+
+async function mountViewingFilterForProfileStartup(options: {
   teamsEdition: boolean
   loading: boolean
   resolved: boolean
@@ -99,7 +114,7 @@ async function mountTopHeaderForProfileStartup(options: {
       }
     : null
 
-  const wrapper = shallowMount(TopHeader, {
+  const wrapper = shallowMount(ViewingFilter, {
     global: { plugins: [router], stubs: { RouterLink: true } },
   })
   await flushPromises()
@@ -112,30 +127,29 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
     // Each mount is an independent startup state. Do not let a prior header's
     // profile requests make a skip assertion vacuously pass or fail.
     vi.clearAllMocks()
+    setAvailableFeatures(['scope_filters'])
   })
 
   // Spec 109 FR-057: profile population is a startup side effect, not merely
   // a rendering detail. These direct-header cases deliberately include the
   // personal branch: changing the guard to `canLoadCore && isAdmin` would
   // still pass the administrator case but must stop this one from fetching.
-  it('populates the profile switcher for confirmed personal startup', async () => {
-    const wrapper = await mountTopHeaderForProfileStartup({
+  it('populates the profile list (Viewing chip) for confirmed personal startup', async () => {
+    const wrapper = await mountViewingFilterForProfileStartup({
       teamsEdition: false, loading: false, resolved: true,
     })
 
     expect(api.getProfiles).toHaveBeenCalledTimes(1)
-    expect(api.getActiveProfile).toHaveBeenCalledTimes(1)
     expect(useProfilesStore().hasProfiles).toBe(true)
-    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(true)
+    expect(wrapper.find('[data-test="viewing-filter"]').exists()).toBe(true)
   })
 
   it('populates profiles for a confirmed administrator startup', async () => {
-    await mountTopHeaderForProfileStartup({
+    await mountViewingFilterForProfileStartup({
       teamsEdition: true, loading: false, resolved: true, role: 'admin',
     })
 
     expect(api.getProfiles).toHaveBeenCalledTimes(1)
-    expect(api.getActiveProfile).toHaveBeenCalledTimes(1)
     expect(useProfilesStore().hasProfiles).toBe(true)
   })
 
@@ -145,10 +159,9 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
     ['bootstrap-failed', { teamsEdition: true, loading: false, resolved: false }],
     ['signed-out', { teamsEdition: true, loading: false, resolved: true }],
   ])('skips profile population for %s server startup', async (_state, options) => {
-    await mountTopHeaderForProfileStartup(options)
+    await mountViewingFilterForProfileStartup(options)
 
     expect(api.getProfiles).not.toHaveBeenCalled()
-    expect(api.getActiveProfile).not.toHaveBeenCalled()
     expect(useProfilesStore().hasProfiles).toBe(false)
   })
 
@@ -185,18 +198,16 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
     expect(wrapper.findComponent({ name: 'StatusPill' }).exists()).toBe(false)
   })
 
-  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): selecting a profile in
-  // ProfileSwitcher calls PUT /api/v1/profiles/active, which the
-  // tenant-session allowlist also refuses with 403 (only GET /profiles* is
-  // tenant-reachable) — an enabled control that always fails to act.
-  it('hides the profile switcher for a tenant principal', async () => {
-    const wrapper = await mountTopHeaderAs('user')
-    expect(wrapper.find('[data-test="profile-switcher"]').exists()).toBe(false)
-    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(false)
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2), carried to the Viewing
+  // chip: a tenant never reads the admin profile list, so the chip is absent.
+  it('hides the viewing chip for a tenant principal', async () => {
+    const wrapper = await mountViewingFilterAs('user')
+    expect(wrapper.find('[data-test="viewing-filter"]').exists()).toBe(false)
+    expect(api.getProfiles).not.toHaveBeenCalled()
   })
 
-  it('still renders the profile switcher for an admin principal', async () => {
-    const wrapper = await mountTopHeaderAs('admin')
-    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(true)
+  it('renders the viewing chip for an admin principal', async () => {
+    const wrapper = await mountViewingFilterAs('admin')
+    expect(wrapper.find('[data-test="viewing-filter"]').exists()).toBe(true)
   })
 })

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -41,12 +43,22 @@ type ClientsService struct {
 
 	notifier BindingNotifier
 	reader   ClientConfigReader
+
+	// upgrade is the connect port behind the admin-key upgrade, observe the
+	// sink for on-demand credential classifications (Spec 108-f).
+	upgrade AdminKeyUpgradePort
+	observe func(clientID string, state profile.CredentialState)
+
+	// inflight holds the per-client connect claim (FR-021a), guarded by mu: a
+	// connect holds it from Issue until Commit, Abort or Release.
+	inflight map[string]time.Time
 }
 
 // ClientCredentialStore is the token-store surface the service needs;
 // *storage.Manager implements it.
 type ClientCredentialStore interface {
 	MintClientCredential(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time) (*auth.AgentToken, error)
+	MintClientCredentialNamed(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time, displayName string) (*auth.AgentToken, error)
 	StageClientCredentialRotation(clientID, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	FinalizeClientCredentialRotation(clientID string) (*auth.AgentToken, error)
 	RollbackClientCredentialRotation(clientID string) (*auth.AgentToken, error)
@@ -116,6 +128,7 @@ func ActorFromContext(ctx context.Context, surface profile.Surface) Actor {
 // ClientCredentialView is a client's credential as the surfaces show it.
 type ClientCredentialView struct {
 	ID              string                  `json:"id"`
+	DisplayName     string                  `json:"display_name,omitempty"`
 	TokenName       string                  `json:"token_name"`
 	Profile         string                  `json:"profile"`
 	Mode            string                  `json:"mode"`
@@ -147,6 +160,30 @@ func (e *NoClientCredentialError) Error() string {
 
 // Code is the wire `code` of the refusal.
 func (e *NoClientCredentialError) Code() string { return profile.ErrorCodeNoClientCredential }
+
+// ConnectInProgressError is the 409 connect_in_progress refusal: a connect of
+// the client holds the in-flight claim (FR-021a), so another connect, rotate,
+// finalize or binding change must wait for it.
+type ConnectInProgressError struct{ ClientID string }
+
+func (e *ConnectInProgressError) Error() string {
+	return fmt.Sprintf("a connect of %s is already in progress; retry when it finishes", e.ClientID)
+}
+
+// Code is the wire `code` of the refusal.
+func (e *ConnectInProgressError) Code() string { return profile.ErrorCodeConnectInProgress }
+
+// CredentialSupersededError is the 409 credential_superseded refusal: the
+// credential a connect wrote was replaced or revoked before it could be
+// finalized, so the written secret must not be treated as live (FR-021a).
+type CredentialSupersededError struct{ ClientID string }
+
+func (e *CredentialSupersededError) Error() string {
+	return fmt.Sprintf("the credential written for %s was replaced or revoked before it could be finalized; reconnect the client", e.ClientID)
+}
+
+// Code is the wire `code` of the refusal.
+func (e *CredentialSupersededError) Code() string { return profile.ErrorCodeCredentialSuperseded }
 
 // ClientsServiceDeps wires a ClientsService. Zero values are safe in tests:
 // Now defaults to time.Now, Mu to a private mutex, Guard to the conservative
@@ -195,6 +232,63 @@ func (s *ClientsService) SetConfigReader(r ClientConfigReader) { s.reader = r }
 
 // --- helpers -------------------------------------------------------------
 
+// Records returns every ownerless token record that concerns a client
+// credential: the kind=client records (any state) and any regular token that
+// holds a client-<id> name (the FR-021 conflict). The REST clients list reads
+// it once to decorate its rows.
+func (s *ClientsService) Records() ([]auth.AgentToken, error) {
+	all, err := s.records()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]auth.AgentToken, 0, len(all))
+	for i := range all {
+		t := &all[i]
+		if t.UserID != "" {
+			continue
+		}
+		if t.Kind == auth.KindClient || strings.HasPrefix(t.Name, "client-") {
+			out = append(out, *t)
+		}
+	}
+	return out, nil
+}
+
+// Now is the service's clock (tests inject one); REST uses it so "expiring"
+// and "last observed" agree with the service.
+func (s *ClientsService) Now() time.Time { return s.now() }
+
+// StateOf classifies a credential record (client | revoked | expired | none).
+func (s *ClientsService) StateOf(t *auth.AgentToken) profile.CredentialState { return s.stateOf(t) }
+
+// ObservedCredentialStates returns the credential states Warnings needs for the
+// admin-key warning: the persisted last observation (Spec 108-f F11) of every
+// connect-registry client that has no client credential record of its own.
+// It reads the credential store only, never a client config (Spec 075). Both
+// GET /clients and the needs-attention list call it, so they cannot disagree.
+func (s *ClientsService) ObservedCredentialStates(observed map[string]storage.ClientCredentialObservation) (map[string]profile.CredentialState, error) {
+	all, err := s.records()
+	if err != nil {
+		return nil, err
+	}
+	hasRecord := map[string]bool{}
+	for i := range all {
+		if all[i].Kind == auth.KindClient {
+			hasRecord[all[i].ClientID] = true
+		}
+	}
+	states := map[string]profile.CredentialState{}
+	for id, obs := range observed {
+		if hasRecord[id] || connect.FindClient(id) == nil {
+			continue
+		}
+		if profile.CredentialState(obs.State) == profile.CredentialStateAdminKey {
+			states[id] = profile.CredentialStateAdminKey
+		}
+	}
+	return states, nil
+}
+
 func (s *ClientsService) records() ([]auth.AgentToken, error) {
 	all, err := s.store.ListAgentTokens()
 	if err != nil {
@@ -231,7 +325,7 @@ func (s *ClientsService) stateOf(t *auth.AgentToken) profile.CredentialState {
 func (s *ClientsService) view(t *auth.AgentToken) *ClientCredentialView {
 	exp := t.ExpiresAt
 	return &ClientCredentialView{
-		ID: t.ClientID, TokenName: t.Name, Profile: t.ProfilePin, Mode: t.ProfileMode,
+		ID: t.ClientID, DisplayName: t.DisplayName, TokenName: t.Name, Profile: t.ProfilePin, Mode: t.ProfileMode,
 		CredentialState: s.stateOf(t), ExpiresAt: &exp, ConnectedAt: t.ConnectedAt,
 		RotationPending: t.PendingHash != "",
 	}
@@ -330,7 +424,14 @@ func surfaceSource(s profile.Surface) storage.ActivitySource {
 }
 
 func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecord) {
-	if s.activity == nil {
+	writeChangeRecord(ctx, s.activity, s.logger, s.now(), a, c)
+}
+
+// writeChangeRecord builds and saves one `profile_change` activity record. It
+// is shared by the clients service and the profiles/config funnel, so every
+// record has one shape (FR-030).
+func writeChangeRecord(ctx context.Context, activity func(*storage.ActivityRecord) error, logger *zap.Logger, now time.Time, a Actor, c changeRecord) {
+	if activity == nil {
 		return
 	}
 	meta := map[string]interface{}{
@@ -350,12 +451,19 @@ func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecor
 		Type:      storage.ActivityTypeProfileChange,
 		Source:    surfaceSource(a.Surface),
 		Status:    "success",
-		Timestamp: s.now().UTC(),
+		Timestamp: now.UTC(),
 		RequestID: reqcontext.GetRequestID(ctx),
 		Metadata:  meta,
+		// Spec 108 FR-030/T063: first-class beside the metadata keys (kept for
+		// one release) so /activity?client=&type=profile_change finds it.
+		// Profile is the NEW profile; a profile_change is not a resolution, so
+		// ProfileSource stays empty.
+		Profile:   c.profile,
+		ClientID:  c.clientID,
+		TokenName: c.tokenName,
 	}
-	if err := s.activity(rec); err != nil {
-		s.logger.Error("failed to write profile_change activity record", zap.String("client_id", c.clientID), zap.Error(err))
+	if err := activity(rec); err != nil {
+		logger.Error("failed to write profile_change activity record", zap.String("client_id", c.clientID), zap.Error(err))
 	}
 }
 
@@ -411,6 +519,9 @@ func (s *ClientsService) SetBinding(ctx context.Context, a Actor, clientID, prof
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	return s.setBindingLocked(ctx, a, clientID, profileName, modeArg)
 }
 
@@ -484,6 +595,10 @@ func (s *ClientsService) BulkAssign(ctx context.Context, a Actor, from, to strin
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
+		if s.connectInFlight(id) {
+			skipped = append(skipped, skipReason(id, &ConnectInProgressError{ClientID: id}))
+			continue
+		}
 		if _, err := s.setBindingLocked(ctx, a, id, to, modeArg); err != nil {
 			skipped = append(skipped, skipReason(id, err))
 			continue
@@ -496,8 +611,11 @@ func (s *ClientsService) BulkAssign(ctx context.Context, a Actor, from, to strin
 func skipReason(id string, err error) Skipped {
 	var guardErr *BindingGuardError
 	var noCred *NoClientCredentialError
+	var busy *ConnectInProgressError
 	var val *ValidationError
 	switch {
+	case errors.As(err, &busy):
+		return Skipped{ClientID: id, Code: busy.Code(), Error: err.Error()}
 	case errors.As(err, &guardErr):
 		return Skipped{ClientID: id, Code: profile.ErrorCodeBindingBypassable, Error: err.Error()}
 	case errors.As(err, &noCred):
@@ -578,6 +696,9 @@ func (s *ClientsService) Rotate(ctx context.Context, a Actor, clientID string) (
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return "", nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	key, err := s.hmacKey()
 	if err != nil {
 		return "", nil, err
@@ -605,6 +726,9 @@ func (s *ClientsService) FinalizeRotation(ctx context.Context, a Actor, clientID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	return s.finalizeLocked(ctx, a, clientID)
 }
 
@@ -662,10 +786,14 @@ func (s *ClientsService) rollbackLocked(ctx context.Context, a Actor, clientID s
 }
 
 // AddRequest creates a credential for a custom (non-connect-registry) client.
+// ExpiresAt zero means the 365-day default; DisplayName is at most
+// auth.MaxClientDisplayName characters.
 type AddRequest struct {
-	ID      string
-	Profile string
-	Mode    *string
+	ID          string
+	DisplayName string
+	Profile     string
+	Mode        *string
+	ExpiresAt   time.Time
 }
 
 // Add mints a credential for a custom client and returns the secret once.
@@ -678,9 +806,12 @@ func (s *ClientsService) Add(ctx context.Context, a Actor, req AddRequest) (*Cli
 	if connect.FindClient(req.ID) != nil {
 		return nil, "", &ValidationError{Field: "id", Message: fmt.Sprintf("client id %q is a supported client; use connect instead", req.ID)}
 	}
+	if n := utf8.RuneCountInString(req.DisplayName); n > auth.MaxClientDisplayName {
+		return nil, "", &ValidationError{Field: "display_name", Message: fmt.Sprintf("display_name is too long (%d characters, max %d)", n, auth.MaxClientDisplayName)}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	issued, err := s.issueLocked(req.ID, &req.Profile, req.Mode, false)
+	issued, err := s.issueLocked(req.ID, &req.Profile, req.Mode, false, issueOptions{expiresAt: req.ExpiresAt, displayName: req.DisplayName})
 	if err != nil {
 		return nil, "", err
 	}

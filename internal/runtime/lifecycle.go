@@ -1925,6 +1925,15 @@ func (r *Runtime) ReloadConfiguration() error {
 	r.applyComponentConfigLocked(oldSnapshot.Config, running)
 	r.mu.Unlock()
 
+	// Issue #1458: a hand edit of profiles / anonymous_profile must reach the
+	// per-profile search indexes now, not after postConfigReload's reconnect and
+	// discovery pass. The detector ran on the restart-pinned configs, so a
+	// restart-gated field cannot hide the profile fields from it.
+	if oldSnapshot.Config != nil &&
+		profileIndexInputsChanged(DetectConfigChanges(oldSnapshot.Config, running).ChangedFields) {
+		r.reconcileProfileIndexes()
+	}
+
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
@@ -2221,6 +2230,10 @@ func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[str
 // see the same value. Without this, only the synchronous restart that did
 // the disk read would see the edit; the next one would replay storage and
 // regress. See issue #467 for context.
+//
+// The disk entry is admission-gated (issue #937) before it is persisted or
+// returned: a server whose file entry never stated `quarantined` keeps the
+// quarantine recorded for it instead of being reset to unquarantined.
 func (r *Runtime) lookupServerConfigForRestart(serverName string) *config.ServerConfig {
 	r.mu.RLock()
 	cfgPath := r.cfgPath
@@ -2236,14 +2249,15 @@ func (r *Runtime) lookupServerConfigForRestart(serverName string) *config.Server
 		} else {
 			for _, srv := range diskCfg.Servers {
 				if srv != nil && srv.Name == serverName {
-					if r.storageManager != nil {
-						if saveErr := r.storageManager.SaveUpstreamServer(srv); saveErr != nil {
+					gated, persist := r.gateServerForRestart(diskCfg, srv)
+					if persist && r.storageManager != nil {
+						if saveErr := r.storageManager.SaveUpstreamServer(gated); saveErr != nil {
 							r.logger.Warn("Failed to persist disk-loaded config to storage during restart",
 								zap.String("server", serverName),
 								zap.Error(saveErr))
 						}
 					}
-					return srv
+					return gated
 				}
 			}
 		}
