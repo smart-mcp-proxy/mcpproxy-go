@@ -405,6 +405,10 @@ func warningFix(w runtime.Warning) string {
 	return ""
 }
 
+// confirmPromptOut is where the confirmation prompt is written (stderr, so
+// `-o json` stdout stays pure JSON). A var so a test can pin the default.
+var confirmPromptOut io.Writer = os.Stderr
+
 // confirmYes asks for confirmation on a terminal, or accepts --yes. A non-TTY
 // stdin without --yes is refused (exit 1) so a script never proceeds blind.
 func confirmYes(prompt string, yes bool) (bool, error) {
@@ -414,8 +418,14 @@ func confirmYes(prompt string, yes bool) (bool, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false, flagValidationError{errors.New("confirmation required; pass --yes")}
 	}
-	fmt.Printf("%s [y/N]: ", prompt)
-	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	// The prompt goes to stderr so `-o json` stdout stays pure JSON.
+	return readConfirmation(os.Stdin, confirmPromptOut, prompt)
+}
+
+// readConfirmation writes the [y/N] prompt to out and reads one answer from in.
+func readConfirmation(in io.Reader, out io.Writer, prompt string) (bool, error) {
+	fmt.Fprintf(out, "%s [y/N]: ", prompt)
+	answer, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil {
 		return false, fmt.Errorf("failed to read confirmation: %w", err)
 	}
