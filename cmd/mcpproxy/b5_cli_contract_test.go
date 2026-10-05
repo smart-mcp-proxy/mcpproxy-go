@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -119,4 +120,16 @@ func TestActivityPeriodFromRelative_FR075Message(t *testing.T) {
 	_, err := activityPeriodFromRelative("-3d")
 	require.Error(t, err)
 	assert.Equal(t, "summary supports --from -1h|-24h|-7d|-30d only", err.Error())
+}
+
+// Disconnecting a never-registered client is a no-op and must exit 0.
+func TestConnectResultError_NotFoundDisconnectExitsZero(t *testing.T) {
+	nf := &connect.ConnectResult{Success: false, Client: "cursor", Action: "not_found", Message: "no entry"}
+	require.NoError(t, connectResultError(nf))
+	require.Error(t, connectResultError(&connect.ConnectResult{Action: "failed", Message: "x"}))
+}
+
+// The confirmation prompt must default to stderr, never stdout.
+func TestConfirmPromptOut_DefaultsToStderr(t *testing.T) {
+	assert.Same(t, os.Stderr, confirmPromptOut)
 }

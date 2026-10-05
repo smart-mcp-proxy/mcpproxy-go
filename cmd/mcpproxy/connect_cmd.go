@@ -359,9 +359,10 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 // error so the exit code is 1; stdout is already printed unchanged. nil for a
 // successful result or an already_exists no-op.
 func connectResultError(result *connect.ConnectResult) error {
-	// already_exists is a deliberate "result, not an error" (re-running connect
-	// is idempotent; --force overwrites), so it keeps exiting 0.
-	if result == nil || result.Success || result.Action == "already_exists" {
+	// already_exists (idempotent connect) and not_found (disconnecting a client
+	// that was never registered) are deliberate "result, not an error" no-ops,
+	// so they keep exiting 0.
+	if result == nil || result.Success || result.Action == "already_exists" || result.Action == "not_found" {
 		return nil
 	}
 	return cliRefusalError{fmt.Errorf("%s", result.Message)}
