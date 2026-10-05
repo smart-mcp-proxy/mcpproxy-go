@@ -502,6 +502,10 @@
             A timestamped backup of the file is written first, and the path is shown afterwards
             so you can restore it.
           </p>
+          <p class="text-sm text-base-content/70 mt-2" data-test="connect-disconnect-revokes">
+            The client's credential is revoked too. Restoring the file does not bring it back;
+            connect again to issue a new one.
+          </p>
           <div class="modal-action">
             <button class="btn btn-ghost btn-sm" data-test="connect-disconnect-cancel" @click="disconnectTarget = null">Cancel</button>
             <button

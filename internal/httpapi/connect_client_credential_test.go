@@ -4,7 +4,9 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -390,4 +392,73 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	toks, err := h.sm.ListAgentTokens()
 	require.NoError(t, err)
 	assert.Empty(t, toks)
+}
+
+// Disconnect revokes the client credential (maintainer decision, #1435-5):
+// removing the entry while leaving the secret live would leave a copied secret
+// authenticating after the user thought the client was cut off.
+func TestConnectREST_DisconnectRevokesTheClientCredential(t *testing.T) {
+	h := newConnectHarness(t, internalRuntime.ConservativeBindingGuard{})
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/api/v1/connect/cursor", `{"profile":"ro"}`, nil, bindingAdminKey).Code)
+	secret := extractSecret(t, h.cursorConfig())
+
+	w := h.do(http.MethodDelete, "/api/v1/connect/cursor", ``, map[string]string{XMCPProxySurfaceHeader: "web"}, bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	data := decodeBody(t, w)["data"].(map[string]interface{})
+	assert.Equal(t, "removed", data["action"])
+	assert.Equal(t, "client-cursor", data["credential_revoked"])
+	assert.Empty(t, data["credential_revoke_error"])
+	assert.NotContains(t, h.cursorConfig(), "mcp_cli_")
+
+	_, err := h.sm.ValidateAgentToken(secret, h.key)
+	require.Error(t, err, "the credential no longer authenticates")
+
+	recs, _, err := h.sm.ListActivities(storage.ActivityFilter{Types: []string{"profile_change"}})
+	require.NoError(t, err)
+	var forget map[string]interface{}
+	for _, r := range recs {
+		if r.Metadata["change"] == "forget" {
+			forget = r.Metadata
+		}
+	}
+	require.NotNil(t, forget, "a forget record is written")
+	assert.Equal(t, "client-cursor", forget["token_name"])
+	assert.Equal(t, true, forget["diff"].(map[string]interface{})["disconnected"])
+	assert.Equal(t, "web", forget["surface"])
+}
+
+func TestConnectREST_DisconnectWithoutACredentialRevokesNothing(t *testing.T) {
+	h := newConnectHarness(t, internalRuntime.ConservativeBindingGuard{})
+	// A hand-written keyless entry has no client credential record.
+	require.NoError(t, os.WriteFile(connect.ConfigPath("cursor", h.home),
+		[]byte(`{"mcpServers":{"mcpproxy":{"url":"http://127.0.0.1:8080/mcp"}}}`+"\n"), 0o644))
+
+	w := h.do(http.MethodDelete, "/api/v1/connect/cursor", ``, nil, bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	data := decodeBody(t, w)["data"].(map[string]interface{})
+	assert.Equal(t, "removed", data["action"])
+	assert.Empty(t, data["credential_revoked"])
+	assert.Empty(t, data["credential_revoke_error"])
+	recs, _, err := h.sm.ListActivities(storage.ActivityFilter{Types: []string{"profile_change"}})
+	require.NoError(t, err)
+	for _, r := range recs {
+		assert.NotEqual(t, "forget", r.Metadata["change"])
+	}
+}
+
+// A completed disconnect is never turned into a failure by the revoke step.
+func TestConnectREST_DisconnectReportsARevokeFailureButStaysOK(t *testing.T) {
+	h := newConnectHarness(t, internalRuntime.ConservativeBindingGuard{})
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/api/v1/connect/cursor", `{"profile":"ro"}`, nil, bindingAdminKey).Code)
+	h.srv.forgetClientCredential = func(context.Context, internalRuntime.Actor, string, bool) (*internalRuntime.ClientCredentialView, error) {
+		return nil, errors.New("disk full")
+	}
+
+	w := h.do(http.MethodDelete, "/api/v1/connect/cursor", ``, nil, bindingAdminKey)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	data := decodeBody(t, w)["data"].(map[string]interface{})
+	assert.Equal(t, "removed", data["action"])
+	assert.Empty(t, data["credential_revoked"])
+	assert.Contains(t, data["credential_revoke_error"], "disk full")
+	assert.NotContains(t, h.cursorConfig(), "mcp_cli_")
 }

@@ -222,6 +222,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Summary     Connect MCPProxy to a client
 // @Description Register MCPProxy as an MCP server in the specified client's configuration file.
 // @Description Creates a backup of the existing config before modifying.
+// @Description Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
 // @Description Optionally accepts precondition_token from a preview (Spec 091): when supplied,
 // @Description the core rechecks the raw pre-write state and the entry it would write, and
 // @Description refuses a drifted write with 409 before taking any backup. The 409 body's
@@ -372,6 +373,7 @@ func applyClientConnected(state *storage.OnboardingState, clientID string, now t
 // @Summary     Disconnect MCPProxy from a client
 // @Description Remove the MCPProxy entry from the specified client's configuration file.
 // @Description Creates a backup of the existing config before modifying.
+// @Description Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
 // @Tags        connect
 // @Accept      json
 // @Produce     json
@@ -421,9 +423,50 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 	}
 	if result.Success {
 		s.recordClientDisconnected(clientID)
+		s.revokeCredentialAfterDisconnect(r, clientID, result)
 	}
 
 	s.writeSuccess(w, result)
+}
+
+// revokeCredentialAfterDisconnect revokes the client credential once its
+// config entry is gone (maintainer decision on #1435: disconnect cuts the
+// client off, so a secret copied out of the config stops authenticating).
+// Same ordering as POST /clients/{id}/forget?disconnect=true: disconnect first,
+// then revoke. A client with no credential has nothing to revoke. A revoke
+// failure never turns the completed disconnect into an error: it is reported
+// in credential_revoke_error and the credential stays active until
+// `client forget` retries it.
+func (s *Server) revokeCredentialAfterDisconnect(r *http.Request, clientID string, result *connect.ConnectResult) {
+	svc := s.clientsService
+	if svc == nil || !auth.ValidClientID(clientID) {
+		return
+	}
+	cred, err := svc.Get(clientID)
+	if err != nil {
+		result.CredentialRevokeError = err.Error()
+		return
+	}
+	if cred == nil {
+		return
+	}
+	forget := svc.Forget
+	if s.forgetClientCredential != nil {
+		forget = s.forgetClientCredential
+	}
+	view, err := forget(r.Context(), actorFromRequest(r), clientID, true)
+	var none *internalRuntime.NoClientCredentialError
+	switch {
+	case err == nil:
+		result.CredentialRevoked = view.TokenName
+	case errors.As(err, &none):
+		// Already revoked concurrently: nothing left to do.
+	default:
+		result.CredentialRevokeError = err.Error()
+		if s.logger != nil {
+			s.logger.Warnf("connect: disconnected %s but could not revoke its credential: %v", clientID, err)
+		}
+	}
 }
 
 func (s *Server) recordClientDisconnected(clientID string) {

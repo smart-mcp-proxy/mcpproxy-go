@@ -67,9 +67,16 @@ type ConnectResult struct {
 	// Rotation is "finalized" when the write replaced an active credential's
 	// secret (staged rotation, FR-021a), empty otherwise.
 	Rotation string `json:"rotation,omitempty" yaml:"rotation,omitempty"`
-	// CredentialRevoked names the credential an undo revoked because the
-	// restored config no longer holds it (plan D16).
+	// CredentialRevoked names the credential that was revoked: by an undo,
+	// because the restored config no longer holds it (plan D16), or by a
+	// disconnect, which cuts the client off (a later undo of that disconnect
+	// does not bring the credential back).
 	CredentialRevoked string `json:"credential_revoked,omitempty" yaml:"credential_revoked,omitempty"`
+	// CredentialRevokeError is set when a disconnect removed the entry but
+	// revoking the client credential failed. The disconnect still succeeded;
+	// the credential is still active and `mcpproxy client forget <id>`
+	// retries the revoke.
+	CredentialRevokeError string `json:"credential_revoke_error,omitempty" yaml:"credential_revoke_error,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration

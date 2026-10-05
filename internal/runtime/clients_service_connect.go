@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -314,14 +316,43 @@ func (m connectMinter) Commit(clientID string, intent connect.CredentialIntent, 
 	if !alreadyFinal {
 		if _, err := s.finalizeLocked(ctx, a, clientID); err != nil {
 			if restore {
-				// Best effort: put the previous binding back so the old secret
-				// is not left under the new, possibly wider, one.
-				_, _, _ = s.store.UpdateClientCredentialBinding(clientID, prevPin, prevMode)
+				s.restoreBindingLocked(ctx, a, clientID, prevPin, prevMode)
 			}
 			return err
 		}
 	}
 	return nil
+}
+
+// restoreBindingLocked puts the previous binding back after a rotating
+// connect moved it and then failed to finalize, so the old secret is not left
+// under the new, possibly wider, binding. It is the mirror of setBindingLocked:
+// it writes straight to the store and deliberately skips the guard and the
+// profile-exists checks, because it restores a state that already held and a
+// refusal must not leave the wider binding in place. Like the forward move it
+// then writes a compensating profile_change record and announces the change,
+// so the audit trail and the live sessions do not keep showing the new binding.
+// A restore failure is logged, not returned: Commit reports the finalize error.
+func (s *ClientsService) restoreBindingLocked(ctx context.Context, a Actor, clientID, prevPin, prevMode string) {
+	before, after, err := s.store.UpdateClientCredentialBinding(clientID, prevPin, prevMode)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("could not restore the previous client binding after a failed rotation",
+				zap.String("client_id", clientID), zap.Error(err))
+		}
+		return
+	}
+	change, diff := bindingChange(before, after)
+	if diff == nil {
+		diff = map[string]interface{}{}
+	}
+	diff["restored"] = true
+	diff["reason"] = "finalize_failed"
+	s.writeChange(ctx, a, changeRecord{
+		change: change, profile: after.ProfilePin, previousProfile: before.ProfilePin,
+		clientID: clientID, tokenName: after.Name, diff: diff,
+	})
+	s.announce(before, after)
 }
 
 // Abort implements connect.CredentialMinter. It rolls back only while the

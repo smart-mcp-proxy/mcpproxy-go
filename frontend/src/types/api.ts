@@ -1317,7 +1317,8 @@ export interface ConnectResult {
   // (`mcp_cli_••••`, never the secret), its token name and binding. Empty for a
   // keyless entry. `rotation` is 'finalized' when a reconnect replaced an
   // active credential's secret; `credential_revoked` names the credential an
-  // undo revoked.
+  // undo or a disconnect revoked; `credential_revoke_error` is set when a
+  // disconnect removed the entry but the revoke failed.
   credential?: string
   token_name?: string
   profile?: string
@@ -1325,6 +1326,7 @@ export interface ConnectResult {
   keyless?: boolean
   rotation?: string
   credential_revoked?: string
+  credential_revoke_error?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
