@@ -613,6 +613,9 @@ func NewMCPProxyServer(
 		capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
 	}
 
+	// Spec 058 FR-019: explicit, private, short-lived cache hints.
+	capabilities = append(capabilities, cacheHintServerOptions()...)
+
 	// Add server instructions for AI agent guidance
 	capabilities = append(capabilities, mcpserver.WithInstructions(resolveInstructions(config.Instructions)))
 
@@ -8347,4 +8350,34 @@ func forwardHeadersWriteError(names []string, static map[string]string) error {
 		msgs = append(msgs, e.Message)
 	}
 	return fmt.Errorf("invalid forward_headers: %s", strings.Join(msgs, "; "))
+}
+
+// mcpListCacheTTLMs is the freshness window (SEP-2549 ttlMs) advertised on
+// mcpproxy's list and read results. Listings change with quarantine approvals,
+// profile switches and upstream reconnects (list_changed covers connected
+// sessions), so the window is deliberately short.
+const mcpListCacheTTLMs int64 = 5000
+
+// cacheHintServerOptions returns the SEP-2549 cache-hint options for the proxy
+// MCP server (Spec 058 FR-019). Every cacheable surface is private: tools/list,
+// prompts/list and resources/* are filtered per caller by profile (Spec 108),
+// agent-token scope (Spec 105) and per-tool quarantine, so no result is
+// provably caller-independent and none may be shared across authorization
+// contexts. Per-method hints are set explicitly so a change to the library
+// default cannot silently widen the scope.
+func cacheHintServerOptions() []mcpserver.ServerOption {
+	opts := []mcpserver.ServerOption{
+		mcpserver.WithCacheHints(mcpListCacheTTLMs, mcp.CacheScopePrivate),
+	}
+	for _, m := range []mcp.MCPMethod{
+		mcp.MethodToolsList,
+		mcp.MethodPromptsList,
+		mcp.MethodResourcesList,
+		mcp.MethodResourcesTemplatesList,
+		mcp.MethodResourcesRead,
+		mcp.MethodServerDiscover,
+	} {
+		opts = append(opts, mcpserver.WithMethodCacheHints(m, mcpListCacheTTLMs, mcp.CacheScopePrivate))
+	}
+	return opts
 }
