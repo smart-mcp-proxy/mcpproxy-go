@@ -507,5 +507,6 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, refused.IsError)
 		require.Equal(t, expectedSetProfileRefusal(t, lockedCtx, "legacy"), resultText(t, refused))
+		require.Equal(t, "work-full", proxy.sessionStore.GetActiveProfile(sid), "a refused switch ignores, not clears, the stored selection")
 	})
 }
