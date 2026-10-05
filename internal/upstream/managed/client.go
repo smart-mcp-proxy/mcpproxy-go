@@ -1201,7 +1201,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	// wait (a queued call may outlive a reconnect), so a transport failure is
 	// only ever charged to the session that produced it (RC4-STDIO-001).
 	callEpoch := mc.connectionEpoch.Load()
-	result, err := invoker.CallTool(ctx, toolName, args)
+	result, err := invoker.CallTool(core.WithConnectionGeneration(ctx, callEpoch), toolName, args)
 	if err != nil {
 		mc.recordCallToolOAuthSignal(toolName, err)
 		// A 429 answered to a tools/call is the same instruction as one answered
