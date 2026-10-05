@@ -206,3 +206,68 @@ func TestOAuthRefreshRace_OneTokenRequestPerExpiry(t *testing.T) {
 		})
 	}
 }
+
+// TestOAuthRefreshRace_LateProactiveAfterReactiveFlight is the deterministic
+// form of the ordering that broke SC-001 in CI (shuffle run 37307361769): the
+// proactive timer fires for the old expiry, but its RefreshOAuthTokenDirect
+// only reads the record after the reactive flight already rotated the token.
+// Observing the new refresh token, it used to start a second flight and
+// rotate the just-minted grant again. A proactive refresh within
+// oauth.MinRefreshInterval of a saved token must not reach the network.
+func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		handlerClientID string
+	}{
+		{"handler sub-path", "dcr-client"},
+		{"stored DCR credentials sub-path", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			as := newRotatingAuthServer(t)
+			mcpSrv := newProtectedMCPServer(t, as)
+
+			db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+
+			name := strings.ReplaceAll(t.Name(), "/", "_")
+			cfg := &config.ServerConfig{Name: name, URL: mcpSrv.URL, Protocol: "streamable-http"}
+			key := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+			require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+				ServerName: key, DisplayName: cfg.Name, AccessToken: "at-0", RefreshToken: "rt-0",
+				TokenType: "Bearer", ExpiresAt: time.Now().Add(-time.Second), ClientID: "dcr-client",
+			}))
+
+			store := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, db)
+			oauthCfg := &client.OAuthConfig{
+				ClientID:              tc.handlerClientID,
+				TokenStore:            store,
+				PKCEEnabled:           true,
+				AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
+			}
+			tr, err := transport.NewStreamableHTTP(mcpSrv.URL, transport.WithHTTPOAuth(*oauthCfg))
+			require.NoError(t, err)
+			mcpClient := client.NewClient(tr)
+			c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+			c.client = mcpClient
+			c.bindOAuthRefresher(oauthCfg)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// Reactive: the token store refreshes the expired token.
+			tok, err := store.GetToken(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "at-1", tok.AccessToken)
+			require.Equal(t, int32(1), as.tokenRequests.Load())
+
+			// The proactive timer for the old expiry lands afterwards.
+			require.NoError(t, c.RefreshOAuthTokenDirect(ctx))
+			assert.Equal(t, int32(1), as.tokenRequests.Load(), "exactly one refresh request per expiry")
+
+			rec, err := db.GetOAuthToken(key)
+			require.NoError(t, err)
+			assert.Equal(t, "rt-1", rec.RefreshToken)
+		})
+	}
+}

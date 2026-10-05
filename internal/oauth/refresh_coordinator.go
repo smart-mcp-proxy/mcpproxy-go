@@ -94,7 +94,21 @@ type refreshKeyState struct {
 	// invalid_client and no successful token response has been seen since
 	// (FR-009 "exactly one re-registration").
 	dcrCleared bool
+
+	// lastSavedAt is when a token was last saved for this key (a refresh
+	// flight or a login). A proactive refresh within proactiveFreshWindow of
+	// it is answered from storage (FR-003, SC-001).
+	lastSavedAt time.Time
 }
+
+// proactiveFreshWindow: a proactive refresh that arrives this soon after a
+// token was saved for the key was decided from the pre-rotation state (the
+// RefreshManager timer fired while a reactive flight or a login was
+// rotating the token, before OnTokenSaved rescheduled it). It must not rotate
+// the just-minted grant again. The RefreshManager never schedules a refresh
+// sooner than MinRefreshInterval after a save, so a genuine proactive refresh
+// is never inside the window.
+const proactiveFreshWindow = MinRefreshInterval
 
 // RefreshCoordinator serializes refresh flights per server key across the
 // reactive (token store) and proactive (RefreshManager) triggers (Spec 113
@@ -231,6 +245,15 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 
 	gen := generationOf(rec)
 	c.mu.Lock()
+	// SC-001: a proactive caller that read the record only after another
+	// flight (or a login) rotated it observes the new refresh token, so the
+	// check above cannot tell. A token saved moments ago is not due.
+	if req.Trigger == RefreshTriggerProactive && rec.AccessToken != "" && !st.lastSavedAt.IsZero() &&
+		c.now().Sub(st.lastSavedAt) < proactiveFreshWindow &&
+		(rec.ExpiresAt.IsZero() || c.now().Before(rec.ExpiresAt)) {
+		c.mu.Unlock()
+		return tokenFromRecord(rec), true, nil
+	}
 	if st.latchErr != nil && st.latchGen == gen {
 		latched := st.latchErr
 		c.mu.Unlock()
@@ -252,6 +275,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	if refreshErr == nil {
 		c.mu.Lock()
 		c.resetLocked(st)
+		st.lastSavedAt = c.now()
 		c.mu.Unlock()
 		// FR-006a: the flight's persist was discarded because something newer
 		// was saved meanwhile; hand out the stored token instead.
@@ -365,9 +389,9 @@ func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient 
 func (c *RefreshCoordinator) NoteTokenSaved(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if st := c.keys[key]; st != nil {
-		c.resetLocked(st)
-	}
+	st := c.stateLocked(key)
+	c.resetLocked(st)
+	st.lastSavedAt = c.now()
 }
 
 func (c *RefreshCoordinator) resetLocked(st *refreshKeyState) {

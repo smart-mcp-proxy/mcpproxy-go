@@ -431,3 +431,56 @@ func waitForWaiters(t *testing.T, c *RefreshCoordinator, key string, n int) {
 	}
 	t.Fatalf("timed out waiting for %d waiters", n)
 }
+
+// SC-001: a proactive refresh that read the record only after a reactive
+// flight rotated it observes the new refresh token. Within
+// proactiveFreshWindow of the save it is answered from storage; once the
+// window has passed a proactive refresh reaches the network again.
+func TestRefreshCoordinator_LateProactiveAfterFlightSkipsNetwork(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	c := newTestCoordinator()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	_, skipped, err := c.Do(context.Background(), f.req(RefreshTriggerReactive, "rt-0"))
+	require.NoError(t, err)
+	require.False(t, skipped)
+
+	tok, skipped, err := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-1"))
+	require.NoError(t, err)
+	assert.True(t, skipped)
+	assert.Equal(t, "at-1", tok.AccessToken)
+	assert.Equal(t, int32(1), f.calls.Load(), "no second rotation of the just-minted grant")
+
+	now = now.Add(proactiveFreshWindow + time.Second)
+	tok, skipped, err = c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-1"))
+	require.NoError(t, err)
+	assert.False(t, skipped)
+	assert.Equal(t, "at-2", tok.AccessToken)
+	assert.Equal(t, int32(2), f.calls.Load())
+}
+
+// A login (NoteTokenSaved) right before a proactive timer fires also answers
+// it from storage; reactive callers are unaffected by the window.
+func TestRefreshCoordinator_ProactiveRightAfterLoginSkipsNetwork(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	c := newTestCoordinator()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	// The login saved a fresh token.
+	require.NoError(t, f.db.UpdateOAuthToken(f.key, func(r *storage.OAuthTokenRecord) error {
+		r.ExpiresAt = now.Add(time.Hour)
+		return nil
+	}))
+	c.NoteTokenSaved(f.key)
+	_, skipped, err := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
+	require.NoError(t, err)
+	assert.True(t, skipped)
+	assert.Equal(t, int32(0), f.calls.Load())
+
+	_, skipped, err = c.Do(context.Background(), f.req(RefreshTriggerReactive, "rt-0"))
+	require.NoError(t, err)
+	assert.False(t, skipped)
+	assert.Equal(t, int32(1), f.calls.Load())
+}

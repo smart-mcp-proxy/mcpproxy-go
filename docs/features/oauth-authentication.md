@@ -95,7 +95,9 @@ request that finds the token about to expire or by the background refresh
 schedule, at most one refresh request is sent to the authorization server per
 expiry; every caller waiting at that moment receives the same new token (or
 the same error). This matters for providers that rotate refresh tokens and
-revoke the whole grant when an old refresh token is reused.
+revoke the whole grant when an old refresh token is reused. A scheduled
+refresh that fires within 5 seconds of a token being saved (by another
+refresh or a sign-in) uses that token instead of rotating it again.
 
 Refresh failures are classified from the RFC 6749 §5.2 `error` code and the
 HTTP status of the token endpoint response:
