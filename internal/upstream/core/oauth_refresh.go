@@ -34,15 +34,22 @@ func (c *Client) staticClientSecret() string {
 // extraParamsClientID reports whether oauth.extra_params carries a client_id
 // (injected into every token request by oauth.OAuthTransportWrapper).
 func (c *Client) extraParamsClientID() bool {
+	return c.extraParamValue("client_id") != ""
+}
+
+// extraParamValue returns oauth.extra_params[key] (case-insensitive key).
+// OAuthTransportWrapper injects extra params into every token request, so a
+// client_secret given there is a sent credential too.
+func (c *Client) extraParamValue(key string) string {
 	if c.config == nil || c.config.OAuth == nil {
-		return false
+		return ""
 	}
 	for k, v := range c.config.OAuth.ExtraParams {
-		if strings.EqualFold(k, "client_id") && v != "" {
-			return true
+		if strings.EqualFold(k, key) {
+			return v
 		}
 	}
-	return false
+	return ""
 }
 
 // oauthRefreshFunc returns the one refresh function both triggers use (FR-003):
@@ -65,7 +72,7 @@ func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.Refresh
 			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
 			// mcp-go embeds the provider's error_description or raw body
 			// in the error text; scrub it before it reaches logs/events.
-			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, c.staticClientSecret())
+			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, c.staticClientSecret(), c.extraParamValue("client_secret"))
 		case rec.ClientID != "" && c.storage != nil:
 			return c.refreshWithStoredCredentials(ctx, handler, rec)
 		default:

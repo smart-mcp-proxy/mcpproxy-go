@@ -331,3 +331,25 @@ func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
 	assert.NotContains(t, err.Error(), rt)
 	assert.NotContains(t, err.Error(), secret)
 }
+
+// Review round 3: the error code field is redacted too, and a non-JSON body
+// longer than the detail cap still classifies by its RFC 6749 code.
+func TestRefreshWithStoredCredentials_CodeRedactedAndLongBodyClassified(t *testing.T) {
+	const rt = "opaque-rt-4711"
+	body := `{"error":"` + rt + `"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{config: &config.ServerConfig{Name: "s"}, logger: zap.NewNop()}
+	rec := &storage.OAuthTokenRecord{RefreshToken: rt, ClientID: "cid"}
+	_, err := c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), rt)
+
+	body = "<html>" + strings.Repeat("z", 2000) + " invalid_grant</html>"
+	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
+	cls, _ := oauth.ClassifyRefreshError(err)
+	assert.Equal(t, oauth.RefreshClassInvalidGrant, cls)
+}

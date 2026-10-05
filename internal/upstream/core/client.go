@@ -844,16 +844,19 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		// The exact credentials this request sent are removed verbatim first:
 		// an opaque value echoed without a key=value shape is invisible to
 		// the pattern scrubber.
-		detail := string(body)
-		for _, sent := range []string{record.RefreshToken, record.ClientSecret} {
-			if sent != "" {
-				detail = strings.ReplaceAll(detail, sent, "[REDACTED]")
-			}
-		}
+		sent := []string{record.RefreshToken, record.ClientSecret, c.extraParamValue("client_secret")}
+		detail := redactSent(string(body), sent...)
 		httpErr := &oauth.RefreshHTTPError{Status: resp.StatusCode, Detail: cappedScrub(detail, 512)}
+		code := ""
 		if jsonErr == nil {
-			httpErr.OAuthCode = tokenResp.Error
+			code = tokenResp.Error
+		} else {
+			// A non-JSON body is capped above; take the RFC 6749 §5.2 code
+			// from the whole body so the cap cannot hide it from
+			// classification.
+			code = rfc6749CodeIn(detail)
 		}
+		httpErr.OAuthCode = cappedScrub(redactSent(code, sent...), 64)
 		return nil, httpErr
 	}
 
@@ -875,6 +878,27 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		TokenType:    tokenResp.TokenType,
 		ExpiresAt:    expiresAt,
 	}, nil
+}
+
+// redactSent removes the exact credential values a token request sent.
+func redactSent(s string, sent ...string) string {
+	for _, v := range sent {
+		if v != "" {
+			s = strings.ReplaceAll(s, v, "[REDACTED]")
+		}
+	}
+	return s
+}
+
+// rfc6749CodeIn finds a known RFC 6749 §5.2 error code in a non-JSON body.
+func rfc6749CodeIn(body string) string {
+	for _, code := range []string{"invalid_grant", "invalid_client", "unauthorized_client",
+		"unsupported_grant_type", "invalid_scope", "temporarily_unavailable", "server_error"} {
+		if strings.Contains(body, code) {
+			return code
+		}
+	}
+	return ""
 }
 
 // GetConfig returns the server configuration
