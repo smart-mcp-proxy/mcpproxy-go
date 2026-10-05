@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"os"
@@ -977,6 +978,87 @@ func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
 		}
 		return bucket.Put([]byte(serverKey), newData)
 	})
+}
+
+// ErrSkipOAuthTokenUpdate may be returned by an UpdateOAuthToken mutate
+// function to leave the record untouched without reporting an error (e.g. a
+// compare-and-swap whose expected generation no longer matches).
+var ErrSkipOAuthTokenUpdate = stderrors.New("skip oauth token update")
+
+// UpdateOAuthToken applies mutate to the record stored under serverKey inside
+// one read-modify-write transaction (Spec 113 FR-006). Fields the mutate
+// function does not touch — the DCR client credentials, callback port,
+// redirect URI, Created and DisplayName — keep the values they have inside
+// that transaction, so a concurrent UpdateOAuthClientCredentials or
+// ClearOAuthClientCredentials is never lost. A missing record is created
+// with ServerName=serverKey. If mutate returns an error nothing is written;
+// ErrSkipOAuthTokenUpdate is swallowed.
+func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenRecord) error) error {
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		now := time.Now()
+		record := &OAuthTokenRecord{}
+		if data := bucket.Get([]byte(serverKey)); data != nil {
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+		} else {
+			record.ServerName = serverKey
+			record.Created = now
+		}
+		if err := mutate(record); err != nil {
+			return err
+		}
+		record.ServerName = serverKey
+		if record.Created.IsZero() {
+			record.Created = now
+		}
+		record.Updated = now
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(serverKey), newData)
+	})
+	if stderrors.Is(err, ErrSkipOAuthTokenUpdate) {
+		return nil
+	}
+	return err
+}
+
+// ClearOAuthClientCredentialsIf clears the DCR fields like
+// ClearOAuthClientCredentials, but only while the stored ClientID still
+// equals expectedClientID (compare-and-clear in one transaction, Spec 113
+// FR-009), so a stale refresh failure cannot clear a registration that a
+// concurrent login just saved. It reports whether it cleared.
+func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID string) (bool, error) {
+	cleared := false
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		data := bucket.Get([]byte(serverKey))
+		if data == nil {
+			return nil
+		}
+		record := &OAuthTokenRecord{}
+		if err := record.UnmarshalBinary(data); err != nil {
+			return err
+		}
+		if expectedClientID == "" || record.ClientID != expectedClientID {
+			return nil
+		}
+		record.ClientID = ""
+		record.ClientSecret = ""
+		record.CallbackPort = 0
+		record.RedirectURI = ""
+		record.Updated = time.Now()
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		cleared = true
+		return bucket.Put([]byte(serverKey), newData)
+	})
+	return cleared, err
 }
 
 // ListOAuthTokens returns all OAuth token records

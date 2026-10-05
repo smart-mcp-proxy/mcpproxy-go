@@ -198,7 +198,7 @@ func (m *TokenStoreManager) GetOrCreateTokenStore(serverName string) client.Toke
 		return store
 	}
 
-	store := client.NewMemoryTokenStore()
+	store := newCoordinatedMemoryTokenStore(serverName)
 	m.stores[serverName] = store
 	m.logger.Info("Created new token store", zap.String("server", serverName))
 	return store

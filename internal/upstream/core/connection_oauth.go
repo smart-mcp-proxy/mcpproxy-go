@@ -287,6 +287,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	c.logger.Debug("🔗 OAuth HTTP client created, starting connection")
 	c.client = httpClient
+	c.bindOAuthRefresher(oauthConfig) // Spec 113 FR-002: serialize mcp-go's reactive refresh
 
 	// Add detailed logging before starting the OAuth client
 	c.logger.Info("🚀 Starting OAuth client - this should trigger browser opening",
@@ -724,6 +725,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	c.logger.Debug("🔗 OAuth SSE client created, starting connection")
 	c.client = sseClient
+	c.bindOAuthRefresher(oauthConfig) // Spec 113 FR-002: serialize mcp-go's reactive refresh
 
 	// Register connection lost handler for SSE transport to detect GOAWAY/disconnects
 	c.client.OnConnectionLost(func(err error) {
@@ -1339,7 +1341,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.String("code", code[:10]+"..."))
 
-		err = oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
+		err = c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
@@ -1625,7 +1627,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 
 		// Exchange the authorization code for a token
-		err = oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
+		err = c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
 		if err != nil {
 			return result, fmt.Errorf("failed to process authorization response: %w", err)
 		}
@@ -2016,6 +2018,7 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 
 	// Store the client
 	c.client = httpClient
+	c.bindOAuthRefresher(oauthConfig) // Spec 113 FR-002: serialize mcp-go's reactive refresh
 
 	// Start the client
 	if err := c.client.Start(ctx); err != nil {
@@ -2302,7 +2305,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		}
 
 		// Exchange the authorization code for a token
-		if err := oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier); err != nil {
+		if err := c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
@@ -2438,6 +2441,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 
 	// Store the client temporarily
 	c.client = httpClient
+	c.bindOAuthRefresher(oauthConfig) // Spec 113 FR-002: serialize mcp-go's reactive refresh
 
 	c.logger.Info("🚀 Starting OAuth HTTP client and triggering initialization to force authorization...")
 
@@ -2511,6 +2515,7 @@ func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartRe
 
 	// Store the client temporarily
 	c.client = sseClient
+	c.bindOAuthRefresher(oauthConfig) // Spec 113 FR-002: serialize mcp-go's reactive refresh
 
 	c.logger.Info("🚀 Starting OAuth SSE client and triggering authorization...")
 

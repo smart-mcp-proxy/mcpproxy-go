@@ -4,13 +4,13 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // Default refresh configuration
@@ -111,7 +111,7 @@ type RefreshEventEmitter interface {
 // This interface decouples RefreshManager from the concrete MetricsManager.
 type RefreshMetricsRecorder interface {
 	// RecordOAuthRefresh records an OAuth token refresh attempt.
-	// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+	// Result is one of: "success", "failed_network", "failed_invalid_grant", "failed_invalid_client", "failed_server_error", "failed_server_gone", "failed_other".
 	RecordOAuthRefresh(server, result string)
 	// RecordOAuthRefreshDuration records the duration of an OAuth token refresh attempt.
 	RecordOAuthRefreshDuration(server, result string, duration time.Duration)
@@ -205,6 +205,11 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 	// Create a cancellable context for all timers
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	m.started = true
+
+	// Spec 113 FR-008: terminal outcomes of reactive refresh flights (started
+	// by the token store, not by this manager) reach the schedule through the
+	// coordinator's completion hook.
+	DefaultRefreshCoordinator().SetCompletionHook(m.onRefreshOutcome)
 
 	m.logger.Info("RefreshManager.Start() called")
 
@@ -360,7 +365,7 @@ func (m *RefreshManager) executeImmediateRefresh(serverName string) {
 	// Get token info for logging
 	var tokenAge time.Duration
 	if m.storage != nil {
-		if token, err := m.storage.GetOAuthToken(serverName); err == nil && token != nil {
+		if token := m.lookupToken(serverName); token != nil {
 			tokenAge = time.Since(token.Updated)
 		}
 	}
@@ -405,6 +410,8 @@ func (m *RefreshManager) Stop() {
 	}
 
 	m.logger.Info("Stopping RefreshManager", zap.Int("active_schedules", len(m.schedules)))
+
+	DefaultRefreshCoordinator().SetCompletionHook(nil)
 
 	// Cancel context to signal all goroutines
 	if m.cancel != nil {
@@ -473,11 +480,11 @@ func (m *RefreshManager) GetScheduleCount() int {
 
 // RefreshStateInfo contains refresh state information for health status reporting.
 type RefreshStateInfo struct {
-	State       RefreshState  // Current refresh state
-	RetryCount  int           // Number of retry attempts
-	LastError   string        // Last error message
-	NextAttempt *time.Time    // When next refresh attempt is scheduled
-	ExpiresAt   time.Time     // When the token expires
+	State       RefreshState // Current refresh state
+	RetryCount  int          // Number of retry attempts
+	LastError   string       // Last error message
+	NextAttempt *time.Time   // When next refresh attempt is scheduled
+	ExpiresAt   time.Time    // When the token expires
 }
 
 // GetRefreshState returns the current refresh state for a server.
@@ -663,8 +670,8 @@ func (m *RefreshManager) handleRefreshSuccess(serverName string) {
 
 	// Get the new token expiration to emit event
 	if m.storage != nil {
-		token, err := m.storage.GetOAuthToken(serverName)
-		if err == nil && token != nil && m.eventEmitter != nil {
+		token := m.lookupToken(serverName)
+		if token != nil && m.eventEmitter != nil {
 			m.eventEmitter.EmitOAuthTokenRefreshed(serverName, token.ExpiresAt)
 		}
 	}
@@ -676,9 +683,20 @@ func (m *RefreshManager) handleRefreshSuccess(serverName string) {
 // Terminal errors (invalid_grant, server not found) stop immediately.
 // Transient errors retry with exponential backoff up to maxRetries.
 func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
+	// Classify the error for metrics and handling (Spec 113 FR-007/FR-008).
+	cls, httpStatus := ClassifyRefreshError(err)
+	errorType := cls.MetricLabel()
+
 	m.mu.Lock()
 	schedule := m.schedules[serverName]
 	if schedule == nil {
+		m.mu.Unlock()
+		return
+	}
+	// A terminal failure is reported once: the coordinator hook (reactive
+	// flight) and a proactive attempt answered by the coordinator's latch
+	// carry the same outcome.
+	if cls.IsTerminal() && schedule.RefreshState == RefreshStateFailed {
 		m.mu.Unlock()
 		return
 	}
@@ -690,44 +708,40 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 	expiresAt := schedule.ExpiresAt
 	m.mu.Unlock()
 
-	// Classify the error for metrics and handling
-	errorType := classifyRefreshError(err)
-
 	m.logger.Warn("OAuth token refresh failed",
 		zap.String("server", serverName),
 		zap.Error(err),
 		zap.String("error_type", errorType),
+		zap.Int("http_status", httpStatus),
 		zap.Int("retry_count", retryCount))
 
-	// Check if this is a permanent failure (invalid_grant means refresh token is invalid/expired)
-	if errorType == "failed_invalid_grant" {
-		m.logger.Error("OAuth refresh token invalid - re-authentication required",
-			zap.String("server", serverName))
-
-		m.mu.Lock()
-		if schedule := m.schedules[serverName]; schedule != nil {
-			schedule.RefreshState = RefreshStateFailed
-			schedule.LastError = "Refresh token expired or revoked - re-authentication required"
+	// Terminal failures stop immediately: the refresh token is invalid
+	// (invalid_grant), the client was rejected (invalid_client, FR-009), the
+	// grant/scope is not allowed, or the server is gone. No amount of retrying
+	// fixes these; the user has to sign in again (or fix the config).
+	if cls.IsTerminal() {
+		lastError := err.Error()
+		switch cls {
+		case RefreshClassInvalidGrant:
+			lastError = "Refresh token expired or revoked - re-authentication required"
+		case RefreshClassInvalidClient, RefreshClassTerminalOther:
+			var failure *RefreshFailure
+			if errors.As(err, &failure) && failure.Message != "" {
+				lastError = failure.Message
+			}
 		}
-		m.mu.Unlock()
-
-		if m.eventEmitter != nil {
-			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
-		}
-		return
-	}
-
-	// Check if the server is gone (removed from config or not OAuth).
-	// No amount of retrying will fix this - stop immediately.
-	if errorType == "failed_server_gone" {
-		m.logger.Error("OAuth refresh stopped - server no longer available",
+		m.logger.Error("OAuth token refresh failed permanently - re-authentication required",
 			zap.String("server", serverName),
+			zap.String("error_type", errorType),
 			zap.Error(err))
 
 		m.mu.Lock()
 		if schedule := m.schedules[serverName]; schedule != nil {
 			schedule.RefreshState = RefreshStateFailed
-			schedule.LastError = err.Error()
+			schedule.LastError = lastError
+			if schedule.Timer != nil {
+				schedule.Timer.Stop()
+			}
 		}
 		m.mu.Unlock()
 
@@ -789,58 +803,51 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 	m.rescheduleAfterDelay(serverName, backoff)
 }
 
-// classifyRefreshError categorizes a refresh error for metrics and error handling.
-// Returns one of: "failed_network", "failed_invalid_grant", "failed_server_gone", "failed_other".
+// onRefreshOutcome is the RefreshCoordinator completion hook. Proactive
+// flights are handled by executeRefresh with the error it gets back; this only
+// applies terminal outcomes of reactive flights to the schedule.
+func (m *RefreshManager) onRefreshOutcome(o RefreshOutcome) {
+	if o.Trigger != RefreshTriggerReactive || !o.Class.IsTerminal() || o.Err == nil {
+		return
+	}
+	m.handleRefreshFailure(o.ServerName, o.Err)
+}
+
+// lookupToken finds the token record of a server by display name (Spec 113
+// FR-010). Records are keyed by GenerateServerKey(name, url), which this
+// manager cannot compute (it only knows the name), so it falls back to the
+// record whose DisplayName matches, preferring the most recently updated one.
+// A legacy record keyed by the bare name is still found directly.
+func (m *RefreshManager) lookupToken(serverName string) *storage.OAuthTokenRecord {
+	if m.storage == nil {
+		return nil
+	}
+	if token, err := m.storage.GetOAuthToken(serverName); err == nil && token != nil {
+		return token
+	}
+	tokens, err := m.storage.ListOAuthTokens()
+	if err != nil {
+		return nil
+	}
+	var best *storage.OAuthTokenRecord
+	for _, t := range tokens {
+		if t == nil || t.GetServerName() != serverName {
+			continue
+		}
+		if best == nil || t.Updated.After(best.Updated) {
+			best = t
+		}
+	}
+	return best
+}
+
+// classifyRefreshError returns the metric result label for a refresh error.
+// Classification is structural (ClassifyRefreshError, Spec 113 FR-007); the
+// label set keeps the pre-Spec-113 values and adds failed_invalid_client and
+// failed_server_error.
 func classifyRefreshError(err error) string {
-	if err == nil {
-		return "success"
-	}
-
-	errStr := err.Error()
-
-	// Check for terminal server-gone errors (server removed from config or not OAuth).
-	// These should never be retried because the server no longer exists or doesn't use OAuth.
-	serverGoneErrors := []string{
-		"server not found",
-		"server does not use OAuth",
-	}
-	for _, pattern := range serverGoneErrors {
-		if stringutil.ContainsIgnoreCase(errStr, pattern) {
-			return "failed_server_gone"
-		}
-	}
-
-	// Check for permanent OAuth errors (refresh token invalid/expired)
-	permanentErrors := []string{
-		"invalid_grant",
-		"refresh token expired",
-		"refresh token revoked",
-		"refresh token invalid",
-	}
-	for _, pattern := range permanentErrors {
-		if stringutil.ContainsIgnoreCase(errStr, pattern) {
-			return "failed_invalid_grant"
-		}
-	}
-
-	// Check for network-related errors (retryable)
-	networkErrors := []string{
-		"timeout",
-		"connection refused",
-		"connection reset",
-		"no such host",
-		"dial tcp",
-		"network",
-		"EOF",
-		"context deadline exceeded",
-	}
-	for _, pattern := range networkErrors {
-		if stringutil.ContainsIgnoreCase(errStr, pattern) {
-			return "failed_network"
-		}
-	}
-
-	return "failed_other"
+	cls, _ := ClassifyRefreshError(err)
+	return cls.MetricLabel()
 }
 
 // maxBackoffExponent is the maximum shift exponent that won't overflow when

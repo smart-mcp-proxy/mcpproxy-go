@@ -737,12 +737,14 @@ func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 // RefreshOAuthTokenDirect forces an OAuth token refresh without reconnecting.
 // This is used by the RefreshManager for proactive token refresh.
 // Unlike ForceReconnect (which returns early when already connected),
-// this directly calls the OAuth handler's RefreshToken method, bypassing
-// the IsExpired() check that would prevent refresh of still-valid tokens.
+// this refreshes even a still-valid token.
 //
-// For servers using Dynamic Client Registration (DCR), the handler may not have
-// client credentials populated. In that case, we fall back to manual refresh
-// using stored credentials from the OAuthTokenRecord.
+// Spec 113 FR-001: the refresh runs as a flight of the process-wide
+// oauth.RefreshCoordinator, shared with the reactive path of the token store
+// handed to mcp-go, so one expiry causes at most one token request. The flight
+// uses the same refresh function as the reactive path (oauthRefreshFunc):
+// mcp-go's handler.RefreshToken when the live handler has a client id, else
+// the stored DCR credentials.
 func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	handler := c.GetOAuthHandler()
 	if handler == nil {
@@ -762,81 +764,26 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return fmt.Errorf("no refresh token available for %s", c.config.Name)
 	}
 
-	handlerClientID := handler.GetClientID()
-	hasHandlerCredentials := handlerClientID != ""
-
 	c.logger.Info("Executing direct OAuth token refresh",
 		zap.String("server", c.config.Name),
 		zap.Time("current_expiry", record.ExpiresAt),
-		zap.Bool("handler_has_credentials", hasHandlerCredentials),
+		zap.Bool("handler_has_credentials", handler.GetClientID() != ""),
 		zap.Bool("storage_has_credentials", record.ClientID != ""))
 
-	// If handler has credentials, use mcp-go's RefreshToken
-	if hasHandlerCredentials {
-		_, err = handler.RefreshToken(ctx, record.RefreshToken)
-		if err != nil {
-			c.logger.Error("Direct OAuth token refresh via handler failed",
-				zap.String("server", c.config.Name),
-				zap.Error(err))
-			return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
-		}
-		c.logger.Info("Direct OAuth token refresh completed successfully via handler",
-			zap.String("server", c.config.Name))
-		return nil
-	}
-
-	// Handler doesn't have credentials - use stored DCR credentials
-	if record.ClientID == "" {
-		return fmt.Errorf("no client credentials available for %s (neither in handler nor storage)", c.config.Name)
-	}
-
-	c.logger.Info("Using stored DCR credentials for token refresh",
-		zap.String("server", c.config.Name),
-		zap.String("client_id", record.ClientID[:min(8, len(record.ClientID))]+"..."))
-
-	metadata, err := handler.GetServerMetadata(ctx)
+	req := c.oauthRefreshRequest(serverKey, handler)
+	req.ObservedRefreshToken = record.RefreshToken
+	req.Trigger = oauth.RefreshTriggerProactive
+	_, skipped, err := oauth.DefaultRefreshCoordinator().Do(ctx, req)
 	if err != nil {
-		return fmt.Errorf("failed to get server metadata for %s: %w", c.config.Name, err)
-	}
-	if metadata.TokenEndpoint == "" {
-		return fmt.Errorf("token endpoint not found in server metadata for %s", c.config.Name)
-	}
-
-	newToken, err := c.refreshTokenWithStoredCredentials(ctx, metadata.TokenEndpoint, record)
-	if err != nil {
-		c.logger.Error("Manual OAuth token refresh failed",
+		c.logger.Error("Direct OAuth token refresh failed",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 		return fmt.Errorf("OAuth refresh failed for %s: %w", c.config.Name, err)
 	}
 
-	// Update storage with new token.
-	// No in-memory sync needed: mcp-go's OAuthHandler calls TokenStore.GetToken() on each
-	// request, and PersistentTokenStore reads from BBolt, so it picks up the updated token.
-	record.AccessToken = newToken.AccessToken
-	if newToken.RefreshToken != "" {
-		record.RefreshToken = newToken.RefreshToken
-	}
-	record.ExpiresAt = newToken.ExpiresAt
-	record.Updated = time.Now()
-
-	// Ensure DisplayName is set for legacy tokens that predate the DisplayName field.
-	// Without this, CleanupOrphanedOAuthTokens could misclassify the token as orphaned.
-	if record.DisplayName == "" {
-		record.DisplayName = c.config.Name
-	}
-
-	if err := c.storage.SaveOAuthToken(record); err != nil {
-		c.logger.Error("Failed to save refreshed token",
-			zap.String("server", c.config.Name),
-			zap.Error(err))
-		return fmt.Errorf("failed to save refreshed token for %s: %w", c.config.Name, err)
-	}
-
-	c.logger.Info("Direct OAuth token refresh completed successfully via stored credentials",
+	c.logger.Info("Direct OAuth token refresh completed successfully",
 		zap.String("server", c.config.Name),
-		zap.Time("new_expiry", newToken.ExpiresAt))
-
+		zap.Bool("network_skipped", skipped))
 	return nil
 }
 
@@ -847,9 +794,12 @@ type oauthTokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Scope        string `json:"scope,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
-// refreshTokenWithStoredCredentials performs a token refresh using credentials from storage
+// refreshTokenWithStoredCredentials performs a token refresh using credentials
+// from storage. A non-2xx response (or a 2xx carrying an RFC 6749 §5.2 error
+// body) is returned as a typed *oauth.RefreshHTTPError (Spec 113 FR-007).
 func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEndpoint string, record *storage.OAuthTokenRecord) (*storage.OAuthTokenRecord, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
@@ -879,7 +829,10 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	var tokenResp oauthTokenResponse
+	jsonErr := json.Unmarshal(body, &tokenResp)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (jsonErr == nil && tokenResp.Error != "") {
 		// Issue #1158 (review round 2, investigation 2). The token endpoint's
 		// error BODY was embedded verbatim, and this error is logged with the
 		// server name and returned to the REST caller. Two problems, both real:
@@ -888,13 +841,15 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		// client_secret and refresh_token), and the body is unbounded, so a
 		// 502 HTML page from a proxy in front of the endpoint went into
 		// main.log whole. Scrub with the free-text rule, then cap.
-		return nil, fmt.Errorf("token refresh failed with status %d: %s",
-			resp.StatusCode, cappedScrub(string(body), 512))
+		httpErr := &oauth.RefreshHTTPError{Status: resp.StatusCode, Detail: cappedScrub(string(body), 512)}
+		if jsonErr == nil {
+			httpErr.OAuthCode = tokenResp.Error
+		}
+		return nil, httpErr
 	}
 
-	var tokenResp oauthTokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	if jsonErr != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", jsonErr)
 	}
 
 	var expiresAt time.Time

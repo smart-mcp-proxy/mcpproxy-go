@@ -90,6 +90,29 @@ MCPProxy automatically refreshes tokens before expiration:
 2. Uses refresh token to get new access token
 3. Falls back to browser re-authentication if refresh fails
 
+Refreshes are **serialized per server**. Whether a refresh is triggered by a
+request that finds the token about to expire or by the background refresh
+schedule, at most one refresh request is sent to the authorization server per
+expiry; every caller waiting at that moment receives the same new token (or
+the same error). This matters for providers that rotate refresh tokens and
+revoke the whole grant when an old refresh token is reused.
+
+Refresh failures are classified from the RFC 6749 §5.2 `error` code and the
+HTTP status of the token endpoint response:
+
+| Response | Behaviour |
+|---|---|
+| `invalid_grant` | Stops retrying; sign in again. |
+| `invalid_client`, dynamically registered client | The stored client registration is cleared; sign in again to register a new client. If the provider rejects the new registration too, configure a static `oauth.client_id`. |
+| `invalid_client`, static `oauth.client_id` | Stops retrying; fix `oauth.client_id` / `oauth.client_secret`. |
+| `unauthorized_client`, `unsupported_grant_type`, `invalid_scope` | Stops retrying; the code is shown in the error. |
+| `server_error`, `temporarily_unavailable`, HTTP 5xx or 429, network errors | Retried with exponential backoff (10 s doubling to 5 min). |
+| Anything else | Retried with backoff, then marked failed after the retry limit. |
+
+The `mcpproxy_oauth_refresh_total` metric labels these as `failed_invalid_grant`,
+`failed_invalid_client`, `failed_server_error`, `failed_network`,
+`failed_server_gone` and `failed_other`.
+
 ### Signing in from the Web UI
 
 When an OAuth-protected server has no usable token, the Web UI does **not**
