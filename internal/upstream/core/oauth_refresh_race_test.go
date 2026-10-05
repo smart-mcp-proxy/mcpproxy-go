@@ -337,8 +337,9 @@ func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
 func TestRefreshWithStoredCredentials_CodeRedactedAndLongBodyClassified(t *testing.T) {
 	const rt = "opaque-rt-4711"
 	body := `{"error":"` + rt + `"}`
+	status := http.StatusBadRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(status)
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
@@ -352,4 +353,10 @@ func TestRefreshWithStoredCredentials_CodeRedactedAndLongBodyClassified(t *testi
 	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
 	cls, _ := oauth.ClassifyRefreshError(err)
 	assert.Equal(t, oauth.RefreshClassInvalidGrant, cls)
+
+	// A 5xx gateway page that mentions a code stays transient.
+	status = http.StatusBadGateway
+	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
+	cls, _ = oauth.ClassifyRefreshError(err)
+	assert.Equal(t, oauth.RefreshClassServerError, cls)
 }

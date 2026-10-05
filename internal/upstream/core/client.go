@@ -850,10 +850,11 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		code := ""
 		if jsonErr == nil {
 			code = tokenResp.Error
-		} else {
+		} else if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 			// A non-JSON body is capped above; take the RFC 6749 §5.2 code
 			// from the whole body so the cap cannot hide it from
-			// classification.
+			// classification. Not for 5xx/429: a gateway page that merely
+			// mentions a code must stay transient (the status decides).
 			code = rfc6749CodeIn(detail)
 		}
 		httpErr.OAuthCode = cappedScrub(redactSent(code, sent...), 64)
