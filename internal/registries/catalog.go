@@ -496,6 +496,10 @@ func publisherOwnsRepo(id, sourceCodeURL string) bool {
 	return ok && domainLabelMatchesOwner(label, repoOwner)
 }
 
+// tldWords are TLD / second-level suffix words that are never a publisher
+// identity: "com.org.evil/x" must not verify as owner "org" against acme-org.
+var tldWords = map[string]bool{"com": true, "org": true, "net": true, "gov": true, "edu": true, "co": true, "ac": true, "io": true}
+
 // domainLabelMatchesOwner is the domain-namespace half of publisherOwnsRepo.
 // A bare substring test let any short label verify against an unrelated owner
 // ("hub" inside "github"), so the label must be the owner itself, a whole
@@ -503,7 +507,7 @@ func publisherOwnsRepo(id, sourceCodeURL string) bool {
 // 5 characters with a short (at most 4 characters) prefix or suffix on the
 // owner ("notion" of makenotion).
 func domainLabelMatchesOwner(label, repoOwner string) bool {
-	if len(label) < 3 {
+	if len(label) < 3 || tldWords[label] {
 		return false
 	}
 	if label == repoOwner {
