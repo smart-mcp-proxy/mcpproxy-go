@@ -1341,7 +1341,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.String("code", code[:10]+"..."))
 
-		err = c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
@@ -1627,7 +1627,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 
 		// Exchange the authorization code for a token
-		err = c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
 		if err != nil {
 			return result, fmt.Errorf("failed to process authorization response: %w", err)
 		}
@@ -2305,7 +2305,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		}
 
 		// Exchange the authorization code for a token
-		if err := c.annotateCodeExchangeError(oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+		if err := c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))

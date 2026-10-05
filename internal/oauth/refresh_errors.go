@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"syscall"
+	"unicode/utf8"
 
 	transport "github.com/mark3labs/mcp-go/client/transport"
 
@@ -275,4 +276,42 @@ func classifyBySubstring(errStr string) RefreshErrorClass {
 		}
 	}
 	return RefreshClassOther
+}
+
+// refreshErrorTextLimit caps the rendered text of a refresh error.
+const refreshErrorTextLimit = 512
+
+// scrubbedRefreshError keeps the original error chain, so classification by
+// errors.As/Is still works, but renders a scrubbed, capped message.
+type scrubbedRefreshError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedRefreshError) Error() string { return e.msg }
+func (e *scrubbedRefreshError) Unwrap() error { return e.err }
+
+// ScrubRefreshError wraps an error from a token-endpoint request so that its
+// message never carries provider-authored text verbatim: mcp-go embeds the
+// RFC 6749 error_description, or the whole non-JSON response body, in the
+// error string, and providers echo request parameters (refresh_token,
+// client_secret) back there. The message is scrubbed with ScrubUpstreamText
+// and capped; the wrapped chain is kept for ClassifyRefreshError.
+func ScrubRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *scrubbedRefreshError
+	if errors.As(err, &already) {
+		return err
+	}
+	msg := ScrubUpstreamText(err.Error())
+	if len(msg) > refreshErrorTextLimit {
+		cut := refreshErrorTextLimit
+		for cut > 0 && !utf8.RuneStart(msg[cut]) {
+			cut--
+		}
+		msg = msg[:cut] + "… (truncated)"
+	}
+	return &scrubbedRefreshError{msg: msg, err: err}
 }

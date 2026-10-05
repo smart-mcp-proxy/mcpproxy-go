@@ -77,14 +77,14 @@ func (f *coordFixture) req(trigger RefreshTrigger, observed string) RefreshReque
 	return RefreshRequest{
 		Key: f.key, ServerName: f.name, ObservedRefreshToken: observed, Trigger: trigger,
 		Load: f.load, Refresh: f.refresh,
-		ClearClient: func(expected string) (bool, error) { return f.db.ClearOAuthClientCredentialsIf(f.key, expected) },
+		ClearClient: func(expectedClientID, expectedRT string) (bool, error) {
+			return f.db.ClearOAuthClientCredentialsIf(f.key, expectedClientID, expectedRT)
+		},
 	}
 }
 
 func newTestCoordinator() *RefreshCoordinator {
-	c := NewRefreshCoordinator()
-	c.flowActive = func(string) bool { return false }
-	return c
+	return NewRefreshCoordinator()
 }
 
 func TestRefreshCoordinator_SingleFlight(t *testing.T) {
@@ -360,15 +360,22 @@ func TestRefreshCoordinator_InvalidClient(t *testing.T) {
 		rec, _ = f.db.GetOAuthToken(f.key)
 		assert.Equal(t, "dcr-2", rec.ClientID, "second rejection does not clear again")
 
-		// The same rule applies to the login flow's code exchange.
-		err = c.AnnotateCodeExchangeError(f.key, false, invalidClient)
+		// The same rule applies to the login flow's code exchange with the
+		// newly registered client...
+		err = c.AnnotateCodeExchangeError(f.key, false, "dcr-2", invalidClient)
 		assert.Contains(t, err.Error(), "rejects new client registrations")
 		cls, _ := ClassifyRefreshError(err)
 		assert.Equal(t, RefreshClassInvalidClient, cls)
 
+		// ...but a login built before the clear, still exchanging with the
+		// cleared client, is told to sign in again (re-register).
+		err = c.AnnotateCodeExchangeError(f.key, false, "dcr-1", invalidClient)
+		assert.Contains(t, err.Error(), "sign in again to re-register")
+		assert.NotContains(t, err.Error(), "rejects new client registrations")
+
 		// A successful token response resets the rule.
 		c.NoteTokenSaved(f.key)
-		err = c.AnnotateCodeExchangeError(f.key, false, invalidClient)
+		err = c.AnnotateCodeExchangeError(f.key, false, "dcr-2", invalidClient)
 		assert.Same(t, invalidClient, err)
 	})
 
@@ -379,7 +386,7 @@ func TestRefreshCoordinator_InvalidClient(t *testing.T) {
 		req := f.req(RefreshTriggerProactive, "rt-0")
 		req.StaticClient = true
 		var cleared atomic.Int32
-		req.ClearClient = func(string) (bool, error) { cleared.Add(1); return true, nil }
+		req.ClearClient = func(string, string) (bool, error) { cleared.Add(1); return true, nil }
 
 		_, _, err := c.Do(context.Background(), req)
 		assert.Contains(t, err.Error(), "oauth.client_id")
@@ -388,16 +395,23 @@ func TestRefreshCoordinator_InvalidClient(t *testing.T) {
 		assert.True(t, cls.IsTerminal())
 	})
 
-	t.Run("active login flow prevents the clear", func(t *testing.T) {
+	// Review round 1: tryOAuthAuth holds a connection-wide OAuth flow while
+	// its own reactive refresh runs. An active flow must not keep a rejected
+	// registration (the next sign-in would reload it and skip DCR forever);
+	// the compare-and-clear protects registrations a login actually saved.
+	t.Run("active connect flow still clears the rejected registration", func(t *testing.T) {
 		f := newCoordFixture(t, "dcr-1")
 		f.failErr = invalidClient
 		c := newTestCoordinator()
-		c.flowActive = func(string) bool { return true }
+		coord := GetGlobalCoordinator()
+		_, err := coord.StartFlow(f.name)
+		require.NoError(t, err)
+		t.Cleanup(func() { coord.EndFlow(f.name, false, nil) })
 
-		_, _, err := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
-		assert.Error(t, err)
+		_, _, err = c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
+		assert.ErrorContains(t, err, "sign in again to re-register")
 		rec, _ := f.db.GetOAuthToken(f.key)
-		assert.Equal(t, "dcr-1", rec.ClientID)
+		assert.Empty(t, rec.ClientID)
 	})
 
 	t.Run("compare-and-clear keeps a registration saved by a concurrent login", func(t *testing.T) {
@@ -483,4 +497,63 @@ func TestRefreshCoordinator_ProactiveRightAfterLoginSkipsNetwork(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, skipped)
 	assert.Equal(t, int32(1), f.calls.Load())
+}
+
+// FR-006a (review round 1): a login that lands after the flight's post-refresh
+// re-read but before the terminal latch is taken must not be latched or
+// failed by the stale invalid_grant.
+func TestRefreshCoordinator_LoginBetweenReloadAndLatch(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	f.failErr = fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_grant"})
+	c := newTestCoordinator()
+	var hookCalls atomic.Int32
+	c.SetCompletionHook(func(RefreshOutcome) { hookCalls.Add(1) })
+
+	req := f.req(RefreshTriggerReactive, "rt-0")
+	var loads atomic.Int32
+	req.Load = func() (*storage.OAuthTokenRecord, error) {
+		if loads.Add(1) == 3 { // initial read, post-refresh read, then the latch read
+			require.NoError(t, f.db.UpdateOAuthToken(f.key, func(r *storage.OAuthTokenRecord) error {
+				r.AccessToken, r.RefreshToken, r.ExpiresAt = "login-at", "login-rt", time.Now().Add(time.Hour)
+				return nil
+			}))
+		}
+		return f.load()
+	}
+	tok, _, err := c.Do(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, "login-at", tok.AccessToken)
+	assert.Equal(t, int32(0), hookCalls.Load(), "stale completion has no terminal side effects")
+
+	f.failErr = nil
+	_, skipped, err := c.Do(context.Background(), f.req(RefreshTriggerReactive, "login-rt"))
+	require.NoError(t, err)
+	assert.False(t, skipped, "the login grant is not latched")
+}
+
+// FR-006a/FR-009 (review round 1): a login that reused the DCR client id but
+// saved a new grant before a stale invalid_client is handled keeps its
+// registration.
+func TestRefreshCoordinator_InvalidClientDoesNotClearLoginReusingClient(t *testing.T) {
+	f := newCoordFixture(t, "dcr-1")
+	f.failErr = fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_client"})
+	f.block = make(chan struct{})
+	c := newTestCoordinator()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Do(context.Background(), f.req(RefreshTriggerReactive, "rt-0"))
+		done <- err
+	}()
+	<-f.started
+	require.NoError(t, f.db.UpdateOAuthToken(f.key, func(r *storage.OAuthTokenRecord) error {
+		r.AccessToken, r.RefreshToken, r.ExpiresAt = "login-at", "login-rt", time.Now().Add(time.Hour)
+		return nil
+	}))
+	close(f.block)
+	<-done
+
+	rec, err := f.db.GetOAuthToken(f.key)
+	require.NoError(t, err)
+	assert.Equal(t, "dcr-1", rec.ClientID, "registration of the newer grant kept")
 }

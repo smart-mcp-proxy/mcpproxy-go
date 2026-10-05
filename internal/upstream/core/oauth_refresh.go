@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -22,6 +23,20 @@ func (c *Client) isStaticOAuthClient() bool {
 	return c.config != nil && c.config.OAuth != nil && c.config.OAuth.ClientID != ""
 }
 
+// extraParamsClientID reports whether oauth.extra_params carries a client_id
+// (injected into every token request by oauth.OAuthTransportWrapper).
+func (c *Client) extraParamsClientID() bool {
+	if c.config == nil || c.config.OAuth == nil {
+		return false
+	}
+	for k, v := range c.config.OAuth.ExtraParams {
+		if strings.EqualFold(k, "client_id") && v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // oauthRefreshFunc returns the one refresh function both triggers use (FR-003):
 // mcp-go's handler.RefreshToken when the live handler has a client id (static
 // clients, and DCR clients whose stored registration matches or is unknown),
@@ -31,10 +46,18 @@ func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.Refresh
 	return func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
 		handlerClientID := handler.GetClientID()
 		switch {
-		case handlerClientID != "" && (c.isStaticOAuthClient() || rec.ClientID == "" || rec.ClientID == handlerClientID):
+		case handlerClientID != "" && (c.isStaticOAuthClient() || rec.ClientID == "" || rec.ClientID == handlerClientID),
+			handlerClientID == "" && rec.ClientID == "" && c.extraParamsClientID():
+			// The second case: a client id configured only through
+			// oauth.extra_params is injected into the token request by
+			// oauth.OAuthTransportWrapper, so the request is not sent with
+			// an empty client_id.
 			// Persists through the handler's token store, whose SaveToken
 			// compare-and-swaps against the flight generation in ctx.
-			return handler.RefreshToken(ctx, rec.RefreshToken)
+			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
+			// mcp-go embeds the provider's error_description or raw body
+			// in the error text; scrub it before it reaches logs/events.
+			return tok, oauth.ScrubRefreshError(err)
 		case rec.ClientID != "" && c.storage != nil:
 			return c.refreshWithStoredCredentials(ctx, handler, rec)
 		default:
@@ -125,8 +148,8 @@ func (c *Client) oauthRefreshRequest(serverKey string, handler *transport.OAuthH
 		Load:         func() (*storage.OAuthTokenRecord, error) { return c.storage.GetOAuthToken(serverKey) },
 		Refresh:      c.oauthRefreshFunc(handler),
 		StaticClient: c.isStaticOAuthClient(),
-		ClearClient: func(expectedClientID string) (bool, error) {
-			return c.storage.ClearOAuthClientCredentialsIf(serverKey, expectedClientID)
+		ClearClient: func(expectedClientID, expectedRefreshToken string) (bool, error) {
+			return c.storage.ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expectedRefreshToken)
 		},
 	}
 }
@@ -152,10 +175,15 @@ func (c *Client) bindOAuthRefresher(oauthConfig *client.OAuthConfig) {
 
 // annotateCodeExchangeError applies the FR-009 one-re-registration rule to an
 // authorization-code exchange failure of the login flow.
-func (c *Client) annotateCodeExchangeError(err error) error {
+// handler is the OAuth handler that ran the exchange (its client id).
+func (c *Client) annotateCodeExchangeError(handler *transport.OAuthHandler, err error) error {
 	if err == nil {
 		return nil
 	}
+	clientID := ""
+	if handler != nil {
+		clientID = handler.GetClientID()
+	}
 	return oauth.DefaultRefreshCoordinator().AnnotateCodeExchangeError(
-		oauth.GenerateServerKey(c.config.Name, c.config.URL), c.isStaticOAuthClient(), err)
+		oauth.GenerateServerKey(c.config.Name, c.config.URL), c.isStaticOAuthClient(), clientID, err)
 }

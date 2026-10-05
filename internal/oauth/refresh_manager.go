@@ -735,17 +735,7 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 			zap.String("error_type", errorType),
 			zap.Error(err))
 
-		m.mu.Lock()
-		if schedule := m.schedules[serverName]; schedule != nil {
-			schedule.RefreshState = RefreshStateFailed
-			schedule.LastError = lastError
-			if schedule.Timer != nil {
-				schedule.Timer.Stop()
-			}
-		}
-		m.mu.Unlock()
-
-		if m.eventEmitter != nil {
+		if m.failScheduleIfCurrent(serverName, schedule, lastError, true) && m.eventEmitter != nil {
 			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
 		}
 		return
@@ -758,14 +748,7 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 			zap.Int("max_retries", m.maxRetries),
 			zap.Int("retry_count", retryCount))
 
-		m.mu.Lock()
-		if schedule := m.schedules[serverName]; schedule != nil {
-			schedule.RefreshState = RefreshStateFailed
-			schedule.LastError = "Max retries exceeded - re-authentication required"
-		}
-		m.mu.Unlock()
-
-		if m.eventEmitter != nil {
+		if m.failScheduleIfCurrent(serverName, schedule, "Max retries exceeded - re-authentication required", false) && m.eventEmitter != nil {
 			m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
 		}
 		return
@@ -785,13 +768,7 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 				zap.Duration("expired_for", timeSinceExpiry),
 				zap.Int("retries", retryCount))
 
-			m.mu.Lock()
-			if schedule := m.schedules[serverName]; schedule != nil {
-				schedule.RefreshState = RefreshStateFailed
-			}
-			m.mu.Unlock()
-
-			if m.eventEmitter != nil {
+			if m.failScheduleIfCurrent(serverName, schedule, "", false) && m.eventEmitter != nil {
 				m.eventEmitter.EmitOAuthRefreshFailed(serverName, err.Error())
 			}
 			return
@@ -801,6 +778,28 @@ func (m *RefreshManager) handleRefreshFailure(serverName string, err error) {
 	// Calculate backoff delay using exponential backoff with cap
 	backoff := m.calculateBackoff(retryCount - 1) // -1 because we just incremented
 	m.rescheduleAfterDelay(serverName, backoff)
+}
+
+// failScheduleIfCurrent marks the schedule failed only while it is still the
+// one the failure was recorded against. A login whose OnTokenSaved replaced
+// the schedule after handleRefreshFailure released m.mu supersedes the
+// failure (Spec 113 FR-006a): the new grant's schedule keeps running and no
+// stale failure event is emitted. lastError "" keeps the current LastError.
+func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *RefreshSchedule, lastError string, stopTimer bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	schedule := m.schedules[serverName]
+	if schedule == nil || schedule != expected {
+		return false
+	}
+	schedule.RefreshState = RefreshStateFailed
+	if lastError != "" {
+		schedule.LastError = lastError
+	}
+	if stopTimer && schedule.Timer != nil {
+		schedule.Timer.Stop()
+	}
+	return true
 }
 
 // onRefreshOutcome is the RefreshCoordinator completion hook. Proactive

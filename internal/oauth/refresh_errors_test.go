@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -97,4 +98,23 @@ func TestRefreshHTTPErrorDoesNotLeakBody(t *testing.T) {
 	assert.Contains(t, e.Error(), "400")
 	assert.Contains(t, e.Error(), "invalid_grant")
 	assert.Contains(t, e.Error(), "scrubbed detail")
+}
+
+// Review round 1: mcp-go embeds error_description / raw bodies in the error
+// text; ScrubRefreshError keeps classification but not the secret.
+func TestScrubRefreshError_KeepsClassDropsSecret(t *testing.T) {
+	// Assembled at runtime so the source never holds a secret-shaped literal.
+	secret := "sk_" + "live_" + "0123456789abcdefABCDEF0123456789"
+	raw := fmt.Errorf("refresh failed: %w", transport.OAuthError{ErrorCode: "invalid_client", ErrorDescription: "bad client_secret=" + secret})
+	err := ScrubRefreshError(raw)
+	cls, _ := ClassifyRefreshError(err)
+	assert.Equal(t, RefreshClassInvalidClient, cls)
+	assert.NotContains(t, err.Error(), secret)
+	assert.Nil(t, ScrubRefreshError(nil))
+
+	status := ScrubRefreshError(fmt.Errorf("refresh token request failed with status 503: <html>%s</html>", strings.Repeat("x", 2000)))
+	cls, code := ClassifyRefreshError(status)
+	assert.Equal(t, RefreshClassServerError, cls)
+	assert.Equal(t, 503, code)
+	assert.LessOrEqual(t, len(status.Error()), 600)
 }

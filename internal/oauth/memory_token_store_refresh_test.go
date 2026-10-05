@@ -46,3 +46,23 @@ func TestGlobalMemoryTokenStore_BoundRefreshIsSerialized(t *testing.T) {
 	}
 	assert.Same(t, store, m.GetOrCreateTokenStore(name), "store is shared per server")
 }
+
+// Review round 1: the CLI store must know when its token was saved, or a
+// short-lived token (shorter than the 5 min grace period) sits inside the
+// refresh margin on every request and is refreshed again and again.
+func TestGlobalMemoryTokenStore_ShortTokenNotRefreshedEveryRequest(t *testing.T) {
+	as := newRotatingAS(t, "rt-0")
+	m := &TokenStoreManager{stores: map[string]client.TokenStore{}, completedOAuth: map[string]time.Time{}, logger: globalTokenStoreManager.logger}
+	store := m.GetOrCreateTokenStore(uniqueServerName(t))
+	require.NoError(t, store.SaveToken(context.Background(), &client.Token{
+		AccessToken: "at-0", RefreshToken: "rt-0", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	require.True(t, BindRefresher(store, RefreshBinding{Refresh: asRefreshFunc(as, store)}))
+
+	for i := 0; i < 5; i++ {
+		tok, err := store.GetToken(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "at-0", tok.AccessToken)
+	}
+	assert.Equal(t, int32(0), as.requests.Load(), "a fresh 60 s token is not refreshed")
+}

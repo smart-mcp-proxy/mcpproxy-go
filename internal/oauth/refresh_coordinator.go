@@ -53,9 +53,11 @@ type RefreshRequest struct {
 	Refresh RefreshFunc
 	// StaticClient is true when the client id comes from oauth.client_id.
 	StaticClient bool
-	// ClearClient compare-and-clears the stored DCR registration (FR-009).
+	// ClearClient compare-and-clears the stored DCR registration (FR-009)
+	// while the stored client id and refresh token are still the ones the
+	// failed request used (FR-006a).
 	// nil means there is nothing to clear (e.g. no storage).
-	ClearClient func(expectedClientID string) (bool, error)
+	ClearClient func(expectedClientID, expectedRefreshToken string) (bool, error)
 }
 
 // RefreshOutcome is passed to the completion hook for a terminal flight
@@ -94,6 +96,11 @@ type refreshKeyState struct {
 	// invalid_client and no successful token response has been seen since
 	// (FR-009 "exactly one re-registration").
 	dcrCleared bool
+	// clearedClientID is the client id that clear removed. A login that
+	// still exchanges its code with it was built before the clear (e.g. the
+	// connect attempt whose refresh hit invalid_client) and is told to sign
+	// in again, not that the AS rejects new registrations.
+	clearedClientID string
 
 	// lastSavedAt is when a token was last saved for this key (a refresh
 	// flight or a login). A proactive refresh within proactiveFreshWindow of
@@ -114,12 +121,11 @@ const proactiveFreshWindow = MinRefreshInterval
 // reactive (token store) and proactive (RefreshManager) triggers (Spec 113
 // FR-001). It is process-wide; see DefaultRefreshCoordinator.
 type RefreshCoordinator struct {
-	mu         sync.Mutex
-	keys       map[string]*refreshKeyState
-	hook       func(RefreshOutcome)
-	now        func() time.Time
-	flowActive func(serverName string) bool
-	logger     *zap.Logger
+	mu     sync.Mutex
+	keys   map[string]*refreshKeyState
+	hook   func(RefreshOutcome)
+	now    func() time.Time
+	logger *zap.Logger
 }
 
 // NewRefreshCoordinator returns an empty coordinator.
@@ -127,9 +133,6 @@ func NewRefreshCoordinator() *RefreshCoordinator {
 	return &RefreshCoordinator{
 		keys: make(map[string]*refreshKeyState),
 		now:  time.Now,
-		flowActive: func(serverName string) bool {
-			return GetGlobalCoordinator().IsFlowActive(serverName) || IsManualFlowActive(serverName)
-		},
 	}
 }
 
@@ -306,6 +309,17 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	if cls.IsTerminal() {
 		latchRec := cur
 		if again, err := req.Load(); err == nil && again != nil {
+			// FR-006a: a login that saved a new grant (or a new client)
+			// since cur was read supersedes this flight; its failure must
+			// not latch or fail the newer grant. Only the flight's own DCR
+			// clear (same refresh token, client id emptied) may change the
+			// generation here.
+			if again.RefreshToken != rec.RefreshToken || (again.ClientID != "" && again.ClientID != rec.ClientID) {
+				if again.AccessToken != "" {
+					return tokenFromRecord(again), false, nil
+				}
+				return nil, false, refreshErr
+			}
 			latchRec = again // after a DCR clear the generation changed
 		}
 		c.mu.Lock()
@@ -340,12 +354,14 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 	if alreadyCleared {
 		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: rejectsNewRegistrationsMessage}
 	}
-	if c.flowActive != nil && c.flowActive(req.ServerName) {
-		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
-			Message: "client registration rejected by the authorization server; a sign-in is already in progress"}
-	}
+	// No "login flow active" exemption: the clear is a compare-and-clear on
+	// the client id AND refresh token this request used, so a login that
+	// saved a new registration or a new grant is never touched, while a
+	// connect attempt that is itself running this refresh (tryOAuthAuth
+	// holds a flow for its whole duration) still gets the rejected
+	// registration removed and can re-register on the next sign-in.
 	if req.ClearClient != nil && rec.ClientID != "" {
-		cleared, clearErr := req.ClearClient(rec.ClientID)
+		cleared, clearErr := req.ClearClient(rec.ClientID, rec.RefreshToken)
 		if clearErr != nil {
 			c.log().Warn("Failed to clear rejected DCR client registration",
 				zap.String("server", req.ServerName), zap.Error(clearErr))
@@ -353,14 +369,17 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 		if cleared {
 			c.mu.Lock()
 			st.dcrCleared = true
+			st.clearedClientID = rec.ClientID
 			c.mu.Unlock()
 			c.log().Info("Cleared DCR client registration rejected by the authorization server",
 				zap.String("server", req.ServerName))
 		}
 	}
 	return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
-		Message: "client registration rejected by the authorization server; sign in again to re-register"}
+		Message: signInToReRegisterMessage}
 }
+
+const signInToReRegisterMessage = "client registration rejected by the authorization server; sign in again to re-register"
 
 const rejectsNewRegistrationsMessage = "the authorization server rejected the newly registered OAuth client (invalid_client) again: the authorization server rejects new client registrations; configure a static oauth.client_id for this server"
 
@@ -368,7 +387,8 @@ const rejectsNewRegistrationsMessage = "the authorization server rejected the ne
 // rule to the login flow's authorization-code exchange: an invalid_client
 // after the registration was cleared, before any successful token response,
 // is reported with an actionable terminal message.
-func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient bool, err error) error {
+// exchangeClientID is the client id the exchange used.
+func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient bool, exchangeClientID string, err error) error {
 	if err == nil || staticClient {
 		return err
 	}
@@ -376,10 +396,16 @@ func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient 
 		return err
 	}
 	c.mu.Lock()
-	cleared := c.keys[key] != nil && c.keys[key].dcrCleared
+	cleared, clearedID := false, ""
+	if st := c.keys[key]; st != nil {
+		cleared, clearedID = st.dcrCleared, st.clearedClientID
+	}
 	c.mu.Unlock()
 	if !cleared {
 		return err
+	}
+	if exchangeClientID != "" && exchangeClientID == clearedID {
+		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: signInToReRegisterMessage}
 	}
 	return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: rejectsNewRegistrationsMessage}
 }
@@ -399,6 +425,7 @@ func (c *RefreshCoordinator) resetLocked(st *refreshKeyState) {
 	st.cooldownGen, st.cooldownUntil, st.cooldownErr = "", time.Time{}, nil
 	st.transientFailures = 0
 	st.dcrCleared = false
+	st.clearedClientID = ""
 }
 
 // refreshBackoff mirrors RefreshManager.calculateBackoff (10 s doubling, 5 min cap).

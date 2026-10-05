@@ -37,27 +37,36 @@ func TestPersistentTokenStore_SaveTokenDoesNotLoseDCRCredentials(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		start := make(chan struct{})
+		errs := make([]error, 20)
 		for i := 0; i < 20; i++ {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
 				<-start
 				if i%2 == 0 {
-					_ = store.SaveToken(context.Background(), &client.Token{
+					errs[i] = store.SaveToken(context.Background(), &client.Token{
 						AccessToken: fmt.Sprintf("at-%d", i), RefreshToken: "rt", TokenType: "Bearer",
 						ExpiresAt: time.Now().Add(time.Hour),
 					})
 					return
 				}
-				_ = db.UpdateOAuthClientCredentials(key, "cid", "sec", 4242, "http://127.0.0.1:4242/cb")
+				errs[i] = db.UpdateOAuthClientCredentials(key, "cid", "sec", 4242, "http://127.0.0.1:4242/cb")
 			}(i)
 		}
 		close(start)
 		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d writer %d: %v", round, i, err)
+			}
+		}
 
 		rec, err := db.GetOAuthToken(key)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if rec.AccessToken == "" || rec.RefreshToken != "rt" {
+			t.Fatalf("round %d: token fields lost by a concurrent DCR write: %+v", round, rec.AccessToken != "")
 		}
 		if rec.ClientID != "cid" || rec.CallbackPort != 4242 || rec.RedirectURI == "" {
 			t.Fatalf("round %d: DCR credentials lost by a concurrent SaveToken: client_id=%q port=%d", round, rec.ClientID, rec.CallbackPort)

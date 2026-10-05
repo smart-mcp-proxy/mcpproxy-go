@@ -1028,10 +1028,12 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 
 // ClearOAuthClientCredentialsIf clears the DCR fields like
 // ClearOAuthClientCredentials, but only while the stored ClientID still
-// equals expectedClientID (compare-and-clear in one transaction, Spec 113
-// FR-009), so a stale refresh failure cannot clear a registration that a
-// concurrent login just saved. It reports whether it cleared.
-func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID string) (bool, error) {
+// equals expectedClientID and the stored RefreshToken still equals
+// expectedRefreshToken, the grant the failed request used (compare-and-clear
+// in one transaction, Spec 113 FR-006a/FR-009). A stale refresh failure
+// therefore cannot clear a registration that a concurrent login just saved,
+// even when the login reused the same client id. It reports whether it cleared.
+func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expectedRefreshToken string) (bool, error) {
 	cleared := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -1043,7 +1045,7 @@ func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID strin
 		if err := record.UnmarshalBinary(data); err != nil {
 			return err
 		}
-		if expectedClientID == "" || record.ClientID != expectedClientID {
+		if expectedClientID == "" || record.ClientID != expectedClientID || record.RefreshToken != expectedRefreshToken {
 			return nil
 		}
 		record.ClientID = ""

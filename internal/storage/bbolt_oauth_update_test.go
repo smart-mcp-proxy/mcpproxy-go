@@ -101,11 +101,11 @@ func TestUpdateOAuthToken_CreatesAndAborts(t *testing.T) {
 func TestClearOAuthClientCredentialsIf(t *testing.T) {
 	db := newTestDB(t)
 	const key = "dcr_0123456789abcdef"
-	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: key, AccessToken: "at", ClientID: "new-client", ClientSecret: "s", CallbackPort: 9, RedirectURI: "r"}); err != nil {
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: key, AccessToken: "at", RefreshToken: "rt-new", ClientID: "new-client", ClientSecret: "s", CallbackPort: 9, RedirectURI: "r"}); err != nil {
 		t.Fatal(err)
 	}
 
-	cleared, err := db.ClearOAuthClientCredentialsIf(key, "old-client")
+	cleared, err := db.ClearOAuthClientCredentialsIf(key, "old-client", "rt-new")
 	if err != nil || cleared {
 		t.Fatalf("mismatch must not clear: cleared=%v err=%v", cleared, err)
 	}
@@ -113,7 +113,14 @@ func TestClearOAuthClientCredentialsIf(t *testing.T) {
 		t.Fatalf("registration was cleared: %+v", rec)
 	}
 
-	cleared, err = db.ClearOAuthClientCredentialsIf(key, "new-client")
+	// A login that reused the client id but saved a new grant is not the
+	// grant the failed request used (FR-006a).
+	cleared, err = db.ClearOAuthClientCredentialsIf(key, "new-client", "rt-old")
+	if err != nil || cleared {
+		t.Fatalf("grant mismatch must not clear: cleared=%v err=%v", cleared, err)
+	}
+
+	cleared, err = db.ClearOAuthClientCredentialsIf(key, "new-client", "rt-new")
 	if err != nil || !cleared {
 		t.Fatalf("match must clear: cleared=%v err=%v", cleared, err)
 	}
@@ -122,7 +129,7 @@ func TestClearOAuthClientCredentialsIf(t *testing.T) {
 		t.Fatalf("unexpected record after clear: %+v", rec)
 	}
 
-	if cleared, err := db.ClearOAuthClientCredentialsIf("absent", "x"); err != nil || cleared {
+	if cleared, err := db.ClearOAuthClientCredentialsIf("absent", "x", ""); err != nil || cleared {
 		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
 	}
 }

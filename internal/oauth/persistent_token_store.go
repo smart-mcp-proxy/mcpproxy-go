@@ -118,8 +118,8 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		return reactiveToken(ctx, p.now(), reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
 			load: p.loadRecord,
-			clear: func(expected string) (bool, error) {
-				return p.storage.ClearOAuthClientCredentialsIf(p.serverKey, expected)
+			clear: func(expectedClientID, expectedRefreshToken string) (bool, error) {
+				return p.storage.ClearOAuthClientCredentialsIf(p.serverKey, expectedClientID, expectedRefreshToken)
 			},
 		}, record, b)
 	}
@@ -391,7 +391,7 @@ type reactiveTarget struct {
 	key, name string
 	logger    *zap.Logger
 	load      func() (*storage.OAuthTokenRecord, error)
-	clear     func(expectedClientID string) (bool, error)
+	clear     func(expectedClientID, expectedRefreshToken string) (bool, error)
 }
 
 // reactiveToken is GetToken for a refresher-bound store. It refreshes through
@@ -426,7 +426,7 @@ func reactiveToken(ctx context.Context, now time.Time, t reactiveTarget, rec *st
 				// let the next request (or the proactive schedule) retry.
 				if t.logger != nil {
 					t.logger.Warn("OAuth refresh failed; access token still valid, continuing to use it",
-						zap.Time("expires_at", rec.ExpiresAt), zap.Error(err))
+						zap.Time("expires_at", rec.ExpiresAt), zap.Error(ScrubRefreshError(err)))
 				}
 			case errIsTerminal(err):
 				return nil, fmt.Errorf("%w: %w", transport.ErrOAuthAuthorizationRequired, err)
@@ -451,6 +451,11 @@ type coordinatedMemoryTokenStore struct {
 	mu         sync.Mutex // serializes the FR-006a compare-and-swap in SaveToken
 	inner      *client.MemoryTokenStore
 	binding    atomic.Pointer[RefreshBinding]
+	// savedAt (UnixNano) is when the current token was saved. It is the
+	// record's Updated time, from which needsReactiveRefresh estimates the
+	// lifetime of short tokens; without it a 60 s token would be inside the
+	// 5 min grace margin on every request.
+	savedAt atomic.Int64
 }
 
 func newCoordinatedMemoryTokenStore(serverName string) *coordinatedMemoryTokenStore {
@@ -466,7 +471,15 @@ func (m *coordinatedMemoryTokenStore) loadRecord() (*storage.OAuthTokenRecord, e
 	if err != nil {
 		return nil, err
 	}
-	return recordFromToken(m.key(), m.serverName, tok), nil
+	return m.record(tok), nil
+}
+
+func (m *coordinatedMemoryTokenStore) record(tok *client.Token) *storage.OAuthTokenRecord {
+	rec := recordFromToken(m.key(), m.serverName, tok)
+	if ns := m.savedAt.Load(); ns != 0 {
+		rec.Updated = time.Unix(0, ns)
+	}
+	return rec
 }
 
 // GetToken implements client.TokenStore.
@@ -480,7 +493,7 @@ func (m *coordinatedMemoryTokenStore) GetToken(ctx context.Context) (*client.Tok
 		return tok, nil
 	}
 	return reactiveToken(ctx, time.Now(), reactiveTarget{key: m.key(), name: m.serverName, load: m.loadRecord},
-		recordFromToken(m.key(), m.serverName, tok), b)
+		m.record(tok), b)
 }
 
 // SaveToken implements client.TokenStore.
@@ -493,6 +506,9 @@ func (m *coordinatedMemoryTokenStore) SaveToken(ctx context.Context, token *clie
 		}
 	}
 	err := m.inner.SaveToken(ctx, token)
+	if err == nil {
+		m.savedAt.Store(time.Now().UnixNano())
+	}
 	m.mu.Unlock()
 	if err == nil {
 		DefaultRefreshCoordinator().NoteTokenSaved(m.key())

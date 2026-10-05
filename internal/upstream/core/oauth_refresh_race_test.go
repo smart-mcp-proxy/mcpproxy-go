@@ -54,6 +54,9 @@ func newRotatingAuthServer(t *testing.T) *rotatingAuthServer {
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		as.tokenRequests.Add(1)
+		// Keep the flight in progress long enough that the concurrent
+		// callers overlap it instead of all arriving after it finished.
+		time.Sleep(50 * time.Millisecond)
 		body, _ := io.ReadAll(r.Body)
 		form, _ := url.ParseQuery(string(body))
 		as.mu.Lock()
@@ -270,4 +273,43 @@ func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
 			assert.Equal(t, "rt-1", rec.RefreshToken)
 		})
 	}
+}
+
+// Review round 1: a client id configured only through oauth.extra_params is
+// injected into token requests by oauth.OAuthTransportWrapper; such a grant
+// must stay refreshable instead of failing with ErrNoClientCredentials.
+func TestOAuthRefresh_ExtraParamsClientID(t *testing.T) {
+	as := newRotatingAuthServer(t)
+	db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	name := strings.ReplaceAll(t.Name(), "/", "_")
+	srvURL := "https://mcp.example.invalid/mcp"
+	extra := map[string]string{"client_id": "xp-client"}
+	cfg := &config.ServerConfig{Name: name, URL: srvURL, Protocol: "streamable-http", OAuth: &config.OAuthConfig{ExtraParams: extra}}
+	key := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName: key, DisplayName: cfg.Name, AccessToken: "at-0", RefreshToken: "rt-0",
+		TokenType: "Bearer", ExpiresAt: time.Now().Add(-time.Second),
+	}))
+	store := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, db)
+	oauthCfg := &client.OAuthConfig{
+		TokenStore:            store,
+		PKCEEnabled:           true,
+		AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
+		HTTPClient:            &http.Client{Transport: oauth.NewOAuthTransportWrapper(nil, extra, zap.NewNop())},
+	}
+	tr, err := transport.NewStreamableHTTP(srvURL, transport.WithHTTPOAuth(*oauthCfg))
+	require.NoError(t, err)
+	c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+	c.client = client.NewClient(tr)
+	c.bindOAuthRefresher(oauthCfg)
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "at-1", tok.AccessToken)
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	assert.Equal(t, []string{"xp-client"}, as.clientIDs)
 }
