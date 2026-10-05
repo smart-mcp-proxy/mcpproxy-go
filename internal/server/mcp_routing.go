@@ -1191,6 +1191,9 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	}
+	// Spec 058 FR-019: private short-lived cache hints on every routing-mode
+	// server (shared opts, so directOpts inherits them too).
+	opts = append(opts, cacheHintServerOptions()...)
 	if p.hooks != nil {
 		// Spec 105 FR-010 D13/gap G6: mark which real JSON-RPC method
 		// produced this request — mcp-go calls these with the SAME ctx it

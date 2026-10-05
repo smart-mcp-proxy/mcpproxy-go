@@ -12,6 +12,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Spec 058 FR-019 / Spec 113-f: list and read results must carry ttlMs and a
@@ -91,4 +93,27 @@ func TestCacheHintTTLIsShort(t *testing.T) {
 	assert.Positive(t, mcpListCacheTTLMs)
 	assert.LessOrEqual(t, mcpListCacheTTLMs, int64(10_000),
 		"listings change with quarantine/profile state; keep the freshness window conservative")
+}
+
+// TestRoutingModeServersCarryCacheHints pins that the real servers behind
+// /mcp, /mcp/all, /mcp/code and /mcp/call (not just p.server) advertise the
+// private hints. Served over an unpinned transport because the production
+// transport is pinned to the legacy era (FR-028).
+func TestRoutingModeServersCarryCacheHints(t *testing.T) {
+	proxy, _ := newStoredScriptProxyCfg(t, nil)
+	for _, mode := range []string{
+		config.RoutingModeRetrieveTools,
+		config.RoutingModeCodeExecution,
+		config.RoutingModeDirect,
+	} {
+		t.Run(mode, func(t *testing.T) {
+			srv := proxy.GetMCPServerForMode(mode)
+			require.NotNil(t, srv)
+			hs := httptest.NewServer(mcpserver.NewStreamableHTTPServer(srv))
+			t.Cleanup(hs.Close)
+			result := postModernCacheProbe(t, hs.URL, mcp.MethodToolsList, map[string]any{})
+			assert.Equal(t, string(mcp.CacheScopePrivate), result["cacheScope"])
+			assert.Equal(t, float64(mcpListCacheTTLMs), result["ttlMs"])
+		})
+	}
 }
