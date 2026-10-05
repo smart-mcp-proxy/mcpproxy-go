@@ -72,7 +72,8 @@ func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.Refresh
 			tok, err := handler.RefreshToken(ctx, rec.RefreshToken)
 			// mcp-go embeds the provider's error_description or raw body
 			// in the error text; scrub it before it reaches logs/events.
-			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, c.staticClientSecret(), c.extraParamValue("client_secret"))
+			return tok, oauth.ScrubRefreshError(err, rec.RefreshToken, rec.ClientSecret, handler.GetClientSecret(),
+				c.staticClientSecret(), c.extraParamValue("client_secret"))
 		case rec.ClientID != "" && c.storage != nil:
 			return c.refreshWithStoredCredentials(ctx, handler, rec)
 		default:

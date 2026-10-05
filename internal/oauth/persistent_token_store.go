@@ -115,7 +115,7 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	}
 
 	if b := p.binding.Load(); b != nil {
-		return reactiveToken(ctx, p.now(), reactiveTarget{
+		return reactiveToken(ctx, p.now, reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
 			load: p.loadRecord,
 			clear: func(expectedClientID, expectedRefreshToken string) (bool, error) {
@@ -401,8 +401,9 @@ type reactiveTarget struct {
 // unserialized refresh. Expiry is owned by mcpproxy; the persisted record
 // keeps the real expires_at, and an upstream 401 still triggers the existing
 // authorization-required path.
-func reactiveToken(ctx context.Context, now time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, error) {
+func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, error) {
 	tok := tokenFromRecord(rec)
+	now := clock()
 	expired := !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt)
 
 	if needsReactiveRefresh(rec, now) {
@@ -416,6 +417,11 @@ func reactiveToken(ctx context.Context, now time.Time, t reactiveTarget, rec *st
 				Trigger: RefreshTriggerReactive, Load: t.load, Refresh: b.Refresh,
 				StaticClient: b.StaticClient, ClearClient: t.clear,
 			})
+			if err != nil {
+				// The flight may have taken a while: judge "still valid" by
+				// the time it returned, not when this caller arrived.
+				expired = !rec.ExpiresAt.IsZero() && !clock().Before(rec.ExpiresAt)
+			}
 			switch {
 			case err == nil:
 				tok = newTok
@@ -492,7 +498,7 @@ func (m *coordinatedMemoryTokenStore) GetToken(ctx context.Context) (*client.Tok
 	if b == nil {
 		return tok, nil
 	}
-	return reactiveToken(ctx, time.Now(), reactiveTarget{key: m.key(), name: m.serverName, load: m.loadRecord},
+	return reactiveToken(ctx, time.Now, reactiveTarget{key: m.key(), name: m.serverName, load: m.loadRecord},
 		m.record(tok), b)
 }
 

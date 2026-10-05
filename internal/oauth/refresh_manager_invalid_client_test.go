@@ -174,3 +174,23 @@ func TestRefreshManager_StaleReactiveOutcomeKeepsLoginSchedule(t *testing.T) {
 	assert.Equal(t, RefreshStateFailed, m.GetRefreshState("srv").State)
 	assert.Equal(t, 1, em.GetFailedEvents())
 }
+
+// Review round 5: a transient retry for a replaced schedule does not touch
+// the login's schedule.
+func TestRefreshManager_StaleRetryKeepsLoginTimer(t *testing.T) {
+	m, _, _, _ := startedManager(t, newMockTokenStore(), nil)
+	m.mu.Lock()
+	old := m.schedules["srv"]
+	m.mu.Unlock()
+	m.OnTokenSaved("srv", time.Now().Add(2*time.Hour))
+	m.mu.Lock()
+	login := m.schedules["srv"]
+	planned := login.ScheduledRefresh
+	m.mu.Unlock()
+	require.NotSame(t, old, login)
+
+	m.rescheduleAfterDelayFor("srv", 5*time.Minute, old)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	assert.Equal(t, planned, m.schedules["srv"].ScheduledRefresh)
+}

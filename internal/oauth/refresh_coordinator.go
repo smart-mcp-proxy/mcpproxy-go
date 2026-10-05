@@ -111,6 +111,10 @@ type refreshKeyState struct {
 	// flight or a login). A proactive refresh within proactiveFreshWindow of
 	// it is answered from storage (FR-003, SC-001).
 	lastSavedAt time.Time
+	// saveSeq counts saved tokens for the key; a flight that cleared the DCR
+	// registration only records that while no token was saved since it read
+	// the state (a login that re-registered in between wins).
+	saveSeq uint64
 }
 
 // proactiveFreshWindow: a proactive refresh that arrives this soon after a
@@ -256,9 +260,12 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	// SC-001: a proactive caller that read the record only after another
 	// flight (or a login) rotated it observes the new refresh token, so the
 	// check above cannot tell. A token saved moments ago is not due.
+	// A token with no more than the window left is genuinely due (the
+	// RefreshManager schedules very short tokens at expiry minus
+	// MinRefreshInterval, possibly within the window of their save).
 	if req.Trigger == RefreshTriggerProactive && rec.AccessToken != "" && !st.lastSavedAt.IsZero() &&
 		c.now().Sub(st.lastSavedAt) < proactiveFreshWindow &&
-		(rec.ExpiresAt.IsZero() || c.now().Before(rec.ExpiresAt)) {
+		(rec.ExpiresAt.IsZero() || rec.ExpiresAt.Sub(c.now()) > proactiveFreshWindow) {
 		c.mu.Unlock()
 		return tokenFromRecord(rec), true, nil
 	}
@@ -284,13 +291,17 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		c.mu.Lock()
 		c.resetLocked(st)
 		st.lastSavedAt = c.now()
+		st.saveSeq++
 		c.mu.Unlock()
 		// FR-006a: the flight's persist was discarded because something newer
 		// was saved meanwhile; hand out the stored token instead.
-		if tok == nil || (cur != nil && cur.AccessToken != "" && cur.AccessToken != tok.AccessToken) {
-			if cur == nil {
-				return nil, false, &RefreshFailure{Class: RefreshClassOther, Message: "refresh succeeded but no token is stored", Err: ErrRefreshFailed}
-			}
+		// No stored record after the flight (logout / token cleared while it
+		// ran, or an unreadable store): the persist was discarded, so the
+		// flight's token must not be handed out either.
+		if cur == nil || cur.AccessToken == "" {
+			return nil, false, &RefreshFailure{Class: RefreshClassOther, Message: "refresh succeeded but no token is stored", Err: ErrRefreshFailed}
+		}
+		if tok == nil || cur.AccessToken != tok.AccessToken {
 			return tokenFromRecord(cur), false, nil
 		}
 		return tok, false, nil
@@ -355,6 +366,7 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 	}
 	c.mu.Lock()
 	alreadyCleared := st.dcrCleared
+	seq := st.saveSeq
 	c.mu.Unlock()
 	if alreadyCleared {
 		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: rejectsNewRegistrationsMessage}
@@ -373,8 +385,10 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 		}
 		if cleared {
 			c.mu.Lock()
-			st.dcrCleared = true
-			st.clearedClientID = rec.ClientID
+			if st.saveSeq == seq {
+				st.dcrCleared = true
+				st.clearedClientID = rec.ClientID
+			}
 			c.mu.Unlock()
 			c.log().Info("Cleared DCR client registration rejected by the authorization server",
 				zap.String("server", req.ServerName))
@@ -423,6 +437,7 @@ func (c *RefreshCoordinator) NoteTokenSaved(key string) {
 	st := c.stateLocked(key)
 	c.resetLocked(st)
 	st.lastSavedAt = c.now()
+	st.saveSeq++
 }
 
 func (c *RefreshCoordinator) resetLocked(st *refreshKeyState) {

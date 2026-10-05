@@ -557,3 +557,67 @@ func TestRefreshCoordinator_InvalidClientDoesNotClearLoginReusingClient(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, "dcr-1", rec.ClientID, "registration of the newer grant kept")
 }
+
+// Review round 5: a token deleted (logout) while its refresh flight ran is
+// not handed out by the flight.
+func TestRefreshCoordinator_LogoutDuringFlightHandsOutNothing(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	f.block = make(chan struct{})
+	c := newTestCoordinator()
+	type res struct {
+		tok *client.Token
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		tok, _, err := c.Do(context.Background(), f.req(RefreshTriggerReactive, "rt-0"))
+		done <- res{tok, err}
+	}()
+	<-f.started
+	require.NoError(t, f.db.DeleteOAuthToken(f.key))
+	close(f.block)
+	r := <-done
+	assert.Error(t, r.err)
+	assert.Nil(t, r.tok)
+	_, err := f.db.GetOAuthToken(f.key)
+	assert.Error(t, err, "the discarded persist did not resurrect the record")
+}
+
+// Review round 5: a very short token whose proactive refresh is scheduled at
+// expiry minus MinRefreshInterval (within the fresh window of its save) is
+// genuinely due and reaches the network.
+func TestRefreshCoordinator_ShortTokenProactiveNotSkipped(t *testing.T) {
+	f := newCoordFixture(t, "cid")
+	c := newTestCoordinator()
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	require.NoError(t, f.db.UpdateOAuthToken(f.key, func(r *storage.OAuthTokenRecord) error {
+		r.ExpiresAt = now.Add(proactiveFreshWindow - time.Second)
+		return nil
+	}))
+	c.NoteTokenSaved(f.key)
+	_, skipped, err := c.Do(context.Background(), f.req(RefreshTriggerProactive, "rt-0"))
+	require.NoError(t, err)
+	assert.False(t, skipped)
+	assert.Equal(t, int32(1), f.calls.Load())
+}
+
+// Review round 5: a login that saved a token between the flight's DCR clear
+// and its bookkeeping wins; the clear is not recorded as "re-registration
+// already used".
+func TestRefreshCoordinator_LoginBetweenClearAndBookkeeping(t *testing.T) {
+	invalidClient := fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_client"})
+	f := newCoordFixture(t, "dcr-1")
+	f.failErr = invalidClient
+	c := newTestCoordinator()
+	req := f.req(RefreshTriggerReactive, "rt-0")
+	inner := req.ClearClient
+	req.ClearClient = func(id, rt string) (bool, error) {
+		cleared, err := inner(id, rt)
+		c.NoteTokenSaved(f.key) // a login saved its token right after the clear
+		return cleared, err
+	}
+	_, _, _ = c.Do(context.Background(), req)
+	err := c.AnnotateCodeExchangeError(f.key, false, "dcr-2", invalidClient)
+	assert.Same(t, invalidClient, err, "the login reset is not undone")
+}

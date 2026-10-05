@@ -269,3 +269,27 @@ func TestPersistentTokenStore_SaveTokenCompareAndSwap(t *testing.T) {
 	assert.Equal(t, "login-rt", got.RefreshToken)
 	assert.Equal(t, "cid", got.ClientID)
 }
+
+// Review round 5: "still valid" is judged when the flight returns. A token
+// that expired while a slow refresh failed transiently is not handed out.
+func TestPersistentTokenStore_ExpiryJudgedAfterSlowFlight(t *testing.T) {
+	db := newTestBolt(t)
+	as := newRotatingAS(t, "rt-0")
+	as.status = http.StatusServiceUnavailable
+	name, u := uniqueServerName(t), "https://slow.example.com/mcp"
+	seedToken(t, db, name, u, "rt-0", time.Hour)
+	store := NewPersistentTokenStore(name, u, db).(*PersistentTokenStore)
+	var calls atomic.Int32
+	base := time.Now()
+	store.now = func() time.Time {
+		if calls.Add(1) == 1 { // on arrival: one second left
+			return base.Add(time.Hour - time.Second)
+		}
+		return base.Add(time.Hour + time.Second) // after the flight: expired
+	}
+	BindRefresher(store, RefreshBinding{Refresh: asRefreshFunc(as, store)})
+
+	tok, err := store.GetToken(context.Background())
+	assert.Nil(t, tok)
+	assert.ErrorIs(t, err, ErrTokenRefreshTransient)
+}

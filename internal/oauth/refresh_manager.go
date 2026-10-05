@@ -790,7 +790,7 @@ func (m *RefreshManager) handleRefreshFailureFor(serverName string, err error, m
 
 	// Calculate backoff delay using exponential backoff with cap
 	backoff := m.calculateBackoff(retryCount - 1) // -1 because we just incremented
-	m.rescheduleAfterDelay(serverName, backoff)
+	m.rescheduleAfterDelayFor(serverName, backoff, schedule)
 }
 
 // failScheduleIfCurrent marks the schedule failed only while it is still the
@@ -908,6 +908,13 @@ func (m *RefreshManager) isRateLimited(schedule *RefreshSchedule) bool {
 // rescheduleAfterDelay reschedules a refresh attempt after a delay.
 // The delay is enforced to be at least MinRefreshInterval to prevent tight loops.
 func (m *RefreshManager) rescheduleAfterDelay(serverName string, delay time.Duration) {
+	m.rescheduleAfterDelayFor(serverName, delay, nil)
+}
+
+// rescheduleAfterDelayFor reschedules only while expected (when non-nil) is
+// still the server's schedule: a login's OnTokenSaved that replaced it keeps
+// its own timer instead of inheriting the failed attempt's backoff.
+func (m *RefreshManager) rescheduleAfterDelayFor(serverName string, delay time.Duration, expected *RefreshSchedule) {
 	// Enforce minimum delay to prevent tight retry loops (defense-in-depth for issue #310).
 	if delay < MinRefreshInterval {
 		delay = MinRefreshInterval
@@ -917,7 +924,7 @@ func (m *RefreshManager) rescheduleAfterDelay(serverName string, delay time.Dura
 	defer m.mu.Unlock()
 
 	schedule, ok := m.schedules[serverName]
-	if !ok {
+	if !ok || (expected != nil && schedule != expected) {
 		return
 	}
 
