@@ -13,7 +13,7 @@
 
     <div v-else-if="loadError" role="alert" class="alert alert-error" data-test="profile-editor-error">
       <span>{{ loadError }}</span>
-      <button type="button" class="btn btn-sm" @click="load">Retry</button>
+      <button type="button" class="btn btn-sm" @click="load()">Retry</button>
     </div>
 
     <template v-else-if="saved">
@@ -400,21 +400,35 @@ async function loadTools(ticket: number) {
   }
 }
 
-async function load() {
+// The draft's content, independent of which profile it is for. Compared before
+// and after an await to tell whether the operator edited meanwhile.
+function draftSnapshot(): string {
+  return JSON.stringify({ ...toConfig(draft), name: '' })
+}
+
+// `force` replaces the draft whatever it holds (an explicit reload, or a switch
+// to another profile). Otherwise edits made while the request was in flight win:
+// the fetched profile becomes the saved baseline and the draft stays dirty.
+async function load(force = false) {
   const ticket = ++loadTicket
+  const before = draftSnapshot()
   loading.value = true
   clearErrors()
   const current = await loadProfile(ticket)
   if (!current) return
   if (saved.value) {
-    Object.assign(draft, draftFrom(saved.value))
-    changedElsewhere.value = false
+    if (force || draftSnapshot() === before) {
+      Object.assign(draft, draftFrom(saved.value))
+      changedElsewhere.value = false
+    } else {
+      changedElsewhere.value = true
+    }
     await loadTools(ticket)
   }
   if (ticket === loadTicket) loading.value = false
 }
 
-function reloadFromServer() { void load() }
+function reloadFromServer() { void load(true) }
 
 async function save() {
   if (!dirty.value || saving.value) return
@@ -425,11 +439,14 @@ async function save() {
   // while the PUT is in flight, its answer must not replace the new page's state.
   const name = props.name
   const body = toConfig(draft)
+  const sent = draftSnapshot()
   try {
     const result = await api.updateProfile(name, body)
     if (props.name !== name) return
     saved.value = result.profile
-    Object.assign(draft, draftFrom(result.profile))
+    // Edits typed while the PUT was in flight stay in the draft (and keep it
+    // dirty against the new baseline); only an untouched draft is refreshed.
+    if (draftSnapshot() === sent) Object.assign(draft, draftFrom(result.profile))
     warnings.value = result.warnings ?? []
     savedNote.value = 'Saved'
     void profiles.fetchProfiles()
@@ -520,5 +537,5 @@ onBeforeUnmount(() => {
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
 })
-watch(() => props.name, () => { renaming.value = false; void load() })
+watch(() => props.name, () => { renaming.value = false; void load(true) })
 </script>
