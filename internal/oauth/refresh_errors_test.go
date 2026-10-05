@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"syscall"
 	"testing"
@@ -132,4 +133,19 @@ func TestScrubRefreshError_SentValuesAndLongBodies(t *testing.T) {
 	assert.NotContains(t, long.Error(), "invalid_grant", "rendered text is capped")
 	cls, _ := ClassifyRefreshError(long)
 	assert.Equal(t, RefreshClassInvalidGrant, cls)
+}
+
+// Review round 7: the plain (non-HTML-escaping) and PHP-style ("\/")
+// JSON spellings of a sent credential are redacted too.
+func TestScrubRefreshError_JSONSpellings(t *testing.T) {
+	const secret = `opaque&value"08/15`
+	for _, echoed := range []string{
+		`opaque&value\"08/15`,   // plain JSON encoder
+		`opaque&value\"08\/15`,  // PHP json_encode
+		`opaque&value\"08/15`,   // Go encoding/json
+		url.QueryEscape(secret), // form-encoded
+	} {
+		err := ScrubRefreshError(errors.New("refresh failed with status 400: "+echoed), secret)
+		assert.NotContains(t, err.Error(), "08", echoed)
+	}
 }

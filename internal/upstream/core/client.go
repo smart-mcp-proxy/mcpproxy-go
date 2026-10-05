@@ -795,6 +795,9 @@ type oauthTokenResponse struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Scope        string `json:"scope,omitempty"`
 	Error        string `json:"error,omitempty"`
+	// ErrorDescription is decoded so redaction sees the value without any
+	// JSON escaping the authorization server chose.
+	ErrorDescription string `json:"error_description,omitempty"`
 }
 
 // refreshTokenWithStoredCredentials performs a token refresh using credentials
@@ -845,7 +848,17 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 		// an opaque value echoed without a key=value shape is invisible to
 		// the pattern scrubber.
 		sent := []string{record.RefreshToken, record.ClientSecret, c.extraParamValue("client_secret")}
-		detail := redactSent(string(body), sent...)
+		raw := string(body)
+		if jsonErr == nil && tokenResp.Error != "" {
+			// A JSON error body is rendered from its DECODED fields: any
+			// escaping the AS used (\u0026, \", \/ ...) is undone before the
+			// sent credentials are matched.
+			raw = tokenResp.Error
+			if tokenResp.ErrorDescription != "" {
+				raw += ": " + tokenResp.ErrorDescription
+			}
+		}
+		detail := redactSent(raw, sent...)
 		httpErr := &oauth.RefreshHTTPError{Status: resp.StatusCode, Detail: cappedScrub(detail, 512)}
 		code := ""
 		if jsonErr == nil {

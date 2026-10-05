@@ -301,14 +301,30 @@ func SentValueSpellings(v string) []string {
 		return nil
 	}
 	out := []string{v}
+	add := func(s string) {
+		for _, have := range out {
+			if have == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	// JSON string spellings: Go's HTML-escaping encoder, a plain encoder,
+	// and the plain one with "/" escaped (PHP's default).
 	if b, err := json.Marshal(v); err == nil && len(b) >= 2 {
-		if j := string(b[1 : len(b)-1]); j != v {
-			out = append(out, j)
+		add(string(b[1 : len(b)-1]))
+	}
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) == nil {
+		if j := strings.TrimSuffix(buf.String(), "\n"); len(j) >= 2 {
+			plain := j[1 : len(j)-1]
+			add(plain)
+			add(strings.ReplaceAll(plain, "/", `\/`))
 		}
 	}
-	if q := url.QueryEscape(v); q != v {
-		out = append(out, q)
-	}
+	add(url.QueryEscape(v))
 	return out
 }
 

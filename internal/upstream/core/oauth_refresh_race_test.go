@@ -333,6 +333,21 @@ func TestRefreshWithStoredCredentials_RedactsEchoedCredentials(t *testing.T) {
 	assert.NotContains(t, err.Error(), rt)
 	assert.NotContains(t, err.Error(), secret)
 	assert.NotContains(t, err.Error(), "0815", "no spelling of the secret survives")
+
+	// A plain JSON encoder escapes only the quote: the decoded description
+	// is what gets redacted.
+	const quoted = `opaque"secret-4242`
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_client","error_description":"bad opaque\"secret-4242"}`)
+	}))
+	t.Cleanup(srv2.Close)
+	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv2.URL,
+		&storage.OAuthTokenRecord{RefreshToken: rt, ClientID: "cid", ClientSecret: quoted})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "4242")
+	cls, _ := oauth.ClassifyRefreshError(err)
+	assert.Equal(t, oauth.RefreshClassInvalidClient, cls)
 }
 
 // Review round 3: the error code field is redacted too, and a non-JSON body
