@@ -36,6 +36,7 @@ func TestAuthzObserver_ProfileRefusalReportsBlockReason(t *testing.T) {
 		opts       ExecutionOptions
 		wantCode   ErrorCode
 		wantReason string
+		wantMsg    string
 	}{
 		{
 			name:       "profile refusal with typed reason",
@@ -50,10 +51,52 @@ func TestAuthzObserver_ProfileRefusalReportsBlockReason(t *testing.T) {
 			wantReason: "",
 		},
 		{
-			name:       "non-profile refusal carries no reason",
+			// Profile-only caller (admin / anonymous under a profile): the
+			// server is outside the profile's scope.
+			name:       "profile-only server-scope refusal carries profile_server_scope",
+			opts:       ExecutionOptions{AllowedServers: []string{"other"}, RestrictToAllowed: true},
+			wantCode:   ErrorCodeServerNotAllowed,
+			wantReason: "profile_server_scope",
+			wantMsg:    "server not allowed: s",
+		},
+		{
+			name:       "deny-all profile scope carries profile_server_scope",
+			opts:       ExecutionOptions{RestrictToAllowed: true},
+			wantCode:   ErrorCodeServerNotAllowed,
+			wantReason: "profile_server_scope",
+			wantMsg:    "server not allowed: s",
+		},
+		{
+			// Token holder whose profile excludes the server.
+			name: "agent token under a profile carries profile_server_scope",
+			opts: ExecutionOptions{
+				AllowedServers:    []string{"other"},
+				RestrictToAllowed: true,
+				AuthContext:       &AuthInfo{Type: "agent", AgentName: "a", AllowedServers: []string{"s", "other"}, Permissions: []string{"read"}},
+			},
+			wantCode:   ErrorCodeAccessDenied,
+			wantReason: "profile_server_scope",
+			wantMsg:    "token does not have access to server 's'",
+		},
+		{
+			// Caller-supplied options.allowed_servers with NO profile
+			// (RestrictToAllowed false): no profile excluded the server.
+			name:       "caller allowed_servers without a profile carries no reason",
 			opts:       ExecutionOptions{AllowedServers: []string{"other"}},
 			wantCode:   ErrorCodeServerNotAllowed,
 			wantReason: "",
+			wantMsg:    "server not allowed: s",
+		},
+		{
+			// Spec 105 out-of-scope row: only the token's own list excludes
+			// the server, no profile is involved, so no block_reason.
+			name: "legacy token scope refusal carries no reason",
+			opts: ExecutionOptions{
+				AuthContext: &AuthInfo{Type: "agent", AgentName: "a", AllowedServers: []string{"other"}, Permissions: []string{"read"}},
+			},
+			wantCode:   ErrorCodeAccessDenied,
+			wantReason: "",
+			wantMsg:    "token does not have access to server 's'",
 		},
 	}
 	for _, tc := range cases {
@@ -74,6 +117,9 @@ func TestAuthzObserver_ProfileRefusalReportsBlockReason(t *testing.T) {
 			}
 			if reports[0].Code != tc.wantCode {
 				t.Fatalf("Code = %q, want %q", reports[0].Code, tc.wantCode)
+			}
+			if tc.wantMsg != "" && reports[0].Message != tc.wantMsg {
+				t.Fatalf("Message = %q, want %q (refusal text must stay non-disclosing and unchanged)", reports[0].Message, tc.wantMsg)
 			}
 			if reports[0].BlockReason != tc.wantReason {
 				t.Fatalf("BlockReason = %q, want %q", reports[0].BlockReason, tc.wantReason)

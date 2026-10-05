@@ -809,12 +809,14 @@ export const BlockReasonProfileRule = 'profile_rule' as const;
 export const BlockReasonProfileUnannotated = 'profile_unannotated' as const;
 export const BlockReasonProfileCodeExecution = 'profile_code_execution' as const;
 export const BlockReasonProfileManagement = 'profile_management' as const;
+export const BlockReasonProfileServerScope = 'profile_server_scope' as const;
 export type ProfileBlockReason =
   | typeof BlockReasonProfileTier
   | typeof BlockReasonProfileRule
   | typeof BlockReasonProfileUnannotated
   | typeof BlockReasonProfileCodeExecution
-  | typeof BlockReasonProfileManagement;
+  | typeof BlockReasonProfileManagement
+  | typeof BlockReasonProfileServerScope;
 
 export const ExplainStepCredential = 'credential' as const;
 export const ExplainStepProfile = 'profile' as const;
