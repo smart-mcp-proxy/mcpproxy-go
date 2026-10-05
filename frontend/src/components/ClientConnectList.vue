@@ -281,7 +281,7 @@
                 :data-test="`client-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id] || previewRefreshing[client.id] || previews[client.id]!.access_state === 'malformed'"
+                :disabled="loading.clients[client.id] || previewRefreshing[client.id] || previewStale[client.id] || previews[client.id]!.access_state === 'malformed'"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>
@@ -851,6 +851,12 @@ async function onBindingToggle(clientId: string) {
 // screen and the precondition token in hand disagree.
 const previewTickets: Record<string, number> = {}
 const previewRefreshing = ref<Record<string, boolean>>({})
+// A re-fetch after a binding change failed: the token in hand belongs to an
+// older intent, so Connect stays disabled until a fetch succeeds or Cancel.
+const previewStale = ref<Record<string, boolean>>({})
+function setStale(clientId: string, on: boolean) {
+  previewStale.value = { ...previewStale.value, [clientId]: on }
+}
 function setRefreshing(clientId: string, on: boolean) {
   previewRefreshing.value = { ...previewRefreshing.value, [clientId]: on }
 }
@@ -862,9 +868,17 @@ async function refreshPreview(clientId: string) {
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
     if (ticket !== previewTickets[clientId]) return
-    if (response.success && response.data) previews.value = { ...previews.value, [clientId]: response.data }
+    if (response.success && response.data) {
+      previews.value = { ...previews.value, [clientId]: response.data }
+      setStale(clientId, false)
+      previewError.value = { ...previewError.value, [clientId]: '' }
+    } else {
+      setStale(clientId, true)
+      previewError.value = { ...previewError.value, [clientId]: response.error || 'Failed to refresh preview' }
+    }
   } catch (err) {
     if (ticket !== previewTickets[clientId]) return
+    setStale(clientId, true)
     setRefusal(clientId, err as ApiError)
   } finally {
     if (ticket === previewTickets[clientId]) setRefreshing(clientId, false)
@@ -878,6 +892,9 @@ async function startConnect(clientId: string) {
   previewLoading[clientId] = true
   previewError.value = { ...previewError.value, [clientId]: '' }
   setRefusal(clientId, null)
+  previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1
+  setRefreshing(clientId, false)
+  setStale(clientId, false)
   // The row's current binding lives in the clients store; make sure it is there.
   if (!clientsStore.clients.some(c => c.id === clientId)) await clientsStore.refreshPresence()
   delete forms[clientId]
@@ -905,6 +922,7 @@ function cancelPreview(clientId: string) {
   // never goes through here).
   previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1
   setRefreshing(clientId, false)
+  setStale(clientId, false)
   setRefusal(clientId, null)
   const next = { ...previews.value }
   delete next[clientId]
@@ -1329,6 +1347,10 @@ watch(() => props.show, (newVal) => {
     previews.value = {}
     previewError.value = {}
     connectRefusal.value = {}
+    // Invalidate any preview fetch still in flight from the previous open.
+    for (const id of Object.keys(previewTickets)) previewTickets[id] += 1
+    previewRefreshing.value = {}
+    previewStale.value = {}
     for (const id of Object.keys(forms)) delete forms[id]
     Object.assign(bulkForm, { profile: '', locked: false, touched: false })
     lastConnect.value = null

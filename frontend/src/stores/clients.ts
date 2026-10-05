@@ -46,9 +46,11 @@ export const useClientsStore = defineStore('clients', () => {
     return Promise.all([scoped, all])
   }
   function applyAll(response: { success: boolean; data?: { clients?: ClientPresence[] } }) {
-    if (response.success && Array.isArray(response.data?.clients)) allClients.value = response.data.clients
+    if (response.success && Array.isArray(response.data?.clients)) {
+      allClients.value = response.data.clients
       stale.value = false
     }
+  }
 
   async function load(nextScope?: { profile?: string; client?: string }) {
     if (nextScope) scope = nextScope
@@ -60,6 +62,8 @@ export const useClientsStore = defineStore('clients', () => {
     const [[clientResponse, allResponse], routingResponse] = await Promise.all([fetchRosters(), api.getRouting()])
     // A newer load owns the loading flag.
     if (mine !== loadTicket || asked !== scopeKey()) return
+    // Routing is only fetched here, so a superseded load still applies it.
+    if (routingResponse.success && routingResponse.data) routing.value = routingResponse.data
     // A newer fetch (another load or a presence poll) owns the rows.
     if (ticket !== fetchTicket) {
       loading.value = false
@@ -71,7 +75,6 @@ export const useClientsStore = defineStore('clients', () => {
       warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
     } else error.value = clientResponse.error || 'Unable to load clients'
-    if (routingResponse.success && routingResponse.data) routing.value = routingResponse.data
     loading.value = false
   }
 
