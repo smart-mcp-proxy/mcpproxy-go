@@ -17,6 +17,10 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
+// attributionWait bounds every record-persistence wait in this file; Windows CI
+// has taken tens of seconds to flush an activity record (#1465).
+const attributionWait = 60 * time.Second
+
 // Spec 108 FR-029 (T057): every dispatched call's activity record carries the
 // profile, client and token IN EFFECT when it ran. One row per FR-020 source.
 
@@ -33,7 +37,7 @@ func waitToolCallFor(t *testing.T, f *restV3Fixture, sessionID, server, tool str
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "tool_call record for %s %s:%s", sessionID, server, tool)
+	}, attributionWait, 10*time.Millisecond, "tool_call record for %s %s:%s", sessionID, server, tool)
 	return found
 }
 
@@ -160,7 +164,7 @@ func TestActivityAttribution_InternalToolCallReadsSessionResolution(t *testing.T
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "internal_tool_call record carries the session's attribution")
+	}, attributionWait, 10*time.Millisecond, "internal_tool_call record carries the session's attribution")
 }
 
 // No history rewrite (FR-029, US3-5): reassigning the client later does not
@@ -195,7 +199,7 @@ func TestActivityAttribution_ReassignmentDoesNotRewriteHistory(t *testing.T) {
 			}
 		}
 		return ro == 1 && full == 1
-	}, 5*time.Second, 10*time.Millisecond, "the earlier record still says work-readonly")
+	}, attributionWait, 10*time.Millisecond, "the earlier record still says work-readonly")
 }
 
 // A code_execution sub-call is a dispatch of its own; it carries the script
@@ -221,7 +225,7 @@ func TestActivityAttribution_CodeExecutionSubCallCarriesCallerAttribution(t *tes
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "sub-call carries the caller's attribution")
+	}, attributionWait, 10*time.Millisecond, "sub-call carries the caller's attribution")
 }
 
 // REST POST /api/v1/tools/call with a legacy pinned agent token: token_name and
@@ -242,7 +246,7 @@ func TestActivityAttribution_RESTLegacyPinnedTokenRecordsTokenAndPin(t *testing.
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond)
+	}, attributionWait, 10*time.Millisecond)
 	assert.Equal(t, "work-readonly", found.Profile)
 	assert.Equal(t, string(profile.SourcePin), found.ProfileSource)
 	assert.Empty(t, found.ClientID)

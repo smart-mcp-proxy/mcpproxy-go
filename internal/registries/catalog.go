@@ -613,13 +613,26 @@ func namespaceOwner(id string) (string, bool) {
 	switch {
 	case labels[0] == "io" && labels[1] == "github":
 		i = 2
-	case len(labels) >= 3 && secondLevelSuffixes[labels[1]]:
+	case len(labels) >= 3 && isCountryCode(labels[0]) && secondLevelSuffixes[labels[1]]:
 		i = 2
 	}
 	if i >= len(labels) || labels[i] == "" {
 		return "", false
 	}
 	return labels[i], true
+}
+
+// isCountryCode reports whether a label is a two-letter ASCII ccTLD (uk, au).
+func isCountryCode(l string) bool {
+	if len(l) != 2 {
+		return false
+	}
+	for i := 0; i < 2; i++ {
+		if c := l[i] | 0x20; c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // Rank is the pure, deterministic catalog ordering (Spec 109 D37.1, data-model

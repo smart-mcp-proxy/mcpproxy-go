@@ -468,6 +468,107 @@ func TestProfilesTool_EachOpResultEqualsRESTData(t *testing.T) {
 	assert.Equal(t, "work-full", list["anonymous_profile"], "the caller is an administrator, so the anonymous_profile is included")
 }
 
+// TestProfilesTool_MutationResultEqualsRESTData: every mutating operation runs
+// through the tool on fixture A and through the matching REST route on an
+// identical fresh fixture B; the tool result equals the REST `data` (#1445).
+func TestProfilesTool_MutationResultEqualsRESTData(t *testing.T) {
+	type restCall struct {
+		method, path string
+		body         interface{}
+	}
+	seedTmp := func(f *profilesToolFixture) {
+		f.ok(map[string]any{"operation": "create", "name": "tmp", "servers": []any{"github"}, "max_tier": "read"})
+	}
+	cases := []struct {
+		name        string
+		clientsOnly bool
+		setup       func(*profilesToolFixture)
+		args        map[string]any
+		rest        func(*profilesToolFixture) restCall
+		normalize   func(map[string]any) // drops per-fixture values (timestamps)
+	}{
+		{
+			name: "create",
+			args: map[string]any{"operation": "create", "name": "tmp", "servers": []any{"github", "ghost"}, "max_tier": "read"},
+			rest: func(*profilesToolFixture) restCall {
+				return restCall{http.MethodPost, "/api/v1/profiles", map[string]any{"name": "tmp", "servers": []string{"github", "ghost"}, "max_tier": "read"}}
+			},
+		},
+		{
+			name: "update",
+			args: map[string]any{"operation": "update", "name": "work-readonly", "servers": []any{"github"}, "max_tier": "read"},
+			rest: func(*profilesToolFixture) restCall {
+				return restCall{http.MethodPut, "/api/v1/profiles/work-readonly", map[string]any{"name": "work-readonly", "servers": []string{"github"}, "max_tier": "read"}}
+			},
+		},
+		{
+			name: "delete", setup: seedTmp,
+			args: map[string]any{"operation": "delete", "name": "tmp"},
+			rest: func(*profilesToolFixture) restCall { return restCall{http.MethodDelete, "/api/v1/profiles/tmp", nil} },
+		},
+		{
+			name: "rename", setup: seedTmp,
+			args: map[string]any{"operation": "rename", "name": "tmp", "new_name": "tmp2"},
+			rest: func(*profilesToolFixture) restCall {
+				return restCall{http.MethodPost, "/api/v1/profiles/tmp/rename", map[string]any{"new_name": "tmp2"}}
+			},
+		},
+		{
+			// There is no classify route: REST classifies through PUT with the
+			// profile's tools.classify changed.
+			name: "classify", setup: seedTmp,
+			args: map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": "read"},
+			rest: func(f *profilesToolFixture) restCall {
+				p := *f.profileByName("tmp")
+				rules := config.ProfileToolRules{}
+				if p.Tools != nil {
+					rules = *p.Tools
+				}
+				rules.Classify = map[string]string{"github:search_code": "read"}
+				p.Tools = &rules
+				return restCall{http.MethodPut, "/api/v1/profiles/tmp", p}
+			},
+		},
+		{
+			name: "assign", clientsOnly: true,
+			normalize: func(m map[string]any) { delete(m["client"].(map[string]any), "expires_at") },
+			setup:     func(f *profilesToolFixture) { f.mintClient("cursor", "work-readonly", auth.ProfileModeLocked) },
+			args:      map[string]any{"operation": "assign", "client": "cursor", "profile": "work-full"},
+			rest: func(*profilesToolFixture) restCall {
+				return restCall{http.MethodPut, "/api/v1/clients/cursor/binding", map[string]any{"profile": "work-full"}}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.clientsOnly && !clientsEdition {
+				t.Skip("client credentials exist in the personal edition only")
+			}
+			a := newProfilesToolFixture(t, nil)
+			b := newProfilesToolFixture(t, nil)
+			for _, f := range []*profilesToolFixture{a, b} {
+				indexEnforcementMatrixFixtureTools(t, f.proxy)
+				if tc.setup != nil {
+					tc.setup(f)
+				}
+			}
+			call := tc.rest(b)
+			status, want, errBody := b.rest(call.method, call.path, call.body)
+			require.Less(t, status, 300, "%v", errBody)
+			got := a.ok(tc.args)
+			if tc.normalize != nil {
+				tc.normalize(got)
+				tc.normalize(want)
+			}
+			wantRaw, err := json.Marshal(want)
+			require.NoError(t, err)
+			gotRaw, err := json.Marshal(got)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(wantRaw), string(gotRaw))
+		})
+	}
+}
+
 // TestProfilesTool_EffectiveToolsClassificationStaleEqualsREST pins FR-005: a
 // classify entry for a tool that is now annotated is reported stale, and the
 // report is the REST one.
