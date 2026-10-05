@@ -4701,6 +4701,20 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	// and the wrong one in five, every door now reads it from the shared
 	// predicate, so they cannot drift apart again.
 	revealHeaders := auth.RevealSecretsAllowed(ctx, p.config != nil && p.config.RevealSecretHeaders)
+	// Reuse the runtime projection that backs the CLI/management API. Rebuilding
+	// health from connection info alone loses stored OAuth token status, expiry,
+	// refresh state and call-time authentication failures.
+	runtimeHealth := make(map[string]*contracts.HealthStatus)
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if projected, err := p.mainServer.runtime.GetAllServers(); err == nil {
+			for _, entry := range projected {
+				name, _ := entry["name"].(string)
+				if hs, ok := entry["health"].(*contracts.HealthStatus); ok && hs != nil {
+					runtimeHealth[name] = hs
+				}
+			}
+		}
+	}
 	for i, server := range servers {
 		// The secret-bearing fields are sourced from redactedServerView — the
 		// shared walker over the config's own JSON — rather than from a
@@ -4869,7 +4883,24 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			}
 		}
 
-		serverMap["health"] = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		if canonical := runtimeHealth[server.Name]; canonical != nil {
+			// Keep the MCP visibility/redaction boundary: copy only health, never
+			// the runtime's secret-bearing config fields or an out-of-scope server.
+			hs := *canonical
+			if !revealHeaders {
+				hs.Summary = scrubUpstreamText(hs.Summary)
+				hs.Detail = scrubUpstreamText(hs.Detail)
+			}
+			if scopedCaller {
+				hs.Summary = logs.RedactContainerMentions(hs.Summary)
+				hs.Detail = logs.RedactContainerMentions(hs.Detail)
+			}
+			serverMap["health"] = &hs
+		} else {
+			// During startup (or in a standalone proxy) no runtime snapshot may
+			// exist yet. Preserve the conservative connection-based fallback.
+			serverMap["health"] = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		}
 
 		// Add Docker isolation information
 		dockerInfo := map[string]interface{}{
