@@ -185,14 +185,7 @@ func Classify(result *mcp.CallToolResult, err error, f Facts) (Outcome, bool) {
 
 	// Network, on typed evidence of a dial / read / write / EOF failure.
 	if isNetworkError(err) {
-		return Outcome{Class: ClassNetwork, Domain: DomainUpstream}, true
-	}
-
-	// A JSON-RPC error response, recognised structurally (mcp-go maps the
-	// standard codes onto sentinels via JSONRPCErrorDetails.AsError). It is a
-	// JSON-RPC error even if the HTTP status was non-2xx.
-	if isJSONRPCError(err) {
-		return Outcome{Class: ClassJSONRPC, Domain: DomainUpstream, HTTPStatus: upstreamStatus}, true
+		return Outcome{Class: ClassNetwork, Domain: DomainUpstream, HTTPStatus: upstreamStatus}, true
 	}
 
 	// A recorded non-2xx HTTP status: mcp-go returns these as an untyped error,
@@ -200,6 +193,13 @@ func Classify(result *mcp.CallToolResult, err error, f Facts) (Outcome, bool) {
 	// wrapper counts as network only AFTER this rule.
 	if nonOK {
 		return Outcome{Class: ClassHTTP, Domain: DomainUpstream, HTTPStatus: status}, true
+	}
+
+	// A JSON-RPC error response, recognised structurally (mcp-go maps the
+	// standard codes onto sentinels via JSONRPCErrorDetails.AsError). A
+	// non-2xx status was already classified http above (FR-041 order).
+	if isJSONRPCError(err) {
+		return Outcome{Class: ClassJSONRPC, Domain: DomainUpstream}, true
 	}
 
 	// mcp-go's generic transport wrapper with no more specific evidence.

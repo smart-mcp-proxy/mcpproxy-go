@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -13,9 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const toolsCallBody = `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}`
+
 func doGet(t *testing.T, c *http.Client, ctx context.Context, url string) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(toolsCallBody))
 	require.NoError(t, err)
 	resp, err := c.Do(req)
 	if err == nil {
@@ -127,4 +130,31 @@ func TestCallRecorderConcurrentCallsIsolated(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// mcp-go reuses the tools/call ctx for reply POSTs to server-initiated
+// requests; those must not overwrite the call's own recorded status.
+func TestCallRecorderIgnoresNonToolsCallPosts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "reply") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cfg := &HTTPTransportConfig{URL: srv.URL}
+	c := cfg.streamableHTTPClient(false, zap.NewNop())
+	ctx, rec := WithCallRecorder(context.Background())
+	doGet(t, c, ctx, srv.URL)
+	for _, body := range []string{`{"jsonrpc":"2.0","id":1,"result":{}}`, `{"jsonrpc":"2.0","method":"notifications/x"}`} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/reply", strings.NewReader(body))
+		require.NoError(t, err)
+		resp, err := c.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+	}
+	snap := rec.Snapshot()
+	assert.Equal(t, 1, snap.Requests)
+	assert.Equal(t, http.StatusOK, snap.LastStatus)
 }

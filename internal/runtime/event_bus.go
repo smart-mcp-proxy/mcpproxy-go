@@ -646,6 +646,9 @@ func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, req
 		"limit":          limit,
 		"retry_after_ms": retryAfterMs,
 		"duration_ms":    waitedMs,
+		// Spec 113-c FR-045: same taxonomy the persisted record carries.
+		"error_class":  "proxy_policy",
+		"fault_domain": "proxy",
 	}
 	evt := newEvent(EventTypeActivityToolCallRejected, payload)
 	r.activityService.RecordToolCallRejected(evt)

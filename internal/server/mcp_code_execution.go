@@ -1065,6 +1065,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			result, err = nil, sanErr
 			if errors.Is(sanErr, audit.ErrSanitisationFailed) {
 				callerr.Observe(ctx, nil, sanErr) // Spec 113-c: proxy_internal, audit class sanitisation
+			} else {
+				// Output-policy block: mcpproxy refused to hand the result over.
+				callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
 			}
 		}
 	}

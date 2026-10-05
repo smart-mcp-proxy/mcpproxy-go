@@ -96,3 +96,15 @@ func TestActivityService_RecordToolCallRejectedStampsProxyPolicy(t *testing.T) {
 	assert.Equal(t, "proxy_policy", records[0].ErrorClass)
 	assert.Equal(t, "proxy", records[0].FaultDomain)
 }
+
+func TestEmitActivityToolCallRejectedPayloadCarriesTaxonomy(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+	svc := NewActivityService(store, zap.NewNop())
+	r := &Runtime{activityService: svc, eventSubs: map[chan Event]struct{}{}}
+	ch := r.SubscribeEvents()
+	r.EmitActivityToolCallRejected("s", "t", "mcp", "r", "queue_full", "server", "busy", 1, 0, 0)
+	evt := <-ch
+	assert.Equal(t, "proxy_policy", evt.Payload["error_class"])
+	assert.Equal(t, "proxy", evt.Payload["fault_domain"])
+}

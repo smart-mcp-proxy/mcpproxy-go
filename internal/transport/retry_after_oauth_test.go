@@ -99,17 +99,13 @@ func TestOAuthClients_RecordRetryAfter(t *testing.T) {
 	}
 }
 
-// TestOAuthClients_NoRecorder_KeepsMcpGoDefaults pins the opt-out: with no
-// recorder and no tracing we must hand mcp-go no client at all, leaving its own
-// defaults (and the OAuth wiring) exactly as they were.
-func TestOAuthClients_NoRecorder_KeepsMcpGoDefaults(t *testing.T) {
+// TestOAuthClients_NoRecorder_StillBuild checks OAuth clients build with no
+// Retry-After recorder and no tracing (the call recorder is always installed).
+func TestOAuthClients_NoRecorder_StillBuild(t *testing.T) {
 	cfg := &HTTPTransportConfig{
 		URL:         "http://127.0.0.1:1/mcp",
 		OAuthConfig: oauthTestConfig(),
 		UseOAuth:    true,
-	}
-	if cfg.needsCustomTransport() {
-		t.Fatal("a config with neither tracing nor a recorder must not force a custom transport")
 	}
 	if c, err := CreateHTTPClient(cfg); err != nil {
 		t.Fatalf("CreateHTTPClient: %v", err)

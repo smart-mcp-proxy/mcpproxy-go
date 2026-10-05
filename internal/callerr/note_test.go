@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -23,7 +24,7 @@ func TestNoteObserveWithRecorder(t *testing.T) {
 	proxytransport.MarkDispatched(dctx)
 	// Drive one request through the recorder round tripper via a tiny client.
 	cfgRT := newRecordingClientForTest()
-	req, _ := http.NewRequestWithContext(dctx, http.MethodPost, srv.URL, nil)
+	req, _ := http.NewRequestWithContext(dctx, http.MethodPost, srv.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))
 	resp, err := cfgRT.Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()

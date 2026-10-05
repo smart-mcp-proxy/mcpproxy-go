@@ -117,6 +117,17 @@ func (t *callRecorderTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if rec == nil {
 		return t.next.RoundTrip(req)
 	}
+	// mcp-go reuses the tools/call context for the reply POSTs to
+	// server-initiated requests received inside the call's SSE stream. Those
+	// are not the call's own request, so their status must not overwrite it.
+	// An unreadable or oversize body is counted: it cannot be told apart.
+	clone := req.Clone(req.Context())
+	if body, ok := readGateBody(clone); ok {
+		if !isToolsCallBody(body) {
+			return t.next.RoundTrip(clone)
+		}
+	}
+	req = clone
 	rec.noteRequest()
 	resp, err := t.next.RoundTrip(req)
 	if err == nil && resp != nil {

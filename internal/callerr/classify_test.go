@@ -179,3 +179,22 @@ func TestClassifyIsErrorWinsOverFacts(t *testing.T) {
 	assert.Equal(t, ClassToolError, got.Class)
 	assert.Zero(t, got.HTTPStatus)
 }
+
+// FR-041 order: a recorded non-2xx status is http even when the error also
+// matches a JSON-RPC sentinel.
+func TestClassifyNon2xxBeatsJSONRPCSentinel(t *testing.T) {
+	f := Facts{Dispatched: true, HTTPRequests: 1, ResponseReceived: true, HTTPStatus: 500}
+	o, ok := Classify(nil, fmt.Errorf("rpc: %w", mcp.ErrInternalError), f)
+	assert.True(t, ok)
+	assert.Equal(t, ClassHTTP, o.Class)
+	assert.Equal(t, 500, o.HTTPStatus)
+}
+
+// A network failure after a recorded non-2xx response keeps the status.
+func TestClassifyNetworkKeepsRecordedStatus(t *testing.T) {
+	f := Facts{Dispatched: true, HTTPRequests: 1, ResponseReceived: true, HTTPStatus: 502}
+	o, ok := Classify(nil, io.ErrUnexpectedEOF, f)
+	assert.True(t, ok)
+	assert.Equal(t, ClassNetwork, o.Class)
+	assert.Equal(t, 502, o.HTTPStatus)
+}
