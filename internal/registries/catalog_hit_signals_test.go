@@ -23,6 +23,8 @@ func TestNamespaceOwner(t *testing.T) {
 		{"com.quranmajeed.time/prayer-times", "quranmajeed", true}, // a subdomain label is not the publisher
 		{"uk.co.acme/x", "acme", true},
 		{"com.example.api.v2/x", "example", true},
+		{"com.org.github/x", "org", true}, // "com" is not a ccTLD, so org is not a second-level suffix here
+		{"au.com.acme/x", "acme", true},
 		{"io.github/x", "", false},
 		{"acme/github-fork", "", false}, // no dotted namespace: the registry-name fallback
 		{"fetch", "", false},
