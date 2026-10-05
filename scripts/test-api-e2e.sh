@@ -593,6 +593,14 @@ test_launcher_lifecycle() {
         log_fail "no launcher-server process found via pgrep"
     fi
 
+    # Abort-mode hook (issue #1388): scripts/test-api-e2e-cleanup-check.sh
+    # --abort sets E2E_ABORT_MARKER, waits for this file to appear (the core,
+    # the launcher fixture and the npx child are all up by now), then sends
+    # SIGTERM to this script mid-run to prove the INT/TERM cleanup trap.
+    if [ -n "${E2E_ABORT_MARKER:-}" ]; then
+        touch "$E2E_ABORT_MARKER"
+    fi
+
     # Step 3: restart -> child must be a NEW pid afterwards.
     log_test "Launcher lifecycle: POST /restart reaps + respawns child with new PID"
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/restart\"" >/dev/null
