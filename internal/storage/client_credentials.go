@@ -171,7 +171,9 @@ func (m *Manager) MintClientCredentialNamed(clientID, rawToken string, hmacKey [
 				return ErrClientCredentialActive
 			}
 			// Soft-revoked/expired: replace in the same transaction. The name
-			// stays reserved by the record we are about to write.
+			// stays reserved by the record we are about to write. Keep the
+			// replaced binding so an aborted/undone connect can restore it.
+			token.PriorProfilePin, token.PriorProfileMode = existing.ProfilePin, existing.ProfileMode
 			if err := tokenBucket.Delete(existingHash); err != nil {
 				return fmt.Errorf("failed to delete stale client credential: %w", err)
 			}
@@ -493,6 +495,19 @@ func (m *Manager) getAgentTokenByPendingHashLocked(pendingHash string) (*auth.Ag
 // "client-"+clientID (disconnect, FR-030 change=forget). Returns
 // ErrClientCredentialNotFound when no such record exists.
 func (m *Manager) ForgetClientCredential(clientID string) (*auth.AgentToken, error) {
+	return m.forgetClientCredential(clientID, false)
+}
+
+// ForgetClientCredentialRestoringPrior revokes like ForgetClientCredential and,
+// when the record replaced a revoked/expired tombstone, puts that tombstone's
+// binding back. It is for rolling back a connect that never took effect (abort,
+// undo): a plain forget would leave the tombstone with the aborted connect's
+// binding and a later profileless reconnect could re-mint with it.
+func (m *Manager) ForgetClientCredentialRestoringPrior(clientID string) (*auth.AgentToken, error) {
+	return m.forgetClientCredential(clientID, true)
+}
+
+func (m *Manager) forgetClientCredential(clientID string, restorePrior bool) (*auth.AgentToken, error) {
 	if !auth.ValidClientID(clientID) {
 		return nil, fmt.Errorf("invalid client id %q", clientID)
 	}
@@ -517,6 +532,10 @@ func (m *Manager) ForgetClientCredential(clientID string) (*auth.AgentToken, err
 			return ErrClientCredentialNotFound
 		}
 		tok.Revoked = true
+		if restorePrior && tok.PriorProfileMode != "" {
+			tok.ProfilePin, tok.ProfileMode = tok.PriorProfilePin, tok.PriorProfileMode
+		}
+		tok.PriorProfilePin, tok.PriorProfileMode = "", ""
 		data, err := json.Marshal(tok)
 		if err != nil {
 			return fmt.Errorf("failed to marshal client credential: %w", err)

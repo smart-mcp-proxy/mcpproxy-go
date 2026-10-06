@@ -85,3 +85,42 @@ func TestConnectMinter_PreviewBindingEqualsIssue(t *testing.T) {
 		require.Equal(t, "profile", val.Field)
 	})
 }
+
+// An explicit-profile reconnect over a revoked tombstone must not leave the
+// aborted/undone connect's binding on the tombstone (F1.1).
+func TestConnectMinter_AbortAndUndoRestoreTombstoneBinding(t *testing.T) {
+	setup := func(t *testing.T) *svcHarness {
+		h := newSvcHarness(t)
+		h.mint("cursor", "ro", nil)
+		_, err := h.sm.ForgetClientCredential("cursor")
+		require.NoError(t, err)
+		return h
+	}
+	wantTombstone := func(t *testing.T, h *svcHarness) {
+		pin, mode, err := h.svc.ConnectMinter().PreviewBinding("cursor", connect.CredentialIntent{})
+		require.NoError(t, err)
+		require.Equal(t, "ro", pin)
+		require.Equal(t, "locked", mode)
+	}
+	intent := connect.CredentialIntent{Profile: strp(""), ActorKind: "api_key", Surface: "api"}
+
+	t.Run("abort", func(t *testing.T) {
+		h := setup(t)
+		m := h.svc.ConnectMinter()
+		issued, err := m.Issue("cursor", intent)
+		require.NoError(t, err)
+		require.Equal(t, "", issued.Profile)
+		require.NoError(t, m.Abort("cursor", intent, issued))
+		wantTombstone(t, h)
+	})
+	t.Run("undo", func(t *testing.T) {
+		h := setup(t)
+		m := h.svc.ConnectMinter()
+		issued, err := m.Issue("cursor", intent)
+		require.NoError(t, err)
+		require.NoError(t, m.Commit("cursor", intent, issued))
+		_, err = m.ForgetUnheld("cursor", "", intent)
+		require.NoError(t, err)
+		wantTombstone(t, h)
+	})
+}

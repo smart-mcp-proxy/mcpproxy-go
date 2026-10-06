@@ -381,7 +381,7 @@ func (m connectMinter) Abort(clientID string, intent connect.CredentialIntent, i
 	}
 	// A fresh mint whose config write failed: revoke it and write no record
 	// (from the operator's view nothing happened, plan D13).
-	_, err := s.store.ForgetClientCredential(clientID)
+	_, err := s.store.ForgetClientCredentialRestoringPrior(clientID)
 	return err
 }
 
@@ -444,7 +444,7 @@ func (m connectMinter) ForgetUnheld(clientID, restoredSecret string, intent conn
 	if restoredSecret != "" && s.hashMatches(restoredSecret, rec) {
 		return "", nil
 	}
-	view, err := s.forgetLocked(context.Background(), actorOf(intent), clientID, map[string]interface{}{"reason": "undo"})
+	view, err := s.forgetLockedOpt(context.Background(), actorOf(intent), clientID, map[string]interface{}{"reason": "undo"}, true)
 	if err != nil {
 		return "", err
 	}
