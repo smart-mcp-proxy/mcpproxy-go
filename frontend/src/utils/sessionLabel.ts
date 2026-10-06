@@ -21,6 +21,7 @@ const KNOWN_CLIENTS: Array<[needle: string, display: string]> = [
   ['gemini', 'Gemini'],
   ['antigravity', 'Antigravity'],
   ['windsurf', 'Windsurf'],
+  ['zcode', 'ZCode'],
 ]
 
 /**

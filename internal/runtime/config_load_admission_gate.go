@@ -5,6 +5,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Issue #937 — the trust-mode admission gate on the CONFIG-LOAD path.
@@ -36,6 +37,27 @@ import (
 // record, so an upgrade re-quarantines nothing — which is the whole point:
 // a server the user has already vetted must not suddenly disappear behind a
 // quarantine wall on a version bump.
+//
+// "Known" alone is not enough, though (RC-UPG-001): v0.69's restart path wrote
+// the ungated file entry over a gated record, leaving a server that was never
+// admitted recorded as quarantined:false. So a known, unstated, trust-gated
+// server is admitted only if it also has an approval baseline — at least one
+// tool record that was approved at some point. A server that ran and exposed
+// tools has one (auto-baseline approves a trusted server's tools on first
+// discovery); the stale v0.69 record has none, and nothing else in storage
+// tells the two apart, so a server without one is held again.
+//
+// That deliberately fails closed for vetted servers that have no tool
+// records: zero-tool (prompts/resources-only) servers, servers never
+// discovered while live (e.g. disabled since they were vetted), and servers
+// last vetted before tool approvals were stored (v0.21). Each is held once
+// on upgrade; one approval releases it and records the decision. The rule
+// applies only to servers config.db already held when this process started
+// (bootKnownServers): AddServer saves a new server to config.db before it
+// publishes the config, so a server added while running must not be read as
+// "known but never approved" before its tools are even discovered. When the
+// approval records cannot be read the gate keeps the old rule: unknown is not
+// the same as never admitted.
 //
 // The cost of that choice is that an install ALREADY hit by #937 keeps its
 // poisoned server live, because the buggy admission left exactly the config.db
@@ -104,6 +126,9 @@ type admissionDecision struct {
 	server string
 	reason string
 	newly  bool
+	// neverApproved marks a known server re-held because it has no approval
+	// baseline (RC-UPG-001).
+	neverApproved bool
 }
 
 // applyConfigLoadAdmissionGate resolves the admission decision for every server
@@ -126,6 +151,13 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 			zap.String("reason", "an unreadable config.db cannot distinguish a first-seen server from a known one (issue #937)"))
 		return cfg, false
 	}
+
+	r.bootKnownOnce.Do(func() {
+		r.bootKnownServers = make(map[string]struct{}, len(stored))
+		for name := range stored {
+			r.bootKnownServers[name] = struct{}{}
+		}
+	})
 
 	decisions := make(map[int]admissionDecision)
 	var preFix []string
@@ -152,6 +184,22 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 			// the fix looks like. Upgrade safety says leave it alone; honesty
 			// says say so.
 			if !sc.QuarantineExplicitlySet() && cfg.QuarantineDefaultForServer(sc) {
+				_, bootKnown := r.bootKnownServers[sc.Name]
+				if !bootKnown {
+					// Added while this process runs: AddServer saves it to
+					// config.db before publishing, so "known" here only means
+					// "just added" — the add path already decided admission.
+					continue
+				}
+				if vetted, ok := r.hasApprovalBaseline(sc.Name); ok && !vetted {
+					decisions[i] = admissionDecision{
+						server: sc.Name,
+						reason: "server recorded as unquarantined but with no approved tool baseline was never admitted; held for review by the " +
+							string(sc.EffectiveTrustMode()) + " trust mode",
+						neverApproved: true,
+					}
+					continue
+				}
 				preFix = append(preFix, sc.Name)
 			}
 			continue
@@ -184,7 +232,12 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 		sc.Quarantined = true
 		gated.Servers[i] = sc
 
-		if d.newly {
+		if d.neverApproved {
+			r.logger.Warn("Quarantining known server with no approved tool baseline",
+				zap.String("server", d.server),
+				zap.String("trust_mode", string(sc.EffectiveTrustMode())),
+				zap.String("reason", "config.db records it unquarantined, but no tool was ever approved, so it was never admitted (RC-UPG-001: a v0.69 restart overwrote the gated record)"))
+		} else if d.newly {
 			r.logger.Warn("Quarantining first-seen server from configuration file",
 				zap.String("server", d.server),
 				zap.String("trust_mode", string(sc.EffectiveTrustMode())),
@@ -200,7 +253,7 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 	// never be able to stall a config update.
 	pending := make([]admissionDecision, 0, len(decisions))
 	for _, d := range decisions {
-		if d.newly {
+		if d.newly || d.neverApproved {
 			pending = append(pending, d)
 		}
 	}
@@ -224,6 +277,25 @@ func (r *Runtime) reportPreFixAdmissions(names []string) {
 	if len(names) == 0 {
 		return
 	}
+	// The gate runs several times per process (gateInitialConfig, then
+	// LoadConfiguredServers, then the pre-publish hook on every publish); name
+	// each affected server once per process.
+	r.preFixMu.Lock()
+	if r.preFixReported == nil {
+		r.preFixReported = make(map[string]struct{})
+	}
+	fresh := names[:0:0]
+	for _, n := range names {
+		if _, seen := r.preFixReported[n]; !seen {
+			r.preFixReported[n] = struct{}{}
+			fresh = append(fresh, n)
+		}
+	}
+	r.preFixMu.Unlock()
+	if len(fresh) == 0 {
+		return
+	}
+	names = fresh
 	r.logger.Warn("Configured servers predate the config-load admission gate and have never been explicitly reviewed",
 		zap.Strings("servers", names),
 		zap.String("action", "review them in the quarantine UI, or record the decision with an explicit \"quarantined\" value in mcp_config.json (issue #937)"))
@@ -248,6 +320,68 @@ func (r *Runtime) storedServersForAdmission() (map[string]*config.ServerConfig, 
 		}
 	}
 	return byName, true
+}
+
+// gateServerForRestart runs one server entry that was just re-read from
+// mcp_config.json (the #467 disk-first restart) through the admission gate and
+// reports whether the result may be persisted to config.db.
+//
+// Why: the raw file entry of a server that never stated `quarantined` decodes as
+// Quarantined=false. Persisting or using it as-is silently erased the quarantine
+// the gate recorded at load, and every later config write, reload or reboot then
+// saw a known, live, un-stated server and admitted it. Only the restarted server
+// is gated (not the whole file) so other servers do not re-log the "predate the
+// gate" warning or emit duplicate first-seen activity on every restart.
+//
+// Like the gate itself this can only ever ADD quarantine.
+func (r *Runtime) gateServerForRestart(diskCfg *config.Config, srv *config.ServerConfig) (*config.ServerConfig, bool) {
+	stored, ok := r.storedServersForAdmission()
+	return r.admitServerForRestart(diskCfg, srv, stored, ok)
+}
+
+// admitServerForRestart is gateServerForRestart with the storage view injected.
+//
+// When storage is readable the disk entry goes through applyConfigLoadAdmissionGate
+// as a one-server config. When it is not, the gate would abstain, but a restart
+// must not then trust the raw file (fail closed): a server that states nothing
+// inherits the quarantine of the currently published (already gated) entry, or
+// the trust-mode default if the runtime has never seen it. An unreadable storage
+// is never written to. An explicit operator `quarantined` value is always obeyed.
+func (r *Runtime) admitServerForRestart(diskCfg *config.Config, srv *config.ServerConfig, stored map[string]*config.ServerConfig, storageOK bool) (*config.ServerConfig, bool) {
+	if storageOK {
+		one := *diskCfg
+		one.Servers = []*config.ServerConfig{srv}
+		gated, _ := r.applyConfigLoadAdmissionGate(&one, stored, true)
+		return gated.Servers[0], true
+	}
+
+	out := config.CopyServerConfig(srv)
+	if out.QuarantineExplicitlySet() || out.Quarantined {
+		return out, false
+	}
+	published := r.Config()
+	if r.configSvc != nil {
+		if snap := r.configSvc.Current(); snap != nil && snap.Config != nil {
+			published = snap.Config
+		}
+	}
+	known := false
+	if published != nil {
+		for _, sc := range published.Servers {
+			if sc != nil && sc.Name == srv.Name {
+				out.Quarantined = sc.Quarantined
+				known = true
+				break
+			}
+		}
+	}
+	if !known && diskCfg.QuarantineDefaultForServer(out) {
+		out.Quarantined = true
+	}
+	r.logger.Warn("Server storage unreadable during restart; keeping the published quarantine decision instead of trusting the config file",
+		zap.String("server", srv.Name),
+		zap.Bool("quarantined", out.Quarantined))
+	return out, false
 }
 
 // gateConfigForAdmission is the one-call form used by paths that hold a config
@@ -357,4 +491,30 @@ func (r *Runtime) publishAdmissionGatedConfig(previous, gated *config.Config) {
 		r.setDesiredLocked(gated)
 	}
 	r.mu.Unlock()
+}
+
+// hasApprovalBaseline reports whether serverName has ever had a tool approved:
+// a record that is approved now, or one that carries an approved hash (a
+// "changed" record after a rug pull was approved before). ok is false when the
+// records cannot be read, so the caller can abstain instead of treating an
+// unreadable store as "never approved".
+func (r *Runtime) hasApprovalBaseline(serverName string) (vetted, ok bool) {
+	if r.storageManager == nil {
+		return false, false
+	}
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		r.logger.Warn("Failed to read tool approvals for the admission gate",
+			zap.String("server", serverName), zap.Error(err))
+		return false, false
+	}
+	for _, rec := range records {
+		if rec == nil {
+			continue
+		}
+		if rec.Status == storage.ToolApprovalStatusApproved || rec.ApprovedHash != "" {
+			return true, true
+		}
+	}
+	return false, true
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // contractsRelPath is the location of the generated TypeScript file
@@ -86,12 +88,127 @@ export type HealthAction =
   | typeof HealthActionConfigure
   | typeof HealthActionEditURL;
 
+// Health status vocabulary (Spec 109 FR-010–012). The ONE vocabulary every
+// surface (Web UI, macOS, tray, CLI) renders as text — HealthLevel stays a
+// severity signal for badge/tray coloring only; no renderer may print it as
+// text.
+export const HealthStatusReady = 'ready' as const;
+export const HealthStatusConnecting = 'connecting' as const;
+export const HealthStatusSignInRequired = 'sign_in_required' as const;
+export const HealthStatusNeedsReview = 'needs_review' as const;
+export const HealthStatusNeedsSecret = 'needs_secret' as const;
+export const HealthStatusNeedsConfig = 'needs_config' as const;
+export const HealthStatusError = 'error' as const;
+export const HealthStatusDisabled = 'disabled' as const;
+export type HealthStatusValue =
+  | typeof HealthStatusReady
+  | typeof HealthStatusConnecting
+  | typeof HealthStatusSignInRequired
+  | typeof HealthStatusNeedsReview
+  | typeof HealthStatusNeedsSecret
+  | typeof HealthStatusNeedsConfig
+  | typeof HealthStatusError
+  | typeof HealthStatusDisabled;
+
+// Label tables — binding for the Web UI, macOS window/tray and CLI table
+// (Spec 109 FR-014). Generated from internal/health/constants.go
+// (StatusLabels / ActionLabels).
+export const HEALTH_STATUS_LABELS: Record<HealthStatusValue, string> = {
+  [HealthStatusReady]: 'Online',
+  [HealthStatusConnecting]: 'Connecting',
+  [HealthStatusSignInRequired]: 'Sign-in required',
+  [HealthStatusNeedsReview]: 'Needs review',
+  [HealthStatusNeedsSecret]: 'Secret required',
+  [HealthStatusNeedsConfig]: 'Needs configuration',
+  [HealthStatusError]: 'Error',
+  [HealthStatusDisabled]: 'Disabled',
+};
+
+export const HEALTH_ACTION_LABELS: Record<string, string> = {
+  [HealthActionLogin]: 'Sign in',
+  [HealthActionSetSecret]: 'Add secret',
+  [HealthActionConfigure]: 'Fix config',
+  [HealthActionEditURL]: 'Edit URL',
+  [HealthActionApprove]: 'Review',
+  [HealthActionRestart]: 'Restart',
+  [HealthActionViewLogs]: 'View logs',
+  [HealthActionEnable]: 'Enable',
+};
+
 export interface HealthStatus {
   level: HealthLevel;
   admin_state: AdminState;
   summary: string;
   detail?: string;
   action?: HealthAction;
+  /** The ONE status vocabulary rendered as text on every surface (FR-010/FR-011). */
+  status: HealthStatusValue;
+  /** True only when status === 'ready'. */
+  usable: boolean;
+  /** Every applicable next step, in priority order (FR-012). Action always equals actions[0] (or action is '' when empty). */
+  actions: HealthAction[];
+}
+
+// Needs-attention list (Spec 109 FR-001-007) - generated from
+// internal/contracts/attention.go. One list, one count, every surface (Web
+// UI, macOS tray/Home, CLI) reads from GET /api/v1/attention.
+export const AttentionKindAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const AttentionKindClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const AttentionKindClientTokenNameConflict = 'client_token_name_conflict' as const;
+export const AttentionKindProfileMissing = 'profile_missing' as const;
+export const AttentionKindClientRotationPending = 'client_rotation_pending' as const;
+export const AttentionKindClientCredentialExpiring = 'client_credential_expiring' as const;
+export const AttentionKindSignInRequired = 'sign_in_required' as const;
+export const AttentionKindMissingSecret = 'missing_secret' as const;
+export const AttentionKindConfigError = 'config_error' as const;
+export const AttentionKindServerError = 'server_error' as const;
+export const AttentionKindServerReview = 'server_review' as const;
+export const AttentionKindToolReview = 'tool_review' as const;
+export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
+
+export type AttentionKind =
+  | typeof AttentionKindAnonymousDeniedByBindingGuard
+  | typeof AttentionKindClientHoldsAdminKey
+  | typeof AttentionKindClientTokenNameConflict
+  | typeof AttentionKindProfileMissing
+  | typeof AttentionKindClientRotationPending
+  | typeof AttentionKindClientCredentialExpiring
+  | typeof AttentionKindSignInRequired
+  | typeof AttentionKindMissingSecret
+  | typeof AttentionKindConfigError
+  | typeof AttentionKindServerError
+  | typeof AttentionKindServerReview
+  | typeof AttentionKindToolReview
+  | typeof AttentionKindClientNeverSeen;
+
+export interface AttentionSubject {
+  type: 'server' | 'tool' | 'client' | 'setting';
+  id: string;
+  name: string;
+}
+
+export interface AttentionFix {
+  verb: string;
+  label: string;
+  target: string;
+}
+
+export interface AttentionItem {
+  /** Stable: kind:type:subject[:state]. */
+  id: string;
+  kind: AttentionKind;
+  rank: number;
+  subject: AttentionSubject;
+  summary: string;
+  detail?: string;
+  fix: AttentionFix;
+  since: string; // ISO date string
+}
+
+export interface AttentionResponse {
+  count: number;
+  generated_at: string; // ISO date string
+  items: AttentionItem[];
 }
 
 `)
@@ -237,6 +354,7 @@ export interface PreflightResponse {
   health?: HealthStatus; // Unified health status calculated by the backend
   trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
   expose_prompts?: boolean; // F9 per-server prompt-aggregation override; absent = inherit default aggregation, false = exclude this server's prompts
+  forward_headers?: string[]; // Spec 112 allowlist of inbound MCP client header names forwarded to this server on tools/call (names only, never values)
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
   // Spec 093 (#955) per-server concurrency overrides. Tri-state: absent =
   // inherit server_concurrency_defaults, 0 = disabled for this server,
@@ -327,6 +445,32 @@ export interface IsolationDefaults {
 
 `)
 
+	// Tier constants - generated from internal/contracts/tier.go
+	// Spec 109 FR-028/X11: one pure function (contracts.AnnotationTier)
+	// computes this everywhere — the Web/macOS/CLI surfaces never derive
+	// their own. `unknown` is returned only by the review payload composer,
+	// never by AnnotationTier itself.
+	sb.WriteString(`export const TierRead = 'read' as const;
+export const TierWrite = 'write' as const;
+export const TierDestructive = 'destructive' as const;
+export const TierUnannotated = 'unannotated' as const;
+export const TierUnknown = 'unknown' as const;
+export type Tier =
+  | typeof TierRead
+  | typeof TierWrite
+  | typeof TierDestructive
+  | typeof TierUnannotated
+  | typeof TierUnknown;
+
+`)
+
+	// Spec 109 FR-090 terminology enums - generated from
+	// internal/contracts/terminology.go (the one Go source). The golden
+	// internal/contracts/testdata/terminology.json pins the same values.
+	sb.WriteString(enumBlock("ToolApproval", "ToolApprovalState", "Tool review states (approval_status)", contracts.AllToolApprovalStates()))
+	sb.WriteString(enumBlock("ActivityView", "ActivityView", "Activity views (the `view` URL parameter; the CLI has no `sessions`)", contracts.AllActivityViews()))
+	sb.WriteString(enumBlock("ClientPresence", "ClientPresenceState", "Client presence states (GET /clients row state)", contracts.AllClientPresenceStates()))
+
 	// Tool types
 	sb.WriteString(`export interface Tool {
   name: string;
@@ -341,6 +485,9 @@ export interface IsolationDefaults {
   // Tool-level quarantine status surfaced by the same approval record.
   // Optional because non-quarantined tools simply omit the field.
   approval_status?: string;
+  // Computed by contracts.AnnotationTier (Spec 109 FR-028) — never derive
+  // this from annotations on the frontend (X11).
+  tier?: Tier;
   // Why the trust_mode: scan gate held this tool for review (spec 086
   // FR-018). held_signals names the matched deterministic check ids, e.g.
   // "tpa.TPA-2026-0001.hidden_instruction". All three are absent unless the
@@ -621,5 +768,373 @@ export interface UpdatePolicy {
 }
 `)
 
+	// Spec 108 (Profiles v3) enums - generated from internal/profile/contract.go
+	// (T014). This is the ONE source of truth every surface reads from
+	// (FR-001, FR-032, FR-052); a value spelled here must match that Go file
+	// exactly.
+	sb.WriteString(`// Profiles v3 enums - generated from internal/profile/contract.go
+export const UnannotatedDeny = 'deny' as const;
+export const UnannotatedAsWrite = 'as_write' as const;
+export const UnannotatedAsRead = 'as_read' as const;
+export type UnannotatedPolicy = typeof UnannotatedDeny | typeof UnannotatedAsWrite | typeof UnannotatedAsRead;
+
+export const ProfileReasonNone = '' as const;
+export const ProfileReasonServerNotInProfile = 'server_not_in_profile' as const;
+export const ProfileReasonDeniedByRule = 'denied_by_rule' as const;
+export const ProfileReasonUnannotatedHidden = 'unannotated_hidden' as const;
+export const ProfileReasonAboveTierCap = 'above_tier_cap' as const;
+export type ProfileReason =
+  | typeof ProfileReasonNone
+  | typeof ProfileReasonServerNotInProfile
+  | typeof ProfileReasonDeniedByRule
+  | typeof ProfileReasonUnannotatedHidden
+  | typeof ProfileReasonAboveTierCap;
+
+export const ProfileSourcePin = 'pin' as const;
+export const ProfileSourceBinding = 'binding' as const;
+export const ProfileSourceURL = 'url' as const;
+export const ProfileSourceSession = 'session' as const;
+export const ProfileSourceAnonymous = 'anonymous' as const;
+export const ProfileSourceNone = 'none' as const;
+export type ProfileSource =
+  | typeof ProfileSourcePin
+  | typeof ProfileSourceBinding
+  | typeof ProfileSourceURL
+  | typeof ProfileSourceSession
+  | typeof ProfileSourceAnonymous
+  | typeof ProfileSourceNone;
+
+export const BlockReasonProfileTier = 'profile_tier' as const;
+export const BlockReasonProfileRule = 'profile_rule' as const;
+export const BlockReasonProfileUnannotated = 'profile_unannotated' as const;
+export const BlockReasonProfileCodeExecution = 'profile_code_execution' as const;
+export const BlockReasonProfileManagement = 'profile_management' as const;
+export const BlockReasonProfileServerScope = 'profile_server_scope' as const;
+export type ProfileBlockReason =
+  | typeof BlockReasonProfileTier
+  | typeof BlockReasonProfileRule
+  | typeof BlockReasonProfileUnannotated
+  | typeof BlockReasonProfileCodeExecution
+  | typeof BlockReasonProfileManagement
+  | typeof BlockReasonProfileServerScope;
+
+export const ExplainStepCredential = 'credential' as const;
+export const ExplainStepProfile = 'profile' as const;
+export const ExplainStepServerInScope = 'server_in_scope' as const;
+export const ExplainStepToolRule = 'tool_rule' as const;
+export const ExplainStepTierCap = 'tier_cap' as const;
+export const ExplainStepTokenPermission = 'token_permission' as const;
+export const ExplainStepGlobalGate = 'global_gate' as const;
+export const ExplainStepServerState = 'server_state' as const;
+export const ExplainStepToolApproval = 'tool_approval' as const;
+export type ExplainStep =
+  | typeof ExplainStepCredential
+  | typeof ExplainStepProfile
+  | typeof ExplainStepServerInScope
+  | typeof ExplainStepToolRule
+  | typeof ExplainStepTierCap
+  | typeof ExplainStepTokenPermission
+  | typeof ExplainStepGlobalGate
+  | typeof ExplainStepServerState
+  | typeof ExplainStepToolApproval;
+
+export const FixActionAllowInProfile = 'allow_in_profile' as const;
+export const FixActionClassifyInProfile = 'classify_in_profile' as const;
+export const FixActionAddServerToProfile = 'add_server_to_profile' as const;
+export const FixActionMoveClient = 'move_client' as const;
+export const FixActionEditToken = 'edit_token' as const;
+export const FixActionEnableServer = 'enable_server' as const;
+export const FixActionApproveTool = 'approve_tool' as const;
+export const FixActionChangeSetting = 'change_setting' as const;
+export const FixActionReconnectClient = 'reconnect_client' as const;
+export type FixAction =
+  | typeof FixActionAllowInProfile
+  | typeof FixActionClassifyInProfile
+  | typeof FixActionAddServerToProfile
+  | typeof FixActionMoveClient
+  | typeof FixActionEditToken
+  | typeof FixActionEnableServer
+  | typeof FixActionApproveTool
+  | typeof FixActionChangeSetting
+  | typeof FixActionReconnectClient;
+
+export const CredentialStateClient = 'client' as const;
+export const CredentialStateAdminKey = 'admin_key' as const;
+export const CredentialStateNone = 'none' as const;
+export const CredentialStateRevoked = 'revoked' as const;
+export const CredentialStateExpired = 'expired' as const;
+export const CredentialStateUnknown = 'unknown' as const;
+export type CredentialState =
+  | typeof CredentialStateClient
+  | typeof CredentialStateAdminKey
+  | typeof CredentialStateNone
+  | typeof CredentialStateRevoked
+  | typeof CredentialStateExpired
+  | typeof CredentialStateUnknown;
+
+export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
+export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+export const ErrorCodeConnectInProgress = 'connect_in_progress' as const;
+export const ErrorCodeCredentialSuperseded = 'credential_superseded' as const;
+export const ErrorCodeProfileInUse = 'profile_in_use' as const;
+export const ErrorCodeProfileIsAnonymousProfile = 'profile_is_anonymous_profile' as const;
+export const ErrorCodeProfileExists = 'profile_exists' as const;
+export const ErrorCodeNameMismatch = 'name_mismatch' as const;
+export const ErrorCodePreconditionFailed = 'precondition_failed' as const;
+
+export const GuardFixRequireMCPAuth = 'require_mcp_auth' as const;
+export const GuardFixSetAnonymousProfile = 'set_anonymous_profile' as const;
+
+export const ProfileChangeCreate = 'create' as const;
+export const ProfileChangeUpdate = 'update' as const;
+export const ProfileChangeDelete = 'delete' as const;
+export const ProfileChangeRename = 'rename' as const;
+export const ProfileChangeClassify = 'classify' as const;
+export const ProfileChangeAssign = 'assign' as const;
+export const ProfileChangeLock = 'lock' as const;
+export const ProfileChangeUnlock = 'unlock' as const;
+export const ProfileChangeForget = 'forget' as const;
+export const ProfileChangeRotate = 'rotate' as const;
+export const ProfileChangeAnonymous = 'anonymous' as const;
+export type ProfileChangeKind =
+  | typeof ProfileChangeCreate
+  | typeof ProfileChangeUpdate
+  | typeof ProfileChangeDelete
+  | typeof ProfileChangeRename
+  | typeof ProfileChangeClassify
+  | typeof ProfileChangeAssign
+  | typeof ProfileChangeLock
+  | typeof ProfileChangeUnlock
+  | typeof ProfileChangeForget
+  | typeof ProfileChangeRotate
+  | typeof ProfileChangeAnonymous;
+
+export const RotationFinalized = 'finalized' as const;
+export const RotationRolledBack = 'rolled_back' as const;
+export const RotationPending = 'pending' as const;
+export type RotationState =
+  | typeof RotationFinalized
+  | typeof RotationRolledBack
+  | typeof RotationPending;
+
+export const ProfileSurfaceWeb = 'web' as const;
+export const ProfileSurfaceMacOS = 'macos' as const;
+export const ProfileSurfaceCLI = 'cli' as const;
+export const ProfileSurfaceMCP = 'mcp' as const;
+export const ProfileSurfaceAPI = 'api' as const;
+export type ProfileSurface =
+  | typeof ProfileSurfaceWeb
+  | typeof ProfileSurfaceMacOS
+  | typeof ProfileSurfaceCLI
+  | typeof ProfileSurfaceMCP
+  | typeof ProfileSurfaceAPI;
+
+export const WarningAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const WarningClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const WarningClientCredentialExpiring = 'client_credential_expiring' as const;
+export const WarningClientRotationPending = 'client_rotation_pending' as const;
+export const WarningProfileMissing = 'profile_missing' as const;
+export const WarningClientTokenNameConflict = 'client_token_name_conflict' as const;
+export type ClientWarningCode =
+  | typeof WarningAnonymousDeniedByBindingGuard
+  | typeof WarningClientHoldsAdminKey
+  | typeof WarningClientCredentialExpiring
+  | typeof WarningClientRotationPending
+  | typeof WarningProfileMissing
+  | typeof WarningClientTokenNameConflict;
+
+// Spec 108-f: warning severity and action, the access explainer and the REST
+// view shapes of GET /profiles, GET /clients and GET /access/explain.
+export const WarningSeverityWarn = 'warn' as const;
+export const WarningSeverityInfo = 'info' as const;
+export type WarningSeverity = typeof WarningSeverityWarn | typeof WarningSeverityInfo;
+
+// A warning's action.kind is a FixAction spelling or this one (the bulk admin-key upgrade).
+export const WarningActionUpgradeAdminKeyHolders = 'upgrade_admin_key_holders' as const;
+
+export const ExplainVerdictAllowed = 'allowed' as const;
+export const ExplainVerdictBlocked = 'blocked' as const;
+export const ExplainVerdictHidden = 'hidden' as const;
+export type ExplainVerdict =
+  | typeof ExplainVerdictAllowed
+  | typeof ExplainVerdictBlocked
+  | typeof ExplainVerdictHidden;
+
+export const ExplainStepStatusPass = 'pass' as const;
+export const ExplainStepStatusFail = 'fail' as const;
+export const ExplainStepStatusSkip = 'skip' as const;
+export type ExplainStepStatus =
+  | typeof ExplainStepStatusPass
+  | typeof ExplainStepStatusFail
+  | typeof ExplainStepStatusSkip;
+
+export const AccessSubjectClient = 'client' as const;
+export const AccessSubjectToken = 'token' as const;
+export const AccessSubjectProfile = 'profile' as const;
+export const AccessSubjectAnonymous = 'anonymous' as const;
+export type AccessSubjectKind =
+  | typeof AccessSubjectClient
+  | typeof AccessSubjectToken
+  | typeof AccessSubjectProfile
+  | typeof AccessSubjectAnonymous;
+
+export interface ProfileToolRules {
+  allow?: string[];
+  deny?: string[];
+  classify?: Record<string, string>;
+}
+
+export interface ProfileToolCounts {
+  read: number;
+  write: number;
+  destructive: number;
+  unannotated_hidden: number;
+}
+
+// used_by is administrator-only: it is omitted, never emptied, for every other caller.
+export interface ProfileUsedBy {
+  clients: { id: string; mode: string }[];
+  tokens: string[];
+  anonymous_profile: boolean;
+}
+
+// GET /api/v1/profiles row and GET /api/v1/profiles/{name} (Spec 108-f FR-034).
+export interface ProfileView {
+  name: string;
+  title?: string;
+  description?: string;
+  servers: string[];
+  max_tier?: string;
+  unannotated?: string;
+  tools?: ProfileToolRules;
+  code_execution?: boolean;
+  management_tools?: boolean;
+  switchable_to?: string[];
+  effective_servers: string[];
+  effective_unannotated: string;
+  effective_code_execution: boolean;
+  is_legacy: boolean;
+  tool_counts: ProfileToolCounts;
+  // Deprecated v2 field: indexed tools on the effective servers.
+  tool_count: number;
+  calls_24h: number;
+  blocked_24h: number;
+  used_by?: ProfileUsedBy;
+}
+
+export interface ProfileList {
+  profiles: ProfileView[];
+  anonymous_profile?: string;
+}
+
+export interface ProfileWriteResult {
+  profile: ProfileView;
+  warnings: string[];
+}
+
+// GET /api/v1/profiles/{name}/effective-tools (Spec 108-f FR-005, FR-032).
+export interface EffectiveTool {
+  server: string;
+  tool: string;
+  intrinsic_tier: string;
+  profile_tier: string;
+  access: { visible: boolean; callable: boolean; reason: ProfileReason | string };
+  classification_stale: boolean;
+}
+
+export interface EffectiveToolsResult {
+  profile: string;
+  tools: EffectiveTool[];
+  counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
+  // Administrators only: classify entries for annotated or missing tools.
+  stale_classifications?: string[];
+  // Administrators only: why each stale entry no longer applies ("annotated" or "missing").
+  stale_classification_reasons?: Record<string, string>;
+}
+
+// GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.
+export interface AccessExplanation {
+  subject: { kind: AccessSubjectKind; name?: string };
+  tool: string;
+  profile: { name: string; source: string };
+  steps: { step: ExplainStep; status: ExplainStepStatus; detail: string }[];
+  verdict: ExplainVerdict;
+  first_failure: ExplainStep | '';
+  fixes: { step: ExplainStep; action: FixAction; target: string; label: string }[];
+}
+
+// One Clients-surface warning (GET /api/v1/clients warnings[]).
+export interface ClientWarning {
+  code: ClientWarningCode;
+  severity: WarningSeverity;
+  client_id?: string;
+  message: string;
+  action?: { kind: FixAction | typeof WarningActionUpgradeAdminKeyHolders; target?: string };
+  bindings?: { client_id: string; token_name: string; profile: string; mode: string }[];
+  fixes?: { kind: string; target?: string }[];
+}
+
+// GET /api/v1/clients row: Spec 109's presence fields plus the Spec 108-f credential and binding fields.
+export interface ClientView {
+  id: string;
+  display_name: string;
+  kind: 'supported' | 'other' | 'custom';
+  icon?: string;
+  state: string;
+  installed: boolean;
+  connected: boolean;
+  connection_unverified?: boolean;
+  config_path?: string;
+  display_path?: string;
+  last_seen: string | null;
+  active_sessions: number;
+  calls_24h: number;
+  reload_hint?: string;
+  sessions?: { id: string; work_session_id?: string; started_at: string; last_activity: string; profile?: string; profile_source?: string }[];
+  credential_state: CredentialState;
+  credential_checked_at?: string;
+  token_name?: string;
+  profile?: string;
+  profile_title?: string;
+  profile_mode?: 'locked' | 'switchable';
+  profile_source?: 'pin' | 'binding';
+  profile_missing?: boolean;
+  expires_at?: string;
+  rotation_pending?: boolean;
+  blocked_24h: number;
+}
+`)
+
+	return sb.String()
+}
+
+// enumBlock renders one terminology family as `export const <Prefix><Camel> =
+// 'v' as const;` lines plus the union type, exactly the shape of the Health*
+// and Tier* blocks above.
+func enumBlock(prefix, typeName, comment string, values []string) string {
+	var sb strings.Builder
+	sb.WriteString("// " + comment + " - generated from internal/contracts/terminology.go\n")
+	names := make([]string, 0, len(values))
+	for _, v := range values {
+		name := prefix
+		for _, w := range strings.Split(v, "_") {
+			if w == "" {
+				continue // a leading, trailing or repeated underscore adds no word
+			}
+			name += strings.ToUpper(w[:1]) + w[1:]
+		}
+		names = append(names, name)
+		sb.WriteString("export const " + name + " = '" + v + "' as const;\n")
+	}
+	sb.WriteString("export type " + typeName + " =\n")
+	for i, n := range names {
+		sb.WriteString("  | typeof " + n)
+		if i == len(names)-1 {
+			sb.WriteString(";\n")
+		} else {
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
 	return sb.String()
 }

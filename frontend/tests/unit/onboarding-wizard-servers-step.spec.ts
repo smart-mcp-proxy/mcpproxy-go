@@ -58,7 +58,7 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'dashboard', component: { template: '<div />' } },
-      { path: '/repositories', name: 'repositories', component: { template: '<div />' } },
+      { path: '/add-server', name: 'add-server', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
@@ -90,10 +90,11 @@ async function openServersTab(importable: string[]) {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: {
-          name: 'AddServerModal',
-          props: ['show'],
-          template: '<div class="add-server-modal" :data-show="String(show)" />',
+        ManualServerForm: {
+          name: 'ManualServerForm',
+          props: ['navigateAfterAdd', 'allowTrustModeSelection'],
+          emits: ['added'],
+          template: '<div class="manual-server-form-stub" :data-navigate-after-add="String(navigateAfterAdd)" :data-allow-trust-mode-selection="String(allowTrustModeSelection)" />',
         },
       },
     },
@@ -128,12 +129,30 @@ describe('OnboardingWizard servers step (F19)', () => {
       expect(wrapper.find('[data-test="nothing-to-import-manual"]').exists()).toBe(true)
     })
 
-    it('the manual branch opens the add-server form', async () => {
-      const { wrapper } = await openServersTab([])
+    it('opens the manual form inline in the wizard without navigating', async () => {
+      const { wrapper, router } = await openServersTab([])
 
-      expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('false')
+      expect(wrapper.find('.manual-server-form-stub').exists()).toBe(false)
       await wrapper.find('[data-test="nothing-to-import-manual"]').trigger('click')
-      expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('true')
+      expect(wrapper.find('[data-test="wizard-manual-form"] .manual-server-form-stub').exists()).toBe(true)
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-navigate-after-add')).toBe('false')
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-allow-trust-mode-selection')).toBe('false')
+      expect(wrapper.emitted('close')).toBeFalsy()
+      expect(router.currentRoute.value.path).toBe('/')
+    })
+
+    it('records server-step completion when the inline form adds a server', async () => {
+      const { wrapper, router } = await openServersTab([])
+
+      await wrapper.find('[data-test="nothing-to-import-manual"]').trigger('click')
+      wrapper.findComponent({ name: 'ManualServerForm' }).vm.$emit('added', 'fs-server')
+      await flushPromises()
+
+      expect(api.markOnboardingState).toHaveBeenCalledWith(expect.objectContaining({ server_step_status: 'completed' }))
+      expect(wrapper.find('.manual-server-form-stub').exists()).toBe(false)
+      expect(wrapper.find('[data-test="servers-nothing-to-import"]').text()).toContain('Server added')
+      expect(wrapper.emitted('close')).toBeFalsy()
+      expect(router.currentRoute.value.path).toBe('/')
     })
 
     it('the registry branch closes the wizard before navigating away', async () => {
@@ -142,9 +161,9 @@ describe('OnboardingWizard servers step (F19)', () => {
       await wrapper.find('[data-test="nothing-to-import-registry"]').trigger('click')
       await flushPromises()
 
-      // A modal left open would hang over the registry page.
+      // The wizard must close before leaving for the catalog.
       expect(wrapper.emitted('close')).toBeTruthy()
-      expect(router.currentRoute.value.path).toBe('/repositories')
+      expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=catalog')
     })
 
     it('emits close BEFORE the route changes, not after', async () => {
@@ -165,17 +184,20 @@ describe('OnboardingWizard servers step (F19)', () => {
       await flushPromises()
 
       expect(closeAlreadyEmitted, 'navigation started before close was emitted').toBe(true)
-      expect(router.currentRoute.value.path).toBe('/repositories')
+      expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=catalog')
     })
 
-    it('still exposes the security choice', async () => {
+    it('still shows the security defaults summary', async () => {
+      // Spec 109-ux-navigation-consistency FR-043: the global Docker
+      // isolation / quarantine toggles moved out of this step into a
+      // one-line, read-only summary linking to Settings — see
+      // onboarding-wizard-import-footer.spec.ts for the full behavior.
       const { wrapper } = await openServersTab([])
 
-      const security = wrapper.find('[data-test="security-panel"]')
+      const security = wrapper.find('[data-test="security-defaults-summary"]')
       expect(security.exists()).toBe(true)
-      expect(security.attributes('open')).toBeDefined()
-      expect(wrapper.find('[data-test="toggle-quarantine"]').exists()).toBe(true)
-      expect(wrapper.find('[data-test="toggle-docker-isolation"]').exists()).toBe(true)
+      expect(wrapper.find('[data-test="toggle-quarantine"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="toggle-docker-isolation"]').exists()).toBe(false)
     })
 
     it('offers Back', async () => {
@@ -190,30 +212,30 @@ describe('OnboardingWizard servers step (F19)', () => {
   })
 
   describe('with servers to import', () => {
-    it('expands the security choice by default rather than hiding it', async () => {
+    it('shows the security defaults summary without needing to expand anything', async () => {
+      // Spec 109-ux-navigation-consistency FR-043: replaced the collapsed
+      // `<details>` disclosure with an always-visible one-line summary — see
+      // onboarding-wizard-import-footer.spec.ts for the full behavior.
       const { wrapper } = await openServersTab(['memory', 'everything'])
 
-      const security = wrapper.find('[data-test="security-panel"]')
-      expect(security.exists()).toBe(true)
-      // A `<details>` the user has to think to click is not a surfaced choice.
-      expect(security.attributes('open')).toBeDefined()
+      expect(wrapper.find('[data-test="security-defaults-summary"]').exists()).toBe(true)
     })
 
-    it('makes the reviewed import the single primary action', async () => {
+    it('makes import the single primary action, gated by a per-import quarantine checkbox', async () => {
+      // Spec 109-ux-navigation-consistency FR-043: the two competing import
+      // buttons were replaced by one primary action plus a defaulted-on
+      // quarantine checkbox — see onboarding-wizard-import-footer.spec.ts for
+      // the full behavior (confirmation on uncheck, quarantine wiring, etc).
       const { wrapper } = await openServersTab(['memory'])
 
-      const quarantine = wrapper.find('[data-test="bulk-import-quarantine"]')
-      const active = wrapper.find('[data-test="bulk-import-active"]')
-      expect(quarantine.exists()).toBe(true)
-      expect(active.exists()).toBe(true)
+      expect(wrapper.find('[data-test="bulk-import-quarantine"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="bulk-import-active"]').exists()).toBe(false)
 
-      // Exactly one primary, and it is the one that holds servers for review.
-      expect(quarantine.classes()).toContain('btn-primary')
-      expect(active.classes()).not.toContain('btn-primary')
-      expect(active.classes()).not.toContain('btn-secondary')
-      expect(active.classes()).toContain('btn-link')
-      // …and the unreviewed path says what it skips.
-      expect(active.text()).toContain('Import without review')
+      const primary = wrapper.find('[data-test="bulk-import-primary"]')
+      expect(primary.exists()).toBe(true)
+      expect(primary.classes()).toContain('btn-primary')
+
+      expect(wrapper.find('[data-test="footer-quarantine-checkbox"]').exists()).toBe(true)
     })
 
     it('caps the import list so the last row is not clipped without a scrollbar', async () => {
@@ -227,6 +249,14 @@ describe('OnboardingWizard servers step (F19)', () => {
     it('offers Back', async () => {
       const { wrapper } = await openServersTab(['memory'])
       expect(wrapper.find('[data-test="wizard-back"]').exists()).toBe(true)
+    })
+
+    it('keeps the optional manual-add form locked to its secure Manual trust mode', async () => {
+      const { wrapper } = await openServersTab(['memory'])
+      await wrapper.find('[data-test="manual-add-details"] summary').trigger('click')
+      await wrapper.find('[data-test="add-server-button"]').trigger('click')
+
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-allow-trust-mode-selection')).toBe('false')
     })
 
     it('keeps a Close, so the step is never a trap', async () => {
@@ -290,7 +320,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -328,7 +357,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -350,11 +378,12 @@ describe('OnboardingWizard mounted already-open', () => {
     expect(wrapper.find('[data-test="panel-clients"]').exists()).toBe(true)
   })
 
-  it('a superseded config read does not flip the security toggles back', async () => {
-    // These checkboxes are the one thing the open sequence writes that the user
-    // can also edit — and the panel is expanded by default, so editing one
-    // immediately is the expected path. A config read from a superseded open
-    // landing afterwards must not silently revert the user's choice.
+  it('a superseded config read does not flip the security defaults summary back', async () => {
+    // fetchSecurityState's openSeq guard exists so a config read from a
+    // superseded open cannot land after a fresher one and silently overwrite
+    // it — this pins that guard against the summary text now that the
+    // quarantine/Docker values are read-only here (Spec 109-ux-navigation-
+    // consistency FR-043; the editable checkboxes moved to Settings).
     let releaseConfig: (v: unknown) => void = () => {}
     ;(api.getConfig as any).mockReturnValueOnce(
       new Promise((resolve) => { releaseConfig = resolve })
@@ -369,7 +398,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -386,14 +414,14 @@ describe('OnboardingWizard mounted already-open', () => {
     await wrapper.find('[data-test="tab-servers"]').trigger('click')
     await flushPromises()
 
-    const toggle = () => wrapper.find('[data-test="toggle-quarantine"]')
-    expect((toggle().element as HTMLInputElement).checked).toBe(false)
+    const summary = () => wrapper.find('[data-test="security-defaults-summary"]')
+    expect(summary().text()).toContain('quarantine is off')
 
     // The abandoned read finally returns, claiming quarantine is ON.
     releaseConfig({ success: true, data: { config: { quarantine_enabled: true } } })
     await flushPromises()
 
-    expect((toggle().element as HTMLInputElement).checked).toBe(false)
+    expect(summary().text()).toContain('quarantine is off')
   })
 
   it('still initialises (fetches its state) with no request pending', async () => {

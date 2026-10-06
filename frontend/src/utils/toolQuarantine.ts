@@ -1,4 +1,12 @@
 import type { ToolApproval } from '@/types'
+import {
+  TierDestructive,
+  TierRead,
+  TierUnannotated,
+  TierUnknown,
+  TierWrite,
+  type Tier,
+} from '@/types/contracts'
 
 /**
  * Selects the tools that warrant the per-server Tool-Quarantine banner / list
@@ -31,4 +39,39 @@ export function selectQuarantinedTools(
 ): ToolApproval[] {
   if (serverQuarantined) return []
   return toolApprovals.filter((t) => t.status === 'changed' || t.status === 'pending')
+}
+
+/**
+ * Spec 109 FR-027: the one tool review-state vocabulary. Web, macOS and the CLI
+ * all name the raw `approval_status` values the same way; the raw value stays the
+ * wire/URL/filter value and is never rendered.
+ */
+export const TOOL_APPROVAL_LABELS: Record<string, string> = {
+  approved: 'Approved',
+  pending: 'New, needs review',
+  changed: 'Changed, needs review',
+}
+
+/** Label for a raw approval status; an unknown value is shown as-is. */
+export function toolApprovalLabel(status: string): string {
+  return TOOL_APPROVAL_LABELS[status] ?? status
+}
+
+/**
+ * Spec 109 FR-028/FR-090: the one tool tier vocabulary, keyed by the generated
+ * Tier enum. The tier itself is computed by contracts.AnnotationTier; this is
+ * display only. macOS (ToolLabels.tierLabel) is pinned to the same words.
+ */
+export const TIER_LABELS: Record<Tier, string> = {
+  [TierRead]: 'Read',
+  [TierWrite]: 'Write',
+  [TierDestructive]: 'Destructive',
+  [TierUnannotated]: 'Unannotated',
+  [TierUnknown]: 'Unknown',
+}
+
+/** Label for a raw tier; a missing tier reads Unannotated, an unknown value is shown as-is. */
+export function tierLabel(tier?: string): string {
+  if (!tier) return TIER_LABELS[TierUnannotated]
+  return TIER_LABELS[tier as Tier] ?? tier
 }

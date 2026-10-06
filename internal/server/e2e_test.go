@@ -46,6 +46,22 @@ type MockUpstreamServer struct {
 
 // NewTestEnvironment creates a complete test environment
 func NewTestEnvironment(t *testing.T) *TestEnvironment {
+	return NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{})
+}
+
+// TestEnvironmentOptions customises NewTestEnvironmentWithOptions. Every field
+// is optional; the zero value is exactly NewTestEnvironment.
+type TestEnvironmentOptions struct {
+	// Mutate edits the proxy config before the server is constructed. tempDir
+	// is the environment's scratch directory (removed at Cleanup).
+	Mutate func(cfg *config.Config, tempDir string)
+	// Logger replaces the default development logger; it runs after Mutate.
+	Logger func(cfg *config.Config) (*zap.Logger, error)
+}
+
+// NewTestEnvironmentWithOptions is NewTestEnvironment with config and logger
+// hooks, for tests that must observe boot-time behaviour (Spec 112).
+func NewTestEnvironmentWithOptions(t *testing.T, opts TestEnvironmentOptions) *TestEnvironment {
 	// Disable OAuth for e2e tests to avoid network calls to mock servers
 	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
 	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
@@ -54,15 +70,10 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	tempDir, err := os.MkdirTemp("", "mcpproxy-e2e-*")
 	require.NoError(t, err)
 
-	// Create logger
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
-
 	env := &TestEnvironment{
 		t:           t,
 		tempDir:     tempDir,
 		mockServers: make(map[string]*MockUpstreamServer),
-		logger:      logger,
 	}
 
 	// Create data directory with secure permissions (0700 required for Unix socket security)
@@ -91,6 +102,19 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		DebugSearch:       true,
 		QuarantineEnabled: &quarantineDisabled, // Disable tool-level quarantine in E2E tests (tested separately)
 	}
+
+	if opts.Mutate != nil {
+		opts.Mutate(cfg, tempDir)
+	}
+
+	var logger *zap.Logger
+	if opts.Logger != nil {
+		logger, err = opts.Logger(cfg)
+	} else {
+		logger, err = zap.NewDevelopment()
+	}
+	require.NoError(t, err)
+	env.logger = logger
 
 	env.proxyServer, err = NewServer(cfg, logger)
 	require.NoError(t, err)
@@ -376,6 +400,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -484,6 +509,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("echoserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -993,17 +1019,29 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	env := NewTestEnvironment(t)
 	defer env.Cleanup()
 
+	// This test pins the manual path: nothing is captured until inspection
+	// fetches definitions itself. The admission baseline scan would otherwise
+	// settle mid-test and trigger the automatic capture (Spec 109
+	// fix-review-screen, D-4), which re-grants the inspection exemption and
+	// races the disconnect assertion below. The automatic path has its own
+	// tests (review_capture_after_scan_test.go).
+	env.proxyServer.reviewCaptureFn = func(context.Context, string) error { return nil }
+
 	// Create MCP client
 	mcpClient := env.CreateProxyClient()
 	env.ConnectClient(mcpClient)
 	defer mcpClient.Close()
 
-	// Create mock server with some tools
+	// Create mock server with some tools. The live-inspection fallback must
+	// classify annotations from the upstream response even though no review
+	// definitions have been captured yet.
+	readOnly := false
 	mockTools := []mcp.Tool{
 		{
 			Name:        "test_tool_1",
 			Description: "First test tool",
 			InputSchema: mcp.ToolInputSchema{Type: "object"},
+			Annotations: mcp.ToolAnnotation{ReadOnlyHint: &readOnly},
 		},
 		{
 			Name:        "test_tool_2",
@@ -1035,6 +1073,53 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	// Wait for server to be added to storage (quarantined servers don't get clients created immediately)
 	time.Sleep(500 * time.Millisecond)
+
+	// The REST review remains an empty, uncaptured snapshot until an upstream
+	// definition scan explicitly records one. MCP inspection still performs
+	// the existing temporary-exemption live fetch below.
+	reviewURL := strings.TrimSuffix(env.proxyAddr, "/mcp") + "/api/v1/servers/quarantined-server/review"
+	reviewReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reviewURL, nil)
+	require.NoError(t, err)
+	reviewReq.Header.Set("X-API-Key", "test-api-key-e2e")
+	reviewResp, err := http.DefaultClient.Do(reviewReq)
+	require.NoError(t, err)
+	defer reviewResp.Body.Close()
+	require.Equal(t, http.StatusOK, reviewResp.StatusCode)
+	var reviewEnvelope struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Server struct {
+				DefinitionsCaptured bool `json:"definitions_captured"`
+			} `json:"server"`
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(reviewResp.Body).Decode(&reviewEnvelope))
+	require.True(t, reviewEnvelope.Success)
+	require.False(t, reviewEnvelope.Data.Server.DefinitionsCaptured)
+	require.Empty(t, reviewEnvelope.Data.Tools)
+
+	queueURL := strings.TrimSuffix(env.proxyAddr, "/mcp") + "/api/v1/review"
+	queueReq, err := http.NewRequestWithContext(ctx, http.MethodGet, queueURL, nil)
+	require.NoError(t, err)
+	queueReq.Header.Set("X-API-Key", "test-api-key-e2e")
+	queueResp, err := http.DefaultClient.Do(queueReq)
+	require.NoError(t, err)
+	defer queueResp.Body.Close()
+	require.Equal(t, http.StatusOK, queueResp.StatusCode)
+	var queueEnvelope struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Count   int `json:"count"`
+			Servers []struct {
+				Server string `json:"server"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(queueResp.Body).Decode(&queueEnvelope))
+	require.True(t, queueEnvelope.Success)
+	require.Equal(t, 1, queueEnvelope.Data.Count)
+	require.Equal(t, "quarantined-server", queueEnvelope.Data.Servers[0].Server)
 
 	t.Log("🔍 Calling inspect_quarantined for quarantined-server...")
 
@@ -1088,6 +1173,28 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	}
 	assert.Contains(t, resultText, "test_tool_1", "Result should mention test_tool_1")
 	assert.Contains(t, resultText, "test_tool_2", "Result should mention test_tool_2")
+	var liveReview struct {
+		DefinitionsSource string `json:"definitions_source"`
+		Tools             []struct {
+			Name        string          `json:"name"`
+			Tier        string          `json:"tier"`
+			ScanVerdict string          `json:"scan_verdict"`
+			Annotations json.RawMessage `json:"annotations"`
+			// default_allowed is always present and false on the live path:
+			// nothing was scanned, so nothing starts pre-selected (D43.7).
+			DefaultAllowed *bool `json:"default_allowed"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resultText), &liveReview))
+	require.Equal(t, "live", liveReview.DefinitionsSource)
+	require.Len(t, liveReview.Tools, 2)
+	require.Equal(t, "write", liveReview.Tools[0].Tier)
+	require.Equal(t, "not_scanned", liveReview.Tools[0].ScanVerdict)
+	require.NotEmpty(t, liveReview.Tools[0].Annotations)
+	for _, tool := range liveReview.Tools {
+		require.NotNil(t, tool.DefaultAllowed, "live inspection must carry default_allowed for %s", tool.Name)
+		require.False(t, *tool.DefaultAllowed, "live inspection must start %s unchecked", tool.Name)
+	}
 
 	// After inspection, server should be disconnected again (exemption revoked)
 	time.Sleep(1 * time.Second)
@@ -1483,6 +1590,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("dataserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2692,6 +2800,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -2876,6 +2985,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3000,6 +3110,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	serverConfigB, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfigB.Quarantined = false
+	serverConfigB.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfigB)
 	require.NoError(t, err)
 
@@ -3180,6 +3291,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("annotated")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -3330,6 +3442,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
@@ -3479,6 +3592,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()

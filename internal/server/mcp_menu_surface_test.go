@@ -118,10 +118,14 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 	// registerTools has always gated on the flag, so the default surface never
 	// carried the tool. Since v0.66.0 the flag ships ON, so the fixture
 	// (DefaultConfig) now registers the live tool there.
+	//
+	// profiles is the Spec 108-h administrator tool (FR-017): registered on the
+	// default, call-tool and code-execution servers (never the direct one), and
+	// listed only to an administrator credential (visibility is per session).
 	wantAdded := map[string][]string{
-		"default_server":      {"code_execution", "describe_tool"},
-		"call_tool_mode":      {"describe_tool"},
-		"code_execution_mode": {},
+		"default_server":      {"code_execution", "describe_tool", "profiles"},
+		"call_tool_mode":      {"describe_tool", "profiles"},
+		"code_execution_mode": {"profiles"},
 	}
 	// Nothing is removed. The two routing-mode surfaces carried a "Code
 	// Execution (Disabled)" stub in the pre-feature snapshot; a disabled
@@ -185,6 +189,10 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertUpstreamServersDelta(t, surface, preM, curM)
 				case name == "code_execution":
 					assertCodeExecutionLive(t, surface, preM, curM)
+				case name == "search_servers":
+					assertSearchServersDelta(t, surface, preM, curM)
+				case name == "list_registries":
+					assertListRegistriesDelta(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -320,11 +328,42 @@ const upstreamServersRedactionMarker = "REDACTION (update/patch):"
 // description, which gains the redaction note above. No parameter may be added,
 // removed or altered — this is a documentation change over an existing
 // behaviour, not a new capability.
+//
+// Spec 112 adds exactly ONE parameter, forward_headers_json (a string holding a
+// JSON array of header names), for the per-server client header forwarding
+// allowlist. It is enumerated here so any other parameter movement still fails.
 func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
-	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
-		"surface %s: only upstream_servers' description may move (issue #1146)", surface)
+	const spec112Param = "forward_headers_json"
+	curProps := schemaProps(curM)
+	if assert.Contains(t, curProps, spec112Param,
+		"surface %s: upstream_servers must expose the Spec 112 forward_headers_json parameter", surface) {
+		prop, _ := curProps[spec112Param].(map[string]interface{})
+		assert.Equal(t, "string", prop["type"], "surface %s: forward_headers_json is a JSON-array string", surface)
+		assert.NotContains(t, requiredParams(curM), spec112Param, "surface %s: forward_headers_json is optional", surface)
+	}
+	// Compare the two schemas with that one added parameter removed from the
+	// current side; everything else must be identical apart from the description.
+	curWithout := schemaWithout(curM, "description")
+	if schema, ok := curWithout["inputSchema"].(map[string]interface{}); ok {
+		trimmed := make(map[string]interface{}, len(schema))
+		for k, v := range schema {
+			trimmed[k] = v
+		}
+		if props, ok := schema["properties"].(map[string]interface{}); ok {
+			np := make(map[string]interface{}, len(props))
+			for k, v := range props {
+				if k != spec112Param {
+					np[k] = v
+				}
+			}
+			trimmed["properties"] = np
+		}
+		curWithout["inputSchema"] = trimmed
+	}
+	assert.Equal(t, schemaWithout(preM, "description"), curWithout,
+		"surface %s: only upstream_servers' description and the Spec 112 forward_headers_json parameter may move", surface)
 
 	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
 		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)
@@ -333,6 +372,75 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 	curDesc, _ := curM["description"].(string)
 	assert.True(t, strings.HasPrefix(curDesc, preDesc),
 		"surface %s: the redaction note is APPENDED — no pre-feature prose may be rewritten", surface)
+}
+
+// assertSearchServersDelta: Spec 109 FR-067 makes 'registry' OPTIONAL (was
+// required) and updates its description, plus the tool's own description,
+// to the "search every catalog source" wording. The catalog follow-up also
+// documents that non-empty 'tag' values are rejected. No parameter is added
+// or removed, and every parameter OTHER than 'registry' and 'tag' is identical.
+func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	preDesc, _ := preM["description"].(string)
+	curDesc, _ := curM["description"].(string)
+	assert.NotEqual(t, preDesc, curDesc,
+		"surface %s: search_servers.description must be regenerated with the FR-067 catalog wording", surface)
+
+	preProps := schemaProps(preM)
+	curProps := schemaProps(curM)
+	assert.ElementsMatch(t, keysOf(preProps), keysOf(curProps),
+		"surface %s: search_servers must keep the same parameter set — FR-067 changes registry's requiredness/description only", surface)
+
+	for name, preProp := range preProps {
+		if name == "registry" || name == "tag" {
+			continue
+		}
+		assert.Equal(t, preProp, curProps[name],
+			"surface %s: search_servers.%s must be unchanged (only 'registry' may move, FR-067)", surface, name)
+	}
+
+	preRequired := requiredParams(preM)
+	curRequired := requiredParams(curM)
+	assert.Contains(t, preRequired, "registry",
+		"surface %s: precondition — pre-feature search_servers required 'registry'", surface)
+	assert.NotContains(t, curRequired, "registry",
+		"surface %s: 'registry' must become optional (FR-067)", surface)
+
+	preTag, ok := preProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: precondition — search_servers has tag parameter", surface)
+	curTag, ok := curProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: search_servers must keep tag parameter", surface)
+	assert.Equal(t, "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.", curTag["description"],
+		"surface %s: tag must explain the unsupported filter behavior", surface)
+	assert.NotEqual(t, preTag["description"], curTag["description"],
+		"surface %s: tag description delta must be explicit", surface)
+}
+
+// assertListRegistriesDelta: Spec 109 FR-067 changes ONLY list_registries'
+// description (pointing at search_servers' all-sources default and using
+// "catalog source" wording). The tool takes no parameters, so its schema
+// must otherwise be byte-identical.
+func assertListRegistriesDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
+		"surface %s: only list_registries' description may move (FR-067)", surface)
+
+	preDesc, _ := preM["description"].(string)
+	curDesc, _ := curM["description"].(string)
+	assert.NotEqual(t, preDesc, curDesc,
+		"surface %s: list_registries.description must be regenerated with the FR-067 catalog wording", surface)
+}
+
+// keysOf returns m's top-level keys, order-independent (paired with
+// assert.ElementsMatch).
+func keysOf(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // assertQuarantineSecurityDelta: quarantine_security may grow the two scan
@@ -459,7 +567,9 @@ func TestMenuSurface_AnnotationFilterParamsShared(t *testing.T) {
 // assertCallToolVariantDelta: only the tool description and the 'args'
 // parameter description may change (FR-014); the new text references
 // signatures + describe_tool and no longer instructs reading inputSchema from
-// retrieve_tools. Everything else is byte-equal.
+// retrieve_tools. Issue #1364 additionally moved the 'args' schema shape from
+// {"properties":{}} to {"additionalProperties":true} (open object); that one
+// transition is pinned below. Everything else is byte-equal.
 func assertCallToolVariantDelta(t *testing.T, surface, name string, preM, curM map[string]interface{}) {
 	t.Helper()
 
@@ -492,8 +602,20 @@ func assertCallToolVariantDelta(t *testing.T, surface, name string, preM, curM m
 	preNorm := asMap(t, mustRemarshal(t, preM))
 	curNorm := asMap(t, mustRemarshal(t, curM))
 	preNorm["description"], curNorm["description"] = "", ""
-	schemaOf(preNorm)["args"].(map[string]interface{})["description"] = ""
-	schemaOf(curNorm)["args"].(map[string]interface{})["description"] = ""
+	preNormArgs := schemaOf(preNorm)["args"].(map[string]interface{})
+	curNormArgs := schemaOf(curNorm)["args"].(map[string]interface{})
+	preNormArgs["description"], curNormArgs["description"] = "", ""
+	// Issue #1364: args must be an OPEN object now (grammar-constrained clients
+	// read an empty "properties" map as "no keys allowed"). Pin the exact
+	// transition, then normalise it away so the rest stays byte-equal.
+	assert.Equal(t, map[string]interface{}{}, preNormArgs["properties"],
+		"golden %s args should still be the frozen empty-properties shape", name)
+	assert.Equal(t, true, curNormArgs["additionalProperties"],
+		"surface %s: %s args must allow arbitrary keys (#1364)", surface, name)
+	assert.NotContains(t, curNormArgs, "properties",
+		"surface %s: %s args must not carry an empty properties map (#1364)", surface, name)
+	delete(preNormArgs, "properties")
+	delete(curNormArgs, "additionalProperties")
 	assert.Equal(t, preNorm, curNorm,
 		"surface %s: %s may differ from pre-feature ONLY in description texts (SC-003)", surface, name)
 }

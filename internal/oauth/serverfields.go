@@ -62,7 +62,7 @@ func RedactServerSecretFields(server *contracts.Server) {
 	// answer differently about the same string. The rule is also the only thing
 	// that catches a token pasted into either field.
 	if server.Command != "" {
-		server.Command = LiveRedaction.Leaf("command", server.Command)
+		server.Command = LiveRedaction.CommandString(server.Command)
 	}
 	if server.WorkingDir != "" {
 		server.WorkingDir = LiveRedaction.Leaf("working_dir", server.WorkingDir)
@@ -253,6 +253,7 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"updated":                    MaskDecisionNotSecret,
 	"reconnect_on_use":           MaskDecisionNotSecret,
 	"expose_prompts":             MaskDecisionNotSecret,
+	"forward_headers":            MaskDecisionNotSecret, // Spec 112: header NAMES only, never values
 	"launcher_wait_timeout":      MaskDecisionNotSecret,
 	"health_check_interval":      MaskDecisionNotSecret,
 	"tool_discovery_interval":    MaskDecisionNotSecret,
@@ -364,6 +365,8 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"health.summary":     MaskDecisionNotSecret,
 	"health.detail":      MaskDecisionNotSecret, // scrubbed free-form text
 	"health.action":      MaskDecisionNotSecret,
+	"health.status":      MaskDecisionNotSecret,
+	"health.actions":     MaskDecisionNotSecret,
 
 	// Spec 044 diagnostic: a classified failure. `cause` echoes the raw connect
 	// error and is scrubbed; the rest are codes and fixed prose. Read-only.

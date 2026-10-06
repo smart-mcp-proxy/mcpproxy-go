@@ -1,0 +1,197 @@
+import XCTest
+@testable import MCPProxy
+
+/// T044 (Spec 109 FR-010–012, FR-014 labels): decode the new
+/// `status`/`usable`/`actions` fields, verify the row/tray label and color
+/// for each status, and guard against `level` leaking as rendered text
+/// (Spec 109 SC-003).
+final class HealthVocabularyTests: XCTestCase {
+
+    private func decode(_ jsonString: String) throws -> HealthStatus {
+        let data = jsonString.data(using: .utf8)!
+        return try JSONDecoder().decode(HealthStatus.self, from: data)
+    }
+
+    // MARK: - Decoding
+
+    func testDecodesStatusUsableActions() throws {
+        let json = """
+        {
+            "level": "degraded",
+            "admin_state": "enabled",
+            "summary": "Sign-in required",
+            "action": "login",
+            "status": "sign_in_required",
+            "usable": false,
+            "actions": ["login"]
+        }
+        """
+        let health = try decode(json)
+        XCTAssertEqual(health.status, "sign_in_required")
+        XCTAssertEqual(health.usable, false)
+        XCTAssertEqual(health.actions, ["login"])
+        XCTAssertEqual(health.action, health.actions?.first, "action must equal actions[0]")
+    }
+
+    func testToleratesMissingNewFields() throws {
+        // An older core payload without status/usable/actions must still decode.
+        let json = """
+        {"level": "healthy", "admin_state": "enabled", "summary": "Connected"}
+        """
+        let health = try decode(json)
+        XCTAssertNil(health.status)
+        XCTAssertNil(health.usable)
+        XCTAssertNil(health.actions)
+        // Falls back to the pre-Spec-109 reading.
+        XCTAssertTrue(health.isUsable)
+    }
+
+    func testOldCorePayloadConnectingIsNotUsable() throws {
+        // A pre-Spec-109 core's "connecting"/"idle" branch
+        // (internal/health/calculator.go) reported a mid-connect server as
+        // level=healthy/admin_state=enabled with this exact summary — the same
+        // shape a fully connected, usable server reports. A naive
+        // level+adminState fallback would call it usable when it cannot yet
+        // serve tool calls.
+        let json = """
+        {"level": "healthy", "admin_state": "enabled", "summary": "Connecting..."}
+        """
+        let health = try decode(json)
+        XCTAssertNil(health.usable)
+        XCTAssertFalse(health.isUsable, "a mid-connect server must not fall back to usable")
+    }
+
+    /// Review finding (Spec 109 round 2): ServerDetailView's "Suggested
+    /// Action" row gated on `health.actions` alone, so an old-core payload
+    /// with only the legacy singular `action` field (no `actions`) dropped
+    /// the row entirely — a regression from before this PR, and inconsistent
+    /// with `isUsable`'s own old-core tolerance just above.
+    func testActionsOrLegacyFallbackUsesLegacyActionWhenActionsIsAbsent() throws {
+        let json = """
+        {"level": "unhealthy", "admin_state": "enabled", "summary": "Missing secret", "action": "set_secret"}
+        """
+        let health = try decode(json)
+        XCTAssertNil(health.actions)
+        XCTAssertEqual(health.actionsOrLegacyFallback, ["set_secret"])
+    }
+
+    func testActionsOrLegacyFallbackPrefersActionsWhenPresent() throws {
+        let json = """
+        {
+            "level": "unhealthy", "admin_state": "enabled", "summary": "Missing secret",
+            "action": "set_secret", "status": "needs_secret", "usable": false,
+            "actions": ["set_secret"]
+        }
+        """
+        let health = try decode(json)
+        XCTAssertEqual(health.actionsOrLegacyFallback, ["set_secret"])
+    }
+
+    func testActionsOrLegacyFallbackIsEmptyWhenNeitherIsPresent() throws {
+        let json = """
+        {"level": "healthy", "admin_state": "enabled", "summary": "Connected"}
+        """
+        let health = try decode(json)
+        XCTAssertEqual(health.actionsOrLegacyFallback, [])
+    }
+
+    // MARK: - Every derivation-table row (mirrors internal/health/status_test.go, T041)
+
+    func testEveryRow_DecodesAndLabels() throws {
+        for row in HealthFixtureRows.all {
+            let health = try decode(row.json)
+            XCTAssertEqual(health.status, row.wantStatus, row.name)
+            XCTAssertEqual(health.usable, row.wantUsable, row.name)
+            XCTAssertEqual(health.statusLabel, row.wantLabel, row.name)
+            XCTAssertEqual(health.isUsable, row.wantUsable, row.name)
+
+            // action == actions.first, or absent when actions is empty.
+            let actions = health.actions ?? []
+            if actions.isEmpty {
+                XCTAssertTrue(health.action == nil || health.action == "", row.name)
+            } else {
+                XCTAssertEqual(health.action, actions.first, row.name)
+            }
+        }
+    }
+
+    // MARK: - Forbidden renderings (SC-003)
+
+    /// For every row where `usable == false`, the status label must never say
+    /// the server is healthy/online/connected.
+    func testForbiddenWordsForUnusableRows() throws {
+        let forbidden = ["healthy", "Healthy", "online", "Online", "connected", "Connected"]
+        for row in HealthFixtureRows.all where !row.wantUsable {
+            let health = try decode(row.json)
+            for word in forbidden {
+                XCTAssertFalse(health.statusLabel.contains(word),
+                                "\(row.name): status label '\(health.statusLabel)' must not contain '\(word)'")
+            }
+        }
+    }
+
+    // MARK: - Action labels
+
+    func testActionLabelsCoverEveryAction() {
+        let actions = ["login", "set_secret", "configure", "edit_url", "approve", "restart", "view_logs", "enable"]
+        for action in actions {
+            XCTAssertNotNil(HealthStatus.actionLabels[action], "no label for action \(action)")
+            XCTAssertFalse(HealthStatus.actionLabels[action]!.isEmpty)
+        }
+    }
+
+    func testStatusLabelsCoverEveryStatus() {
+        let statuses = ["ready", "connecting", "sign_in_required", "needs_review", "needs_secret", "needs_config", "error", "disabled"]
+        for status in statuses {
+            XCTAssertNotNil(HealthStatus.statusLabels[status], "no label for status \(status)")
+            XCTAssertFalse(HealthStatus.statusLabels[status]!.isEmpty)
+        }
+    }
+
+    // MARK: - Golden fixture shared with Go (internal/health/testdata/status_fixtures.json)
+
+    /// `HealthStatus.statusLabels` / `actionLabels` are hand-copied from
+    /// internal/health/constants.go. The Go side pins the same fixture to
+    /// constants.go (TestStatusFixturesMatchConstants), so a label rename there
+    /// fails here too instead of leaving macOS on the old wording.
+    private struct VocabularyFixture: Decodable {
+        let statusOrder: [String]
+        let statusLabels: [String: String]
+        let actionPriority: [String]
+        let actionLabels: [String: String]
+
+        enum CodingKeys: String, CodingKey {
+            case statusOrder = "status_order"
+            case statusLabels = "status_labels"
+            case actionPriority = "action_priority"
+            case actionLabels = "action_labels"
+        }
+    }
+
+    /// Anchored on `#filePath` (not the working directory), like the other
+    /// fixture-reading tests: `swift test` runs from varying directories.
+    private func loadVocabularyFixture() throws -> VocabularyFixture {
+        let relative = "internal/health/testdata/status_fixtures.json"
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while directory.path != "/" {
+            let candidate = directory.appendingPathComponent(relative)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try JSONDecoder().decode(VocabularyFixture.self, from: Data(contentsOf: candidate))
+            }
+            directory = directory.deletingLastPathComponent()
+        }
+        struct FixtureMissing: Error {}
+        XCTFail("could not find \(relative) above \(#filePath)")
+        throw FixtureMissing()
+    }
+
+    func testLabelTablesMatchGoldenFixture() throws {
+        let fixture = try loadVocabularyFixture()
+        XCTAssertEqual(HealthStatus.statusLabels, fixture.statusLabels,
+                       "HealthStatus.statusLabels drifted from internal/health/constants.go")
+        XCTAssertEqual(HealthStatus.actionLabels, fixture.actionLabels,
+                       "HealthStatus.actionLabels drifted from internal/health/constants.go")
+        XCTAssertEqual(Set(fixture.statusOrder), Set(HealthStatus.statusLabels.keys))
+        XCTAssertEqual(Set(fixture.actionPriority), Set(HealthStatus.actionLabels.keys))
+    }
+}

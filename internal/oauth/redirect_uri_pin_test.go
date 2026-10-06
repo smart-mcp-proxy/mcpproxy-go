@@ -61,7 +61,9 @@ func TestParsePinnedRedirectURI(t *testing.T) {
 		{name: "not a url", uri: "://nope", wantErr: "not a valid URL"},
 		{name: "https scheme", uri: "https://127.0.0.1:54108/oauth/callback", wantErr: "http scheme"},
 		{name: "non-loopback host", uri: "http://example.com:54108/oauth/callback", wantErr: "loopback host"},
-		{name: "wrong path", uri: "http://127.0.0.1:54108/callback", wantErr: "callback path"},
+		// issue #1304: ParsePinnedRedirectURI only pins the port; the path is a
+		// separate concern handled by ParsePinnedRedirectURIBinding.
+		{name: "non-default path is not a port-parsing error", uri: "http://127.0.0.1:54108/callback", wantPort: 54108},
 		{name: "no port", uri: "http://127.0.0.1/oauth/callback", wantErr: "explicit port"},
 		{name: "port zero", uri: "http://127.0.0.1:0/oauth/callback", wantErr: "invalid port"},
 		{name: "query string", uri: "http://127.0.0.1:54108/oauth/callback?x=1", wantErr: "query string or fragment"},
@@ -156,7 +158,7 @@ func TestCreateOAuthConfig_StaticClientCredentialsSurviveMissingPort(t *testing.
 
 	// Simulate the state left behind by a login that persisted the static
 	// client_id but no callback port.
-	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "static-client", "static-secret", 0))
+	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "static-client", "static-secret", 0, ""))
 
 	serverConfig := &config.ServerConfig{
 		Name: serverName,
@@ -170,7 +172,7 @@ func TestCreateOAuthConfig_StaticClientCredentialsSurviveMissingPort(t *testing.
 	oauthConfig := CreateOAuthConfig(serverConfig, store)
 	require.NotNil(t, oauthConfig)
 
-	storedClientID, storedSecret, _, err := store.GetOAuthClientCredentials(serverKey)
+	storedClientID, storedSecret, _, _, err := store.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Equal(t, "static-client", storedClientID,
 		"static OAuth credentials must never be cleared for re-registration")
@@ -189,7 +191,7 @@ func TestCreateOAuthConfig_LegacyDCRCredentialsStillCleared(t *testing.T) {
 	serverURL := upstream.URL + "/mcp"
 	serverKey := GenerateServerKey(serverName, serverURL)
 
-	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-client", "dcr-secret", 0))
+	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-client", "dcr-secret", 0, ""))
 
 	serverConfig := &config.ServerConfig{
 		Name: serverName,
@@ -199,7 +201,7 @@ func TestCreateOAuthConfig_LegacyDCRCredentialsStillCleared(t *testing.T) {
 	oauthConfig := CreateOAuthConfig(serverConfig, store)
 	require.NotNil(t, oauthConfig)
 
-	storedClientID, _, _, err := store.GetOAuthClientCredentials(serverKey)
+	storedClientID, _, _, _, err := store.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Empty(t, storedClientID,
 		"legacy DCR credentials without a stored port should still be cleared")

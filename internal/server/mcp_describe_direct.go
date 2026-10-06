@@ -6,8 +6,42 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
+
+type directProfileViewContextKey struct{}
+
+type directProfileView struct {
+	name  string
+	scope *profile.ProfileScope
+	index *profileIndex
+}
+
+// cacheDirectProfileView pins the direct surface's profile decision once per
+// describe_tool request. The direct resolver checks multiple catalog entries
+// for visibility and suggestions; recomputing the anonymous binding guard for
+// each entry would repeat a token-store read and a full live-tool comparison.
+func (p *MCPProxyServer) cacheDirectProfileView(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(directProfileViewContextKey{}).(directProfileView); ok {
+		return ctx
+	}
+	name, scope, idx := p.resolveActiveProfileWithIndex(ctx)
+	if anonymousProfileCaller(ctx) {
+		resolution := p.ResolveProfileV3(ctx, idx)
+		name, scope = resolution.Name, resolution.Scope
+	}
+	return context.WithValue(ctx, directProfileViewContextKey{}, directProfileView{name: name, scope: scope, index: idx})
+}
+
+func (p *MCPProxyServer) directProfileViewFor(ctx context.Context) directProfileView {
+	if view, ok := ctx.Value(directProfileViewContextKey{}).(directProfileView); ok {
+		return view
+	}
+	ctx = p.cacheDirectProfileView(ctx)
+	view, _ := ctx.Value(directProfileViewContextKey{}).(directProfileView)
+	return view
+}
 
 // Spec 102 US2 — describe_tool's id resolver for the DIRECT surface.
 //
@@ -72,17 +106,77 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 		return nil, false
 	}
 
-	entry, ok := cat.Lookup(id)
-	if !ok {
-		// The canonical form. splitServerTool is deliberately NOT used to
-		// re-derive a display name from it: the canonical map is keyed by the
-		// same (server, tool) pair the handler was registered from.
-		entry, ok = cat.LookupCanonical(id)
+	authCtx := auth.AuthContextFromContext(ctx)
+	isScopedAgent := isScopeRestrictedCaller(authCtx)
+
+	if !isScopedAgent {
+		// Administrator resolution — including a PROFILE-SCOPED
+		// administrator (/mcp/p/<slug>), which is not a scoped AGENT — is
+		// UNCHANGED by Spec 105 FR010-G3 (codex round-1 review, MUST-FIX):
+		// FR-010 is explicit that "administrator resolution [is] unchanged
+		// and tested separately", and a profile-scoped admin is not named as
+		// an SC-005 exception for this FR. The pre-fix two-step lookup, with
+		// visibility checked once at the end, is preserved exactly: a
+		// display match this session cannot see ends resolution here (no
+		// canonical-shadow fallback), and an ambiguous canonical id never
+		// resolves via the admin-only LookupCanonical.
+		entry, ok := cat.Lookup(id)
+		if !ok {
+			entry, ok = cat.LookupCanonical(id)
+		}
+		if !ok || entry == nil {
+			return nil, false
+		}
+		if !p.directEntryVisibleToSession(ctx, entry) {
+			return nil, false
+		}
+		return entry, true
 	}
+
+	// codex round-2 review, MUST-FIX: the shadow-candidate predicate must be
+	// full VISIBILITY (scope AND callability), not scope alone. A candidate
+	// that is scope-authorized but callability-LOCKED (pending/changed/
+	// disabled/quarantined) is not actually reachable by this caller, so
+	// counting it as "authorized" here made a genuinely visible candidate
+	// look ambiguous against it — the caller could see exactly ONE side of
+	// the collision, yet got not-found because the OTHER side, invisible
+	// for an unrelated reason, still counted as a competing claimant.
+	// directEntryVisibleToSession is the canonical single definition of
+	// "this session may reach this entry" (used identically two lines
+	// below and throughout this file); reusing it here rather than
+	// re-deriving scope alone is what keeps the two checks from drifting
+	// apart again.
+	authorized := func(e *directCatalogEntry) bool {
+		return p.directEntryVisibleToSession(ctx, e)
+	}
+
+	// The display form is tried first, as always. A match this AGENT
+	// session cannot see does NOT end resolution here (Spec 105 FR010-G3):
+	// the same string can ALSO be a different, authorized entry's canonical
+	// id — one server's tool "y:z" displays as "x__y:z", which is exactly
+	// server "x__y" tool "z"'s canonical form — and the hidden display owner
+	// must never suppress the authorized canonical owner merely by existing.
+	if entry, ok := cat.Lookup(id); ok && p.directEntryVisibleToSession(ctx, entry) {
+		return entry, true
+	}
+
+	// The canonical form. splitServerTool is deliberately NOT used to
+	// re-derive a display name from it: the canonical map is keyed by the
+	// same (server, tool) pair the handler was registered from.
+	//
+	// LookupCanonicalForAuth answers exactly like LookupCanonical — byte
+	// identical — for an id that is unambiguous. When the id was withdrawn
+	// from the catalog's canonical map for colliding with another entry
+	// (same-canonical duplicate, or the cross-namespace clash above), it
+	// instead resolves against the ONE shadow candidate THIS agent's own
+	// authorization admits, so a hidden colliding entry can never suppress
+	// an id an authorized entry would otherwise answer to. Two authorized
+	// candidates is a genuine ambiguity from this caller's own point of view
+	// too, and resolves to nothing.
+	entry, ok := cat.LookupCanonicalForAuth(id, authorized)
 	if !ok || entry == nil {
 		return nil, false
 	}
-
 	if !p.directEntryVisibleToSession(ctx, entry) {
 		return nil, false
 	}
@@ -94,13 +188,30 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 // operation-permission tier, and agent callability.
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	view := p.directProfileViewFor(ctx)
+	isScopedAgent := isScopeRestrictedCaller(authCtx)
 
-	if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
+	if !directEntryInScope(authCtx, view.scope, isScopedAgent, entry) {
 		return false
 	}
-	return p.directEntryCallable(authCtx, entry)
+	if !p.directEntryCallable(authCtx, entry) {
+		return false
+	}
+	// Spec 108 FR-011/T023: describe_tool on the direct surface must never
+	// return a definition for a profile-excluded tool. This function is
+	// describe-only (never consulted by the actual dispatch path), so unlike
+	// the list filter it needs no call-time exception — describe always
+	// applies the policy in full.
+	if view.name != "" && view.index != nil {
+		if policy := view.index.PolicyFor(view.name); policy != nil {
+			annotations, found := p.EffectiveAnnotations(entry.ServerName, entry.ToolName)
+			intrinsic := profile.IntrinsicTier(annotations, found)
+			if admitted, _, _ := policy.Decide(entry.ServerName, entry.ToolName, intrinsic); !admitted {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // suggestDirectToolID corrects an id that differs from a listed one only by
@@ -130,6 +241,9 @@ func (p *MCPProxyServer) suggestDirectToolID(ctx context.Context, id string) (st
 		return "", false
 	}
 
+	authCtx := auth.AuthContextFromContext(ctx)
+	isScopedAgent := isScopeRestrictedCaller(authCtx)
+
 	for _, display := range cat.DisplayNames() {
 		entry, ok := cat.Lookup(display)
 		if !ok || entry == nil {
@@ -148,7 +262,22 @@ func (p *MCPProxyServer) suggestDirectToolID(ctx context.Context, id string) (st
 		}
 
 		if !p.directEntryVisibleToSession(ctx, entry) {
-			return "", false
+			if !isScopedAgent {
+				// Administrator resolution (including a profile-scoped
+				// administrator) is UNCHANGED (codex round-1 review,
+				// MUST-FIX / FR-010 "administrator resolution unchanged"):
+				// the first case-fold match ends the search here, visible or
+				// not, exactly as before this fix.
+				return "", false
+			}
+			// Spec 105 FR-010 G4: for a scoped AGENT, a hidden
+			// case-equivalent candidate must not suppress a suggestion for a
+			// DIFFERENT, authorized candidate later in the (sorted)
+			// display-name order — e.g. hidden "B:read" sorting before
+			// authorized "b:Read" must not swallow the suggestion the caller
+			// would get were "B:read" absent entirely. Keep scanning rather
+			// than giving up on the first case-fold match.
+			continue
 		}
 		return corrected, true
 	}

@@ -362,10 +362,19 @@ func TestScopeCacheFixture_PinnedTokenRESTDispatchAndRedemptionParity(t *testing
 	}(), "premise: the unpinned entry contains a weather tool")
 
 	// Direct dispatch to the out-of-pin server is refused on the REST path.
+	//
+	// Spec 105 PR G, FR-010 gap G7 (inverted pinned-reversal assertion): the
+	// refusal body used to name WHICH sub-check excluded the server ("... is
+	// not in profile 'research'"), which told apart a server outside only
+	// the pin from one outside only the token's own allowed-server list —
+	// two states this token's own holder cannot tell apart from a server
+	// that does not exist at all. Both now answer the ONE agent-scope body.
 	_, dispatchErr := callToolDirectText(t, proxy, pinned, contracts.ToolVariantRead,
 		map[string]interface{}{"name": "weather:get_forecast", "args": map[string]interface{}{}})
 	require.Error(t, dispatchErr, "the pin must refuse direct dispatch to weather")
-	assert.Contains(t, dispatchErr.Error(), "not in profile 'research'")
+	assert.Contains(t, dispatchErr.Error(), "not in scope for this agent token")
+	assert.NotContains(t, dispatchErr.Error(), "not in profile",
+		"the profile-specific wording must not survive for a scoped agent caller")
 
 	// The producing (unpinned) token reads its entry on the same endpoint.
 	_, err := readCacheDirect(t, proxy, unpinned, key)

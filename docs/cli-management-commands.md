@@ -11,6 +11,15 @@ MCPProxy provides two command groups:
 
 All commands support both **daemon mode** (fast, via socket) and **standalone mode** (direct connection).
 
+## Global flags
+
+`-c/--config` and `-d/--data-dir` are accepted before or after the command name
+and apply to every management command. An empty value (`-c ""`, `--config=`) is an
+error, never "use the default". A command's own `--config` wins over the global
+one. With only `-d DIR`, management commands read `DIR/mcp_config.json` when it
+exists; they never create a default configuration under `~/.mcpproxy` when a
+path was given.
+
 ## Command Reference
 
 ### `mcpproxy upstream list`
@@ -26,6 +35,13 @@ mcpproxy upstream list [flags]
 - `--output, -o` - Output format (table, json) [default: table]
 - `--log-level, -l` - Log level (trace, debug, info, warn, error) [default: warn]
 - `--config, -c` - Path to config file
+- `--profile` - Show only the servers of this profile's effective server set;
+  the tool count of each row becomes the number of tools visible under the
+  profile (needs the running daemon)
+- `--status` - Filter by health status (repeatable; a comma-separated value is
+  equivalent to repeating the flag — several values select the union of their
+  statuses): `ready`, `connecting`, `sign_in_required`, `needs_review`,
+  `needs_secret`, `needs_config`, `error`, `disabled`
 
 **Examples:**
 ```bash
@@ -37,29 +53,55 @@ mcpproxy upstream list --output=json
 
 # With debug logging
 mcpproxy upstream list --log-level=debug
+
+# Only servers that need a sign-in or a review
+mcpproxy upstream list --status sign_in_required --status needs_review
+mcpproxy upstream list --status sign_in_required,needs_review
 ```
 
 **Output Fields:**
 - NAME - Server name
 - PROTOCOL - Transport protocol (stdio, http, sse, streamable-http)
 - TOOLS - Number of available tools
-- STATUS - Unified health status with emoji indicator and summary
-- ACTION - Suggested remediation command (if applicable)
+- STATUS - The one status label (Spec 109), e.g. "Online", "Sign-in required",
+  "Needs review" — never the free-text summary, which stays available in
+  `-o json` as `health.summary`
+- ACTION - Suggested remediation command, keyed on `health.actions[0]` (if applicable)
 
-**Status Indicators:**
-- ✅ Healthy - Server connected and working
-- ⚠️ Degraded - Server has warnings (e.g., token expiring soon)
-- ❌ Unhealthy - Server has errors or not functioning
-- ⏸️ Disabled - Server manually disabled by user
-- 🔒 Quarantined - Server pending security approval
+**Status Indicators (emoji):** the emoji is keyed on `admin_state` first, then
+`level` (a severity signal) — independent of the `status` label shown in the
+STATUS column, so the same `status` value can render with different emoji
+depending on severity:
+- ⏸️ `disabled` admin state — server manually disabled by user, regardless of level
+- 🔒 `quarantined` admin state — server pending security approval, regardless
+  of level; this is the only emoji a `needs_review` status ever renders as
+- ✅ enabled, not quarantined, `level: healthy` — covers both `ready` and the
+  transient `connecting` status
+- ⚠️ enabled, not quarantined, `level: degraded` — e.g. a first-time
+  `sign_in_required` sign-in, or an OAuth token refresh still retrying
+- ❌ enabled, not quarantined, `level: unhealthy` — covers `error`,
+  `needs_secret`, `needs_config`, and a `sign_in_required` re-auth/expired-token case
+
+**Tool-hold overlay (GH #938):** independent of the emoji rules above, a
+server with tools pending approval, changed (rug-pull), or blocked never
+renders a bare ✅ — even when it is otherwise `ready`/healthy. STATUS gets a
+`· N held` suffix (e.g. `Online · 2 pending held`) and the emoji downgrades
+one step to ⚠️, so a hold is never hidden behind an all-clear green. ACTION
+also fills in with `tools list --server=<name>` when no other action applies.
+See `mcpproxy tools list --server=<name>` or `upstream logs` for the hold detail.
+
+`-o json`'s `health` object always carries `status`, `usable` (true only when
+`status == "ready"`) and `actions` (every applicable next step, in priority
+order) alongside the existing `level`/`admin_state`/`summary`/`detail`/`action`
+fields.
 
 **Example Output:**
 ```
 NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅    github-server           http       15         Connected (15 tools)           -
-❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
-⏸️    disabled-server         stdio      0          Disabled by user               upstream enable disabled-server
+✅    github-server           http       15         Online                         -
+❌    oauth-server            http       0          Sign-in required               auth login --server=oauth-server
+⏸️    disabled-server         stdio      0          Disabled                       upstream enable disabled-server
 ```
 
 ---
@@ -372,7 +414,7 @@ mcpproxy doctor [flags]
 ```
 
 **Flags:**
-- `--output, -o` - Output format (pretty, json) [default: pretty]
+- `--output, -o` - Output format (pretty, json, yaml) [default: pretty]; the global `--json` is shorthand for `-o json`
 - `--log-level, -l` - Log level [default: warn]
 - `--config, -c` - Path to config file
 - `--server` - Limit health checks to a single upstream server by name (Spec 044)
@@ -392,12 +434,27 @@ mcpproxy doctor --output=json
 mcpproxy doctor --server=github
 ```
 
+The report is made to be shared, so credentials are always redacted in every
+format: query parameters such as `?apikey=` or `?token=` in any URL (including
+`web_ui_url`) print as `REDACTED`, and so does the admin API key wherever it
+would appear. Use `mcpproxy status --show-key` or `mcpproxy status --web-url`
+when you need the key itself.
+
 **Health Checks:**
 - Upstream server connection errors
 - OAuth authentication requirements
 - Missing secrets (unresolved references)
 - Runtime warnings
 - Docker isolation status
+- **Profiles & clients** (Spec 108): `profiles.binding_bypass` (a client bound to a
+  profile could escape it by omitting its credential while `require_mcp_auth` is off,
+  so anonymous callers are denied) and `connect.admin_key_in_client_config` (a client
+  config still holds the admin API key). Both are read from the `warnings` of
+  `GET /api/v1/clients`, so they always agree with the REST warning and with the
+  refusals of `connect`, `profile` and `client`; doctor never reads a client config.
+  A server edition or an older daemon without `/clients` reports them as `skipped`.
+  `-o json` adds a top-level `profile_checks` list (`id`, `status` of
+  `ok|warn|info|skipped`, `message`, and `bindings`/`fixes` when present)
 
 **Output:**
 - Total issue count
@@ -443,6 +500,65 @@ mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server my-stdio -o json
 catalog with associated fix steps and fixer keys.
 
 ---
+
+### `mcpproxy connect <client>`
+
+Register MCPProxy in an AI client's MCP configuration (Claude Code, Cursor,
+Windsurf, VS Code, Codex, Gemini, OpenCode, ZCode). Connect **never writes the
+instance admin API key**: every write carries a per-client credential
+(`mcp_cli_...`) that identifies the client and binds it to a profile. The
+credential is valid on MCP endpoints only, so it cannot open the REST API.
+
+**Flags:**
+- `--profile <name|all>` - the profile the client's credential binds to;
+  `all` is the built-in All servers scope. A new credential defaults to
+  `all` (switchable); a reconnect **keeps the client's existing binding**
+  unless `--profile` is given
+- `--lock` / `--switchable` - lock the client to its profile so it can never
+  switch (the default for a named profile), or let it switch within the
+  profile's `switchable_to` (the default for `all`); mutually exclusive
+- `--keyless` - write an entry with no credential; only possible while
+  `require_mcp_auth` is off, and the client is then unidentified. It cannot be
+  combined with `--profile`, `--lock` or `--switchable`
+- `--force` - overwrite an existing entry; `--name` - server name in the client
+  config; `--all` - connect every supported client with the same options
+  (a refusal for one client is reported and never aborts the others)
+
+**Output:**
+```text
+MCPProxy registered in Cursor as "mcpproxy"
+Backup: ~/.cursor/mcp.json.bak.20260930-101500
+Credential: mcp_cli_•••• (token client-cursor, profile ro, locked)
+Config: ~/.cursor/mcp.json
+Next: Restart Cursor to load MCPProxy
+```
+
+The credential is shown masked; the secret is written only into the client's
+config file. Reconnecting over an active credential is a **staged rotation**:
+the old secret keeps working until the new config has been written.
+
+With `require_mcp_auth` off, a named binding is refused (exit 1, nothing
+written) when an anonymous caller could reach more than the client, because
+the client could then escape its profile by omitting its credential. The
+refusal lists the fixes: turn `require_mcp_auth` on, or set `anonymous_profile`
+to a profile that is not wider than the binding.
+
+With a running daemon the write goes through the daemon (it mints, records and
+notifies); with none, the command runs locally over the data directory with the
+strictest guard (any named binding is refused while `require_mcp_auth` is off).
+If a running mcpproxy holds the database but its socket was not reachable, the
+command reports that instead of guessing.
+
+**Examples:**
+```bash
+mcpproxy connect cursor --profile ro           # Bind Cursor to "ro" (locked)
+mcpproxy connect cursor --profile work --switchable
+mcpproxy connect --all --profile all           # Every supported client, all servers
+```
+
+### Profiles, clients, access explanations and token profiles (Spec 108)
+
+The `profile`, `client` (bindings), `access explain` and `token --profile` commands are documented on the published site: <https://docs.mcpproxy.app/cli/profile-commands> (source: `docs/cli/profile-commands.md`).
 
 ## Common Workflows
 
@@ -544,7 +660,7 @@ mcpproxy upstream add notion https://mcp.notion.com/sse
 
 # View quarantine status
 mcpproxy upstream list
-# 🔒 notion  http  0  Pending approval  Approve in Web UI
+# 🔒 notion  http  0  Needs review  Approve in Web UI
 
 # Approve in web UI or via API:
 curl -X POST "http://localhost:8080/api/v1/servers/notion/unquarantine" \
@@ -598,6 +714,12 @@ mcpproxy tools list [flags]
 - `--status` - Filter by state: `enabled`, `disabled`, `config-denied`
 - `--risk` - Filter by risk level: `read`, `write`, `destructive`
 - `--approval` - Filter by approval: `approved`, `pending`, `changed`
+- `--client` - View as a client (administrator only, global list): adds `ACCESS`
+  (`callable`, `visible`, `hidden`) and `REASON` columns, the verdict of each tool
+  for that client's connection. With a scoped token this exits `1` with
+  `operation requires admin access`
+- `--profile` - View as a profile (global list): adds the same columns. A
+  non-administrator sees only the visible tools and a count of the hidden ones
 - `--output, -o` - Output format: `table`, `json`, `yaml`
 - `--log-level, -l` - Log level [default: info]
 - `--config, -c` - Path to config file

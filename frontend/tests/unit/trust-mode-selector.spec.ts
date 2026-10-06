@@ -180,6 +180,18 @@ describe('TrustModeSelector — auto requires an acknowledged warning (FR-003)',
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()
   })
 
+  it('clears the pending confirmation state when reselecting the effective mode', async () => {
+    const wrapper = mountSelector('manual')
+    await select(wrapper, 'auto')
+    expect(wrapper.emitted('confirmation-pending')?.at(-1)).toEqual([true])
+
+    await select(wrapper, 'manual')
+
+    expect(wrapper.find('[data-test="trust-mode-auto-confirm"]').exists()).toBe(false)
+    expect(wrapper.emitted('confirmation-pending')?.at(-1)).toEqual([false])
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
   it('the confirmation warns about BOTH unscanned tool changes and unscanned admission', async () => {
     const wrapper = mountSelector('manual')
     await select(wrapper, 'auto')

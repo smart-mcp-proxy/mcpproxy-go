@@ -63,10 +63,25 @@ mcpproxy activity list [flags]
 | `--parent-id` | | | List child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
+| `--profile` | | | Filter by the profile in effect when the call ran; `-` selects records with none |
+| `--client` | | | Filter by client id; `-` selects records with none |
+| `--token` | | | Filter by the token name in effect; `-` selects records with none. `--agent` is a deprecated alias (prints a notice; conflicting values exit `1`) |
+| `--client-name` | | | Filter by the client's self-reported name (advisory, never authoritative) |
+| `--view` | | `all` | Filter by view: `calls` (tool_call, internal_tool_call), `system` (every other type), `all`; overridden by `--type` |
 | `--start-time` | | | Filter records after this time (RFC3339) |
 | `--end-time` | | | Filter records before this time (RFC3339) |
+| `--from` | | | Alias of `--start-time`; also accepts a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d`, or any `-<N>m`/`-<N>h`/`-<N>d` |
+| `--to` | | | Alias of `--end-time`; same relative shorthand as `--from` |
 | `--limit` | `-n` | 50 | Max records to return (1-100) |
 | `--offset` | | 0 | Pagination offset |
+
+A `--tool` value of the form `server:tool` (e.g. `github:create_issue`) is
+split into `--server github --tool create_issue` — the REST filters compare
+bare tool names, so sending `server:tool` verbatim would match nothing. An
+explicit `--server` that disagrees with the prefix is a contradiction: the
+command exits `1` with `--server <a> conflicts with the server in --tool
+<b>:<t>` before making any request, rather than silently keeping one value
+and dropping the other.
 
 ### Examples
 
@@ -117,13 +132,15 @@ mcpproxy activity list --limit 20 --offset 40
 ### Output (Table)
 
 ```
-ID               SRC  TYPE         SERVER      TOOL           INTENT  STATUS   DURATION   TIME
-01JFXYZ123ABC    MCP  tool_call    github      create_issue   write   success  245ms      2 min ago
-01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      read    error    125ms      5 min ago
-01JFXYZ123ABE    MCP  policy       private     get_secret     -       blocked  0ms        10 min ago
+ID               SRC  TYPE         SERVER      TOOL           CLIENT  PROFILE              INTENT  STATUS   DURATION   TIME
+01JFXYZ123ABC    MCP  tool_call    github      create_issue   cursor  work-full (binding)  write   success  245ms      2 min ago
+01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      -       -                    read    error    125ms      5 min ago
+01JFXYZ123ABE    MCP  policy       private     get_secret     ~Zed    -                    -       blocked  0ms        10 min ago
 
 Showing 3 of 150 records (page 1)
 ```
+
+**Client and Profile columns**: `CLIENT` is the client id the call was bound to; when a record carries only the client's self-reported name it is shown as `~<name>` (advisory: a client can claim any name); otherwise `-`. `PROFILE` is the profile in effect with its source in parentheses (`pin`, `binding`, `url`, `session`, `anonymous`, `none`), or `-`. Records written before Profiles v3 show `-`. `activity show` also prints the `Client`, `Profile`, `Token` and `Block reason` of a record.
 
 **Intent Column**: Shows the declared operation type (`read`, `write`, `destructive`) or `-` if no intent was declared.
 
@@ -181,6 +198,10 @@ mcpproxy activity watch [flags]
 |------|-------|---------|-------------|
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
+| `--profile`, `--client`, `--token`, `--client-name` | | | Same scope filters as `activity list`, applied to the `attribution` of each streamed event (`-` selects events with none); `--agent` is a deprecated alias of `--token` |
+| `--view` | | `all` | Filter by view: `calls`, `system`, `all`; overridden by `--type` |
+| `--from` | | | Only print records at/after this time (RFC3339 or relative: `-1h`, `-24h`, `-7d`, `-30d`) |
+| `--to` | | | Stop watching once this time has passed (RFC3339 or relative); `watch` exits cleanly instead of reconnecting once `--to` is in the past |
 
 ### Examples
 
@@ -335,6 +356,11 @@ mcpproxy activity summary [flags]
 |------|-------|---------|-------------|
 | `--period` | `-p` | 24h | Time period: `1h`, `24h`, `7d`, `30d` |
 | `--by` | | | Group by: `server`, `tool`, `status` |
+| `--profile`, `--client`, `--token` | | | Count only records made under this profile, client id or token name (`-` selects records with none); `--agent` is a deprecated alias of `--token`. `--client-name` is accepted but always rejected: `client_name is not supported on this endpoint; filter by client` |
+| `--from` | | | Alias of `--period`, as a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d` (any other value is rejected — summary has no arbitrary range) |
+
+`--to` is accepted for symmetry with `list`/`watch`/`export` but always
+rejected on `summary`; use `--period` or `--from`.
 
 ### Examples
 
@@ -427,11 +453,11 @@ mcpproxy activity export [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--output` | | | Output file path (stdout if not specified) |
-| `--format` | `-f` | json | Export format: `json`, `csv` |
+| `--output` | | | Destination file path (stdout if not specified); not the global `-o/--output` format flag |
+| `--format` | `-f` | json | Export file format: `json` (JSON Lines), `csv` |
 | `--include-bodies` | | false | Include full request/response bodies |
 | `--parent-id` | | | Export only child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
-| *(filter flags)* | | | Same filters as `activity list` |
+| *(filter flags)* | | | Same filters as `activity list`, including `--profile`, `--client`, `--token` and `--client-name`. CSV output appends `profile`, `profile_source`, `client_id`, `client_name`, `token_name` and `block_reason` after `parent_id` |
 
 ### Examples
 

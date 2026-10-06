@@ -1139,12 +1139,14 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			clientSecret := oauthHandler.GetClientSecret()
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				// Get the callback server port to persist alongside DCR credentials
+				// Get the callback server port and redirect URI to persist alongside DCR credentials
 				var callbackPort int
+				var redirectURI string
 				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
 					callbackPort = callbackServer.Port
+					redirectURI = callbackServer.RedirectURI
 				}
-				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
+				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); err != nil {
 					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(err))
@@ -1496,10 +1498,12 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 				var callbackPort int
+				var redirectURI string
 				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
 					callbackPort = callbackServer.Port
+					redirectURI = callbackServer.RedirectURI
 				}
-				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); saveErr != nil {
+				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); saveErr != nil {
 					c.logger.Warn("Failed to persist DCR credentials",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(saveErr))
@@ -1745,8 +1749,9 @@ func (c *Client) persistDCRCredentials() {
 	// login allocated a fresh loopback port — breaking providers that require an
 	// exact, unchanging callback URL (issue #975).
 	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
+	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage)
 
-	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort); err != nil {
+	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
 			logSafeErrorField(err))
@@ -1780,6 +1785,25 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 		return record.CallbackPort
 	}
 	return 0
+}
+
+// resolveCallbackRedirectURIForPersistence is resolveCallbackPortForPersistence's
+// counterpart for the exact redirect URI (path included). Needed so the Spec 022
+// hygiene check in CreateOAuthConfig can detect a pin whose PATH changed while its
+// port stayed the same (issue #1304) — comparing port alone would miss that and
+// reuse a client_id the provider registered for the old path.
+func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB) string {
+	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.RedirectURI != "" {
+		return callbackServer.RedirectURI
+	}
+
+	if store == nil {
+		return ""
+	}
+	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+		return record.RedirectURI
+	}
+	return ""
 }
 
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
@@ -2074,10 +2098,12 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			if c.storage != nil && clientID != "" {
 				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 				var callbackPort int
+				var redirectURI string
 				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
 					callbackPort = callbackServer.Port
+					redirectURI = callbackServer.RedirectURI
 				}
-				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort)
+				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 			}
 		}
 	}

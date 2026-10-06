@@ -1,0 +1,118 @@
+{
+  "_comment": "Spec 109 FR-090 golden: the six terminology enums as ONE file. values come from Go (internal/contracts/terminology.go, internal/health/constants.go, internal/runtime/attention_contract.go); TestSpec109TerminologyGolden regenerates them with UPDATE_GOLDEN=1 and asserts the hand-maintained labels cover every value. Decoded by Go (internal/httpapi/spec109_parity_test.go), vitest (frontend/tests/unit/spec109-terminology.spec.ts) and XCTest (Spec109TerminologyTests.swift), which read this file by relative path.",
+  "health_status": {
+    "values": [
+      "ready",
+      "connecting",
+      "sign_in_required",
+      "needs_review",
+      "needs_secret",
+      "needs_config",
+      "error",
+      "disabled"
+    ],
+    "labels": {
+      "connecting": "Connecting",
+      "disabled": "Disabled",
+      "error": "Error",
+      "needs_config": "Needs configuration",
+      "needs_review": "Needs review",
+      "needs_secret": "Secret required",
+      "ready": "Online",
+      "sign_in_required": "Sign-in required"
+    }
+  },
+  "attention_kind": {
+    "values": [
+      "anonymous_denied_by_binding_guard",
+      "client_holds_admin_key",
+      "client_token_name_conflict",
+      "profile_missing",
+      "client_rotation_pending",
+      "client_credential_expiring",
+      "sign_in_required",
+      "missing_secret",
+      "config_error",
+      "server_error",
+      "server_review",
+      "tool_review",
+      "client_never_seen"
+    ],
+    "rank": {
+      "anonymous_denied_by_binding_guard": 4,
+      "client_credential_expiring": 9,
+      "client_holds_admin_key": 5,
+      "client_never_seen": 70,
+      "client_rotation_pending": 8,
+      "client_token_name_conflict": 6,
+      "config_error": 30,
+      "missing_secret": 20,
+      "profile_missing": 7,
+      "server_error": 40,
+      "server_review": 50,
+      "sign_in_required": 10,
+      "tool_review": 60
+    }
+  },
+  "tier": {
+    "values": [
+      "read",
+      "write",
+      "destructive",
+      "unannotated",
+      "unknown"
+    ],
+    "labels": {
+      "destructive": "Destructive",
+      "read": "Read",
+      "unannotated": "Unannotated",
+      "unknown": "Unknown",
+      "write": "Write"
+    }
+  },
+  "tool_approval": {
+    "values": [
+      "approved",
+      "pending",
+      "changed"
+    ],
+    "labels": {
+      "approved": "Approved",
+      "changed": "Changed, needs review",
+      "pending": "New, needs review"
+    },
+    "retired": [
+      "Awaiting approval",
+      "Pending Approval"
+    ],
+    "cli_flag": "--approval"
+  },
+  "activity_view": {
+    "values": [
+      "calls",
+      "sessions",
+      "system",
+      "all"
+    ],
+    "labels": {
+      "all": "All",
+      "calls": "Tool calls",
+      "sessions": "Sessions",
+      "system": "System events"
+    },
+    "cli": [
+      "calls",
+      "system",
+      "all"
+    ]
+  },
+  "client_presence": {
+    "values": [
+      "connected_seen",
+      "connected_never_seen",
+      "installed",
+      "not_installed",
+      "other"
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { OnboardingStateResponse, OnboardingMarkRequest } from '@/types'
+import type { OnboardingStateResponse, OnboardingMarkRequest, TelemetryState } from '@/types'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 
@@ -20,6 +20,14 @@ import { useAuthStore } from '@/stores/auth'
  */
 /** Tabs the wizard renders, in order. */
 export type WizardTab = 'clients' | 'servers' | 'verify'
+
+/**
+ * Shared localStorage key for the telemetry notice's dismissal (Spec 109-b
+ * FR-044): TelemetryBanner.vue (post-wizard) and OnboardingWizard.vue's
+ * Verify-step one-liner both read/write it, so dismissing either silences
+ * both for good.
+ */
+export const TELEMETRY_BANNER_STORAGE_KEY = 'telemetry-banner-dismissed'
 
 export const useOnboardingStore = defineStore('onboarding', () => {
   // State fetched from backend
@@ -41,10 +49,70 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   // some earlier caller asked for.
   const wizardInitialTab = ref<WizardTab | null>(null)
 
+  // Shared, reactive dismissal state for the telemetry notice (Spec 109-b
+  // FR-044). TelemetryBanner.vue (post-wizard) and OnboardingWizard.vue's
+  // Verify-step one-liner both read this — a single store-level ref, not an
+  // independent local ref per component reading localStorage on its own
+  // mount — so dismissing on either surface hides the other immediately,
+  // even though both stay mounted at the same time on Dashboard.vue and
+  // never remount.
+  const telemetryNoticeDismissed = ref(!!localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY))
+
+  /** Dismiss the telemetry notice on both surfaces at once, permanently. */
+  function dismissTelemetryNotice(): void {
+    telemetryNoticeDismissed.value = true
+    localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+  }
+
+  // Effective telemetry state (Spec 109 FR-044a), read off GET /api/v1/status.
+  // null = unknown (an older core, a scoped caller, a failed fetch): every
+  // consumer treats that as "show the standard notice".
+  const telemetryState = ref<TelemetryState | null>(null)
+  let telemetryStateFetchedAt = 0
+  let telemetryStateInFlight: Promise<void> | null = null
+
+  function setTelemetryState(s?: TelemetryState | null): void {
+    telemetryState.value = s ?? null
+    telemetryStateFetchedAt = Date.now()
+  }
+
+  /**
+   * Load the effective telemetry state. One in-flight request is shared by every
+   * caller (the banner and the wizard mount together), and a value fetched in
+   * the last 30 s is reused. Errors leave the state null.
+   */
+  function loadTelemetryState(force = false): Promise<void> {
+    if (telemetryStateInFlight) return telemetryStateInFlight
+    if (!force && telemetryStateFetchedAt && Date.now() - telemetryStateFetchedAt < 30_000) {
+      return Promise.resolve()
+    }
+    telemetryStateInFlight = (async () => {
+      try {
+        const res = await api.getStatus()
+        // A failed fetch (401 before the API key is stored, a dropped
+        // connection) must not start the 30 s reuse window, or the notice
+        // would stay on "unknown" until it expires.
+        if (res?.success) setTelemetryState(res.data?.telemetry ?? null)
+        else telemetryState.value = null
+      } catch {
+        telemetryState.value = null
+      } finally {
+        telemetryStateInFlight = null
+      }
+    })()
+    return telemetryStateInFlight
+  }
+
   // Computed
   const shouldShowWizard = computed(() => state.value?.should_show_wizard ?? false)
   const hasConnectedClient = computed(() => state.value?.has_connected_client ?? false)
   const hasConfiguredServer = computed(() => state.value?.has_configured_server ?? false)
+  // Spec 109-b FR-041: the real "something to try" signal. Prefer this over
+  // hasConfiguredServer for the Servers step and the Setup badge — a server
+  // entry that is still quarantined or has no approved tool is not usable
+  // yet, even though it counts toward hasConfiguredServer.
+  const hasUsableServer = computed(() => state.value?.has_usable_server ?? false)
+  const usableServers = computed<string[]>(() => state.value?.usable_servers ?? [])
   const isEngaged = computed(() => state.value?.state.engaged ?? false)
 
   // Spec 046 v2 — passive Verify tab + sidebar badge sources.
@@ -64,7 +132,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const visibleSteps = computed<Array<'connect' | 'server'>>(() => {
     const steps: Array<'connect' | 'server'> = []
     if (!hasConnectedClient.value) steps.push('connect')
-    if (!hasConfiguredServer.value) steps.push('server')
+    if (!hasUsableServer.value) steps.push('server')
     return steps
   })
 
@@ -76,7 +144,8 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     // Spec 107 FR-041 / T088: /onboarding/state describes the operator's
     // fleet-wide setup wizard (connected clients, configured servers across
     // the whole instance) — a tenant principal has no wizard to drive.
-    if (useAuthStore().principalKind === 'tenant') return null
+    const auth = useAuthStore()
+    if (auth.isTeamsEdition && !auth.canLoadCore) return null
 
     loading.value = true
     error.value = null
@@ -187,9 +256,16 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     error,
     wizardOpen,
     wizardInitialTab,
+    telemetryNoticeDismissed,
+    dismissTelemetryNotice,
+    telemetryState,
+    setTelemetryState,
+    loadTelemetryState,
     shouldShowWizard,
     hasConnectedClient,
     hasConfiguredServer,
+    hasUsableServer,
+    usableServers,
     isEngaged,
     firstMCPClientEver,
     mcpClientsSeenEver,

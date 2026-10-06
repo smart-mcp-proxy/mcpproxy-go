@@ -151,31 +151,6 @@ final class TrayPresentationTests: XCTestCase {
         XCTAssertEqual(TrayProtocolDisplay.label(for: "websocket"), "websocket")
     }
 
-    // MARK: - F11 · Profiles that resolve to nothing
-
-    func testAProfileWhoseServersAreNotConfiguredSaysSo() {
-        let label = TrayProfileDisplay.label(
-            name: "research", servers: ["github", "gitlab"], toolCount: 0,
-            knownServers: ["everything", "ElevenLabs"])
-        XCTAssertEqual(label, "research — no servers")
-    }
-
-    func testAWorkingProfileShowsServersAndTools() {
-        let label = TrayProfileDisplay.label(
-            name: "deploy", servers: ["github", "k8s"], toolCount: 27,
-            knownServers: ["github", "k8s", "jira"])
-        XCTAssertEqual(label, "deploy (2 servers · 27 tools)")
-    }
-
-    /// The count is the EFFECTIVE one: a profile listing three servers of which
-    /// one exists scopes agents to one server, and must say one.
-    func testOnlyConfiguredServersCount() {
-        let label = TrayProfileDisplay.label(
-            name: "solo", servers: ["github", "ghost", "phantom"], toolCount: 4,
-            knownServers: ["github"])
-        XCTAssertEqual(label, "solo (1 server · 4 tools)")
-    }
-
     // MARK: - F15 · Filing the Servers submenu
 
     func testDisabledServersAreFiledAwayFromWorkingOnes() {

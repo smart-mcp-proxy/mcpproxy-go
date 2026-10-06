@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
 	"net/http"
@@ -34,6 +35,21 @@ func NewHandler(logger *zap.SugaredLogger) http.Handler {
 	return NewHandlerWithIndexCallback(logger, nil)
 }
 
+// HandlerOptions describes the edition-neutral, non-secret UI bootstrap data.
+// ServerEditionEnabled is a routing hint for the SPA only; authorization
+// remains exclusively in the HTTP and MCP middleware.
+type HandlerOptions struct {
+	ServerEditionEnabled bool
+	OnIndexServe         func()
+}
+
+// NewHandlerWithOptions serves the embedded UI with an explicit bootstrap
+// configuration. Existing constructors remain available for callers that do
+// not need to customize the served index document.
+func NewHandlerWithOptions(logger *zap.SugaredLogger, options HandlerOptions) http.Handler {
+	return newHandler(logger, options)
+}
+
 // NewHandlerWithIndexCallback is NewHandler with an optional hook fired each
 // time the UI entrypoint (index document) is served — i.e. a request for the
 // root, index.html, or an extensionless SPA route that resolves to the index
@@ -43,6 +59,10 @@ func NewHandler(logger *zap.SugaredLogger) http.Handler {
 // deliberately independent of the X-MCPProxy-Client-header-based
 // surface_requests.webui counting. onIndexServe may be nil.
 func NewHandlerWithIndexCallback(logger *zap.SugaredLogger, onIndexServe func()) http.Handler {
+	return newHandler(logger, HandlerOptions{OnIndexServe: onIndexServe})
+}
+
+func newHandler(logger *zap.SugaredLogger, options HandlerOptions) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The /ui prefix is already stripped by http.StripPrefix in server.go
 		// So paths come in as: "/" for index, "/assets/file.js" for assets
@@ -97,14 +117,25 @@ func NewHandlerWithIndexCallback(logger *zap.SugaredLogger, onIndexServe func())
 		// an index document. Requests with a file extension are asset fetches
 		// — they never count, even when a missing asset falls back to the
 		// index body above.
-		if onIndexServe != nil &&
-			strings.HasSuffix(fullPath, "index.html") &&
-			(p == "index.html" || path.Ext(p) == "") {
-			onIndexServe()
+		isIndexDocument := strings.HasSuffix(fullPath, "index.html") &&
+			(p == "index.html" || path.Ext(p) == "")
+		if options.OnIndexServe != nil && isIndexDocument {
+			options.OnIndexServe()
+		}
+		if isIndexDocument {
+			content = addServerEditionHint(content, options.ServerEditionEnabled)
 		}
 
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(http.StatusOK)
 		w.Write(content)
 	})
+}
+
+func addServerEditionHint(content []byte, serverEditionEnabled bool) []byte {
+	hint := []byte(`<meta name="mcpproxy-server-edition" content="false">`)
+	if serverEditionEnabled {
+		hint = []byte(`<meta name="mcpproxy-server-edition" content="true">`)
+	}
+	return bytes.Replace(content, []byte("</head>"), append(append(hint, '\n'), []byte("</head>")...), 1)
 }

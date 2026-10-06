@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -35,6 +35,15 @@ import (
 // exportedStringFuncs binds every exported `func(string) string` in this
 // package that renders or rewrites a value. TestExportedStringFuncs_AreAllBound
 // fails when the package grows one that is missing here.
+//
+// LogSafeQueryString, LogSafeRequestURL and LogSafeRequestPath are wrapped in
+// a closure that calls them with no knownSecrets: SEC-01's follow-up (PR
+// #1350) grew them a trailing `...string` for exact-value redaction (see
+// isStringVariadicToString below), which no longer matches the map's
+// `func(string) string` value type, but the property this map exists to
+// check — that the rendering carries a marker the fail-closed net recognises
+// — must still hold for their name-rule/shape-rule output with no secret
+// configured, exactly as it did before the signature grew.
 var exportedStringFuncs = map[string]func(string) string{
 	"MaskValue":            MaskValue,
 	"AuditMaskValue":       AuditMaskValue,
@@ -47,6 +56,9 @@ var exportedStringFuncs = map[string]func(string) string{
 	// Issue #1158, review round 2. Both emit masks, so the fail-closed net has
 	// to know their markers even though no write door echoes them back.
 	"LogSafeURL":           LogSafeURL,
+	"LogSafeQueryString":   func(s string) string { return LogSafeQueryString(s) },
+	"LogSafeRequestURL":    func(s string) string { return LogSafeRequestURL(s) },
+	"LogSafeRequestPath":   func(s string) string { return LogSafeRequestPath(s) },
 	"LogSafeCallbackQuery": LogSafeCallbackQuery,
 }
 
@@ -100,6 +112,10 @@ var redactionMethodRenderers = map[string][]func(string) string{
 	"Redaction.SpawnCommandString": {
 		func(s string) string { return AuditRedaction.SpawnCommandString("npx mcp --token " + s) },
 		func(s string) string { return LiveRedaction.SpawnCommandString("npx mcp --token " + s) },
+	},
+	"Redaction.CommandString": {
+		func(s string) string { return AuditRedaction.CommandString("npx mcp --token " + s) },
+		func(s string) string { return LiveRedaction.CommandString("npx mcp --token " + s) },
 	},
 	"Redaction.URLValueDeep": {
 		func(s string) string { return AuditRedaction.URLValueDeep(s) },
@@ -223,28 +239,30 @@ func discoverExportedStringFuncs(t *testing.T) []string {
 	dir := packageDir(t)
 
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 
 	var names []string
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || !fn.Name.IsExported() {
-					continue
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		require.NoError(t, parseErr)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !fn.Name.IsExported() {
+				continue
+			}
+			if fn.Recv == nil {
+				if isStringToString(fn.Type) || isStringVariadicToString(fn.Type) {
+					names = append(names, fn.Name.Name)
 				}
-				if fn.Recv == nil {
-					if isStringToString(fn.Type) {
-						names = append(names, fn.Name.Name)
-					}
-					continue
-				}
-				if receiverTypeName(fn.Recv) == "Redaction" && rendersAValue(fn.Type) {
-					names = append(names, "Redaction."+fn.Name.Name)
-				}
+				continue
+			}
+			if receiverTypeName(fn.Recv) == "Redaction" && rendersAValue(fn.Type) {
+				names = append(names, "Redaction."+fn.Name.Name)
 			}
 		}
 	}
@@ -307,6 +325,32 @@ func rendersAValue(ft *ast.FuncType) bool {
 func isStringIdent(e ast.Expr) bool {
 	id, ok := e.(*ast.Ident)
 	return ok && id.Name == "string"
+}
+
+// isStringVariadicToString reports whether ft is `func(string, ...string) string`
+// — one required string argument, a trailing `...string`, one string result.
+// This is the shape LogSafeRequestPath, LogSafeQueryString and
+// LogSafeRequestURL grew for the SEC-01 known-secret exact-match pass (PR
+// #1350 follow-up): the trailing knownSecrets is redacted by exact value
+// before any other rule runs, so a function of this shape is exactly as much
+// a mask rendering as isStringToString's narrower `func(string) string` and
+// belongs in the same discovery net.
+func isStringVariadicToString(ft *ast.FuncType) bool {
+	if ft.Params == nil || ft.Results == nil {
+		return false
+	}
+	if len(ft.Results.List) != 1 || !isStringIdent(ft.Results.List[0].Type) {
+		return false
+	}
+	fields := ft.Params.List
+	if len(fields) != 2 {
+		return false
+	}
+	if !isStringIdent(fields[0].Type) || len(fields[0].Names) > 1 {
+		return false
+	}
+	ell, ok := fields[1].Type.(*ast.Ellipsis)
+	return ok && isStringIdent(ell.Elt)
 }
 
 // packageDir returns the directory this test file lives in.

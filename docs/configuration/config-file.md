@@ -63,6 +63,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers are believed. Headers from any other peer are ignored and the direct `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES` (comma list). Live (hot-reload, no restart). Validation: `trusted_proxies[N] "value" is not a valid CIDR or IP address` — refused identically at boot, `PATCH /api/v1/config` and `/config/apply`. See [Reverse Proxy Deployment](/operations/reverse-proxy#trusted_proxies-forwarded-headers) |
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost. **Server edition:** forced to `true` whenever `server_edition.enabled` is `true` — an explicit `false` is not an error, but boot logs `require_mcp_auth: false is overridden to true because server_edition.enabled is true` and `mcpproxy doctor` reports the same finding |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
+| `forward_client_headers` | boolean | `true` | Master switch for [client header forwarding](/configuration/upstream-servers#client-header-forwarding). Nothing is forwarded until a server lists names in `forward_headers`. Env `MCPPROXY_FORWARD_CLIENT_HEADERS=false` disables it for the process (never persisted). |
 
 ### `audit_log` (edition-neutral JSONL audit record)
 
@@ -114,6 +115,8 @@ the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `instructions` | string | _(built-in)_ | Custom text for the MCP `initialize` response, sent verbatim to every client. Do not put server names or secrets in it. A per-caller access block is always appended; see [Agent Instructions](/features/agent-instructions). |
+| `advertise_upstream_servers` | boolean | `true` | Name the caller's reachable upstream servers in the initialize instructions and the `retrieve_tools` description, filtered to its profile and agent-token scope. Set `false` to keep server names out of client context. Hot-reloadable. See [Agent Instructions](/features/agent-instructions). |
 
 ### Tool Discovery & Health Check Intervals
 
@@ -421,6 +424,56 @@ Fixes false or missing behavioural hints from an upstream MCP server without for
 
 See [Upstream Servers](/configuration/upstream-servers) for the per-server option table, the REST/MCP PATCH shapes, and the Web UI card in the ServerDetail Configuration tab.
 
+### Profiles (`profiles`) and `anonymous_profile` {#profiles}
+
+A profile is a named view over your upstream servers with a tool policy. The full model, the resolution order and the refusal texts are in [Profiles](/features/profiles); this is the configuration reference.
+
+```json
+{
+  "require_mcp_auth": true,
+  "anonymous_profile": "",
+  "profiles": [
+    {
+      "name": "work-readonly",
+      "title": "Work · Read-only",
+      "description": "GitHub and Notion, read tools only",
+      "servers": ["github", "notion"],
+      "max_tier": "read",
+      "unannotated": "deny",
+      "tools": {
+        "allow": ["notion:update_page"],
+        "deny": ["github:*secret*"],
+        "classify": { "github:search_code": "read" }
+      },
+      "code_execution": false,
+      "management_tools": false,
+      "switchable_to": ["work-full"]
+    },
+    { "name": "work-full", "servers": ["github", "notion", "filesystem"] }
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `profiles[].name` | string | required | Slug `^[a-z0-9][a-z0-9_-]{0,62}$`. Reserved: `all`, `code`, `call`, `p` (URL segments), `active`, `try` (REST routes). Duplicates are a fatal error |
+| `profiles[].servers` | string[] | required | Servers the profile reaches. An unknown server is a warning and is skipped; an empty list denies everything |
+| `profiles[].title` | string | name | Display title, at most 80 characters |
+| `profiles[].description` | string | none | At most 500 characters |
+| `profiles[].max_tier` | `read` \| `write` \| `destructive` | no cap | The highest tool tier the profile admits |
+| `profiles[].unannotated` | `deny` \| `as_write` \| `as_read` | `deny` under a `read` or `write` cap, otherwise `as_read` | How to treat a tool that declares no tier |
+| `profiles[].tools.allow` | string[] | none | `server:tool` patterns (`*` is the only wildcard) admitted even above the cap. Cannot add a server |
+| `profiles[].tools.deny` | string[] | none | Patterns hidden from the profile. Deny beats allow |
+| `profiles[].tools.classify` | object | none | `server:tool` to `read`, `write` or `destructive`; applies only to tools with no annotations |
+| `profiles[].code_execution` | boolean | off under a `read` or `write` cap, otherwise inherits `enable_code_execution` | `false` removes the `code_execution` tool for the profile; the global flag always wins |
+| `profiles[].management_tools` | boolean | inherit | `true` shows `upstream_servers` and `quarantine_security` (still limited by the caller's own permissions); `false` hides them |
+| `profiles[].switchable_to` | string[] | unset (none) | Profiles a client bound to this profile, or a confined anonymous caller, may switch to with `set_profile` |
+| `anonymous_profile` | string | empty (unconfined) | Confines every caller that presents no credential, or an unrecognised token while `require_mcp_auth` is off, to this profile. A missing profile denies everything and logs a warning |
+
+A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
+
+With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](/features/profiles#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
+
 ### MCP Servers
 
 See [Upstream Servers](/configuration/upstream-servers) for detailed server configuration.
@@ -429,7 +482,7 @@ See [Upstream Servers](/configuration/upstream-servers) for detailed server conf
 
 MCPProxy watches the configuration file for changes and automatically reloads when modifications are detected. No restart is required for most configuration changes.
 
-Exceptions that require a restart include `listen`, `data_dir`, `api_key`, the TLS block, the three `http_*_timeout` options, and — in the Server edition — every `server_edition` key except `admin_emails` and `access` (see [Server Edition](#server-edition)). `trusted_proxies` is live.
+Exceptions that require a restart include `listen`, `data_dir`, `api_key`, the TLS block, the three `http_*_timeout` options, and — in the Server edition — every `server_edition` key except `admin_emails` and `access` (see [Server Edition](#server-edition)). `trusted_proxies` is live, as are `profiles` and `anonymous_profile` (see [Profiles](#profiles)).
 
 ## Environment Variable Overrides
 

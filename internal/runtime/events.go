@@ -22,6 +22,31 @@ const (
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
 	EventTypeOAuthRefreshFailed EventType = "oauth.refresh_failed"
+	// EventTypeAttentionChanged is emitted (debounced) whenever the set of
+	// needs-attention item ids changes (Spec 109 FR-001/FR-002). The payload
+	// carries the structured item list (`items: [{id, subject_type,
+	// subject_id}]`); internal/httpapi renders it per subscriber as
+	// `{count, ids}` (FR-006).
+	EventTypeAttentionChanged EventType = "attention.changed"
+	// EventTypeReviewChanged signals that the review queue or a server's
+	// composed review payload changed. Its server field is scope-bearing.
+	EventTypeReviewChanged EventType = "review.changed"
+	// EventTypeClientPresenceChanged invalidates the derived client presence
+	// and attention inputs after an MCP initialise observation.
+	EventTypeClientPresenceChanged EventType = "clients.presence.changed"
+	// EventTypeClientBindingChanged is emitted when a client credential's
+	// profile binding is assigned, locked, unlocked or first minted (Spec 108
+	// FR-026). Payload: {client_id, token_name, profile, previous_profile,
+	// mode}. It discloses bindings, so it is administrator-only on SSE.
+	EventTypeClientBindingChanged EventType = "client.binding_changed"
+	// EventTypeProfilesChanged is emitted (Spec 108-f F9) once per changed
+	// profile after a config snapshot that changed it is published: payload
+	// {name, change: create|update|delete|anonymous, previous_name?}. It is an
+	// INVALIDATION, not a log: a consumer refetches GET /profiles. It names
+	// profiles a scoped caller may not reach, so it is administrator-only on
+	// SSE. One emitter (the server's snapshot observer) covers service writes
+	// and hand edits alike.
+	EventTypeProfilesChanged EventType = "profiles.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

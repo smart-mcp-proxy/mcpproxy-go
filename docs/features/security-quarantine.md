@@ -44,9 +44,28 @@ A config-file server is held for review when **both** of the following are true:
   is an explicit operator statement and is obeyed), **and**
 - the server is not yet recorded in `config.db`.
 
+Quarantine must also be enabled (`quarantine_enabled`, on by default), and the
+server's [trust mode](#trust-modes-auto--scan--manual) must not be `auto`. A
+server with no `trust_mode` is `manual` unless a legacy setting resolves to
+`auto` (`"auto_approve_tool_changes": true`, or the older
+`"skip_quarantine": true`), so by default a first-seen config-file server is
+held; a server whose trust mode is `auto` is admitted.
+
 The second condition is what makes upgrading safe: every server you are already
 running has a `config.db` record, so **upgrading never re-quarantines a server
-you have already vetted**. The boundary is that a server present in a
+you have already vetted**. "Vetted" means the record is backed by an approval
+baseline — at least one of the server's tools was approved at some point, which
+happens automatically when a trusted server first connects. A server recorded
+as unquarantined whose tools were never approved was never admitted, and the
+gate holds it for review (see the restart note below).
+
+Because the rule cannot tell such a server apart from a vetted one that has no
+tool records, a few vetted servers are also held once on upgrade: servers that
+expose no tools (prompts or resources only), servers that never connected while
+live (for example, disabled ever since they were vetted), and servers last
+vetted before v0.21. Approve them from the quarantine review; the decision is
+recorded and they are not held again. To skip the review, add
+`"quarantined": false` to the server's entry before upgrading. The boundary is that a server present in a
 hand-written config but absent from `config.db` — after a wiped data directory,
 or on a machine that has never seen that config before — is treated as
 first-seen and held for review.
@@ -89,6 +108,21 @@ For each server named, either:
   `"quarantined": false` (you have vetted it) to that server's entry.
 
 Adding the key by hand is enough — the gate obeys an explicit value either way.
+
+**Restarts also cleared the quarantine.** In the same affected releases,
+restarting a server that the gate had quarantined silently cleared its
+quarantine: a restart from the REST API, the CLI, the tray or an MCP client,
+"restart all", a secret change that restarts the servers using it, and a security
+scan (including the baseline scan that runs shortly after startup) all re-read the
+server from `mcp_config.json` and wrote the un-gated entry over the recorded
+quarantine. Upgrading now catches this case: such a server has no approved tool,
+so the gate quarantines it again at startup and logs `Quarantining known server
+with no approved tool baseline`; approve it from the quarantine review as usual.
+A server that ran unquarantined (and so has approved tools) still only shows up
+in the "predate the config-load admission gate" warning. From this fix on, a restart
+runs the file entry through the admission gate, and `config.db` refuses to lower a
+recorded quarantine unless the operator states `"quarantined": false` or the
+server is released from the quarantine review.
 
 ### Tool Discovery and Search Isolation
 
@@ -172,6 +206,42 @@ Manage held prompts with the `quarantine_security` MCP tool:
 
 ## Managing Quarantine
 
+## Review verbs and where to find them {#review-verbs}
+
+Every surface offers the same four decisions. Only the scan-gated approval can release a quarantined server; none of the first-party surfaces uses the legacy `POST /unquarantine` endpoint.
+
+| Verb | REST |
+|------|------|
+| Approve server | `POST /api/v1/servers/{id}/security/approve`. Scan-gated; `force` only after the dangerous-verdict confirmation; optional `block: [tools]` keeps tools disabled |
+| Reject server | `POST /api/v1/servers/{id}/security/reject` |
+| Approve tool | `POST /api/v1/servers/{id}/tools/approve` |
+| Reject tool | `POST /api/v1/servers/{id}/tools/block` |
+
+| Surface | Where |
+|---------|-------|
+| Web UI | The **Review queue** (`/review`) and one server's review screen (`/review/<server>`, also the **Review** tab of the server detail page). The Tools page links each new or changed tool to it, and its "Needs review" count opens the queue |
+| macOS app | Sidebar **Review Queue** and its review sheet. The tray item "Review Queue… (N)" and the Needs Attention rows open the sheet |
+| CLI | `mcpproxy review list`, `show`, `approve`, `reject` ([Review Commands](/cli/review-commands)) |
+| Tray on Windows and Linux (Go tray) | A server in the "Security Quarantine" submenu opens the Web UI at `/review/<name>` |
+| MCP | `quarantine_security` with `list_quarantined`, `inspect_quarantined`, `inspect_tools`, `approve_tool`, `approve_all_tools`, `block_tool`, `block_all_tools` (admin only). There is no server-level approve over MCP by design: an agent cannot release a quarantined server |
+
+### Scan coverage on the review screen
+
+The scan line of the review screen says whether the baseline scan describes the definitions you are looking at:
+
+| Coverage | What the screen shows |
+|----------|-----------------------|
+| current | `Baseline scan: clean · risk 0/100 · covers all 5 tools`, in the colour of the verdict. The risk score appears only here |
+| stale | A warning: a tool definition changed or was added after the last scan. It names the tools and the last result, and offers **Rescan**. A rug pull after the scan therefore never reads as clean |
+| not captured | A warning that the scan was not checked against tool definitions, with **Fetch tool definitions** |
+| no tools scanned | A warning that the last scan did not analyse tool definitions, with **Rescan** |
+| scanning | `Scan in progress…` |
+| none | `Not scanned yet.` with **Scan now** |
+
+Each tool's scan verdict follows the same rule: `clean` only when the scan covered that tool's current definition. After a baseline scan has listed a quarantined server's tools, MCPProxy captures the definitions itself, so the review list is not empty until someone clicks **Fetch tool definitions**. With `security.auto_baseline_scan: false` and no manual scan nothing is started automatically.
+
+On a server that is not quarantined, the review tab shows approved state: approved tools read **Approved** or **Blocked** (no Approve or Reject), the heading says the server is approved, and **Manage tools** and **Quarantine to review again…** are offered. The second is the existing quarantine action behind a confirmation. Only a new or changed tool shows Approve and Reject.
+
 ### Scan a Server for TPAs (MCP)
 
 The `quarantine_security` tool can also run and read the TPA scan, so an agent
@@ -197,47 +267,85 @@ unavailable they are skipped without changing the baseline verdict.
 ### View Quarantined Servers
 
 **Web UI:**
-1. Open the dashboard
-2. Go to **Servers** and select the **Quarantined** filter tab
-3. Review pending servers
+1. Open **Review queue** in the Protect section.
+2. Select the server that is waiting for review.
+3. Read the server-provided tool definitions, scan result, tier counts, and
+   changed-definition diff before making a decision. Definitions are displayed
+   as plain text because their content is not trusted.
+
+The queue also retains recent scan history. Old `/security` links redirect to
+the queue; a specific report remains available at `/security/scans/:jobId`.
+Optional scanner setup lives at **Settings → Security → Scanners**.
 
 **CLI:**
 ```bash
-mcpproxy upstream list
-# Shows quarantine status for each server
+mcpproxy review list
+# One row per server that needs review: quarantined servers and trusted
+# servers with new or changed tools
+
+mcpproxy review show github [--full]
+# Captured tool definitions, tiers and scan verdicts for one server
 ```
 
 ### Approve a Server
 
 **Web UI:**
-1. Click on the quarantined server
-2. Review the security analysis
-3. Click "Approve" to remove from quarantine
+1. Select the quarantined server from **Review queue**.
+2. Choose the tools to allow. Only read-only tools whose scan is clean start
+   checked; write, destructive, unannotated, not-scanned and held tools start
+   unchecked. Unselected tools are submitted as explicit blocks with the
+   approval decision and stay blocked until you enable them on the Tools tab.
+3. Choose **Approve server**; the button names the exact count (for example
+   "Approve server (3 of 9 tools)"). **Approve all** is a separate action that
+   allows every pending or changed tool (tools you blocked earlier on a
+   re-quarantined server stay blocked). If no tool definitions have been captured, the button
+   reads "Approve without seeing tools" and the UI asks for a separate
+   confirmation before a blind approval can proceed.
+
+The review controls are deliberate: **Fetch tool definitions** uses the
+inspection-only `discover-tools` capture to store current upstream metadata
+without indexing it, **Allow this tool** selects an individual tool for
+the server decision, **Approve server** releases only the selected tools, and
+**Reject server** keeps the server quarantined. Existing trusted servers use
+the same screen to approve or reject a changed tool definition.
 
 **API:**
 ```bash
 curl -X POST \
   -H "X-API-Key: your-key" \
-  http://127.0.0.1:8080/api/v1/servers/server-name/unquarantine
+  http://127.0.0.1:8080/api/v1/servers/server-name/discover-tools
+
+# The capture action reports success only. Read the stored, redacted review
+# payload before deciding which tools to block.
+curl -H "X-API-Key: your-key" \
+  http://127.0.0.1:8080/api/v1/servers/server-name/review
+
+# Submit the scan-gated approval. Omit block[] or list only the tools to keep
+# disabled; direct unquarantine is legacy-only.
+curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
+  -d '{"block":["tool-to-keep-disabled"]}' \
+  http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
-**Config File:**
+**CLI:**
+```bash
+# Quarantined server: scan-gated approval. By default only read-only tools with
+# a clean scan are allowed; --all allows every tool, --tools a,b exactly those,
+# --except keeps more tools disabled
+mcpproxy review approve github [--all | --tools a,b] [--except a,b] [--force] [--yes]
 
-Edit `~/.mcpproxy/mcp_config.json` and add `"quarantined": false`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "reviewed-server",
-      "command": "npx",
-      "args": ["@example/mcp-server"],
-      "quarantined": false,
-      "enabled": true
-    }
-  ]
-}
+# Trusted server: approve only the listed new or changed tools
+mcpproxy review approve github --tools create_issue
 ```
+
+See [Review Commands](/cli/review-commands) for every flag.
+
+**Configuration:**
+
+Leave a new server quarantined until the review flow has captured its tool
+definitions and the scan-gated approval is complete. Do not edit
+`quarantined: false` into the configuration file as an approval shortcut:
+that bypasses the informed-review record and its baseline check.
 
 ### Re-quarantine a Server
 

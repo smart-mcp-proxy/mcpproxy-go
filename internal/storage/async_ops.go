@@ -198,6 +198,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		OAuth:                  serverConfig.OAuth,
 		EnabledTools:           serverConfig.EnabledTools,
 		DisabledTools:          serverConfig.DisabledTools,
+		ForwardHeaders:         serverConfig.ForwardHeaders,
 		AutoApproveToolChanges: serverConfig.AutoApproveToolChanges, // MCP-2940: persist so REST/UI toggle survives save/restart
 		TrustMode:              serverConfig.TrustMode,              // spec 086: persist trust tier so REST/UI/MCP-set trust_mode survives save/restart
 
@@ -213,7 +214,14 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		ExposePrompts:            serverConfig.ExposePrompts,
 		AnnotationOverrides:      config.CloneAnnotationOverrides(serverConfig.AnnotationOverrides),
 	}
-	return am.db.SaveUpstream(record)
+	// Same invariant as Manager.SaveUpstreamServer: never lower a recorded
+	// quarantine without an explicit decision (only quarantineServerSync may).
+	kept, err := am.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		am.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name)
+	}
+	return err
 }
 
 func (am *AsyncManager) deleteServerSync(name string) error {

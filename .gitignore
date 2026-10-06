@@ -171,3 +171,7 @@ scripts/demo/node_modules
 
 # Subagent-driven-development scratch workspace (ledger, briefs, review packages)
 .superpowers/
+
+# codex CLI local config + Go build cache
+.codex/
+.gocache/

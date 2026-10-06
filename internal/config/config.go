@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 )
 
@@ -253,6 +254,14 @@ type Config struct {
 	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
 	// without this key serialize byte-identically (SC-004).
 	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
+	// AnonymousProfile confines every caller whose request authenticates as
+	// credential kind "anonymous" (no credential, or an unrecognised
+	// non-agent token accepted by the require_mcp_auth:false back-compat
+	// branch) to the named profile (Spec 108 FR-008). Empty (default) means
+	// unconfined, legacy anonymous behaviour. A name that does not match any
+	// configured profile resolves anonymous callers to deny-all and is
+	// reported as a validation warning (data-model.md §1).
+	AnonymousProfile string `json:"anonymous_profile,omitempty" mapstructure:"anonymous-profile"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
 	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
@@ -384,6 +393,16 @@ type Config struct {
 	// (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
 	// The one reader is ForwardedHeaders; validation is validateTrustedProxies.
 	TrustedProxies []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
+
+	// ForwardClientHeaders is the global switch for client header forwarding
+	// (Spec 112): copying allowlisted headers from the inbound /mcp request into
+	// the upstream tools/call request. nil (absent) means enabled; because every
+	// per-server forward_headers allowlist is empty by default, the default
+	// forwards nothing. false disables forwarding for every server. Read via
+	// IsClientHeaderForwardingEnabled(); MCPPROXY_FORWARD_CLIENT_HEADERS
+	// overrides it for the process. Distinct from ForwardedHeaders/trusted_proxies
+	// (Spec 107), which trusts inbound X-Forwarded-*.
+	ForwardClientHeaders *bool `json:"forward_client_headers,omitempty" mapstructure:"forward-client-headers"`
 	// AuditLog configures the Spec 107 edition-neutral audit sink
 	// (internal/audit). nil means "use the per-edition/per-transport
 	// default" (EffectiveAuditLog); restart-pinned (bound at sink
@@ -557,6 +576,14 @@ type Config struct {
 	// When empty, a built-in default is used that explains retrieve_tools workflow.
 	Instructions string `json:"instructions,omitempty" mapstructure:"instructions"`
 
+	// AdvertiseUpstreamServers controls whether MCP clients are told the
+	// names of the upstream servers they can reach — in the initialize
+	// instructions and the retrieve_tools description — so agents use the
+	// proxied tools instead of falling back to shell CLIs. Names are always
+	// filtered to the caller's profile and agent-token scope. Default true;
+	// set false to keep server names out of client context. Read live.
+	AdvertiseUpstreamServers *bool `json:"advertise_upstream_servers,omitempty" mapstructure:"advertise-upstream-servers"`
+
 	// QuarantineEnabled controls whether quarantine is active. It gates two
 	// things together:
 	//   1. Server-level auto-quarantine for newly added servers (issue #370).
@@ -703,6 +730,14 @@ type ServerConfig struct {
 	// default-aggregate behavior (included if the server advertises
 	// Capabilities.Prompts); false excludes it regardless of capability.
 	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
+	// are copied into this server's upstream tools/call requests (Spec 112).
+	// Exact names, case-insensitive, at most 32, no wildcards. Empty forwards
+	// nothing. Only HTTP-based transports (http, streamable-http) forward; the
+	// deny list (Authorization, Host, hop-by-hop, ...) is enforced at runtime
+	// regardless of what is configured here.
+	ForwardHeaders []string `json:"forward_headers,omitempty" mapstructure:"forward_headers"`
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -1520,6 +1555,8 @@ type ObservabilityConfig struct {
 // MetricsExporterConfig controls the Prometheus /metrics endpoint (MCP-32).
 type MetricsExporterConfig struct {
 	// Enabled exposes /metrics on the existing HTTP listener when true.
+	// The endpoint is admin-authenticated (SEC-07): scrapers must present the
+	// global API key, via X-API-Key or an Authorization: Bearer header.
 	Enabled bool `json:"enabled" mapstructure:"enabled"`
 }
 
@@ -1861,13 +1898,17 @@ func DefaultConfig() *Config {
 	}
 }
 
-// generateAPIKey creates a cryptographically secure random API key
+// generateAPIKey creates a cryptographically secure random API key: 32 random
+// bytes (256 bits), hex-encoded to 64 characters.
+//
+// crypto/rand.Read is documented since Go 1.24 as never returning an error and
+// always filling b entirely; on a failure of the system source it terminates
+// the process (runtime fatal, not a recoverable panic). The former
+// time-based fallback branch here was therefore unreachable, and is gone —
+// nothing can observe a predictable key from this function.
 func generateAPIKey() string {
 	bytes := make([]byte, 32) // 32 bytes = 256 bits
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to less secure method if crypto/rand fails
-		return fmt.Sprintf("mcpproxy_%d", time.Now().UnixNano())
-	}
+	_, _ = rand.Read(bytes)   // documented never to fail; see above
 	return hex.EncodeToString(bytes)
 }
 
@@ -2307,8 +2348,45 @@ func (v ValidationError) Error() string {
 // The boot path is deliberately NOT this function — see Validate(), which runs
 // validateDetailedCore() so that a pre-existing bad value on disk cannot brick
 // a load that has nothing to do with the offending server.
+//
+// Spec 108 FR-007: profiles are validated here (never inside
+// validateDetailedCore, which the boot path also runs) via the SAME
+// ValidateProfiles the boot path calls, so a write surface can never persist
+// a profile the boot path would then refuse to load. It stays out of
+// validateDetailedCore for two reasons: Validate() already calls
+// ValidateProfiles separately (to capture its warnings into
+// c.profileWarnings), so folding it into validateDetailedCore would run it
+// twice on every boot/reload; and wrapping its raw, exact-text error in a
+// ValidationError{Field:"profiles"} would prefix "profiles: " onto a message
+// that already starts with "profiles[%d]: ", changing the boot path's error
+// text for every existing Spec 057 profile validation failure, not only the
+// new v3 ones.
 func (c *Config) ValidateDetailed() []ValidationError {
-	return append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors = append(errors, c.forwardHeadersErrors()...)
+	if _, err := ValidateProfiles(c); err != nil {
+		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
+	return errors
+}
+
+// ValidateServerForLoad runs the per-server checks config.Load applies at boot
+// (the stdio command-required check, url-required for HTTP protocols, protocol
+// and name validity, ...) against a single server and returns only the errors
+// attributable to it. Write surfaces that persist a server built outside the
+// config loader (e.g. imports) use it so they can never save an entry the next
+// startup would refuse to load.
+func ValidateServerForLoad(server *ServerConfig) []ValidationError {
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{server}
+	const prefix = "mcpServers[0]"
+	var out []ValidationError
+	for _, e := range cfg.validateDetailedCore() {
+		if strings.HasPrefix(e.Field, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
@@ -2328,7 +2406,7 @@ func (c *Config) oauthRedirectURIErrors() []ValidationError {
 		if strings.TrimSpace(server.OAuth.RedirectURI) == "" {
 			continue
 		}
-		if _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
+		if _, _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
 			errors = append(errors, ValidationError{
 				Field:   fmt.Sprintf("mcpServers[%d].oauth.redirect_uri", i),
 				Message: err.Error(),
@@ -2336,6 +2414,104 @@ func (c *Config) oauthRedirectURIErrors() []ValidationError {
 		}
 	}
 	return errors
+}
+
+// forwardHeadersErrors reports every per-server `forward_headers` problem
+// (Spec 112 FR-005a): an invalid token, wildcard, denied name, duplicate, more
+// than 32 entries, or a collision with the same server's static headers.
+//
+// Write-time only, like oauthRedirectURIErrors: a hand-edited bad entry must
+// not brick boot. Load drops such entries via NormalizeForwardHeaders and the
+// runtime filter in internal/headerfwd stays the authoritative boundary.
+// Messages name headers only, never values.
+func (c *Config) forwardHeadersErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server == nil {
+			continue
+		}
+		errors = append(errors, ForwardHeadersValidationErrors(fmt.Sprintf("mcpServers[%d].forward_headers", i), server.ForwardHeaders, server.Headers)...)
+	}
+	return errors
+}
+
+// ForwardHeadersValidationErrors validates one server's forward_headers
+// allowlist against its static headers (Spec 112 FR-005a). It is the shared
+// write-time check for ValidateDetailed and the REST/MCP single-server write
+// paths. field is the reported ValidationError.Field.
+func ForwardHeadersValidationErrors(field string, names []string, static map[string]string) []ValidationError {
+	if len(names) == 0 {
+		return nil
+	}
+	var errors []ValidationError
+	for _, err := range headerfwd.ValidateNames(names, static) {
+		errors = append(errors, ValidationError{Field: field, Message: err.Error()})
+	}
+	return errors
+}
+
+// ForwardHeaderNormalization records one dropped forward_headers entry.
+type ForwardHeaderNormalization struct {
+	Server  string
+	Dropped []string
+}
+
+// NormalizeForwardHeaders is the lenient load-time counterpart of
+// forwardHeadersErrors (Spec 112 FR-005b): it rewrites each server's allowlist
+// in place to the usable canonical names, dropping invalid, denied, duplicate
+// and over-cap entries plus names colliding with the server's static headers,
+// and reports what it dropped (names only). It never fails. Idempotent and
+// nil-safe.
+func NormalizeForwardHeaders(cfg *Config) []ForwardHeaderNormalization {
+	if cfg == nil {
+		return nil
+	}
+	var out []ForwardHeaderNormalization
+	for _, s := range cfg.Servers {
+		if s == nil || len(s.ForwardHeaders) == 0 {
+			continue
+		}
+		kept, dropped := headerfwd.NormalizeNames(s.ForwardHeaders)
+		var final []string
+		for _, n := range kept {
+			collides := false
+			for k := range s.Headers {
+				if strings.EqualFold(k, n) {
+					collides = true
+					break
+				}
+			}
+			if collides {
+				dropped = append(dropped, n)
+				continue
+			}
+			final = append(final, n)
+		}
+		if len(dropped) > 0 {
+			out = append(out, ForwardHeaderNormalization{Server: s.Name, Dropped: dropped})
+		}
+		s.ForwardHeaders = final
+	}
+	return out
+}
+
+// EnvForwardClientHeaders is the environment kill switch for client header
+// forwarding (Spec 112 FR-003): false|0|off disables it for the process.
+const EnvForwardClientHeaders = "MCPPROXY_FORWARD_CLIENT_HEADERS"
+
+// IsClientHeaderForwardingEnabled reports the resolved global switch: nil means
+// enabled, an explicit value wins, and MCPPROXY_FORWARD_CLIENT_HEADERS
+// (false|0|off) outranks both on every path (loader, hot reload,
+// /config/apply) because the precedence is resolved here.
+func (c *Config) IsClientHeaderForwardingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvForwardClientHeaders))) {
+	case "false", "0", "off":
+		return false
+	}
+	if c == nil || c.ForwardClientHeaders == nil {
+		return true
+	}
+	return *c.ForwardClientHeaders
 }
 
 func (c *Config) validateDetailedCore() []ValidationError {
@@ -2716,6 +2892,11 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// Spec 107 FR-014/FR-019: audit_log validated (never mutated) on every
 	// door - boot, PATCH and /config/apply.
 	errors = append(errors, validateAuditLog(c)...)
+
+	// NOTE: profiles (Spec 108 FR-007) are deliberately NOT validated here —
+	// see ValidateDetailed's doc comment for why folding it into this
+	// function would run ValidateProfiles twice on every boot/reload and
+	// change the boot path's error text.
 
 	return errors
 }
@@ -3247,4 +3428,10 @@ func migrateDeepScanConfig(cfg *Config) {
 	// Clear the legacy keys so the migrated config serializes only deep_scan.*.
 	sc.ScannerFetchPackageSource = nil
 	sc.ScannerDisableNoNewPrivileges = false
+}
+
+// AdvertiseUpstreamServersEnabled reports the effective
+// advertise_upstream_servers value (default true when unset).
+func (c *Config) AdvertiseUpstreamServersEnabled() bool {
+	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
 }

@@ -3,9 +3,6 @@
 package tray
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -13,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +26,7 @@ import (
 
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	// "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
@@ -71,7 +70,6 @@ type ServerInterface interface {
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
 
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
@@ -99,10 +97,13 @@ type ServerInterface interface {
 // App represents the system tray application
 type App struct {
 	server    ServerInterface
-	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
-	logger    *zap.SugaredLogger
-	version   string
-	shutdown  func()
+	apiClient interface {
+		OpenWebUI() error
+		OpenWebUIPath(string) error
+	} // API client for web UI access (optional)
+	logger   *zap.SugaredLogger
+	version  string
+	shutdown func()
 
 	connectionState   ConnectionState
 	connectionStateMu sync.RWMutex
@@ -147,6 +148,11 @@ type App struct {
 	// nil so performSelfUpdate runs.
 	selfUpdateFunc func()
 
+	// applyUpdateFn, when non-nil, replaces the real binary swap
+	// (update.Apply). Tests inject it to observe whether the self-update path
+	// would have installed an artifact; production leaves it nil.
+	applyUpdateFn func(io.Reader, update.Options) error
+
 	// Config path for opening from menu
 	configPath string
 
@@ -174,7 +180,10 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 }
 
 // NewWithAPIClient creates a new tray application with an API client for web UI access
-func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+func NewWithAPIClient(server ServerInterface, apiClient interface {
+	OpenWebUI() error
+	OpenWebUIPath(string) error
+}, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
 		server:          server,
 		apiClient:       apiClient,
@@ -1121,13 +1130,13 @@ func (a *App) performSelfUpdate() {
 		return
 	}
 
-	downloadURL, err := a.findAssetURL(release)
+	assetName, downloadURL, err := a.findAsset(release)
 	if err != nil {
 		a.logger.Error("Failed to find asset for your system", zap.Error(err))
 		return
 	}
 
-	if err := a.downloadAndApplyUpdate(downloadURL); err != nil {
+	if err := a.downloadAndApplyUpdate(release, assetName, downloadURL); err != nil {
 		a.logger.Error("Update failed", zap.Error(err))
 	}
 }
@@ -1196,11 +1205,20 @@ func (a *App) getLatestReleaseIncludingPrereleases() (*GitHubRelease, error) {
 	return &releases[0], nil
 }
 
-// findAssetURL finds the correct asset URL for the current system
+// findAssetURL finds the correct asset URL for the current system.
 func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
+	_, url, err := a.findAsset(release)
+	return url, err
+}
+
+// findAsset resolves both the asset NAME and its download URL for the current
+// system. The name is what checksums.txt keys its digests by, so callers must
+// verify against the name actually selected here rather than rederiving one:
+// the "latest-*" aliases and the versioned archives have different digests.
+func (a *App) findAsset(release *GitHubRelease) (name, url string, err error) {
 	// Check if this is a Homebrew installation to avoid conflicts
 	if a.isHomebrewInstallation() {
-		return "", fmt.Errorf("auto-update disabled for Homebrew installations - use 'brew upgrade mcpproxy' instead")
+		return "", "", fmt.Errorf("auto-update disabled for Homebrew installations - use 'brew upgrade mcpproxy' instead")
 	}
 
 	// Determine file extension based on platform
@@ -1216,7 +1234,7 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	latestSuffix := fmt.Sprintf("latest-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
 	for _, asset := range release.Assets {
 		if strings.HasSuffix(asset.Name, latestSuffix) {
-			return asset.BrowserDownloadURL, nil
+			return asset.Name, asset.BrowserDownloadURL, nil
 		}
 	}
 
@@ -1224,11 +1242,11 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	versionedSuffix := fmt.Sprintf("-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
 	for _, asset := range release.Assets {
 		if strings.HasSuffix(asset.Name, versionedSuffix) {
-			return asset.BrowserDownloadURL, nil
+			return asset.Name, asset.BrowserDownloadURL, nil
 		}
 	}
 
-	return "", fmt.Errorf("no suitable asset found for %s-%s (tried %s and %s)",
+	return "", "", fmt.Errorf("no suitable asset found for %s-%s (tried %s and %s)",
 		runtime.GOOS, runtime.GOARCH, latestSuffix, versionedSuffix)
 }
 
@@ -1273,113 +1291,221 @@ func (a *App) isAppBundle() bool {
 	return strings.Contains(execPath, ".app/Contents/MacOS/")
 }
 
-// downloadAndApplyUpdate downloads and applies the update
-func (a *App) downloadAndApplyUpdate(url string) error {
-	resp, err := http.Get(url) // #nosec G107 -- URL is from GitHub releases API which is trusted
+// maxUpdateDownloadBytes bounds a single downloaded release artifact. The
+// archives are ~30-90 MB; the cap exists so a hostile or broken response
+// cannot fill the disk before verification would have rejected it.
+const maxUpdateDownloadBytes = 512 << 20
+
+// checksumsAssetName is the sha256sum-format manifest every release publishes
+// beside its artifacts (.github/workflows/release.yml and prerelease.yml both
+// generate it over every file in release-files/).
+const checksumsAssetName = "checksums.txt"
+
+// applyUpdate performs the binary swap. Tests inject applyUpdateFn so the
+// gating logic can be exercised without rewriting the test binary.
+func (a *App) applyUpdate(r io.Reader, opts update.Options) error {
+	if a.applyUpdateFn != nil {
+		return a.applyUpdateFn(r, opts)
+	}
+	return update.Apply(r, opts)
+}
+
+// downloadToFile fetches url into destPath, refusing any non-200 response.
+func downloadToFile(url, destPath string) error {
+	resp, err := http.Get(url) // #nosec G107 -- URL comes from the GitHub releases API for this repo
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if strings.HasSuffix(url, assetZipExt) {
-		return a.applyZipUpdate(resp.Body)
-	} else if strings.HasSuffix(url, assetTarGzExt) {
-		return a.applyTarGzUpdate(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected HTTP status %s", resp.Status)
 	}
 
-	return update.Apply(resp.Body, update.Options{})
+	f, err := os.Create(destPath) // #nosec G304 -- destPath is inside a temp dir this process just created
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxUpdateDownloadBytes))
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
-// applyZipUpdate extracts and applies an update from a zip archive
-func (a *App) applyZipUpdate(body io.Reader) error {
-	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetZipExt))
-	if err != nil {
-		return err
+// resolveAssetDigest fetches checksums.txt from the SAME release and returns
+// the digest it publishes for assetName. Every failure mode - no manifest
+// asset, an unreachable or unparseable manifest, an asset the manifest does not
+// list - is an error, so the caller can never fall through to an unverified
+// install.
+//
+// The lookup keys on the exact asset name that was selected for download: a
+// release publishes both "mcpproxy-latest-<os>-<arch>" aliases and versioned
+// archives, and on macOS their digests differ (notarization), so rederiving a
+// name here instead of using the downloaded one would compare the wrong entry.
+func (a *App) resolveAssetDigest(release *GitHubRelease, assetName, workDir string) (string, error) {
+	var checksumsURL string
+	for _, asset := range release.Assets {
+		if asset.Name == checksumsAssetName {
+			checksumsURL = asset.BrowserDownloadURL
+			break
+		}
 	}
-	defer os.Remove(tmpfile.Name())
-	defer tmpfile.Close()
+	if checksumsURL == "" {
+		return "", fmt.Errorf("release %s publishes no %s, so %s cannot be verified; refusing to install it",
+			release.TagName, checksumsAssetName, assetName)
+	}
 
-	_, err = io.Copy(tmpfile, body)
+	checksumsPath := filepath.Join(workDir, checksumsAssetName)
+	if err := downloadToFile(checksumsURL, checksumsPath); err != nil {
+		return "", fmt.Errorf("download %s for release %s: %w", checksumsAssetName, release.TagName, err)
+	}
+
+	f, err := os.Open(checksumsPath) // #nosec G304 -- checksumsPath is inside a temp dir this process just created
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", checksumsAssetName, err)
+	}
+	defer f.Close()
+
+	manifest, err := updatecheck.ParseChecksums(f)
+	if err != nil {
+		return "", fmt.Errorf("parse %s for release %s: %w", checksumsAssetName, release.TagName, err)
+	}
+
+	digest, ok := manifest[assetName]
+	if !ok {
+		return "", fmt.Errorf("%s is not listed in %s for release %s; refusing to install an unlisted artifact",
+			assetName, checksumsAssetName, release.TagName)
+	}
+	return digest, nil
+}
+
+// downloadAndApplyUpdate downloads the release asset and applies it, but only
+// once the downloaded bytes match the SHA-256 that the release's own
+// checksums.txt publishes for that exact asset. It fails closed: a missing
+// manifest, a missing entry or any mismatch refuses the update rather than
+// installing an unverified binary.
+//
+// The digest covers the ARCHIVE as published, so the hash is taken over the
+// downloaded file before anything is extracted from it - update.Options.Checksum
+// would instead hash the extracted member, which the manifest says nothing
+// about. Signature verification of checksums.txt itself (the cosign bundle the
+// release also publishes, as `mcpproxy update --self` verifies) is a follow-up;
+// it needs the cosign binary, which a tray user's machine usually lacks.
+func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url string) error {
+	workDir, err := os.MkdirTemp("", "mcpproxy-tray-update-*")
+	if err != nil {
+		return fmt.Errorf("create work directory: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	// Resolved before the ~90 MB download so an unverifiable release costs
+	// nothing, and so no code path can reach the apply without a digest.
+	wantDigest, err := a.resolveAssetDigest(release, assetName, workDir)
 	if err != nil {
 		return err
 	}
 
-	r, err := zip.OpenReader(tmpfile.Name())
-	if err != nil {
-		return err
+	// The archive keeps the published extension (and only that — never the
+	// asset name itself, which is server-supplied): ExtractBinary dispatches
+	// tar.gz vs zip off the path suffix.
+	archivePath := filepath.Join(workDir, "artifact"+archiveExt(assetName))
+	if err := downloadToFile(url, archivePath); err != nil {
+		return fmt.Errorf("download %s: %w", assetName, err)
 	}
-	defer r.Close()
+
+	if err := updatecheck.VerifyFileSHA256(archivePath, wantDigest); err != nil {
+		return fmt.Errorf("refusing to install %s from release %s: %w", assetName, release.TagName, err)
+	}
+
+	a.logger.Info("Update artifact verified against release checksums",
+		zap.String("asset", assetName),
+		zap.String("release", release.TagName),
+		zap.String("sha256", wantDigest))
+
+	switch {
+	case archiveExt(assetName) != "":
+		return a.applyArchiveUpdate(archivePath)
+	default:
+		f, err := os.Open(archivePath) // #nosec G304 -- archivePath is inside a temp dir this process just created
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return a.applyUpdate(f, update.Options{})
+	}
+}
+
+// archiveExt returns the archive extension assetName carries, or "" when it is
+// not an archive this path knows how to open.
+func archiveExt(assetName string) string {
+	switch {
+	case strings.HasSuffix(assetName, assetZipExt):
+		return assetZipExt
+	case strings.HasSuffix(assetName, assetTarGzExt):
+		return assetTarGzExt
+	default:
+		return ""
+	}
+}
+
+// trayBinaryName is the archive member this process installs over itself.
+//
+// The self-update runs inside mcpproxy-tray (cmd/mcpproxy-tray is the only
+// importer of this package) and hands update.Apply a TargetPath of
+// os.Executable(), so the member extracted has to be the TRAY binary. Release
+// archives ship the core binary and the tray binary side by side —
+// .github/workflows/release.yml stages mcpproxy plus mcpproxy-tray[.exe] — and
+// list the core first, so any "first entry" or suffix-based rule pulls out the
+// core and installs it over the tray, leaving the user with a tray executable
+// that is really a headless core. The core keeps updating itself through
+// `mcpproxy update`, which selects its own member the same way
+// (coreBinaryName in cmd/mcpproxy/update_cmd.go).
+func trayBinaryName() string {
+	name := "mcpproxy-tray"
+	if runtime.GOOS == osWindows {
+		name += ".exe"
+	}
+	return name
+}
+
+// applyArchiveUpdate extracts the tray binary out of the already-downloaded,
+// already-checksum-verified archive and swaps it over the running executable.
+//
+// Extraction matches the member on its exact base name and fails closed when it
+// is absent: an archive without the tray binary means the layout changed, and
+// installing some other member instead is worse than not updating.
+func (a *App) applyArchiveUpdate(archivePath string) error {
+	member := trayBinaryName()
+
+	stageDir, err := os.MkdirTemp(filepath.Dir(archivePath), "extract-*")
+	if err != nil {
+		return fmt.Errorf("create extraction directory: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+
+	stagedPath := filepath.Join(stageDir, member)
+	if err := updatecheck.ExtractBinary(archivePath, member, stagedPath); err != nil {
+		return fmt.Errorf("extract %s: %w", member, err)
+	}
+
+	staged, err := os.Open(stagedPath) // #nosec G304 -- stagedPath is inside a temp dir this process just created
+	if err != nil {
+		return fmt.Errorf("open extracted %s: %w", member, err)
+	}
+	defer staged.Close()
 
 	executablePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
+	a.logger.Info("Installing tray binary from update archive",
+		zap.String("member", member),
+		zap.String("target", executablePath))
 
-		err = update.Apply(rc, update.Options{TargetPath: executablePath})
-		rc.Close()
-		return err
-	}
-
-	return fmt.Errorf("no file found in zip archive to apply")
-}
-
-// applyTarGzUpdate extracts and applies an update from a tar.gz archive
-func (a *App) applyTarGzUpdate(body io.Reader) error {
-	// For tar.gz files, we need to extract and find the binary
-	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetTarGzExt))
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpfile.Name())
-	defer tmpfile.Close()
-
-	_, err = io.Copy(tmpfile, body)
-	if err != nil {
-		return err
-	}
-
-	// Open the tar.gz file and extract the binary
-	if _, err := tmpfile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek to beginning of file: %w", err)
-	}
-
-	gzr, err := gzip.NewReader(tmpfile)
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		// Look for the mcpproxy binary (could be mcpproxy or mcpproxy.exe)
-		if strings.HasSuffix(header.Name, "mcpproxy") || strings.HasSuffix(header.Name, "mcpproxy.exe") {
-			executablePath, err := os.Executable()
-			if err != nil {
-				return err
-			}
-
-			return update.Apply(tr, update.Options{TargetPath: executablePath})
-		}
-	}
-
-	return fmt.Errorf("no mcpproxy binary found in tar.gz archive")
+	return a.applyUpdate(staged, update.Options{TargetPath: executablePath})
 }
 
 // openConfigDir opens the directory containing the configuration file
@@ -1688,8 +1814,12 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "quarantine":
 		err = a.syncManager.HandleServerQuarantine(serverName, true)
 
-	case "unquarantine":
-		err = a.syncManager.HandleServerUnquarantine(serverName)
+	case "review":
+		if a.apiClient == nil {
+			err = fmt.Errorf("API client unavailable")
+		} else {
+			err = a.apiClient.OpenWebUIPath("/review/" + url.PathEscape(serverName))
+		}
 
 	case "switch_profile":
 		// Profiles v2 T5: serverName carries the profile slug ("" = all servers).

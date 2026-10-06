@@ -558,6 +558,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// Spec 112: project the forward_headers allowlist (names only).
+		if names, ok := srvRaw["forward_headers"].([]string); ok && len(names) > 0 {
+			srv.ForwardHeaders = append([]string(nil), names...)
+		}
+
 		// Spec 086: project the per-server trust tier (auto|scan|manual) so the
 		// GET payload, `mcpproxy upstream list` and the SSE servers.changed
 		// embed can read back the persisted mode. Plain string — an absent key

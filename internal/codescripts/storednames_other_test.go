@@ -154,6 +154,41 @@ func waitForIndexRebuild(t *testing.T, dir string) {
 	}
 }
 
+// joinRealRebuildGoroutines intercepts spawnIndexRebuild for the test's
+// duration so a real (non-held) rebuild goroutine — the default `go
+// rebuild()`, as opposed to holdIndexRebuilds' captured closures — is
+// joined in full before the test returns. idx.landed (what
+// waitForIndexRebuild and quiesceIndexRebuilds wait on) closes INSIDE
+// idx.rebuild, before that goroutine returns and scheduleRebuildLocked's
+// own deferred rebuildSlots release runs; a test that only waits on landed
+// can return while the goroutine is still alive reading the package-level
+// rebuildSlots variable, racing a later test's reassignment of it (that
+// gap is exactly what let TestStoredNames_GenerationChangeRebuildsOffTheRequestPath's
+// "live" subtest leak a goroutine into TestStoredNames_WarmBlocksOnRebuildSlots
+// under shuffle).
+func joinRealRebuildGoroutines(t *testing.T) {
+	t.Helper()
+	var wg sync.WaitGroup
+	orig := spawnIndexRebuild
+	spawnIndexRebuild = func(rebuild func()) {
+		wg.Add(1)
+		orig(func() {
+			defer wg.Done()
+			rebuild()
+		})
+	}
+	t.Cleanup(func() {
+		spawnIndexRebuild = orig
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("a rebuild goroutine did not exit before test cleanup")
+		}
+	})
+}
+
 // requireScopedNotFound asserts the ordinary non-disclosing not-found refusal.
 func requireScopedNotFound(t *testing.T, err error) {
 	t.Helper()
@@ -517,6 +552,7 @@ func TestStoredNames_GenerationChangeRebuildsOffTheRequestPath(t *testing.T) {
 	})
 
 	t.Run("live: the rebuild goroutine lands and the next request sees the script", func(t *testing.T) {
+		joinRealRebuildGoroutines(t)
 		dir := t.TempDir()
 		writeScript(t, dir, "alpha.js", "1")
 		warmStoredNames(t, dir)

@@ -67,6 +67,24 @@ enum ConnectClientAccessibility {
     static let status = "connect-client-status"
     static let waiting = "connect-client-waiting"
     static let transportNotice = "connect-client-transport-notice"
+    /// Spec 109-b FR-037/FR-042: the client's reload hint shown after a
+    /// successful connect/disconnect.
+    static let reloadHint = "connect-client-reload-hint"
+    /// Spec 109-b FR-037: the shortened config path shown alongside a
+    /// successful connect/disconnect result, so the write is anchored to a
+    /// place, not just a message — matching the preview pane's "Config file"
+    /// row above.
+    static let resultConfigPath = "connect-client-result-config-path"
+    /// Spec 108-k K21: the binding controls, the masked credential line, the D5
+    /// notice and the result's credential line. The short forms are the ids
+    /// `mcpproxy-ui-test` looks for (K22).
+    static let profilePicker = "connect-profile-picker"
+    static let lockToggle = "connect-lock-toggle"
+    static let keylessToggle = "connect-client-keyless"
+    static let credentialLine = "connect-client-credential-line"
+    static let managementNotice = "connect-mgmt-notice"
+    static let resultCredential = "connect-client-result-credential"
+    static let guardRefusal = "connect-client-guard-refusal"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -76,7 +94,9 @@ enum ConnectClientAccessibility {
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
-        closeButton, status, waiting, transportNotice
+        closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath,
+        profilePicker, lockToggle, keylessToggle, credentialLine, managementNotice,
+        resultCredential, guardRefusal
     ]
 }
 
@@ -91,6 +111,13 @@ enum ConnectClientAccessibility {
 struct ConnectClientView: View {
     @ObservedObject var model: ConnectClientModel
     var onClose: () -> Void = {}
+    /// Select this client as soon as the list loads (an "Upgrade to client
+    /// credential…" or "Reconnect…" entry point).
+    var preselect: String? = nil
+    /// The profile that client was bound to, preset in the picker (K9).
+    var presetProfile: String? = nil
+    /// Follows a guard fix (Settings…). The sheet closes first.
+    var onRoute: (AppRoute) -> Void = { _ in }
 
     @State private var selectedID: String?
     @State private var showAdvanced = false
@@ -110,7 +137,13 @@ struct ConnectClientView: View {
             actionBar
         }
         .frame(minWidth: 760, minHeight: 480)
-        .task { await model.loadList() }
+        .task {
+            await model.loadList()
+            if let preselect, model.selection == nil {
+                selectedID = preselect
+                await model.preselect(preselect, profile: presetProfile)
+            }
+        }
         .alert("Disconnect this client?", isPresented: disconnectConfirmationIsPresented,
                presenting: model.pendingDisconnect) { _ in
             Button("Cancel", role: .cancel) { model.cancelDisconnect() }
@@ -256,6 +289,7 @@ struct ConnectClientView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     detailSection
+                    bindingSection
                     previewSection
                     advancedSection
                     statusSection
@@ -305,7 +339,7 @@ struct ConnectClientView: View {
                 .accessibilityIdentifier(ConnectClientAccessibility.preview)
         case .resolved(let preview):
             VStack(alignment: .leading, spacing: 10) {
-                labelledRow("Config file", preview.configPath,
+                labelledRow("Config file", preview.effectiveDisplayPath,
                             identifier: ConnectClientAccessibility.configPath)
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -331,11 +365,35 @@ struct ConnectClientView: View {
                         .accessibilityIdentifier(ConnectClientAccessibility.safetyNet)
                 }
 
-                if let credential = preview.credentialNotice {
+                if let line = preview.credentialLine {
+                    Text(line)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier(ConnectClientAccessibility.credentialLine)
+                }
+
+                if let credential = model.credentialDisclosure {
                     Label(credential, systemImage: "key.fill")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(preview.containsAPIKey ? Color.orange : Color.secondary)
                         .accessibilityIdentifier(ConnectClientAccessibility.credentialNotice)
+                }
+
+                // D5: a client credential cannot reach management tools unless
+                // its profile enables them.
+                if model.showsManagementNotice {
+                    Label(ConnectClientModel.managementNotice, systemImage: "wrench.and.screwdriver")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.managementNotice)
+                }
+
+                if let refusal = model.guardRefusal {
+                    GuardRefusalView(body: refusal) { route in
+                        onClose()
+                        onRoute(route)
+                    }
+                    .accessibilityIdentifier(ConnectClientAccessibility.guardRefusal)
                 }
 
                 if let refusal = model.connectRefusal {
@@ -383,10 +441,50 @@ struct ConnectClientView: View {
         .accessibilityIdentifier(ConnectClientAccessibility.existingSummary)
     }
 
+    /// Spec 108-k K21: which profile the client's credential binds to, and
+    /// whether it is locked to it. Untouched, nothing is sent: a reconnect keeps
+    /// its binding and a new credential starts on All servers.
+    @ViewBuilder
+    private var bindingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Profile", selection: Binding(
+                get: { model.profile },
+                set: { model.chooseProfile($0) })) {
+                Text("All servers").tag("")
+                ForEach(model.profiles) { Text($0.pickerTitle(in: model.profiles)).tag($0.name) }
+            }
+            .frame(maxWidth: 320)
+            .disabled(model.keyless || model.isBusy)
+            .accessibilityLabel("Profile for the client credential")
+            .accessibilityIdentifier(ConnectClientAccessibility.profilePicker)
+
+            Toggle("Locked — the client cannot switch to another profile", isOn: Binding(
+                get: { model.mode == .locked },
+                set: { model.setLocked($0) }))
+                .disabled(model.profile.isEmpty || model.keyless || model.isBusy)
+                .accessibilityIdentifier(ConnectClientAccessibility.lockToggle)
+            if model.profile.isEmpty && !model.keyless {
+                Text(model.bindingTouched
+                     ? "Choose a profile to lock."
+                     : "A new credential starts on All servers; an existing one keeps its profile.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: model.profile) { _ in Task { await model.refreshPreview() } }
+        .onChange(of: model.lockedChoice) { _ in Task { await model.refreshPreview() } }
+        .onChange(of: model.keyless) { _ in Task { await model.refreshPreview() } }
+    }
+
     /// FR-007: the entry-name override is advanced and collapsed by default.
     private var advancedSection: some View {
         DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
             VStack(alignment: .leading, spacing: 4) {
+                if model.keylessAvailable {
+                    Toggle("Connect without a credential (authentication is off)", isOn: Binding(
+                        get: { model.keyless }, set: { model.setKeyless($0) }))
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier(ConnectClientAccessibility.keylessToggle)
+                }
                 TextField("Entry name", text: $model.entryName)
                     .textFieldStyle(.roundedBorder)
                     // The name is bound to the write that is already running.
@@ -411,21 +509,87 @@ struct ConnectClientView: View {
         case .idle, .inFlight:
             EmptyView()
         case .succeeded(let result):
-            Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                // Spec 108-k K21: which credential the write embedded, in the
+                // CLI's words (masked; the secret is never shown here).
+                if let line = result.credentialLine {
+                    Text(line)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier(ConnectClientAccessibility.resultCredential)
+                }
+                if let revoked = result.credentialRevoked, !revoked.isEmpty {
+                    Text("Revoked credential \(revoked)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                // Spec 109-b FR-037: anchor the result to the file it wrote,
+                // the same shortened path the preview pane showed above —
+                // `effectiveDisplayPath` was decoded and available since
+                // FR-037/FR-042 landed but never rendered here.
+                if let displayPath = result.effectiveDisplayPath, !displayPath.isEmpty {
+                    Text(displayPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
+                }
+                // Spec 109-b FR-037/FR-042: name the client's reload step so a
+                // successful write doesn't read as "done" when the client
+                // hasn't picked it up yet.
+                if let reloadHint = result.reloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
         case .conflict(let reason):
-            Label("\(reason) The preview has been refreshed — review it and try again.",
-                  systemImage: "arrow.triangle.2.circlepath")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label("\(reason) The preview has been refreshed — review it and try again.",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+            }
         case .failed(let reason):
-            Label(reason, systemImage: "xmark.octagon.fill")
+            VStack(alignment: .leading, spacing: 2) {
+                Label(reason, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+                // Spec 109-b FR-037/FR-042 (review round 3 finding): the
+                // legacy `already_exists` failure means an entry is already
+                // there under this path — the reload hint tells the user
+                // that reloading/restarting the client is what would pick it
+                // up, the same information a successful connect shows above.
+                if let reloadHint = model.actionReloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
+        }
+    }
+
+    /// Shared with the `.conflict`/`.failed` branches above: the core fills
+    /// `display_path` on every ConnectResult branch, including a 409
+    /// conflict (review round 3 finding) — this used to be discarded before
+    /// reaching the model, so neither branch could ever show it.
+    @ViewBuilder
+    private var conflictDisplayPathRow: some View {
+        if let displayPath = model.actionDisplayPath, !displayPath.isEmpty {
+            Text(displayPath)
                 .font(.caption)
-                .foregroundStyle(.red)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
         }
     }
 

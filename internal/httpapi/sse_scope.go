@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -163,6 +164,16 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeConfigReloaded: {},
 	internalRuntime.EventTypeConfigSaved:    {},
 	internalRuntime.EventTypeSecretsChanged: {},
+	// Presence is an administrator-only local-client inventory. The invalidation
+	// frame names no server, so scoped callers cannot be given a safe subset.
+	internalRuntime.EventTypeClientPresenceChanged: {},
+	// A binding change discloses which client is bound to which profile
+	// (Spec 108 FR-032 rule): administrator-only, never shown to a scoped
+	// caller.
+	internalRuntime.EventTypeClientBindingChanged: {},
+	// A profile change names profiles (and so servers and policy) a scoped
+	// caller may not reach (Spec 108-f FR-038): administrator-only invalidation.
+	internalRuntime.EventTypeProfilesChanged: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one
@@ -187,9 +198,10 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 // also means a producer that starts omitting a field — the exact regression
 // shape above — cannot silently reopen the door.
 //
-// servers.changed is deliberately absent: it is the coalesced, state-carrying
-// event that eventVisibleToCaller never drops and
-// renderEventPayloadForCaller narrows instead.
+// servers.changed and attention.changed are deliberately absent: both are
+// rendered per subscriber by renderEventPayloadForCaller (FR-006) instead of
+// being dropped by this function — see eventVisibleToCaller's early return
+// for the two of them.
 //
 // TestSSE_IdentityBearingEventTypesCoverEveryNamingProducer pins this set
 // against the fixtures that exercise each type end-to-end, and
@@ -211,6 +223,7 @@ var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeOAuthRefreshFailed:           {},
 	internalRuntime.EventTypeSecurityScanSettled:          {},
 	internalRuntime.EventTypeSecurityIntegrityAlert:       {},
+	internalRuntime.EventTypeReviewChanged:                {},
 }
 
 // eventVisibleToCaller reports whether a runtime event may be delivered to the
@@ -248,7 +261,7 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if !auth.IsScopedCaller(ctx) {
 		return true
 	}
-	if evt.Type == internalRuntime.EventTypeServersChanged {
+	if evt.Type == internalRuntime.EventTypeServersChanged || evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return true
 	}
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {
@@ -294,4 +307,70 @@ func isOutOfScopeIdentityField(ctx context.Context, key string, value interface{
 		}
 	}
 	return false
+}
+
+// renderActivityAttributionForCaller renders the Spec 108 FR-029 `attribution`
+// object of an activity event for ONE SSE subscriber. The payload map is
+// shared by pointer with every other subscriber, so a changed view is a fresh
+// map and nothing is written into the original.
+//
+//   - `_token_prefix` is internal: it lets this function recognise a scoped
+//     subscriber's OWN events and is stripped for EVERY subscriber, admins
+//     included, so it never reaches the wire.
+//   - An admin (or a caller with no AuthContext) sees the rest of the object.
+//   - A scoped subscriber sees it only on events its own token made (prefix
+//     and name both match); on every other event the whole object is removed,
+//     because it discloses which profile and client another token used
+//     (binding disclosure is admin-only, FR-032).
+//
+// The legacy flat `profile` key (Spec 057, the /mcp/p/<slug> a call arrived on)
+// names a profile exactly as attribution.profile does, so on an activity.*
+// event it follows the same rule: a scoped subscriber keeps it only on its own
+// events, and an event that carries no ownership proof (no attribution) is
+// treated as foreign.
+func renderActivityAttributionForCaller(ctx context.Context, eventType internalRuntime.EventType, payload map[string]interface{}) map[string]interface{} {
+	raw, hasAttr := payload["attribution"]
+	_, hasFlatProfile := payload["profile"]
+	flatProfile := hasFlatProfile && strings.HasPrefix(string(eventType), "activity.")
+	if !hasAttr && !flatProfile {
+		return payload
+	}
+	attr, _ := raw.(map[string]any)
+
+	scoped := auth.IsScopedCaller(ctx)
+	owned := attr != nil
+	if owned && scoped {
+		ac := auth.AuthContextFromContext(ctx)
+		prefix, _ := attr["_token_prefix"].(string)
+		name, _ := attr["token_name"].(string)
+		owned = ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" && prefix == ac.TokenPrefix && name == ac.AgentName
+	}
+	keep := owned
+	// Without a scope restriction there is nothing to withhold from.
+	keepFlatProfile := !scoped || owned
+	if !hasAttr && !scoped {
+		return payload
+	}
+
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		switch {
+		case k == "attribution":
+		case k == "profile" && flatProfile && !keepFlatProfile:
+		default:
+			out[k] = v
+		}
+	}
+	if keep {
+		view := make(map[string]any, len(attr))
+		for k, v := range attr {
+			if k != "_token_prefix" {
+				view[k] = v
+			}
+		}
+		if len(view) > 0 {
+			out["attribution"] = view
+		}
+	}
+	return out
 }

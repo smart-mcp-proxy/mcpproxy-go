@@ -55,7 +55,13 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 	if reg == nil {
 		return nil, fmt.Errorf("registry '%s' not found", registryID)
 	}
+	return searchRegistry(ctx, reg, tag, query, limit, guesser)
+}
 
+// searchRegistry is SearchServers for an already-resolved registry. The
+// catalog's background fetches call it with their own copy of the entry rather
+// than re-reading the (unsynchronised) registry list.
+func searchRegistry(ctx context.Context, reg *RegistryEntry, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
 	// FR-008: skip a key-requiring registry when no key is configured, rather
 	// than performing a doomed fetch. Surfaces map ErrRegistryKeyMissing to an
 	// "unavailable" marker so the overall search still succeeds.
@@ -112,6 +118,102 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 	}
 
 	return filtered, nil
+}
+
+// typedFetchCap bounds how many entries one source contributes to a typed
+// catalog query before ranking (Spec 109 D37.3): the fetch is one page per
+// query (3 on the official protocol), so this is a ceiling, not a target.
+const typedFetchCap = 300
+
+// searchCatalogSource is the typed-query fetch behind catalog search (Spec 109
+// D37.3). Unlike SearchServers it does NOT truncate to a limit in the
+// registry's own order: the official registry's search returns names in byte
+// order, so truncating first decided what the user could ever see. It returns
+// every match (capped at typedFetchCap) and lets Rank order them. The official
+// protocol also fetches the owner and name-prefix expansion queries
+// (fetchOfficialCatalog). When the official source's main query fails the
+// error is returned together with the expansion hits that did arrive.
+func searchCatalogSource(ctx context.Context, reg *RegistryEntry, q string) ([]ServerEntry, error) {
+	return searchCatalogSourceProgress(ctx, reg, q, nil)
+}
+
+// searchCatalogSourceProgress is searchCatalogSource that also reports, through
+// onPartial, the already-filtered hits of the official protocol's expansion
+// queries as they arrive. A caller that stops waiting (the 5s source budget)
+// can then still show them while the slow main query finishes in the
+// background (Spec 109 D37.2/D37.11). onPartial may be nil.
+func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q string, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
+	// FR-008: skip a key-requiring registry when no key is configured.
+	if err := checkRegistryKey(reg); err != nil {
+		return nil, err
+	}
+	if reg.ServersURL == "" {
+		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
+	}
+
+	var (
+		servers []ServerEntry
+		err     error
+	)
+	if reg.Protocol == protocolOfficial {
+		var progress func([]ServerEntry, bool)
+		if onPartial != nil {
+			progress = func(landed []ServerEntry, mainLanded bool) {
+				onPartial(finishCatalogEntries(reg, q, landed), mainLanded)
+			}
+		}
+		servers, err = fetchOfficialCatalogProgress(ctx, reg, q, progress)
+	} else {
+		servers, err = fetchServers(ctx, reg, nil, q, 0)
+	}
+	if err != nil {
+		err = fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
+	}
+
+	return finishCatalogEntries(reg, q, servers), err
+}
+
+// finishCatalogEntries applies the typed query's filter and the per-source cap
+// to fetched entries and stamps the registry name.
+func finishCatalogEntries(reg *RegistryEntry, q string, servers []ServerEntry) []ServerEntry {
+	filtered := filterCatalogEntries(servers, q)
+	if len(filtered) > typedFetchCap {
+		filtered = filtered[:typedFetchCap]
+	}
+	for i := range filtered {
+		filtered[i].Registry = reg.Name
+	}
+	return filtered
+}
+
+// filterCatalogEntries keeps the entries a typed catalog query matches: the
+// per-registry filter (name, title, description substring) plus a
+// separator-insensitive match, so "github actions" finds "github-actions".
+func filterCatalogEntries(servers []ServerEntry, q string) []ServerEntry {
+	filtered := make([]ServerEntry, 0, len(servers))
+	nq := normalizeMatchText(q)
+	for i := range servers {
+		e := &servers[i]
+		if entryMatchesQuery(e, q) ||
+			(nq != "" && (strings.Contains(normalizeMatchText(e.Name), nq) ||
+				strings.Contains(normalizeMatchText(e.Title), nq) ||
+				strings.Contains(normalizeMatchText(e.Description), nq))) {
+			filtered = append(filtered, *e)
+		}
+	}
+	return filtered
+}
+
+// entryMatchesQuery is filterServers' per-entry query test: a case-insensitive
+// substring of the name, the title or the description. An empty query matches.
+func entryMatchesQuery(e *ServerEntry, query string) bool {
+	if query == "" {
+		return true
+	}
+	q := strings.ToLower(query)
+	return strings.Contains(strings.ToLower(e.Name), q) ||
+		strings.Contains(strings.ToLower(e.Title), q) ||
+		strings.Contains(strings.ToLower(e.Description), q)
 }
 
 // FindServerByID resolves a single server within a registry by its exact ID.
@@ -406,6 +508,16 @@ func parseDocker(rawData interface{}) []ServerEntry {
 				server.UpdatedAt = lastUpdated
 			}
 
+			// Spec 110 FR-001: pull_count -> Installs (comes free with the
+			// listing this parser already fetches). Docker's own star_count
+			// is deliberately NEVER mapped to Stars — it lives on a wildly
+			// different scale from GitHub stars (single digits vs tens of
+			// thousands) and mixing them would be meaningless.
+			if pullCount, ok := itemMap["pull_count"].(float64); ok && pullCount >= 0 {
+				installs := int(pullCount)
+				server.Popularity = &Popularity{Installs: &installs}
+			}
+
 			servers = append(servers, server)
 		}
 	}
@@ -544,15 +656,9 @@ func filterServers(servers []ServerEntry, tag, query string) []ServerEntry {
 	for i := range servers {
 		srv := &servers[i]
 
-		// Filter by query (search in name and description)
-		if query != "" {
-			q := strings.ToLower(query)
-			name := strings.ToLower(srv.Name)
-			desc := strings.ToLower(srv.Description)
-
-			if !strings.Contains(name, q) && !strings.Contains(desc, q) {
-				continue
-			}
+		// Filter by query (search in name, title and description)
+		if !entryMatchesQuery(srv, query) {
+			continue
 		}
 
 		filtered = append(filtered, *srv)

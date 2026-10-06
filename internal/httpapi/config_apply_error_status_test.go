@@ -26,7 +26,7 @@ type applyErrController struct {
 	err    error
 }
 
-func (m *applyErrController) GetCurrentConfig() any { return &config.Config{APIKey: "k"} }
+func (m *applyErrController) GetCurrentConfig() *config.Config { return &config.Config{APIKey: "k"} }
 func (m *applyErrController) GetConfig() (*config.Config, error) {
 	return &config.Config{Listen: "127.0.0.1:8080"}, nil
 }

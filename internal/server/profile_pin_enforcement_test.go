@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // A profile pin is only a security boundary if EVERY dispatch surface resolves
@@ -113,9 +114,21 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 
 	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "deploy-srv", ToolName: "ship", DisplayName: FormatDirectToolName("deploy-srv", "ship"), Annotations: nil})
 	result, err := handler(ctx, mcp.CallToolRequest{})
-	require.NoError(t, err)
-	require.True(t, result.IsError, "a call outside the pinned profile must be refused")
-	assert.Contains(t, resultText(t, result), "is not in profile 'research'")
+	// Spec 105 FR-008 gap G5 (D12): the refusal must not name the profile-out
+	// server "deploy-srv" — invoking the registered handler directly, as this
+	// test does, exercises its defense-in-depth check, which now echoes only
+	// the caller-supplied tool name, matching an unregistered name's wording.
+	// Returned as the handler's own error (PR #1326 review round 2, chunk C),
+	// not a NewToolResultError, so the envelope KIND matches too.
+	//
+	// An EXACT match, not Contains: a loose substring check would still pass
+	// a message that echoes the expected prefix AND appends extra
+	// disclosure (e.g. "... not found (server deploy-srv is not in profile
+	// 'research')"). The full string is the only check that rules that out.
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err, "a call outside the pinned profile must be refused")
+	assert.Equal(t, "tool 'deploy-srv__ship' not found: tool not found", err.Error(),
+		"the refusal must be EXACTLY the unregistered-name wording, with nothing appended that could leak the scope reason")
 
 	// Profile deleted → deny-all on both discovery and dispatch.
 	cfg.Profiles = nil
@@ -124,8 +137,10 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 
 	handler = proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "research-srv", ToolName: "search", DisplayName: FormatDirectToolName("research-srv", "search"), Annotations: nil})
 	result, err = handler(ctx, mcp.CallToolRequest{})
-	require.NoError(t, err)
-	require.True(t, result.IsError, "a stale pin must refuse even the formerly pinned server")
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err, "a stale pin must refuse even the formerly pinned server")
+	assert.Equal(t, "tool 'research-srv__search' not found: tool not found", err.Error(),
+		"the refusal must be EXACTLY the unregistered-name wording even for the formerly pinned server")
 
 	// An admin (no auth context, no profile) is unaffected.
 	assert.Len(t, proxy.filterDirectModeToolsForAuth(context.Background(), tools), 2)
@@ -154,6 +169,7 @@ func TestSetProfileClearReportsPinnedScope(t *testing.T) {
 	require.False(t, result.IsError)
 	payload := decodeSetProfilePayload(t, result)
 	assert.Equal(t, "", payload["active_profile"], "the pin is not a stored selection")
+	assert.Equal(t, string(profile.SourceNone), payload["profile_source"], "clearing hides the credential's base profile")
 	assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("sess-pin-clear"), "the stored selection must be cleared")
 	assert.Equal(t, []interface{}{"research-srv"}, payload["servers"],
 		"clearing must not advertise servers the pin still denies")

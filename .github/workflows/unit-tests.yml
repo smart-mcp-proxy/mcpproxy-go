@@ -53,6 +53,42 @@ jobs:
       - name: Regenerate and verify OpenAPI spec
         run: scripts/verify-oas.sh
 
+  # Review round 8, finding 5: proves the recursive process-tree walk
+  # (descendant_pids, scripts/descendant-pids.sh) the E2E cleanup trap uses
+  # to reap only what a run itself spawned. Hermetic (spawns only its own
+  # sleep/bash processes) — no build, frontend or binary needed — so it runs
+  # standalone rather than piggybacking on the `test` job below. Before this,
+  # neither this nor the heavier test-e2e-cleanup-check.sh (see
+  # release-qa-gate.yml's suite-api-e2e job) was wired into any workflow, so
+  # a regression reintroducing the blanket `pkill -f "mcpproxy.*serve"` this
+  # PR removes, or breaking descendant_pids' recursion, would pass CI
+  # undetected.
+  test-descendant-pids:
+    name: Descendant-PIDs Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Run descendant_pids unit test
+        run: make test-descendant-pids
+
+  # Spec 109 SC-005 (T147): no first-party surface calls POST
+  # /servers/{id}/unquarantine, and the one-click approvals 109-f removed stay
+  # removed. Hermetic grep; the self-test proves the check can fail.
+  check-no-unquarantine-callers:
+    name: No Unquarantine Callers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the checker
+        run: bash scripts/check-no-unquarantine-callers.test.sh
+
+      - name: Check the repository
+        run: bash scripts/check-no-unquarantine-callers.sh
+
   test:
     name: Unit Tests
     needs: [build-frontend, verify-oas]
@@ -141,17 +177,22 @@ jobs:
       # atomic coverage (the E2E workflow's -short, coverage-free run of the
       # same package takes ~450s), so the default 10m package timeout is one
       # slow runner away from "panic: test timed out" — which is how the leg
-      # failed on the first green-again push after #1266.
+      # failed on the first green-again push after #1266. It has since grown to
+      # ~1100-1200s, so the bound is 40m to leave real headroom.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: go test -v -race -timeout 20m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        run: go test -v -race -timeout 40m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
+      # internal/server under -race takes ~10 minutes on the macOS runner and
+      # grows with every spec's tests, so the default 10m package timeout
+      # ("panic: test timed out") is no longer enough there; match the
+      # Windows leg's 20m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -166,7 +207,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           file: ./coverage.out
           flags: unittests
@@ -258,7 +299,7 @@ jobs:
       # Keep the flags identical to the required ubuntu lane except for
       # -shuffle=on (and no coverage — Codecov already gets the ordered run).
       - name: Run unit tests (shuffled)
-        run: go test -v -race -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

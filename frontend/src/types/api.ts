@@ -1,5 +1,5 @@
 // Re-export common types from contracts (generated from Go constants)
-export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction, Tier } from './contracts'
 export {
   HealthLevelHealthy,
   HealthLevelDegraded,
@@ -17,8 +17,24 @@ export {
   HealthActionConfigure,
 } from './contracts'
 
-// Import HealthStatus for use in this file
-import type { HealthStatus } from './contracts'
+// Import HealthStatus/Tier for use in this file
+import type {
+  CredentialState, HealthStatus, Tier, ProfileSource, ProfileBlockReason,
+  ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
+  EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
+  ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState,
+} from './contracts'
+
+// Spec 108-i: the Profiles v3 wire shapes are generated with the rest of the
+// enums (cmd/generate-types reads internal/runtime). This file re-exports them
+// so the views import from one place, and adds the request bodies and the
+// handful of responses that only the Web UI consumes.
+export type {
+  ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
+  EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
+  ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState, CredentialState,
+  ProfileSource, ProfileBlockReason,
+}
 
 // Quarantine stats for tool-level quarantine (Spec 032)
 export interface QuarantineStats {
@@ -54,7 +70,8 @@ export interface SecurityScanSummary {
 }
 
 // Security scan finding (Spec 039)
-export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
+// Mirrors internal/security/scanner.Threat* plus detect.ThreatExfiltration.
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'exfiltration' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
 // FindingSpan locates ONE check's match inside ONE raw (un-normalized) tool text
@@ -240,6 +257,8 @@ export interface ServerIsolationDefaults {
 
 export interface Server {
   name: string
+  /** Catalog provenance, used only to resolve an already-added catalog card. */
+  source_registry_id?: string
   // Human-friendly display label from the source registry (MCP-1112). When
   // present it is preferred over `name` for display; `name` stays the stable
   // identifier used for routing and API calls (it may be a reverse-DNS id such
@@ -342,6 +361,9 @@ export interface GlobalTool {
   usage: number
   last_used?: string       // ISO 8601; omitted if never used in window
   annotations?: ToolAnnotation
+  // Spec 109 FR-028: computed by contracts.AnnotationTier — never derive this
+  // from `annotations` on the frontend (X11).
+  tier?: Tier
   // Hold evidence (Spec 086 FR-018, surfaced by Spec 088 FR-008): present only
   // on tools the trust gate refused to auto-approve. GET /api/v1/tools emits
   // these alongside the approval status (internal/httpapi/server.go); records
@@ -349,7 +371,27 @@ export interface GlobalTool {
   held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
   held_verdict?: string    // "dangerous" | "warnings" | "clean"
   held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
+  // Spec 108 FR-032: present only in a view-as listing (`GET /tools?client=|profile=`).
+  // `tier` stays the intrinsic tier; `profile_tier` is the tier under the viewed
+  // subject's profile and `access` is the subject's verdict for the tool.
+  profile_tier?: Tier
+  access?: ToolAccess
   // derived locally: enabled = !disabled && !config_denied
+}
+
+// Spec 108 FR-032: a view-as verdict for one tool. `reason` is empty when the
+// tool is callable, otherwise one of profile.AccessReasons (see
+// utils/profiles.ts reasonText for the words).
+export interface ToolAccess {
+  visible: boolean
+  callable: boolean
+  reason?: string
+}
+
+// Spec 108 FR-032: the row accounting of a NON-administrator profile view-as.
+export interface ViewAsCounts {
+  visible: number
+  hidden: number
 }
 
 export interface GlobalToolsStats {
@@ -364,6 +406,9 @@ export interface GlobalToolsResponse {
   stats: GlobalToolsStats
   partial: boolean
   failed_servers: string[]
+  // Only for a non-administrator `profile=` view-as: the response lists the
+  // visible rows and this is the only trace of the rest.
+  counts?: ViewAsCounts
 }
 
 // Tool Annotation types
@@ -395,6 +440,12 @@ export interface MCPSession {
   // belongs to.
   workspace_name?: string
   work_session_id?: string
+  // Spec 108 FR-033: the credential the session initialized with and the latest
+  // profile resolution. Absent on sessions recorded before Spec 108.
+  client_id?: string
+  token_name?: string
+  profile?: string
+  profile_source?: ProfileSource
 }
 
 // Tool types
@@ -465,6 +516,11 @@ export interface SearchResult {
 // Status types
 export interface StatusUpdate {
   running: boolean
+  // Spec 109 FR-056: the SSE `status` stream (both the initial frame and every
+  // subsequent one) carries the same `edition` GET /api/v1/status reports, so
+  // the Web UI can gate edition-only UI (Settings' "Server Edition" tab) on
+  // the resolved runtime edition rather than on config content.
+  edition?: string
   listen_addr: string
   routing_mode?: string
   upstream_stats: {
@@ -564,6 +620,11 @@ export interface ConfigSecretsResponse {
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number
+  // FR-065: whether the OS keyring provider is usable, and why not when it
+  // isn't — the Paste/Manual/Catalog secret toggle disables itself with this
+  // reason instead of failing silently on Add.
+  keyring_available: boolean
+  keyring_reason?: string
 }
 
 // Tool Call History types
@@ -578,12 +639,43 @@ export interface TokenMetrics {
   was_truncated: boolean      // Whether response was truncated
 }
 
+// GET /api/v1/status (partial — only the fields the Web UI currently reads).
+// `features` (Spec 109-k / url-filter-contract.md FR-080a): which of
+// "profile"/"client"/"token" this build accepts as scope-filter query
+// parameters. Absent (or `scope_filters` absent/empty) means none yet — the
+// Spec 108 rows of useScopeQuery's parameter table stay hidden until this
+// lists them.
+/**
+ * Effective telemetry state served on GET /api/v1/status (Spec 109 FR-044a).
+ * `source` is where the state came from: an environment variable, the config
+ * file, or the unset default (on). `disabled_by` is present only for `env`.
+ */
+export interface TelemetryState {
+  enabled: boolean
+  source: 'env' | 'config' | 'default'
+  disabled_by?: string
+}
+
+export interface StatusResponse {
+  edition: string
+  running: boolean
+  routing_mode: string
+  default_instructions?: string
+  activation?: { first_real_tool_call_ever?: boolean }
+  // Spec 109 FR-044a: omitted for scoped callers and by cores that predate it.
+  telemetry?: TelemetryState
+  features?: { scope_filters?: string[] }
+}
+
 export interface ServerTokenMetrics {
   total_server_tool_list_size: number
   average_query_result_size: number
   saved_tokens: number
   saved_tokens_percentage: number
   per_server_tool_list_sizes: Record<string, number>
+  // Spec 109-k: true while average_query_result_size/saved_tokens are a
+  // synthetic simulation rather than derived from a real retrieve_tools call.
+  estimated: boolean
 }
 
 // Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
@@ -632,6 +724,9 @@ export interface UsageAggregateResponse {
   token_source: string              // "bytes" — size-based proxy (FR-006)
   tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
   tokens_saved_percentage: number
+  // Spec 109-k: true while tokens_saved is a synthetic simulation (no real
+  // retrieve_tools call observed yet) rather than derived from real usage.
+  tokens_saved_estimated: boolean
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
@@ -813,10 +908,83 @@ export interface SearchRegistryServersResponse {
   tag?: string
 }
 
+// Catalog (Spec 109 FR-060/061), GET /api/v1/catalog/search. Mirrors
+// registries.CatalogResult — a DTO distinct from RepositoryServer/ServerEntry;
+// see contracts/rest-api.md#catalog.
+export interface CatalogPopularity {
+  stars?: number
+  installs?: number
+}
+
+export interface CatalogInstall {
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface CatalogInput {
+  name: string
+  description?: string
+  secret_like: boolean
+}
+
+export interface CatalogResult {
+  source: string
+  id: string
+  title: string
+  publisher?: string
+  verified: boolean
+  official: boolean
+  popularity?: CatalogPopularity
+  description: string
+  transport: 'http' | 'stdio'
+  install: CatalogInstall
+  required_inputs?: CatalogInput[]
+  source_code_url?: string
+  added: boolean
+  /** Unique visible installed server selected by the backend before redaction. */
+  added_server_name?: string
+  /**
+   * True when this hit came from the source's cached listing because its live
+   * search failed (Spec 109 D35). The source is then also in `unavailable`.
+   */
+  from_cache?: boolean
+}
+
+export interface CatalogSourceError {
+  source: string
+  reason: string
+  /** "cached_listing" when the hits for this source came from its cached listing. */
+  fallback?: 'cached_listing'
+  /** RFC 3339: when that cached listing was last refreshed. */
+  cached_at?: string
+}
+
+export interface CatalogSections {
+  official: CatalogResult[]
+  popular: CatalogResult[]
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  results: CatalogResult[]
+  sections: CatalogSections | null
+  unavailable: CatalogSourceError[]
+}
+
 // Activity Log types (RFC-003)
 
+// Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
+// that map's own comment (#1065) already flags the drift risk of hand-copying
+// this list a second time; this union had fallen behind it (missing five
+// backend types), which is what let `row.activity.type === 'tool_quarantine_change'`
+// (Spec 109-k's quarantine-batch fold) fail as "no overlap" at compile time.
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
+  | 'system_start'
+  | 'system_stop'
+  | 'config_change'
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
@@ -827,6 +995,15 @@ export type ActivityType =
    * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
    */
   | 'preflight'
+  /** Spec 032, tool-level quarantine state change. */
+  | 'tool_quarantine_change'
+  /** Spec 077. */
+  | 'security_scan'
+  /** Spec 074, server edition only. */
+  | 'credential_broker'
+  | 'prompt_get'
+  /** Spec 108: a client binding, credential rotation or forget. */
+  | 'profile_change'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
@@ -868,6 +1045,24 @@ export interface ActivityRecord {
    */
   parent_id?: string
   metadata?: Record<string, any>
+  /**
+   * Spec 028: caller identity — 'admin' | 'agent', plus 'user' | 'admin_user' on
+   * the server edition. Absent on records written without an auth context, and
+   * blanked for a scoped caller on rows it did not make.
+   */
+  auth_type?: 'admin' | 'agent' | 'user' | 'admin_user'
+  /** Spec 028: agent token name when auth_type is "agent". */
+  agent_name?: string
+  // Spec 108 FR-029: the profile, client and token IN EFFECT when the call ran,
+  // stamped at emit time. All absent on records that predate Spec 108.
+  profile?: string
+  profile_source?: ProfileSource
+  client_id?: string
+  /** The self-reported clientInfo.name: advisory, never authoritative. */
+  client_name?: string
+  token_name?: string
+  /** Why a profile refused the call (activity of status "blocked"). */
+  block_reason?: ProfileBlockReason
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean
   detection_types?: string[]
@@ -896,6 +1091,16 @@ export interface ActivityTopTool {
   count: number
 }
 
+// Spec 109 FR-013: every server with a call in the period (unlike
+// top_servers, which is capped at 5 and carries no error counts). Used by the
+// server card's 24h stats line and the macOS Servers rows.
+export interface ActivityPerServer {
+  name: string
+  calls: number
+  errors: number
+  last_call_at: string
+}
+
 export interface ActivitySummaryResponse {
   period: string
   total_count: number
@@ -919,6 +1124,7 @@ export interface ActivitySummaryResponse {
   call_error_count: number
   top_servers?: ActivityTopServer[]
   top_tools?: ActivityTopTool[]
+  per_server?: ActivityPerServer[]
   start_time: string
   end_time: string
 }
@@ -934,12 +1140,24 @@ export interface AgentTokenInfo {
   created_at: string
   last_used_at: string | null
   revoked: boolean
+  // Spec 108-f: a pinned token's profile, the token kind ("agent" or a
+  // per-client credential), the owning client for "client" rows, the binding
+  // mode for client rows and whether the scope is the legacy allowed_servers /
+  // permissions pair rather than a profile.
+  profile_pin?: string
+  kind?: 'agent' | 'client'
+  client_id?: string
+  profile_mode?: 'locked' | 'switchable'
+  legacy_scope?: boolean
 }
 
 export interface CreateAgentTokenRequest {
   name: string
-  allowed_servers: string[]
-  permissions: string[]
+  // Spec 108-i: with a profile the body is {name, profile, expires_in} and the
+  // server defaults the scope; the legacy body keeps the two scope fields.
+  profile?: string
+  allowed_servers?: string[]
+  permissions?: string[]
   expires_in?: string
 }
 
@@ -961,6 +1179,22 @@ export interface ImportSummary {
   failed: number
 }
 
+// ImportFieldPreview types mirror httpapi.EnvFieldPreview / HeaderFieldPreview
+// (Spec 109 FR-064/065): never the raw value, only presence + two booleans a
+// surface uses to default the Value/Secret toggle.
+export interface ImportEnvFieldPreview {
+  name: string
+  value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
+export interface ImportHeaderFieldPreview {
+  name: string
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
 export interface ImportedServer {
   name: string
   protocol: string
@@ -971,6 +1205,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
+  // FR-064 preview enrichment (contracts/rest-api.md "Import preview").
+  summary?: string
+  tags?: string[]
+  env?: ImportEnvFieldPreview[]
+  headers?: ImportHeaderFieldPreview[]
 }
 
 export interface SkippedServer {
@@ -998,6 +1237,17 @@ export interface ImportResponse {
 // API returns a flat array of ClientStatus objects in the data field
 export type ConnectStatusResponse = ClientStatus[]
 
+export interface ClientSessionPresence { id: string; work_session_id?: string; started_at: string; last_activity: string }
+// Spec 108-f: a Clients row is Spec 109's presence fields plus the credential
+// and binding fields. The 108 fields are optional here so code written against
+// the 109 shape (and its fixtures) keeps compiling.
+export type ClientPresence = Omit<ClientView, 'credential_state' | 'blocked_24h' | 'last_seen'> & {
+  last_seen?: string | null
+  credential_state?: CredentialState
+  blocked_24h?: number
+}
+export interface ClientsResponse { clients: ClientPresence[]; routing?: RoutingInfo; warnings?: ClientWarning[] }
+
 // AccessState classifies a per-client config content access (Spec 075). The
 // stat-only overall listing leaves it 'unknown' (no eager read); the on-demand
 // per-client GET / connect / disconnect paths resolve it to one of the others.
@@ -1007,6 +1257,8 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
+  // Spec 109-b FR-037: the presentation-safe version of config_path.
+  display_path?: string
   exists: boolean
   connected: boolean
   supported: boolean
@@ -1020,6 +1272,11 @@ export interface ClientStatus {
   // privacy fix including the exact tccutil reset command).
   access_state?: AccessState
   remediation?: string
+  // Spec 108 FR-025: what the client's entry carries — client | admin_key |
+  // none | revoked | expired — or 'unknown' in the stat-only listing, which
+  // never reads a config. Absent when the client is not connected.
+  // Administrator-only, like the rest of the connect reads.
+  credential_state?: CredentialState
   // Every config location the existence check consults, highest precedence
   // first (e.g. OpenCode's opencode.jsonc then opencode.json).
   checked_paths?: string[]
@@ -1035,10 +1292,20 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
+  // The client-specific action needed after a Connect write.
+  reload_hint?: string
 }
 
 // How a client's registered endpoint relates to this instance (audit F18).
 export type EndpointMatch = 'this' | 'other' | 'unknown'
+
+// Spec 108-c2: what a connect or a connect preview may ask for.
+export interface ConnectOptions {
+  profile?: string
+  mode?: 'locked' | 'switchable'
+  keyless?: boolean
+  precondition_token?: string
+}
 
 export interface ConnectResult {
   success: boolean
@@ -1049,6 +1316,20 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+  display_path?: string
+  reload_hint?: string
+  // Spec 108 FR-024: the masked per-client credential the write embedded
+  // (`mcp_cli_••••`, never the secret), its token name and binding. Empty for a
+  // keyless entry. `rotation` is 'finalized' when a reconnect replaced an
+  // active credential's secret; `credential_revoked` names the credential an
+  // undo revoked.
+  credential?: string
+  token_name?: string
+  profile?: string
+  mode?: 'locked' | 'switchable'
+  keyless?: boolean
+  rotation?: string
+  credential_revoked?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1058,13 +1339,23 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
+  display_path?: string
   format: 'json' | 'toml'
   server_key: string
   server_name: string
   entry: Record<string, unknown>
   entry_text: string
   entry_exists: boolean
+  // Always false since Spec 108: connect never writes the admin API key.
   contains_api_key: boolean
+  // Spec 108: the masked per-client credential the write would embed
+  // (`mcp_cli_••••`) and the requested binding (profile '' = All servers).
+  credential?: string
+  profile?: string
+  mode?: 'locked' | 'switchable' | ''
+  keyless?: boolean
+  // Spec 108-c2: the connect TOCTOU guard; a write sends it back.
+  precondition_token?: string
   bridge?: boolean
   access_state?: AccessState
 }
@@ -1076,6 +1367,7 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
+  client_connected_at?: Record<string, string>
 }
 
 export interface OnboardingStateResponse {
@@ -1090,6 +1382,8 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
+  has_usable_server: boolean
+  usable_servers: string[]
 }
 
 export interface OnboardingMarkRequest {
@@ -1099,22 +1393,165 @@ export interface OnboardingMarkRequest {
   mark_shown?: boolean
 }
 
-// Profiles v2 (MCP-3243 / T4): a profile scopes tool discovery + calls to a
-// named subset of upstream servers. Mirrors httpapi.ProfileSummary from the
-// GET /api/v1/profiles listing (MCP-3241).
-export interface ProfileSummary {
+// Spec 109-g: the review API is intentionally separate from the ordinary
+// tools list.  Definitions come from an untrusted upstream and must be
+// rendered as text by every caller.
+export interface ReviewScan {
+  verdict: 'dangerous' | 'warnings' | 'clean' | 'not_scanned' | string
+  risk_score?: number
+  report_id?: string
+  scanned_at?: string
+  /** Whether the verdict describes the definitions on screen (Spec 109 fix-review-screen). */
+  coverage?: 'current' | 'stale' | 'not_captured' | 'tools_not_scanned' | 'scanning' | 'none' | string
+  tools_scanned?: number
+  /** Captured tools whose current definition the scan did not cover (coverage `stale`). */
+  unscanned_tools?: string[]
+}
+
+export interface ReviewQueueRow {
+  server: string
+  kind: 'server_review' | 'tool_review' | string
+  quarantined: boolean
+  tools_captured?: number
+  tier_counts?: Record<string, number>
+  pending?: number
+  changed?: number
+  scan?: ReviewScan
+  since?: string
+}
+
+export interface ReviewQueueResponse { count: number; servers: ReviewQueueRow[] }
+
+export interface ReviewToolPrevious {
+  description: string
+  input_schema?: unknown
+  output_schema?: unknown
+  annotations?: Record<string, unknown> | null
+}
+
+export interface ReviewToolDiff {
+  description?: string
+  input_schema?: string
+  output_schema?: string
+  annotations?: string
+}
+
+export interface ReviewTool {
+  name: string
+  description: string
+  input_schema?: unknown
+  output_schema?: unknown
+  annotations?: Record<string, unknown> | null
+  tier: 'read' | 'write' | 'destructive' | 'unannotated' | 'unknown' | string
+  approval_status: 'approved' | 'pending' | 'changed' | string
+  disabled: boolean
+  scan_verdict: string
+  held_reason?: string
+  held_signals?: string[]
+  /** Fail-closed default selection computed by the core (D43); absent on an older core, which reads as false. */
+  default_allowed?: boolean
+  previous?: ReviewToolPrevious | null
+  diff?: ReviewToolDiff | null
+}
+
+export interface ServerReviewResponse {
+  server: {
+    name: string; transport: string; command?: string; url?: string
+    quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
+    definitions_captured: boolean
+  }
+  tools: ReviewTool[]
+}
+
+// ---------------------------------------------------------------------------
+// Profiles v3 (Spec 108-i). Response shapes come from contracts.ts.
+// ---------------------------------------------------------------------------
+
+/** The editable profile document (PUT /profiles/{name}, POST /profiles, try). */
+export interface ProfileConfig {
   name: string
   servers: string[]
-  tool_count: number
+  title?: string
+  description?: string
+  max_tier?: '' | 'read' | 'write' | 'destructive'
+  unannotated?: '' | 'deny' | 'as_write' | 'as_read'
+  tools?: ProfileToolRules
+  code_execution?: boolean
+  management_tools?: boolean
+  switchable_to?: string[]
 }
 
-export interface ListProfilesResponse {
-  profiles: ProfileSummary[]
+export type ProfileMoved = { clients: string[]; tokens: string[] }
+export interface ProfileRenameResult { profile: ProfileView; moved: ProfileMoved }
+export interface ProfileDeleteResult { deleted: string; moved: ProfileMoved; anonymous_profile_moved_to?: string }
+
+/** One retrieve_tools hit as POST /profiles/try returns it (consumers read the nested `tool`). */
+export interface TryProfileHit {
+  score?: number
+  tool?: { name?: string; server_name?: string; description?: string; annotations?: unknown } | string
+  [key: string]: unknown
 }
 
-// Server-level default active profile used by UI surfaces (Web UI / tray).
-// Empty string means "all servers". A live MCP session's set_profile selection
-// takes precedence over this default.
-export interface ActiveProfileResponse {
-  active_profile: string
+export interface TryProfileResponse {
+  results: Array<TryProfileHit>
+  hidden_by_profile: number
+  hidden: Array<{ server: string; tool: string; reason: string }>
+  hidden_truncated?: boolean
+}
+
+/** A client bound to, or a token pinned to, a profile named in a refusal. */
+export interface BindingRef { client_id: string; token_name: string; profile: string; mode: string }
+/** One fix of a binding-guard refusal (`require_mcp_auth` | `set_anonymous_profile`). */
+export interface GuardFix { kind: string; target?: string }
+
+export interface BulkAssignResponse {
+  moved: string[]
+  skipped: Array<{ client_id: string; code: string; error?: string }>
+}
+
+export interface CustomClientResponse {
+  client: ClientView
+  credential: string
+  snippet: { generic_http: string; header_name: string }
+}
+
+export interface RotateResponse {
+  client: ClientView
+  connect?: ConnectResult
+  credential?: string
+  snippet?: { generic_http: string; header_name: string }
+  rotation: { state: RotationState }
+}
+
+export interface UpgradeRow {
+  client_id: string
+  display_name: string
+  display_path?: string
+  diff: Record<string, unknown>
+  credential: string
+  profile: string
+  mode: string
+  precondition_token: string
+  error?: string
+}
+export interface UpgradePreview {
+  preview: UpgradeRow[]
+  precondition_token: string
+  guard?: { code: string; bindings: BindingRef[]; fixes: GuardFix[] }
+  next_step?: string
+}
+export interface UpgradeApplyResult {
+  upgraded: string[]
+  failed: Array<{ client_id: string; error: string }>
+  next_step?: string
+}
+
+export interface ForgetClientResponse { revoked: string; disconnected: boolean; disconnect_error?: string }
+
+export interface ExplainSubjectQuery {
+  tool: string
+  client?: string
+  token?: string
+  profile?: string
+  anonymous?: boolean
 }

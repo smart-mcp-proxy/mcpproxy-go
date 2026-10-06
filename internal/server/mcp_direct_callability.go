@@ -42,45 +42,83 @@ func newDirectCallabilityEvaluator(proxy *MCPProxyServer) *directCallabilityEval
 	}
 }
 
-// filterDirectToolsForAgentCallability hides direct-mode tools that an agent
-// token cannot actually invoke because they are disabled, quarantined, pending
-// approval, or changed since approval. Non-agent contexts keep the existing
-// operator-visible discovery behavior.
+// filterDirectToolsForAgentCallability hides direct-mode tools that a
+// scope-restricted caller (an agent token or an OAuth-authenticated user —
+// see isScopeRestrictedCaller) cannot actually invoke because they are
+// disabled, quarantined, pending approval, or changed since approval.
+// Administrator contexts keep the existing operator-visible discovery
+// behavior: server-edition-multiuser-auth.md documents the admin role as the
+// one that "sees all activity, manages users" and reviews pending/quarantined
+// tools, which a plain "user" account is not (it is caller-bounded exactly
+// like an agent token — see cache_authz.go's CallerKindUser case).
 func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	if len(tools) == 0 {
 		return tools
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+	if !isScopeRestrictedCaller(authCtx) {
 		return tools
 	}
 
 	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		// Same catalog resolution as filterDirectModeToolsForAuth (D10). The two
-		// filters run over the same listing, so if they resolved names
-		// differently — one by catalog, one by first-"__" parse — a server whose
-		// name contains "__" could be scope-checked as one origin and
-		// callability-checked as another.
-		entry, decision := p.resolveDirectTool(tool.Name)
+		var serverName, toolName, tier string
 
-		var serverName, toolName string
-		switch decision {
-		case directResolveBuiltin:
-			// Built-ins are this proxy's own tools; there is no upstream
-			// approval record to evaluate.
+		if stamp, stamped := readDirectToolStamp(tool); stamped {
+			// Spec 105 FR-008: the identity STAMPED on this exact tool object,
+			// never re-derived from a fresh catalog lookup (see
+			// directToolStamp's doc comment).
+			if stamp.rawName == "" {
+				continue
+			}
+			serverName, toolName, tier = stamp.owner, stamp.rawName, stamp.tier
+		} else {
+			// No stamp: fall back to the pre-105 catalog/builtin resolution,
+			// exactly as filterDirectModeToolsForAuth does. Same catalog
+			// resolution the scope filter uses (D10): the two filters run over
+			// the same listing, so if they resolved names differently — one by
+			// catalog, one by first-"__" parse — a server whose name contains
+			// "__" could be scope-checked as one origin and
+			// callability-checked as another.
+			//
+			// Same residual as filterDirectModeToolsForAuth's fallback branch
+			// (see its doc comment): an unstamped mcp-go SESSION tool sharing a
+			// global tool's name would resolve here too. Not reachable today —
+			// mcpproxy-go registers no session-specific tools on this surface.
+			entry, decision := p.resolveDirectTool(tool.Name)
+
+			switch decision {
+			case directResolveBuiltin:
+				// Built-ins are this proxy's own tools; there is no upstream
+				// approval record to evaluate.
+				filtered = append(filtered, tool)
+				continue
+			case directResolveDenied:
+				continue
+			case directResolveNoCatalog:
+				serverName, toolName, _ = ParseDirectToolName(tool.Name)
+			case directResolveFound:
+				serverName, toolName, tier = entry.ServerName, entry.ToolName, entry.RequiredPermission
+			}
+		}
+
+		// Spec 105 FR-010 D13/gap G6: tier-first precedence. At call time, a
+		// tool the caller is over-tier for must reach the handler (which
+		// checks tier BEFORE callability) even when it is ALSO
+		// disabled/quarantined/pending/changed — so "over-tier + locked"
+		// answers insufficient-permission, not this filter's -32602. The
+		// scope+tier filter ahead of this one in the chain already let such a
+		// tool through (directCallTimeTierExceeded, mcp_direct_scope.go); this
+		// filter must not re-exclude it for callability. list time and an
+		// in-scope, within-tier caller are unaffected: the condition is false
+		// and evaluate().callable applies exactly as before. authCtx is
+		// guaranteed a scoped agent token here — the early return above sent
+		// every other caller home before this loop started.
+		if directCallTimeTierExceeded(ctx, authCtx, true, tier) {
 			filtered = append(filtered, tool)
 			continue
-		case directResolveDenied:
-			continue
-		case directResolveNoCatalog:
-			// The parse cannot fail: a separator-less name was already classified
-			// as a built-in above.
-			serverName, toolName, _ = ParseDirectToolName(tool.Name)
-		case directResolveFound:
-			serverName, toolName = entry.ServerName, entry.ToolName
 		}
 
 		if evaluator.evaluate(serverName, toolName).callable {
@@ -91,19 +129,22 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	return filtered
 }
 
-// directEntryCallable is the agent-callability half of the direct listing gate,
+// directEntryCallable is the callability half of the direct listing gate,
 // for callers that already hold a resolved catalog entry (Spec 102 US2).
 //
-// Non-agent sessions are unfiltered here, exactly as the loop above leaves them:
-// the direct listing deliberately RETAINS tool-level pending/changed/disabled
-// states for an operator, and describe_tool must therefore keep describing them
-// — a listed tool is never undescribable (SC-007). Only agent tokens, which
-// cannot see those tools in their own listing, are gated.
+// Administrator sessions are unfiltered here, exactly as the loop above
+// leaves them: the direct listing deliberately RETAINS tool-level
+// pending/changed/disabled states for an operator, and describe_tool must
+// therefore keep describing them — a listed tool is never undescribable
+// (SC-007). Only scope-restricted callers (agent tokens and OAuth
+// users — see isScopeRestrictedCaller), which cannot see those tools in
+// their own listing, are gated. This MUST stay in parity with
+// filterDirectToolsForAgentCallability above — the same SC-007 invariant.
 func (p *MCPProxyServer) directEntryCallable(authCtx *auth.AuthContext, entry *directCatalogEntry) bool {
 	if entry == nil {
 		return false
 	}
-	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+	if !isScopeRestrictedCaller(authCtx) {
 		return true
 	}
 	return newDirectCallabilityEvaluator(p).evaluate(entry.ServerName, entry.ToolName).callable
@@ -141,17 +182,62 @@ func (p *MCPProxyServer) directToolCallabilityBlockWithReason(ctx context.Contex
 	return p.directToolCallabilityResult(ctx, decision, args), directBlockReasonKey(decision)
 }
 
-// directBlockReasonKey classifies a direct-mode callability block onto the
-// closed telemetry.BlockReason* enum. The branches mirror
-// directToolCallabilityResult exactly, so the counted reason always matches the
-// payload the caller was handed.
-func directBlockReasonKey(decision directCallabilityDecision) string {
+// directRefusalKind is the ONE precedence order a direct-mode callability
+// block resolves to, shared by directBlockReasonKey (telemetry) and
+// directToolCallabilityResult (the response body) so the two can never
+// disagree about which gate "fired" for a tool that trips more than one at
+// once (PR #1326 review round 2, chunk B: a tool can be BOTH config-denied
+// AND pending/changed approval at the same time, and the two functions used
+// to classify that case differently — the response said config-denied, the
+// telemetry said pending).
+//
+// The order mirrors the established dispatch precedence every OTHER path
+// already uses (handleCallToolVariant / handleCallTool in mcp.go, via
+// toolGate.lockStatus): quarantine, then the approval lock (pending/changed),
+// then the generic/config-denied block. Direct mode's RESPONSE function had
+// drifted from that precedence (config-denied was checked before the
+// approval lock); this converges it rather than inventing a third order.
+type directRefusalKind int
+
+const (
+	directRefusalNone directRefusalKind = iota
+	directRefusalQuarantined
+	directRefusalPending
+	directRefusalChanged
+	directRefusalConfigDenied
+	directRefusalGeneric
+)
+
+// classifyDirectRefusal is the single source of truth for which refusal a
+// blocked directCallabilityDecision represents. Both directBlockReasonKey and
+// directToolCallabilityResult switch on its result instead of re-deriving
+// their own branch order, so they cannot drift apart again.
+func classifyDirectRefusal(decision directCallabilityDecision) directRefusalKind {
 	switch {
 	case decision.serverConfig != nil && decision.serverConfig.Quarantined:
-		return telemetry.BlockReasonServerQuarantined
+		return directRefusalQuarantined
 	case decision.approvalStatus == storage.ToolApprovalStatusPending:
-		return telemetry.BlockReasonToolPendingApproval
+		return directRefusalPending
 	case decision.approvalStatus == storage.ToolApprovalStatusChanged:
+		return directRefusalChanged
+	case decision.configDenied:
+		return directRefusalConfigDenied
+	default:
+		return directRefusalGeneric
+	}
+}
+
+// directBlockReasonKey classifies a direct-mode callability block onto the
+// closed telemetry.BlockReason* enum, from the SAME classification
+// directToolCallabilityResult uses, so the counted reason always matches the
+// payload the caller was handed.
+func directBlockReasonKey(decision directCallabilityDecision) string {
+	switch classifyDirectRefusal(decision) {
+	case directRefusalQuarantined:
+		return telemetry.BlockReasonServerQuarantined
+	case directRefusalPending:
+		return telemetry.BlockReasonToolPendingApproval
+	case directRefusalChanged:
 		return telemetry.BlockReasonToolChanged
 	default:
 		// Disabled server, config-denied tool, per-tool disable, and the
@@ -296,22 +382,16 @@ func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string
 }
 
 func (p *MCPProxyServer) directToolCallabilityResult(ctx context.Context, decision directCallabilityDecision, args map[string]interface{}) *mcp.CallToolResult {
-	if decision.serverConfig != nil && decision.serverConfig.Quarantined {
+	switch classifyDirectRefusal(decision) {
+	case directRefusalQuarantined:
 		return p.handleQuarantinedToolCall(ctx, decision.serverName, decision.toolName, args)
-	}
-
-	if decision.configDenied {
+	case directRefusalPending:
+		return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
+	case directRefusalChanged:
+		return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
+	case directRefusalConfigDenied:
 		return mcp.NewToolResultError(blockedToolMessageFor(true))
+	default:
+		return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
 	}
-
-	if decision.approval != nil {
-		switch decision.approvalStatus {
-		case storage.ToolApprovalStatusPending:
-			return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
-		case storage.ToolApprovalStatusChanged:
-			return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
-		}
-	}
-
-	return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
 }

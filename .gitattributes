@@ -34,3 +34,12 @@ internal/server/testdata/toolslist_goldens/**/*.json text eol=lf
 # actual Go/Vue/Swift source instead of being dominated by these reports.
 specs/**/verification/*.html linguist-generated
 docs/qa/*.html linguist-generated
+
+# Spec 108-l: the profile contract goldens (Go, vitest and XCTest all read
+# them), the SC-006 activity record-set golden and the CLI goldens are
+# whole-file byte-compared; pin them to LF so a Windows autocrlf checkout does
+# not turn the comparison into a \r diff.
+internal/profile/testdata/contract/*.json text eol=lf
+internal/httpapi/testdata/sc006_activity_recordsets.json text eol=lf
+cmd/mcpproxy/testdata/cli108/* text eol=lf
+internal/server/testdata/profiles_v3/*.json text eol=lf

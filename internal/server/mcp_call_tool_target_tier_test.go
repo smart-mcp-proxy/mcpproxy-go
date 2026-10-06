@@ -1254,18 +1254,36 @@ func TestLookupToolApproval_ReadsBothKeysFromOneSnapshot(t *testing.T) {
 			storage.ToolApprovalRecord{ToolName: "erase", Status: storage.ToolApprovalStatusPending})
 		db := proxy.storage.GetDB()
 
-		before := db.Stats().TxN
-		record, err := proxy.lookupToolApproval("a", "ns:erase")
-		require.NoError(t, err)
-		require.NotNil(t, record)
-		assert.Equal(t, 1, db.Stats().TxN-before, "the exact and collapsed keys must come from a single read transaction")
+		// TxN is database-wide, so a background goroutine of the proxy's
+		// runtime can open its own read transaction inside the measured
+		// window. Noise only ever ADDS transactions, never removes one, so the
+		// minimum over several attempts is the reader's true cost.
+		minTx := func(op func()) int {
+			lowest := -1
+			for i := 0; i < 25; i++ {
+				before := db.Stats().TxN
+				op()
+				if d := db.Stats().TxN - before; lowest < 0 || d < lowest {
+					lowest = d
+				}
+			}
+			return lowest
+		}
 
-		before = db.Stats().TxN
-		_, err = proxy.storage.GetToolApproval("a", "ns:erase")
-		require.NoError(t, err)
-		_, err = proxy.storage.GetToolApproval("a", "erase")
-		require.NoError(t, err)
-		assert.Equal(t, 2, db.Stats().TxN-before, "control: two independent reads are two transactions, so the oracle bites")
+		var record *storage.ToolApprovalRecord
+		var lookupErr error
+		oneRead := minTx(func() { record, lookupErr = proxy.lookupToolApproval("a", "ns:erase") })
+		require.NoError(t, lookupErr)
+		require.NotNil(t, record)
+		assert.Equal(t, 1, oneRead, "the exact and collapsed keys must come from a single read transaction")
+
+		twoReads := minTx(func() {
+			_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+			require.NoError(t, err)
+			_, err = proxy.storage.GetToolApproval("a", "erase")
+			require.NoError(t, err)
+		})
+		assert.Equal(t, 2, twoReads, "control: two independent reads are two transactions, so the oracle bites")
 	})
 }
 

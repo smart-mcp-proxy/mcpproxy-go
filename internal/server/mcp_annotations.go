@@ -26,11 +26,26 @@ type SessionRisk struct {
 //   - openWorldHint nil → true (assumes open world)
 //   - destructiveHint nil → true (assumes destructive)
 //   - readOnlyHint nil → false (assumes not read-only, i.e., can write)
+//
+// Unrestricted: every connected server contributes (analyzeSessionRiskScoped
+// with an always-true discoverable predicate).
 func analyzeSessionRisk(snapshot *stateview.ServerStatusSnapshot) SessionRisk {
+	return analyzeSessionRiskScoped(snapshot, func(string) bool { return true })
+}
+
+// analyzeSessionRiskScoped is analyzeSessionRisk restricted to servers
+// discoverable admits (Spec 105 FR-005 G3): a scoped caller's session_risk
+// MUST be computed over its own authorized servers only, under the existing
+// availability rules (connected, tier-blind) — otherwise the level (and the
+// lethal-trifecta verdict) leaks the existence and annotation shape of a
+// server outside the caller's scope, even though no tool name is named.
+// Administrators are not a named SC-005 exception here and keep calling
+// analyzeSessionRisk (discoverable admits everything) unchanged.
+func analyzeSessionRiskScoped(snapshot *stateview.ServerStatusSnapshot, discoverable func(serverName string) bool) SessionRisk {
 	var hasOpenWorld, hasDestructive, hasWrite bool
 
 	for _, server := range snapshot.Servers {
-		if !server.Connected {
+		if !server.Connected || !discoverable(server.Name) {
 			continue
 		}
 

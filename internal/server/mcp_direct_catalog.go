@@ -59,6 +59,22 @@ type directCatalog struct {
 	// display name; only the canonical form is withheld, because it cannot name
 	// one of them.
 	ambiguousCanonical map[string]struct{}
+
+	// canonicalShadow records, for every canonical string withdrawn from
+	// byCanonical (an entry in ambiguousCanonical), every entry that string
+	// could name — Spec 105 FR010-G3. Resolution over this list is deferred
+	// to REQUEST time (LookupCanonicalForAuth), never decided once here: this
+	// build is scope-blind by construction (one snapshot serves every
+	// caller), so deciding a winner here would either pick one caller's
+	// authorized entry over another's, or withhold an id from EVERY caller
+	// merely because it collides with something a given caller cannot even
+	// see. Administrator resolution is unaffected: LookupCanonicalForAuth's
+	// fast path is exactly LookupCanonical's answer for an unambiguous id,
+	// and for an ambiguous one an administrator's authorization predicate
+	// admits every shadow candidate — so it still lands on "more than one
+	// authorized, therefore absent", byte-identical to what LookupCanonical
+	// itself answers (see TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap).
+	canonicalShadow map[string][]*directCatalogEntry
 }
 
 // directCatalogEntry is one tool as the direct surface sees it.
@@ -164,6 +180,7 @@ func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesBySe
 		displayNames:       make([]string, 0, len(tools)),
 		byCanonical:        make(map[string]*directCatalogEntry, len(tools)),
 		ambiguousCanonical: make(map[string]struct{}),
+		canonicalShadow:    make(map[string][]*directCatalogEntry),
 	}
 
 	// First pass: group by display name so a collision is detected before any
@@ -174,6 +191,20 @@ func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesBySe
 	order := make([]string, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
+			continue
+		}
+		if t.Name == "" {
+			// Spec 105 FR-008 (FR008-G7): an upstream tool with an empty raw
+			// name renders as "server__" and has no registration identity to
+			// authorize it against — the direct-surface analogue of the
+			// FR-006 empty-prompt-name rule. Refused admission here, at the
+			// source, rather than admitted and relied on to be caught by a
+			// downstream filter: withheld from every caller, administrators
+			// included (SC-005 exception).
+			if logger != nil {
+				logger.Warn("Withholding direct tool with an empty raw name: no registration identity to authorize it against",
+					zap.String("server_name", t.ServerName))
+			}
 			continue
 		}
 		name := FormatDirectToolName(t.ServerName, t.Name)
@@ -251,9 +282,14 @@ func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesBySe
 		// BOTH lose the canonical form rather than one silently shadowing the
 		// other.
 		canonical := entry.ServerName + ":" + entry.ToolName
-		if _, dup := cat.byCanonical[canonical]; dup {
+		if prior, dup := cat.byCanonical[canonical]; dup {
 			delete(cat.byCanonical, canonical)
 			cat.ambiguousCanonical[canonical] = struct{}{}
+			// Spec 105 FR010-G3: both candidates go on the shadow list — the
+			// entry that occupied byCanonical first, and this one — so a
+			// per-request, per-caller resolution can still pick whichever one
+			// (if either) the requester is authorized to see.
+			cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], prior, entry)
 			if logger != nil {
 				logger.Warn("Withholding ambiguous canonical direct id: two distinct display names flatten to it, so it resolves in neither form",
 					zap.String("canonical_id", canonical))
@@ -261,6 +297,7 @@ func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesBySe
 			continue
 		}
 		if _, ambiguous := cat.ambiguousCanonical[canonical]; ambiguous {
+			cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], entry)
 			continue
 		}
 		cat.byCanonical[canonical] = entry
@@ -284,6 +321,10 @@ func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesBySe
 		}
 		delete(cat.byCanonical, canonical)
 		cat.ambiguousCanonical[canonical] = struct{}{}
+		// Spec 105 FR010-G3: the entry whose OWN canonical form this string
+		// is, plus the entry it clashes with (the one whose DISPLAY name
+		// happens to equal that string), both go on the shadow list.
+		cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], entry, other)
 		if logger != nil {
 			logger.Warn("Withholding ambiguous direct id: it is one tool's display name and another's canonical id, so it resolves only as the display name",
 				zap.String("id", canonical))
@@ -317,6 +358,47 @@ func (c *directCatalog) LookupCanonical(canonicalID string) (*directCatalogEntry
 	}
 	e, ok := c.byCanonical[canonicalID]
 	return e, ok
+}
+
+// LookupCanonicalForAuth resolves a canonical "<server>:<tool>" id the way
+// LookupCanonical does when the id is unambiguous — byte-identical for every
+// caller, administrators included (Spec 105 FR-010: administrator resolution
+// is unchanged). When the id was withdrawn from byCanonical for colliding
+// with another entry, it instead resolves against the shadow candidate list,
+// filtered to the ones `authorized` admits: exactly one authorized candidate
+// resolves as if the others never existed, so a HIDDEN colliding entry can
+// never suppress an id an AUTHORIZED entry would otherwise answer to
+// (FR010-G3). Zero or more than one authorized candidate is a genuine
+// ambiguity from this caller's own point of view too (an administrator who
+// can see every candidate always lands here) and resolves to nothing, same
+// as an absent id.
+func (c *directCatalog) LookupCanonicalForAuth(canonicalID string, authorized func(*directCatalogEntry) bool) (*directCatalogEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	if e, ok := c.byCanonical[canonicalID]; ok {
+		return e, true
+	}
+	candidates := c.canonicalShadow[canonicalID]
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	var match *directCatalogEntry
+	for _, candidate := range candidates {
+		if !authorized(candidate) {
+			continue
+		}
+		if match != nil {
+			// More than one candidate is authorized for this caller: a real
+			// ambiguity, not a disclosure artefact.
+			return nil, false
+		}
+		match = candidate
+	}
+	if match == nil {
+		return nil, false
+	}
+	return match, true
 }
 
 // DisplayNames returns the sorted display names this catalog admits.
@@ -389,12 +471,6 @@ const (
 	directResolveNoCatalog
 )
 
-// builtinDirectToolNames is an explicit allowlist for built-ins whose display
-// name WOULD parse as server__tool and so cannot be recognised structurally.
-// Empty today; it exists so adding such a built-in is a deliberate act rather
-// than an accidental denial.
-var builtinDirectToolNames = map[string]struct{}{}
-
 // resolveDirectTool maps a direct display name to its catalog entry.
 //
 // This replaces ParseDirectToolName as the resolution path for the discovery
@@ -415,28 +491,24 @@ func (p *MCPProxyServer) resolveDirectTool(displayName string) (*directCatalogEn
 	// through the scope, tier and callability gates like any other.
 	//
 	// This ordering is load-bearing, and getting it wrong was a real disclosure
-	// bug. The structural test below assumes every upstream display name parses,
-	// because FormatDirectToolName always inserts "__". It does not: an upstream
-	// tool whose NAME IS EMPTY renders as "server__", which ParseDirectToolName
-	// rejects (the tool half is empty). That name was therefore classified as a
-	// proxy built-in, and both direct filters pass built-ins through
-	// unconditionally — so an agent token scoped to other servers could see the
-	// name, description and annotations of a tool on a server outside its scope.
-	// Found by adversarial QA, not by any unit test, because no fixture had ever
+	// bug: an upstream tool whose NAME IS EMPTY renders as "server__", which
+	// ParseDirectToolName rejects (the tool half is empty). A name with no
+	// "__" separator was therefore once inferred a proxy built-in structurally
+	// — and both direct filters pass built-ins through unconditionally — so an
+	// agent token scoped to other servers could see the name, description and
+	// annotations of a tool on a server outside its scope. Found by
+	// adversarial QA, not by any unit test, because no fixture had ever
 	// contained a nameless tool.
+	//
+	// Spec 105 FR-008 (FR008-G7) closes this at its source: buildDirectCatalog
+	// now refuses to admit an entry with an empty raw tool name at all, so
+	// "server__" is never in this catalog to begin with, and the structural
+	// "no separator -> built-in" inference below is gone entirely — a name is
+	// a built-in ONLY via the explicit builtinDirectToolNames set checked
+	// above. A name that is neither stamped in the catalog nor a recognised
+	// built-in has no registration identity and falls through to denial.
 	if entry, ok := cat.Lookup(displayName); ok {
 		return entry, directResolveFound
-	}
-
-	// A name with no "__" separator that the catalog does NOT admit is something
-	// this proxy registered itself — describe_tool, retrieve_tools on a shared
-	// surface — and denying it would delete built-ins off their own surface.
-	//
-	// This is the structural half of D13 rule 2's "built-ins by explicit name
-	// set". The set above covers the residual case a structural test cannot: a
-	// built-in whose name happens to contain "__".
-	if _, _, ok := ParseDirectToolName(displayName); !ok {
-		return nil, directResolveBuiltin
 	}
 
 	if cat == nil {

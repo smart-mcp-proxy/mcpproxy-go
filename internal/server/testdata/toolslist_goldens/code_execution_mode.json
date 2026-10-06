@@ -15,8 +15,8 @@
           "type": "string"
         },
         "input": {
+          "additionalProperties": true,
           "description": "Input data accessible as global `input` variable in code (default: {})",
-          "properties": {},
           "type": "object"
         },
         "language": {
@@ -28,8 +28,8 @@
           "type": "string"
         },
         "options": {
+          "additionalProperties": true,
           "description": "Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (\u003e= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed). Batch concurrency is not an execution option: call_tools() defaults to the configured code_execution_max_parallel and is overridden per batch with call_tools(requests, {max_parallel}).",
-          "properties": {},
           "type": "object"
         },
         "script": {
@@ -50,13 +50,196 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams.",
+    "description": "📋 List all available catalog sources (registries). 'search_servers' already searches every enabled source when 'registry' is omitted (FR-060) — call this to see source ids, e.g. to narrow a search with 'registry', or to check what's enabled. Each source contains different collections of MCP servers that can be added as upstreams.",
     "inputSchema": {
       "properties": {},
       "required": [],
       "type": "object"
     },
     "name": "list_registries"
+  },
+  "profiles": {
+    "annotations": {
+      "title": "Manage profiles and client bindings",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "description": "Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain). Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain. Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body.",
+    "inputSchema": {
+      "properties": {
+        "anonymous": {
+          "description": "explain: explain a caller with no credential.",
+          "type": "boolean"
+        },
+        "client": {
+          "description": "assign, explain, effective_tools, list_clients: client id.",
+          "type": "string"
+        },
+        "code_execution": {
+          "description": "create, update: false turns code_execution off for the profile; omitted inherits.",
+          "type": "boolean"
+        },
+        "description": {
+          "description": "create, update: description, at most 500 characters.",
+          "type": "string"
+        },
+        "force": {
+          "description": "delete: delete although in use, leaving pins dangling (never overrides the anonymous_profile).",
+          "type": "boolean"
+        },
+        "from_profile": {
+          "description": "assign (bulk): move every client bound to this profile (\"\" = All servers).",
+          "type": "string"
+        },
+        "management_tools": {
+          "description": "create, update: true makes the management tools (upstream_servers, quarantine_security, profiles) visible under it; omitted inherits.",
+          "type": "boolean"
+        },
+        "max_tier": {
+          "description": "create, update: highest tool tier the profile allows; omitted = no cap.",
+          "enum": [
+            "read",
+            "write",
+            "destructive"
+          ],
+          "type": "string"
+        },
+        "mode": {
+          "description": "assign: binding mode; omitted keeps the current mode (profile \"\" is switchable).",
+          "enum": [
+            "locked",
+            "switchable"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "get, create, update, delete, rename, classify, effective_tools: the profile name (update replaces the profile with this name).",
+          "type": "string"
+        },
+        "new_name": {
+          "description": "rename: the new profile name.",
+          "type": "string"
+        },
+        "operation": {
+          "description": "What to do. Every operation returns the data of its REST route.",
+          "enum": [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete",
+            "rename",
+            "classify",
+            "assign",
+            "list_clients",
+            "effective_tools",
+            "explain"
+          ],
+          "type": "string"
+        },
+        "profile": {
+          "description": "assign: profile to bind (\"\" = All servers). explain, list_clients: profile name (list_clients \"-\" = All servers).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "effective_tools: keep only rows with this access reason.",
+          "type": "string"
+        },
+        "reassign_to": {
+          "description": "delete: another existing profile that takes over the clients and tokens.",
+          "type": "string"
+        },
+        "server": {
+          "description": "effective_tools: keep only this server's rows.",
+          "type": "string"
+        },
+        "servers": {
+          "description": "create, update: servers the profile reaches (all servers when empty).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "switchable_to": {
+          "description": "create, update: profile names a session may set_profile into; [] = none, omitted = unset.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tier": {
+          "description": "classify: tier to assign; \"\" removes the classification.",
+          "enum": [
+            "read",
+            "write",
+            "destructive",
+            ""
+          ],
+          "type": "string"
+        },
+        "title": {
+          "description": "create, update: display title, at most 80 characters.",
+          "type": "string"
+        },
+        "to_profile": {
+          "description": "assign (bulk): the profile they move to (\"\" = All servers).",
+          "type": "string"
+        },
+        "token": {
+          "description": "explain: regular agent token name.",
+          "type": "string"
+        },
+        "tool": {
+          "description": "classify, explain: upstream tool as server:tool.",
+          "type": "string"
+        },
+        "tools": {
+          "description": "create, update: tool rules: allow/deny are server:tool globs (deny wins), classify maps an exact server:tool to a tier.",
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "classify": {
+              "additionalProperties": {
+                "enum": [
+                  "read",
+                  "write",
+                  "destructive"
+                ],
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "unannotated": {
+          "description": "create, update: handling of tools with no tier hint; omitted = deny under a read/write cap.",
+          "enum": [
+            "deny",
+            "as_write",
+            "as_read"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
+    "name": "profiles"
   },
   "quarantine_security": {
     "annotations": {
@@ -118,7 +301,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Search and discover available upstream tools using BM25 full-text search. Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. Do NOT use call_tool_read/write/destructive — they are not available in this mode. Use natural language to describe what you want to accomplish. Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
+    "description": "Search and discover available upstream tools using BM25 full-text search. Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. Do NOT use call_tool_read/write/destructive — they are not available in this mode. Use natural language to describe what you want to accomplish. Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). Upstream servers' tools are reachable ONLY through this tool — search here before using a shell CLI (gh, aws, kubectl, curl) or a raw HTTP API for an external service. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
     "inputSchema": {
       "properties": {
         "exclude_destructive": {
@@ -161,7 +344,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
+    "description": "🔍 Discover MCP servers from the catalog, with repository type detection. Omit 'registry' to search every enabled catalog source at once, ranked official-first then by relevance (FR-060) — this is the recommended way to search. Pass 'registry' to narrow to one catalog source (e.g., 'smithery', 'mcprun', 'pulse'); use 'list_registries' to see source ids. Features npm/PyPI package detection for enhanced install commands. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -169,7 +352,7 @@
           "type": "number"
         },
         "registry": {
-          "description": "Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries.",
+          "description": "Optional: a catalog source id or name to narrow the search to (e.g., 'smithery', 'mcprun', 'pulse'). Omit to search every enabled catalog source at once. Use 'list_registries' to see source ids.",
           "type": "string"
         },
         "search": {
@@ -177,13 +360,11 @@
           "type": "string"
         },
         "tag": {
-          "description": "Filter servers by tag/category (if supported by registry)",
+          "description": "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.",
           "type": "string"
         }
       },
-      "required": [
-        "registry"
-      ],
+      "required": [],
       "type": "object"
     },
     "name": "search_servers"
@@ -239,6 +420,10 @@
         "expose_prompts": {
           "description": "Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch.",
           "type": "boolean"
+        },
+        "forward_headers_json": {
+          "description": "Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch.",
+          "type": "string"
         },
         "headers_json": {
           "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",

@@ -38,7 +38,19 @@ import (
 // address / API key / require_mcp_auth changed since the connect: the entry the
 // service would write today no longer matches the one on disk, so mcpproxy can
 // no longer prove the file is untouched.
-func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult, error) {
+func (s *Service) Undo(clientID, serverName, backupName string) (res *ConnectResult, err error) {
+	return s.UndoWithIntent(clientID, serverName, backupName, CredentialIntent{})
+}
+
+// UndoWithIntent is Undo with the actor attribution the credential revocation
+// record needs (Spec 108 plan D16). A connect that minted or rotated a client
+// credential is undone as "as if it never happened": the drift check replays
+// the write with the credential the file holds (accepted only when it is that
+// client's own `mcp_cli_` secret), and after a successful restore the client's
+// active credential is forgotten unless the restored entry still holds it —
+// the result names it in credential_revoked. A live orphan secret is never
+// left behind.
+func (s *Service) UndoWithIntent(clientID, serverName, backupName string, intent CredentialIntent) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -46,6 +58,19 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 	if !client.Supported {
 		return nil, fmt.Errorf("client %s is not supported: %s", client.Name, client.Reason)
 	}
+
+	// FR-037/FR-042 (review round 3 finding): fill DisplayPath/ReloadHint on
+	// whichever ConnectResult this call returns, matching Connect/Disconnect
+	// — every branch below, refusal or success. Undo reverts a connect (the
+	// mcpproxy entry ends up removed either way), so the hint is reworded for
+	// removal the same way Disconnect's is.
+	defer func() {
+		if res != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = disconnectReloadHint(client.ReloadHint)
+		}
+	}()
+
 	if serverName == "" {
 		serverName = defaultServerName
 	}
@@ -96,11 +121,11 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 		backupPath = filepath.Join(filepath.Dir(cfgPath), base)
 	}
 
-	res, err := s.undo(client, cfgPath, serverName, backupPath)
+	res, err = s.undo(client, cfgPath, serverName, backupPath, intent)
 	return res, s.asAccessError(client, cfgPath, err)
 }
 
-func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string) (*ConnectResult, error) {
+func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string, intent CredentialIntent) (*ConnectResult, error) {
 	// Load the pre-connect content (empty when connect created the file).
 	var backupRaw []byte
 	if backupPath != "" {
@@ -141,11 +166,20 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	// Drift check (FR-008 safety): reconstruct the exact bytes the connect wrote
 	// by replaying the same transformation on the backup content. If the current
 	// file differs, someone edited it since — refuse instead of clobbering.
-	expected, err := s.replayConnectWrite(client, serverName, backupRaw)
-	if err != nil {
-		return nil, err
+	// The connect embedded a credential minted for this client; replay with the
+	// one the file holds, but only when it is provably this client's own
+	// `mcp_cli_` secret — anything else is an edit made since the connect.
+	currentSecret, _ := entryCredentialFromRaw(client, currentRaw, serverName)
+	credentialOK := currentSecret == "" ||
+		(s.minter != nil && s.minter.HeldByRecord(client.ID, currentSecret))
+	var expected []byte
+	if credentialOK {
+		expected, err = s.replayConnectWrite(client, serverName, backupRaw, currentSecret)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if !bytes.Equal(currentRaw, expected) {
+	if !credentialOK || !bytes.Equal(currentRaw, expected) {
 		return &ConnectResult{
 			Success:    false,
 			Client:     client.ID,
@@ -168,7 +202,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		if err := os.Remove(cfgPath); err != nil {
 			return nil, fmt.Errorf("remove created config: %w", err)
 		}
-		return &ConnectResult{
+		res := &ConnectResult{
 			Success:    true,
 			Client:     client.ID,
 			ConfigPath: cfgPath,
@@ -176,18 +210,19 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 			ServerName: serverName,
 			Action:     "deleted",
 			Message:    fmt.Sprintf("Removed %s — it did not exist before mcpproxy connected (a safety copy was saved to %s)", cfgPath, safetyPath),
-		}, nil
+		}
+		return res, s.revokeUnheld(client.ID, "", intent, res)
 	}
 
 	perm := os.FileMode(0o644)
 	if info, statErr := os.Stat(cfgPath); statErr == nil {
 		perm = info.Mode()
 	}
-	if err := atomicWriteFile(cfgPath, backupRaw, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
 
-	return &ConnectResult{
+	res := &ConnectResult{
 		Success:    true,
 		Client:     client.ID,
 		ConfigPath: cfgPath,
@@ -195,7 +230,46 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		ServerName: serverName,
 		Action:     "restored",
 		Message:    fmt.Sprintf("Restored %s from backup %s", cfgPath, backupPath),
-	}, nil
+	}
+	restoredSecret, _ := entryCredentialFromRaw(client, backupRaw, serverName)
+	return res, s.revokeUnheld(client.ID, restoredSecret, intent, res)
+}
+
+// revokeUnheld forgets the client's active credential when the restored config
+// no longer holds it, and names it on the result (plan D16).
+func (s *Service) revokeUnheld(clientID, restoredSecret string, intent CredentialIntent, res *ConnectResult) error {
+	if s.minter == nil {
+		return nil
+	}
+	revoked, err := s.minter.ForgetUnheld(clientID, restoredSecret, intent)
+	if err != nil {
+		return fmt.Errorf("the config was restored but its credential could not be revoked: %w", err)
+	}
+	res.CredentialRevoked = revoked
+	return nil
+}
+
+// entryCredentialFromRaw extracts the credential carried by serverName's entry
+// in a raw client config (JSON or TOML). ok is false when there is no entry or
+// the config cannot be parsed.
+func entryCredentialFromRaw(client *ClientDef, raw []byte, serverName string) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	data := make(map[string]interface{})
+	if client.Format == "toml" {
+		if _, err := toml.Decode(string(raw), &data); err != nil {
+			return "", false
+		}
+	} else if err := unmarshalLenientJSON(raw, &data); err != nil {
+		return "", false
+	}
+	serversMap, _ := getServersMap(client, data)
+	entry, ok := serversMap[serverName]
+	if !ok {
+		return "", false
+	}
+	return extractEntryCredential(client.ID, entry)
 }
 
 // replayConnectWrite reproduces, from the pre-connect bytes, the exact file
@@ -205,7 +279,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 // the same encoder. Because Connect itself performed exactly these steps, a
 // current file that has not been touched since is byte-identical to this
 // reconstruction.
-func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backupRaw []byte) ([]byte, error) {
+func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backupRaw []byte, credential string) ([]byte, error) {
 	data := make(map[string]interface{})
 	if client.Format == "toml" {
 		if len(backupRaw) > 0 {
@@ -217,7 +291,7 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 		if serversMap == nil {
 			serversMap = make(map[string]interface{})
 		}
-		serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(false))
+		serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(credential))
 		data["mcp_servers"] = serversMap
 		var buf bytes.Buffer
 		if err := toml.NewEncoder(&buf).Encode(data); err != nil {
@@ -227,11 +301,16 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 	}
 
 	if len(backupRaw) > 0 {
+		// unmarshalLenientJSON normalizes a top-level JSON `null` back to a
+		// non-nil map on success (a backup that is exactly "null" would
+		// otherwise reset the pre-initialized `data` above to nil and panic on
+		// the setServersMap write below), so no additional nil check is needed
+		// here.
 		if err := unmarshalLenientJSON(backupRaw, &data); err != nil {
 			return nil, fmt.Errorf("parse backup JSON: %w", err)
 		}
 	}
-	serversMap, _ := data[client.ServerKey].(map[string]interface{})
+	serversMap, _ := getServersMap(client, data)
 	if serversMap == nil {
 		serversMap = make(map[string]interface{})
 	}
@@ -242,7 +321,7 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 			delete(serversMap, adoptedName)
 		}
 	}
-	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(false))
-	data[client.ServerKey] = serversMap
+	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(credential))
+	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }

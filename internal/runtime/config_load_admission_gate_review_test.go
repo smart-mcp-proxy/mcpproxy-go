@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Cross-model review findings on the #937 admission gate.
@@ -157,6 +158,8 @@ func TestConfigLoadAdmissionGate_WarnsAboutServersAdmittedBeforeTheFix(t *testin
 		require.NoError(t, rt.storageManager.SaveUpstreamServer(&config.ServerConfig{
 			Name: name, Command: "./x", Protocol: "stdio", Enabled: true, Quarantined: false,
 		}))
+		// Live under the old release, so it has an approval baseline.
+		seedApproval(t, rt, name, "read_graph", storage.ToolApprovalStatusApproved, "h1")
 	}
 
 	require.NoError(t, rt.LoadConfiguredServers(cfg))

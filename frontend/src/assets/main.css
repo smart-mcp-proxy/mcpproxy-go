@@ -425,6 +425,13 @@ body {
   padding-block: 0.5rem;
   padding-inline: 0.25rem;
 }
+/* A radio/checkbox row written `label.label.justify-start` directly inside a
+   .form-control wants its text next to the control. The space-between rule
+   above is unlayered, so it beats the layered Tailwind `justify-start`
+   utility; reassert the author's intent here (demo-ux-fixes, finding #9). */
+.form-control > .label.justify-start {
+  justify-content: flex-start;
+}
 .label-text {
   font-size: 0.875rem;
   line-height: 1.25rem;

@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -94,6 +97,66 @@ func TestProfileMiddleware_ScopedRefusalIsLoggedForOperator(t *testing.T) {
 	require.Empty(t, logs.FilterMessage("profile URL refused for scoped caller").All())
 }
 
+func TestProfileURLGate_ConfinedAnonymousHonorsSwitchableTo(t *testing.T) {
+	switchTo := []string{"target"}
+	cfg := &config.Config{
+		AnonymousProfile: "base",
+		Servers:          []*config.ServerConfig{{Name: "base-srv"}, {Name: "target-srv"}, {Name: "other-srv"}},
+		Profiles: []config.ProfileConfig{
+			{Name: "base", Servers: []string{"base-srv"}, SwitchableTo: &switchTo},
+			{Name: "target", Servers: []string{"target-srv"}},
+			{Name: "other", Servers: []string{"other-srv"}},
+		},
+	}
+	handler := (profileGateFleet{srv: &Server{logger: zap.NewNop()}, cfg: cfg}).handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name, path string
+		wantStatus int
+	}{
+		{name: "bound base remains selectable", path: "/mcp/p/base", wantStatus: http.StatusOK},
+		{name: "declared switchable target is selectable", path: "/mcp/p/target", wantStatus: http.StatusOK},
+		{name: "undeclared target is refused", path: "/mcp/p/other", wantStatus: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, http.NoBody)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
+// A locked client binding makes the otherwise-unprofiled anonymous identity
+// deny-all. The URL gate must carry that confinement through as well: both an
+// existing profile and a nonexistent one receive the same refusal before the
+// MCP handler, so the URL cannot be used to inventory profile names.
+func TestProfileURLGate_BindingGuardedAnonymousRefusesExistingAndMissingSlugs(t *testing.T) {
+	proxy, profiles := bindingGuardTestProxy(t, "", []config.ProfileConfig{
+		{Name: "locked", Servers: []string{"a"}},
+	}, auth.ProfileModeLocked, "locked")
+	srv := proxy.mainServer
+	srv.logger = zap.NewNop()
+	srv.mcpProxy = proxy
+	require.True(t, proxy.ResolveProfileV3(context.Background(), profiles).BindingGuarded)
+
+	reached := false
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		reached = true
+	})
+	for _, slug := range []string{"locked", "does-not-exist"} {
+		req := httptest.NewRequest(http.MethodPost, "/mcp/p/"+slug, http.NoBody)
+		rec := httptest.NewRecorder()
+		srv.serveProfileURL(rec, req, profiles, handler)
+		require.Equal(t, http.StatusNotFound, rec.Code, slug)
+		require.JSONEq(t, fmt.Sprintf(`{"error":"unknown profile '%s'"}`, slug), rec.Body.String())
+	}
+
+	require.False(t, reached, "a binding-guarded anonymous request must not reach MCP")
+}
+
 // profileGateFleetConfig builds a config over a fleet of 1+n profiles: "pin"
 // (reaching "pin-srv") followed by n profiles "p0".."p<n-1>" that reach only
 // "other-srv". With n == -1 the fleet has no profiles at all. hidden further
@@ -180,6 +243,134 @@ func profileGateRefusal(t *testing.T, handler http.Handler, agent *auth.AuthCont
 	return rec
 }
 
+// settleBackgroundGoroutines waits for the process's live goroutine count to
+// stop moving before an allocation-parity measurement starts. internal/server
+// runs its tests in one shared binary; a goroutine still winding down from an
+// earlier test (a runtime fixture's shutdown, an SSE/HTTP client closing
+// against an already-stopped httptest server) can still be allocating when a
+// later, unrelated test opens its testing.AllocsPerRun window — AllocsPerRun
+// counts every goroutine's mallocs process-wide, not just the calling one's.
+// This is a SINGLE settle pass before measurement begins, not one per sample:
+// a prior attempt forced runtime.GC() between every measurement instead and
+// made the flakiness worse, not better — each GC is itself a stop-the-world
+// synchronization point that hands other goroutines a fresh chance to run
+// right as the next window opens, and doing that hundreds of times over a
+// run added churn rather than removing it.
+func settleBackgroundGoroutines(t *testing.T) {
+	t.Helper()
+	last := goruntime.NumGoroutine()
+	stable := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for stable < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		n := goruntime.NumGoroutine()
+		if n == last {
+			stable++
+		} else {
+			stable = 0
+			last = n
+		}
+	}
+}
+
+// retryUntilAllocsMatch takes one fresh testing.AllocsPerRun reading of every
+// case in "cases" and returns as soon as all of them agree with "baseline"
+// on the SAME attempt, sleeping a real 20ms between attempts otherwise (up
+// to "attempts" tries) — the shape TestProfileMiddleware_RefusalWorkIndepen-
+// dentOfFleet originally used inline, now shared with its sibling
+// TestSelectableProfileNames_PinOutcomesDoSameWork.
+//
+// A round-robin MINIMUM-of-many-samples was tried first (keep, per case, the
+// lowest reading seen over several back-to-back rounds) on the theory that
+// process-wide noise only ever ADDS allocations. It does not work here:
+// measured directly under `go test -race`, two fleets of different size can
+// differ by exactly one allocation on EVERY back-to-back call, with no
+// fluctuation at all across dozens of tight-loop rounds — go's race build
+// disables the tiny-object allocator (objects that would normally share one
+// heap slot each get their own; see runtime/malloc.go's raceenabled checks),
+// and which case's measurement window absorbs the resulting off-by-one comes
+// down to incidental free-list/size-class state that repeated sampling with
+// no gap in between never disturbs, so the minimum converges on two
+// different, both "clean," values instead of one shared value. A REAL sleep
+// between attempts does let it move: confirmed by direct comparison in
+// isolation under -race, requiring an exact match across every case on one
+// shared attempt (this function) passes reliably where round-robin-minimum
+// sampling with the identical total sleep budget fails on every run. Forcing
+// this with runtime.GC() between measurements instead of sleeping was tried
+// even earlier and made the flakiness worse, not better — see
+// settleBackgroundGoroutines above, which handles the OTHER, independent
+// noise source (a goroutine leftover from an earlier test in this package's
+// shared binary) with a single settle pass before measurement starts.
+//
+// tol is the largest absolute allocation-count difference from the baseline
+// still treated as agreement (see allocsMismatch). The -race artifact above
+// moves one allocation between measurement windows in either direction (33 vs
+// 34) and no amount of retrying can guarantee the counts converge exactly, so
+// the check is bounded rather than exact. It is deliberately an absolute
+// count, not a percentage: a fleet-proportional gate differs by ~4 096
+// allocations (the fleets hold 4 096 profiles/servers), so a tolerance of a
+// couple of allocations still catches any O(n) regression, whereas a
+// percentage would scale with the fleet.
+func retryUntilAllocsMatch(attempts, runs int, tol float64, baseline string, cases map[string]func()) map[string]float64 {
+	restore := goruntime.GOMAXPROCS(1)
+	defer goruntime.GOMAXPROCS(restore)
+
+	allocs := make(map[string]float64, len(cases))
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		for name, fn := range cases {
+			allocs[name] = testing.AllocsPerRun(runs, fn)
+		}
+		if allocsMismatch(allocs, baseline, tol) == "" {
+			break
+		}
+	}
+	return allocs
+}
+
+// allocsParityTolerance is the absolute allocation-count slack the fleet-
+// independence witnesses allow around the baseline case. See
+// retryUntilAllocsMatch for why it is a small constant and not a percentage.
+const allocsParityTolerance = 2
+
+// allocsMismatch returns "" when every case is within tol allocations of the
+// baseline case, otherwise a description of the first offending case.
+func allocsMismatch(allocs map[string]float64, baseline string, tol float64) string {
+	base := allocs[baseline]
+	for _, name := range slices.Sorted(maps.Keys(allocs)) {
+		if math.Abs(allocs[name]-base) > tol {
+			return fmt.Sprintf("%q allocates %v vs baseline %q %v (tolerance %v)", name, allocs[name], baseline, base, tol)
+		}
+	}
+	return ""
+}
+
+// TestAllocsMismatch_CatchesFleetProportionalWork proves the bounded
+// tolerance still bites: a closure doing one allocation per fleet item (the
+// regression the witnesses guard against) is rejected, while the +/-1 drift
+// of the -race allocator artifact is accepted.
+func TestAllocsMismatch_CatchesFleetProportionalWork(t *testing.T) {
+	var sink []*int
+	perItem := func(n int) func() {
+		return func() {
+			sink = sink[:0]
+			for i := 0; i < n; i++ {
+				sink = append(sink, new(int))
+			}
+		}
+	}
+	allocs := retryUntilAllocsMatch(2, 5, allocsParityTolerance, "small", map[string]func(){
+		"small": perItem(1),
+		"large": perItem(4097),
+	})
+	require.NotEmpty(t, allocsMismatch(allocs, "small", allocsParityTolerance), "O(n) work must exceed the tolerance: %v", allocs)
+
+	require.Empty(t, allocsMismatch(map[string]float64{"a": 33, "b": 34, "c": 35}, "b", allocsParityTolerance))
+	require.NotEmpty(t, allocsMismatch(map[string]float64{"a": 33, "b": 36}, "a", allocsParityTolerance))
+}
+
 // TestProfileMiddleware_RefusalWorkIndependentOfFleet (Spec 105 PR D codex
 // round 2, finding 1): the uniform refusal must not cost work proportional to
 // the number of OTHER profiles the operator has configured. A gate that
@@ -195,10 +386,12 @@ func profileGateRefusal(t *testing.T, handler http.Handler, agent *auth.AuthCont
 // profiles, for every refusal branch. (HEAD before the fix: 31 allocations
 // over the empty fleet, ~4 129 over the large one — 1.7 µs vs 0.9 ms at
 // 10 000 profiles.) AllocsPerRun counts every goroutine's mallocs and the
-// package's other tests may leave background work behind, so a reading is
-// retried into a quiet window — noise only ever adds, and a fleet-
-// proportional gate is off by thousands, so it can never pass. The pure
-// predicate is pinned at zero allocations without any retry in
+// package's other tests may leave background work behind, plus a `-race`-
+// only allocator artifact independent of that (see retryUntilAllocsMatch),
+// so a reading is retried into an attempt where the four fleets agree —
+// noise only ever adds, and a fleet-proportional gate is off by thousands,
+// so it can never pass regardless of how the noise is filtered. The pure
+// predicate is pinned at zero allocations the same way in
 // TestProfileIndex_SelectableAllocatesNothing.
 func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 	fleets := profileGateFleets()
@@ -211,26 +404,18 @@ func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 	for _, f := range fleets {
 		f.srv.profileIndexes.For(f.cfg)
 	}
+	settleBackgroundGoroutines(t)
 
 	for name, c := range profileGateRefusalCases {
 		t.Run(name, func(t *testing.T) {
-			var allocs map[string]float64
-			for attempt := 0; attempt < 10; attempt++ {
-				allocs = map[string]float64{}
-				for fleet, f := range fleets {
-					handler := f.handler(next)
-					allocs[fleet] = testing.AllocsPerRun(20, func() { profileGateRefusal(t, handler, c.agent, c.path) })
-				}
-				same := true
-				for fleet := range fleets {
-					same = same && allocs[fleet] == allocs["no profiles"]
-				}
-				if same {
-					return
-				}
-				time.Sleep(20 * time.Millisecond)
+			cases := make(map[string]func(), len(fleets))
+			for fleet, f := range fleets {
+				handler := f.handler(next)
+				cases[fleet] = func() { profileGateRefusal(t, handler, c.agent, c.path) }
 			}
-			t.Fatalf("%s must allocate exactly like the empty fleet on every fleet: %v", name, allocs)
+			allocs := retryUntilAllocsMatch(15, 20, allocsParityTolerance, "no profiles", cases)
+			require.Empty(t, allocsMismatch(allocs, "no profiles", allocsParityTolerance),
+				"%s must allocate like the empty fleet on every fleet (within %d): %v", name, allocsParityTolerance, allocs)
 		})
 	}
 }

@@ -1,90 +1,96 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
-import type { ProfileSummary } from '@/types'
+import { ref, computed, onScopeDispose } from 'vue'
+import type { ProfileView } from '@/types'
 import api from '@/services/api'
 
-// Profiles v2 (MCP-3243 / T4): client state for the Web UI profile switcher.
-// Backed by the REST surface shipped in MCP-3241:
-//   GET  /api/v1/profiles          → configured profiles + servers + tool count
-//   GET  /api/v1/profiles/active   → server-level default active profile
-//   PUT  /api/v1/profiles/active   → set/clear the default active profile
+// Profiles v3 (Spec 108-i). The list behind the Profiles page, the Viewing chip
+// in the header, every profile picker and the anonymous-callers setting.
 //
-// The active profile is a *UI/tray default* — an empty string means "all
-// servers" (zero-config default). It does not override a live MCP session's
-// set_profile selection.
+// `profiles.changed` is an invalidation, not a payload: it carries no profile
+// data, so the store refetches GET /profiles (debounced, because one config
+// write can emit several). Scoped SSE subscribers never receive the event and
+// nothing here depends on it for correctness - a page that just mutated a
+// profile refetches itself.
+export const PROFILES_CHANGED_EVENT = 'mcpproxy:profiles.changed'
+const REFETCH_DEBOUNCE_MS = 250
+
 export const useProfilesStore = defineStore('profiles', () => {
-  // State
-  const profiles = ref<ProfileSummary[]>([])
-  const activeProfile = ref<string>('')
+  const profiles = ref<ProfileView[]>([])
+  const anonymousProfile = ref('')
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const errorStatus = ref(0)
   const loaded = ref(false)
 
-  // Getters
   const hasProfiles = computed(() => profiles.value.length > 0)
-  // Human label for the current selection; empty selection = "All servers".
-  const activeLabel = computed(() => activeProfile.value || 'All servers')
-  // True when the active selection is the zero-config "all servers" default.
-  const isAllServers = computed(() => activeProfile.value === '')
+  const byName = computed(() => new Map(profiles.value.map(profile => [profile.name, profile])))
 
-  // Actions
+  // The human label of a profile name; unknown names (a dangling pin) fall back
+  // to the slug so nothing renders empty.
+  function titleFor(name: string | undefined): string {
+    if (!name) return 'All servers'
+    const profile = byName.value.get(name)
+    return profile?.title || name
+  }
+
+  // Every fetch takes a ticket and only the latest applies: a slow answer that
+  // started before a mutation or an invalidation must not overwrite a newer one.
+  let fetchTicket = 0
   async function fetchProfiles(): Promise<void> {
+    const ticket = ++fetchTicket
     loading.value = true
     error.value = null
+    errorStatus.value = 0
     try {
-      const [list, active] = await Promise.all([
-        api.getProfiles(),
-        api.getActiveProfile(),
-      ])
-      if (list.success && list.data) {
-        profiles.value = list.data.profiles ?? []
-      } else if (!list.success) {
-        error.value = list.error ?? 'Failed to load profiles'
-      }
-      if (active.success && active.data) {
-        activeProfile.value = active.data.active_profile ?? ''
-      }
+      const list = await api.getProfiles()
+      if (ticket !== fetchTicket) return
+      profiles.value = list?.profiles ?? []
+      anonymousProfile.value = list?.anonymous_profile ?? ''
       loaded.value = true
+    } catch (err) {
+      if (ticket !== fetchTicket) return
+      error.value = err instanceof Error ? err.message : 'Failed to load profiles'
+      errorStatus.value = (err as { status?: number })?.status ?? 0
     } finally {
-      loading.value = false
+      if (ticket === fetchTicket) loading.value = false
     }
   }
 
-  // Set (or clear, with '') the default active profile. On success the local
-  // state is updated to the server-confirmed value so the UI reflects exactly
-  // what the backend stored.
-  async function setActive(profile: string): Promise<boolean> {
-    error.value = null
-    const res = await api.setActiveProfile(profile)
-    if (res.success && res.data) {
-      activeProfile.value = res.data.active_profile ?? ''
-      return true
-    }
-    error.value = res.error ?? 'Failed to set active profile'
-    return false
+  let refetchTimer: ReturnType<typeof setTimeout> | null = null
+  function invalidate(): void {
+    if (refetchTimer) clearTimeout(refetchTimer)
+    refetchTimer = setTimeout(() => {
+      refetchTimer = null
+      void fetchProfiles()
+    }, REFETCH_DEBOUNCE_MS)
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener(PROFILES_CHANGED_EVENT, invalidate)
+    onScopeDispose(() => {
+      window.removeEventListener(PROFILES_CHANGED_EVENT, invalidate)
+      if (refetchTimer) clearTimeout(refetchTimer)
+    })
   }
 
   function reset(): void {
     profiles.value = []
-    activeProfile.value = ''
+    anonymousProfile.value = ''
     error.value = null
+    errorStatus.value = 0
     loaded.value = false
   }
 
   return {
-    // state
     profiles,
-    activeProfile,
+    anonymousProfile,
     loading,
     error,
+    errorStatus,
     loaded,
-    // getters
     hasProfiles,
-    activeLabel,
-    isAllServers,
-    // actions
+    byName,
+    titleFor,
     fetchProfiles,
-    setActive,
     reset,
   }
 })

@@ -56,6 +56,15 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        advertise_upstream_servers:
+          description: |-
+            AdvertiseUpstreamServers controls whether MCP clients are told the
+            names of the upstream servers they can reach — in the initialize
+            instructions and the retrieve_tools description — so agents use the
+            proxied tools instead of falling back to shell CLIs. Names are always
+            filtered to the caller's profile and agent-token scope. Default true;
+            set false to keep server names out of client context. Read live.
+          type: boolean
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -87,6 +96,16 @@ components:
           type: boolean
         allow_server_remove:
           type: boolean
+        anonymous_profile:
+          description: |-
+            AnonymousProfile confines every caller whose request authenticates as
+            credential kind "anonymous" (no credential, or an unrecognised
+            non-agent token accepted by the require_mcp_auth:false back-compat
+            branch) to the named profile (Spec 108 FR-008). Empty (default) means
+            unconfined, legacy anonymous behaviour. A name that does not match any
+            configured profile resolves anonymous callers to deny-all and is
+            reported as a validation warning (data-model.md §1).
+          type: string
         api_key:
           description: Security settings
           type: string
@@ -151,6 +170,17 @@ components:
           $ref: '#/components/schemas/secureenv.EnvConfig'
         features:
           $ref: '#/components/schemas/config.FeatureFlags'
+        forward_client_headers:
+          description: |-
+            ForwardClientHeaders is the global switch for client header forwarding
+            (Spec 112): copying allowlisted headers from the inbound /mcp request into
+            the upstream tools/call request. nil (absent) means enabled; because every
+            per-server forward_headers allowlist is empty by default, the default
+            forwards nothing. false disables forwarding for every server. Read via
+            IsClientHeaderForwardingEnabled(); MCPPROXY_FORWARD_CLIENT_HEADERS
+            overrides it for the process. Distinct from ForwardedHeaders/trusted_proxies
+            (Spec 107), which trusts inbound X-Forwarded-*.
+          type: boolean
         forward_proxy_env:
           description: |-
             ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
@@ -690,8 +720,10 @@ components:
         by default — operators opt in for k8s/enterprise deployments.
       properties:
         enabled:
-          description: Enabled exposes /metrics on the existing HTTP listener when
-            true.
+          description: |-
+            Enabled exposes /metrics on the existing HTTP listener when true.
+            The endpoint is admin-authenticated (SEC-07): scrapers must present the
+            global API key, via X-API-Key or an Authorization: Bearer header.
           type: boolean
       type: object
     config.OAuthConfig:
@@ -775,11 +807,70 @@ components:
       type: object
     config.ProfileConfig:
       properties:
+        code_execution:
+          description: |-
+            CodeExecution: nil = inherit the global enable_code_execution gate;
+            non-nil narrows it (a profile can only narrow, never widen, FR-006).
+          type: boolean
+        description:
+          description: <= 500 chars (FR-001)
+          type: string
+        management_tools:
+          description: |-
+            ManagementTools: nil = legacy/inherit (FR-016); non-nil sets the
+            profile-level visibility of upstream_servers/quarantine_security.
+          type: boolean
+        max_tier:
+          description: |-
+            MaxTier caps the tier a tool may run at under this profile: "" (no
+            cap) | "read" | "write" | "destructive" (FR-001).
+          type: string
         name:
-          description: URL slug, validated
+          description: slug (Spec 057 rules unchanged)
           type: string
         servers:
           description: references to mcpServers[].name
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          description: |-
+            SwitchableTo is the list of profile names a session under this
+            profile may `set_profile` into (FR-022). nil = legacy/none (research
+            D6); a non-nil EMPTY list is an explicit "none" and must round-trip as
+            `[]`, never be dropped by omitempty — hence the pointer (see the
+            MarshalJSON note below, and profiles_v3_test.go's switchable_to round
+            trip case).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          description: display only, <= 80 chars (FR-001)
+          type: string
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          description: |-
+            Unannotated is this profile's handling of a tool whose effective
+            annotations carry no tier hint: "" (unset, see EffectiveUnannotated) |
+            "deny" | "as_write" | "as_read" (FR-001, FR-003).
+          type: string
+      type: object
+    config.ProfileToolRules:
+      description: Tools holds the allow/deny/classify rule set (FR-001, FR-004, FR-005).
+      properties:
+        allow:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        classify:
+          additionalProperties:
+            type: string
+          type: object
+        deny:
           items:
             type: string
           type: array
@@ -1018,6 +1109,18 @@ components:
             default-aggregate behavior (included if the server advertises
             Capabilities.Prompts); false excludes it regardless of capability.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders lists inbound MCP-client header NAMES (never values) that
+            are copied into this server's upstream tools/call requests (Spec 112).
+            Exact names, case-insensitive, at most 32, no wildcards. Empty forwards
+            nothing. Only HTTP-based transports (http, streamable-http) forward; the
+            deny list (Authorization, Host, hop-by-hop, ...) is enforced at runtime
+            regardless of what is configured here.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -1275,7 +1378,7 @@ components:
         name:
           type: string
         reason:
-          description: '"already_exists", "filtered_out", "invalid_name"'
+          description: '"already_exists", "filtered_out", "invalid_name", "self_reference"'
           type: string
       type: object
     connect.ConnectResult:
@@ -1290,12 +1393,52 @@ components:
           type: string
         config_path:
           type: string
+        credential:
+          description: |-
+            Credential is the masked client credential the write embedded
+            (`mcp_cli_••••`); the real secret is never returned (FR-024). Empty for a
+            keyless entry, a disconnect and every refusal.
+          type: string
+        credential_revoked:
+          description: |-
+            CredentialRevoked names the credential an undo revoked because the
+            restored config no longer holds it (plan D16).
+          type: string
+        display_path:
+          description: |-
+            DisplayPath is ConfigPath with the home directory shortened to "~"
+            (FR-037). Populated for every result whose ConfigPath is known.
+          type: string
+        keyless:
+          description: Keyless is true when the entry was written with no credential.
+          type: boolean
         message:
+          type: string
+        mode:
+          type: string
+        profile:
+          description: |-
+            Profile and Mode are the binding of the credential this write minted or
+            kept. Profile "" means the built-in All servers scope.
+          type: string
+        reload_hint:
+          description: |-
+            ReloadHint is this client's instruction for making the write take
+            effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+            for an unknown client.
+          type: string
+        rotation:
+          description: |-
+            Rotation is "finalized" when the write replaced an active credential's
+            secret (staged rotation, FR-021a), empty otherwise.
           type: string
         server_name:
           type: string
         success:
           type: boolean
+        token_name:
+          description: TokenName is the client credential's token name (`client-<id>`).
+          type: string
       type: object
     contracts.APIResponse:
       allOf:
@@ -1329,11 +1472,44 @@ components:
         total:
           type: integer
       type: object
+    contracts.ActivityPerServer:
+      properties:
+        calls:
+          description: Calls counted per storage.CountsAsCall
+          type: integer
+        errors:
+          description: Of those calls, how many failed
+          type: integer
+        last_call_at:
+          description: |-
+            LastCallAt is RFC3339, or "" if the server had no call in the period
+            (PerServer only lists servers that did, so this is always set).
+          type: string
+        name:
+          description: Server name
+          type: string
+      type: object
     contracts.ActivityRecord:
       properties:
+        agent_name:
+          description: Agent token name when auth_type is "agent"
+          type: string
         arguments:
           description: Tool call arguments
           type: object
+        auth_type:
+          description: '"admin", "agent", "user" or "admin_user"; empty without an
+            auth context or on another caller''s row for a scoped caller'
+          type: string
+        block_reason:
+          description: Typed cause of a profile policy refusal
+          type: string
+        client_id:
+          description: Client id from the client-credential binding
+          type: string
+        client_name:
+          description: Self-reported clientInfo.name (advisory)
+          type: string
         detection_types:
           description: List of detection types found
           items:
@@ -1361,6 +1537,18 @@ components:
         parent_id:
           description: Correlation id of the parent call (the code_execution whose
             sandbox issued this sub-call)
+          type: string
+        profile:
+          description: |-
+            Scope attribution (Spec 108 FR-029): the profile, client and token in
+            effect when the call ran. Stamped at write time, never rewritten. For a
+            scoped (non-admin) caller the profile/profile_source/client_id/token_name
+            of a row it did not make are blanked (binding disclosure is admin-only);
+            client_name is self-reported and stays. Absent on records written before
+            Spec 108 and on records with no MCP/REST request context.
+          type: string
+        profile_source:
+          description: pin|binding|url|session|anonymous|none
           type: string
         request_bytes:
           description: |-
@@ -1401,6 +1589,9 @@ components:
           type: string
         timestamp:
           description: When activity occurred
+          type: string
+        token_name:
+          description: Agent/client token name
           type: string
         tool_name:
           description: Name of tool called
@@ -1458,6 +1649,19 @@ components:
             than the denominator printed beside them — 15+4+0+0 under a \"42\"\n(audit
             finding F2, #1046). The residual now has a name and a tile."
           type: integer
+        per_server:
+          description: |-
+            PerServer covers EVERY server with at least one call in the period
+            (unlike TopServers, which is capped at 5 and carries no error counts).
+            Spec 109 FR-013: the server-card stats line and the macOS Servers rows
+            read this — one `GET /activity/summary` response per page load — rather
+            than issuing a per-server activity query each. Computed in the same
+            counting pass as the totals above, from the same CountsAsCall/
+            IsManagementBuiltin definitions TopServers already uses.
+          items:
+            $ref: '#/components/schemas/contracts.ActivityPerServer'
+          type: array
+          uniqueItems: false
         period:
           description: Time period (1h, 24h, 7d, 30d)
           type: string
@@ -1546,6 +1750,45 @@ components:
           type: string
         url:
           description: required https registry URL
+          type: string
+      type: object
+    contracts.AttentionFix:
+      properties:
+        label:
+          type: string
+        target:
+          type: string
+        verb:
+          type: string
+      type: object
+    contracts.AttentionItem:
+      properties:
+        detail:
+          type: string
+        fix:
+          $ref: '#/components/schemas/contracts.AttentionFix'
+        id:
+          description: kind:type:subject[:state]
+          type: string
+        kind:
+          type: string
+        rank:
+          type: integer
+        since:
+          type: string
+        subject:
+          $ref: '#/components/schemas/contracts.AttentionSubject'
+        summary:
+          type: string
+      type: object
+    contracts.AttentionSubject:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          description: server|tool|client|setting
           type: string
       type: object
     contracts.ConfigApplyResult:
@@ -1854,6 +2097,8 @@ components:
       type: object
     contracts.GlobalToolsResponse:
       properties:
+        counts:
+          $ref: '#/components/schemas/contracts.ViewAsCounts'
         failed_servers:
           items:
             type: string
@@ -1884,9 +2129,19 @@ components:
       description: Unified health status calculated by the backend
       properties:
         action:
-          description: 'Action is the suggested fix action: "login", "restart", "enable",
-            "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)'
+          description: |-
+            Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)
+            Invariant: Action always equals Actions[0], or "" when Actions is empty.
           type: string
+        actions:
+          description: |-
+            Actions lists every applicable next step in priority order (FR-012):
+            login > set_secret > configure > edit_url > approve > restart >
+            view_logs > enable. Always non-nil (empty slice, never null).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         admin_state:
           description: 'AdminState indicates the admin state: "enabled", "disabled",
             or "quarantined"'
@@ -1898,10 +2153,23 @@ components:
           description: 'Level indicates the health level: "healthy", "degraded", or
             "unhealthy"'
           type: string
+        status:
+          description: |-
+            Status is the ONE status vocabulary rendered as text on every surface
+            (Web UI, macOS, tray, CLI) — Spec 109 FR-010/FR-011. Values: "ready",
+            "connecting", "sign_in_required", "needs_review", "needs_secret",
+            "needs_config", "error", "disabled". Unlike Level (a severity signal for
+            badge/tray coloring only), no renderer may print Level as text.
+          type: string
         summary:
           description: Summary is a human-readable status message (e.g., "Connected
             (5 tools)")
           type: string
+        usable:
+          description: |-
+            Usable reports whether the server can currently serve tool calls. True
+            only when Status == "ready".
+          type: boolean
       type: object
     contracts.InfoEndpoints:
       description: Available API endpoints
@@ -2065,6 +2333,12 @@ components:
       type: object
     contracts.MCPSession:
       properties:
+        client_id:
+          description: |-
+            Scope attribution (Spec 108 FR-033). ClientID and TokenName are the
+            credential the session initialized with; Profile and ProfileSource are
+            the session's latest effective resolution. Empty on legacy sessions.
+          type: string
         client_name:
           type: string
         client_version:
@@ -2085,9 +2359,15 @@ components:
           type: string
         last_activity:
           type: string
+        profile:
+          type: string
+        profile_source:
+          type: string
         start_time:
           type: string
         status:
+          type: string
+        token_name:
           type: string
         tool_call_count:
           type: integer
@@ -2635,6 +2915,15 @@ components:
             default aggregation". Surfaced on GET so a caller that PATCHed the override
             can read it back; PATCH/POST accept it via AddServerRequest.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
+            allowlist of inbound MCP client header NAMES forwarded to this server on
+            tools/call. Names only, never values. Omitted when empty.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -2787,6 +3076,16 @@ components:
         average_query_result_size:
           description: Typical retrieve_tools output (tokens)
           type: integer
+        estimated:
+          description: |-
+            Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+            true while AverageQueryResultSize is a synthetic simulation (a sample of
+            the first `tools_limit` tools' schemas — no real retrieve_tools call has
+            completed yet in this runtime's usage aggregate); false once at least one
+            real retrieve_tools call has, at which point AverageQueryResultSize is
+            derived from the real observed average response size instead. The Web
+            UI and macOS render an "estimate" label while this is true.
+          type: boolean
         per_server_tool_list_sizes:
           additionalProperties:
             type: integer
@@ -2809,6 +3108,19 @@ components:
         success:
           type: boolean
       type: object
+    contracts.Tier:
+      description: |-
+        Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+        Annotations — read|write|destructive|unannotated. Set by every producer
+        of a Tool (enrichServerTools, the global tools handler); never left for
+        a consuming surface to compute.
+      type: string
+      x-enum-varnames:
+      - TierRead
+      - TierWrite
+      - TierDestructive
+      - TierUnannotated
+      - TierUnknown
     contracts.TokenMetrics:
       description: Token usage metrics (nil for older records)
       properties:
@@ -2839,6 +3151,8 @@ components:
       type: object
     contracts.Tool:
       properties:
+        access:
+          $ref: '#/components/schemas/contracts.ToolAccess'
         annotations:
           $ref: '#/components/schemas/contracts.ToolAnnotation'
         approval_status:
@@ -2890,12 +3204,37 @@ components:
           type: string
         name:
           type: string
+        profile_tier:
+          description: |-
+            ProfileTier and Access are present only in a view-as listing (a tools
+            listing with ?client= or ?profile=, Spec 108 FR-032). ProfileTier is the
+            tool's tier under the viewed subject's profile (Tier above stays the
+            intrinsic tier); Access is the subject's verdict for the tool. Absent
+            otherwise, so an ordinary listing is byte-identical to before.
+          type: string
+          x-enum-varnames:
+          - TierRead
+          - TierWrite
+          - TierDestructive
+          - TierUnannotated
+          - TierUnknown
         schema:
           type: object
         server_name:
           type: string
+        tier:
+          $ref: '#/components/schemas/contracts.Tier'
         usage:
           type: integer
+      type: object
+    contracts.ToolAccess:
+      properties:
+        callable:
+          type: boolean
+        reason:
+          type: string
+        visible:
+          type: boolean
       type: object
     contracts.ToolAnnotation:
       description: Tool behavior hints snapshot
@@ -3089,6 +3428,13 @@ components:
         tokens_saved:
           description: echoed from ServerTokenMetrics (FR-007)
           type: integer
+        tokens_saved_estimated:
+          description: |-
+            TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+            true while TokensSaved is a synthetic simulation rather than derived
+            from a real retrieve_tools call. Dropped (false, the zero value) for a
+            scoped caller along with TokensSaved itself, above.
+          type: boolean
         tokens_saved_percentage:
           type: number
         tools:
@@ -3210,10 +3556,55 @@ components:
         message:
           type: string
       type: object
+    contracts.ViewAsCounts:
+      description: |-
+        Counts is present only for a NON-administrator profile view-as (Spec 108
+        FR-032): the response then lists only the visible rows, and this is the
+        only trace of the rest, with no per-server, per-tier or per-reason
+        breakdown.
+      properties:
+        hidden:
+          type: integer
+        visible:
+          type: integer
+      type: object
     data:
       properties:
         data:
           $ref: '#/components/schemas/contracts.InfoResponse'
+      type: object
+    httpapi.AccessExplanationData:
+      properties:
+        first_failure:
+          type: string
+          x-enum-varnames:
+          - StepCredential
+          - StepProfile
+          - StepServerInScope
+          - StepToolRule
+          - StepTierCap
+          - StepTokenPermission
+          - StepGlobalGate
+          - StepServerState
+          - StepToolApproval
+        fixes:
+          items:
+            $ref: '#/components/schemas/runtime.Fix'
+          type: array
+          uniqueItems: false
+        profile:
+          $ref: '#/components/schemas/runtime.ExplainProfileView'
+        steps:
+          items:
+            $ref: '#/components/schemas/runtime.ExplainStepView'
+          type: array
+          uniqueItems: false
+        subject:
+          $ref: '#/components/schemas/runtime.ExplainSubjectView'
+        tool:
+          type: string
+        verdict:
+          $ref: '#/components/schemas/profile.ExplainVerdict'
       type: object
     httpapi.AddServerRequest:
       properties:
@@ -3257,6 +3648,17 @@ components:
             a nil pointer means "leave unchanged" on PATCH (and "inherit the default
             aggregate behavior" on create); a present value (including false) is applied.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders is the per-server allowlist of inbound MCP client header
+            NAMES forwarded to this server on tools/call (Spec 112). Names only, never
+            values. On PATCH a nil slice (field omitted) leaves the stored allowlist
+            unchanged and an empty array ([]) clears it. Invalid, denied, duplicate
+            and static-header-colliding names are rejected with 400.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -3306,6 +3708,61 @@ components:
         working_dir:
           type: string
       type: object
+    httpapi.BindingGuardResponse:
+      properties:
+        bindings:
+          items:
+            $ref: '#/components/schemas/httpapi.GuardBinding'
+          type: array
+          uniqueItems: false
+        code:
+          description: binding_bypassable_without_auth
+          type: string
+        error:
+          description: Human-readable, byte-stable refusal text
+          type: string
+        fixes:
+          items:
+            $ref: '#/components/schemas/httpapi.GuardFixOption'
+          type: array
+          uniqueItems: false
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
+    httpapi.BulkAssignRequest:
+      properties:
+        from_profile:
+          type: string
+        mode:
+          type: string
+        to_profile:
+          type: string
+      type: object
+    httpapi.BulkAssignResponse:
+      properties:
+        moved:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        skipped:
+          items:
+            $ref: '#/components/schemas/httpapi.BulkAssignSkipped'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.BulkAssignSkipped:
+      properties:
+        client_id:
+          type: string
+        code:
+          type: string
+        error:
+          type: string
+      type: object
     httpapi.CanonicalConfigPath:
       properties:
         description:
@@ -3339,6 +3796,60 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ClientBindingErrorResponse:
+      properties:
+        code:
+          type: string
+        error:
+          type: string
+        field:
+          type: string
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
+    httpapi.ClientBindingResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        warnings:
+          items:
+            $ref: '#/components/schemas/httpapi.ClientWarning'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ClientSnippet:
+      properties:
+        generic_http:
+          type: string
+        header_name:
+          type: string
+      type: object
+    httpapi.ClientWarning:
+      properties:
+        action:
+          $ref: '#/components/schemas/runtime.WarningAction'
+        bindings:
+          items:
+            $ref: '#/components/schemas/runtime.BindingRef'
+          type: array
+          uniqueItems: false
+        client_id:
+          type: string
+        code:
+          $ref: '#/components/schemas/profile.WarningCode'
+        fixes:
+          items:
+            $ref: '#/components/schemas/runtime.GuardFix'
+          type: array
+          uniqueItems: false
+        message:
+          type: string
+        severity:
+          $ref: '#/components/schemas/profile.WarningSeverity'
+      type: object
     httpapi.ConnectConflictResponse:
       properties:
         action:
@@ -3358,6 +3869,10 @@ components:
         force:
           description: Overwrite existing entry
           type: boolean
+        keyless:
+          type: boolean
+        mode:
+          type: string
         precondition_token:
           description: |-
             PreconditionToken is the opaque token from the preview this write was
@@ -3369,9 +3884,131 @@ components:
             TOGETHER with force=true: the token, not the absence of force, is the
             overwrite safety.
           type: string
+        profile:
+          description: |-
+            Profile, Mode and Keyless are the client-credential intent (Spec 108
+            FR-024). Profile names the profile the client's credential binds to;
+            "" is the built-in All servers scope. Omitted means "not specified": a
+            fresh credential defaults to All servers and a reconnect keeps the
+            client's existing binding (a reconnect never silently widens a locked
+            client). Mode is locked|switchable (default locked for a named profile,
+            switchable for All servers). Keyless writes a credential-less entry and
+            is only possible while require_mcp_auth is off; it cannot carry a
+            profile or mode.
+          type: string
         server_name:
           description: Defaults to "mcpproxy"
           type: string
+      type: object
+    httpapi.CreateClientRequest:
+      properties:
+        display_name:
+          type: string
+        expires_in:
+          description: ExpiresIn is a duration like 30d or 720h; default and cap are
+            365 days.
+          type: string
+        id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+      type: object
+    httpapi.CreateClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        credential:
+          type: string
+        snippet:
+          $ref: '#/components/schemas/httpapi.ClientSnippet'
+      type: object
+    httpapi.EffectiveToolsData:
+      properties:
+        counts:
+          $ref: '#/components/schemas/runtime.EffectiveCounts'
+        profile:
+          type: string
+        stale_classification_reasons:
+          additionalProperties:
+            type: string
+          description: |-
+            StaleClassificationReasons maps each stale classify entry to why it no
+            longer applies: profile.StaleClassificationAnnotated or
+            profile.StaleClassificationMissing. It is computed over the UNFILTERED
+            tool set, so a server or reason filter never changes it. Administrators
+            only.
+          type: object
+        stale_classifications:
+          description: |-
+            StaleClassifications lists classify entries for tools that are now
+            annotated or no longer exist (FR-005). Administrators only.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tools:
+          items:
+            $ref: '#/components/schemas/runtime.EffectiveTool'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.EnvFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
+      type: object
+    httpapi.FinalizeClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        rotation:
+          $ref: '#/components/schemas/httpapi.RotationState'
+      type: object
+    httpapi.ForgetClientResponse:
+      properties:
+        disconnect_error:
+          type: string
+        disconnected:
+          type: boolean
+        revoked:
+          type: string
+      type: object
+    httpapi.GuardBinding:
+      properties:
+        client_id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+        token_name:
+          type: string
+      type: object
+    httpapi.GuardFixOption:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
+      type: object
+    httpapi.HeaderFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
       type: object
     httpapi.ImportFromPathRequest:
       properties:
@@ -3402,12 +4039,45 @@ components:
       type: object
     httpapi.ImportRequest:
       properties:
+        allow_paste_fallback:
+          description: |-
+            AllowPasteFallback opts into detecting a bare URL or a single command
+            line (FR-064) when Format/format detection would otherwise fail — see
+            configimport.ImportOptions.AllowPasteFallback for why this must stay
+            opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+            every other caller of this endpoint (the general "Import config"
+            panel, or a direct API call) leaves it false and gets a clear
+            "unable to detect configuration format" error for a plain one-liner
+            instead of it being silently guessed at and, on apply, added as a
+            real server with no confirmation step.
+          type: boolean
         content:
           description: Raw JSON or TOML content
           type: string
+        env_override:
+          additionalProperties:
+            type: string
+          description: |-
+            EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+            F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+            value the user typed, or a keyring ref path if they chose Secret —
+            keyed by field name. Applied to the matching imported server's
+            Env/Headers ONLY when preview=false, directly on the server this
+            request's own raw Content parses to server-side. This is what lets
+            the apply call carry the user's edited env/header values without
+            ever round-tripping the redacted preview: url/command/args on apply
+            always come from re-parsing Content here, never from a client-held
+            preview response, so a credential embedded in a URL query param or
+            argv flag (which the preview necessarily redacted for display) is
+            never overwritten with the masked placeholder.
+          type: object
         format:
           description: Optional format hint
           type: string
+        header_override:
+          additionalProperties:
+            type: string
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:
@@ -3453,9 +4123,19 @@ components:
           uniqueItems: false
         command:
           type: string
+        env:
+          items:
+            $ref: '#/components/schemas/httpapi.EnvFieldPreview'
+          type: array
+          uniqueItems: false
         fields_skipped:
           items:
             type: string
+          type: array
+          uniqueItems: false
+        headers:
+          items:
+            $ref: '#/components/schemas/httpapi.HeaderFieldPreview'
           type: array
           uniqueItems: false
         name:
@@ -3466,6 +4146,20 @@ components:
           type: string
         source_format:
           type: string
+        summary:
+          description: |-
+            Summary, Tags, Env and Headers are the Spec 109 FR-064 preview
+            enrichment (contracts/rest-api.md "Import preview"). Summary and Tags
+            are built from the already-redacted URL/Command/Args above, so a
+            secret embedded in argv or a URL query never reaches Summary either.
+            Env/Headers never carry the raw value — only its presence and two
+            booleans a surface uses to default the Value/Secret toggle (FR-065).
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         url:
           type: string
         warnings:
@@ -3529,6 +4223,26 @@ components:
             persisted without that server-verified evidence (edge case: "never
             guess completed_external without positive evidence").
           type: string
+        connected_client_id:
+          description: |-
+            ConnectedClientID records a successful connect write for this client id
+            (Spec 109-b FR-042, review round 6). The REST connect endpoint
+            (POST /api/v1/connect/{client}) already records this itself on success;
+            this field exists so `mcpproxy connect` — which writes the client's
+            config file directly, without going through that endpoint, so the
+            command still works when no daemon is running — can relay the same
+            event to a daemon that IS running, keeping ClientConnectedAt in sync
+            across both surfaces. Must be a known id from the fixed connect client
+            registry (internal/connect.GetAllClients); any other value is rejected,
+            matching the field's "bounded by the registry" invariant
+            (data-model.md §7).
+          type: string
+        disconnected_client_id:
+          description: |-
+            DisconnectedClientID relays a successful local CLI disconnect to a running
+            daemon, which cannot observe the CLI's direct config-file edit itself.
+            Like ConnectedClientID, it is bounded to the fixed client registry.
+          type: string
         engaged:
           description: |-
             Engaged marks the wizard as engaged (completed or explicitly skipped).
@@ -3544,11 +4258,280 @@ components:
             preserves the existing value.
           type: string
       type: object
+    httpapi.OnboardingStateResponse:
+      properties:
+        configured_server_count:
+          description: |-
+            ConfiguredServerCount is the number of upstream MCP servers configured
+            in mcpproxy (counts both enabled and disabled).
+          type: integer
+        connected_client_count:
+          description: |-
+            ConnectedClientCount is the number of supported clients currently
+            pointing at mcpproxy.
+          type: integer
+        connected_client_ids:
+          description: |-
+            ConnectedClientIDs are the identifiers of supported clients currently
+            pointing at mcpproxy. Drawn exclusively from the fixed adapter table —
+            user-entered values never appear here.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        first_mcp_client_ever:
+          description: |-
+            FirstMCPClientEver is true once any MCP client has successfully completed
+            an `initialize` round-trip with this mcpproxy. Sourced from the Spec 044
+            activation bucket. Drives the Verify tab's "green check" state.
+          type: boolean
+        has_configured_server:
+          description: |-
+            HasConfiguredServer is true if at least one upstream MCP server is
+            configured (regardless of current connection health).
+          type: boolean
+        has_connected_client:
+          description: |-
+            HasConnectedClient is true if at least one supported AI client currently
+            has mcpproxy registered in its config.
+          type: boolean
+        has_usable_server:
+          description: |-
+            HasUsableServer is true once at least one enabled, non-quarantined
+            server has usable health and at least one approved (non-disabled) tool.
+            This is the real "the wizard has something to try" signal:
+            HasConfiguredServer only means a server entry exists, even while every
+            one of them sits quarantined, requires sign-in, or has zero approved
+            tools. The Servers step and Setup badge use this instead of
+            HasConfiguredServer, which is kept above for compatibility.
+            HealthStatus.Usable is the shared
+            readiness contract used by every UI surface (Spec 109-c, tasks.md T051).
+          type: boolean
+        incomplete_tab_count:
+          description: |-
+            IncompleteTabCount is the number of wizard tabs whose state is incomplete.
+            Drives the sidebar Setup entry's badge. Formula:
+              +1 if HasConnectedClient == false
+              +1 if HasUsableServer == false
+              +1 if FirstMCPClientEver == false
+          type: integer
+        mcp_clients_seen_ever:
+          description: |-
+            MCPClientsSeenEver is the capped list of recognized client names that
+            have ever called this mcpproxy. Names come from the MCP `initialize`
+            payload's `clientInfo.name` field, sanitized. Surfaces on the Verify tab
+            so the user can see whether their real IDE — not a test client — has
+            connected.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        should_show_wizard:
+          description: |-
+            ShouldShowWizard is the derived flag the frontend uses to decide
+            whether to auto-show. True when not engaged and IncompleteTabCount > 0
+            (Spec 046 v2 — semantics widened to also count the Verify tab).
+          type: boolean
+        state:
+          $ref: '#/components/schemas/storage.OnboardingState'
+        usable_servers:
+          description: |-
+            UsableServers lists the names behind HasUsableServer, for the Verify
+            step's suggested-prompt generator (FR-042): prompts are only built from
+            tools of servers in this list, never from a quarantined or toolless one.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileConflictResponse:
+      properties:
+        code:
+          type: string
+        error:
+          type: string
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+        used_by:
+          $ref: '#/components/schemas/httpapi.ProfileUsedByData'
+      type: object
+    httpapi.ProfileDeleteData:
+      properties:
+        anonymous_profile_moved_to:
+          type: string
+        deleted:
+          type: string
+        moved:
+          $ref: '#/components/schemas/runtime.MovedRefs'
+      type: object
+    httpapi.ProfileListData:
+      properties:
+        anonymous_profile:
+          type: string
+        profiles:
+          items:
+            $ref: '#/components/schemas/runtime.ProfileView'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileRenameData:
+      properties:
+        moved:
+          $ref: '#/components/schemas/runtime.MovedRefs'
+        profile:
+          $ref: '#/components/schemas/runtime.ProfileView'
+      type: object
+    httpapi.ProfileTryData:
+      properties:
+        hidden:
+          items:
+            $ref: '#/components/schemas/runtime.TryHidden'
+          type: array
+          uniqueItems: false
+        hidden_by_profile:
+          type: integer
+        hidden_truncated:
+          type: boolean
+        results:
+          items:
+            additionalProperties: {}
+            type: object
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileUsedByData:
+      properties:
+        anonymous_profile:
+          type: boolean
+        clients:
+          items:
+            $ref: '#/components/schemas/runtime.UsedByClient'
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileViewData:
+      properties:
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        code_execution:
+          type: boolean
+        description:
+          type: string
+        effective_code_execution:
+          type: boolean
+        effective_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        effective_unannotated:
+          type: string
+        is_legacy:
+          type: boolean
+        management_tools:
+          type: boolean
+        max_tier:
+          type: string
+        name:
+          type: string
+        servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          type: string
+        tool_count:
+          description: |-
+            ToolCount is the v2 field: indexed tools on the effective servers.
+            Deprecated: use tool_counts.
+          type: integer
+        tool_counts:
+          $ref: '#/components/schemas/runtime.ToolCounts'
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          type: string
+        used_by:
+          $ref: '#/components/schemas/runtime.UsedBy'
+      type: object
+    httpapi.ProfileWriteData:
+      properties:
+        profile:
+          $ref: '#/components/schemas/runtime.ProfileView'
+        warnings:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.PutClientBindingRequest:
+      properties:
+        mode:
+          type: string
+        profile:
+          type: string
+      type: object
+    httpapi.RenameProfileRequest:
+      properties:
+        new_name:
+          type: string
+      type: object
+    httpapi.RotateClientRequest:
+      properties:
+        precondition_token:
+          description: |-
+            PreconditionToken is the token of GET /connect/{client}/preview; it
+            binds a supported client's rotation to what the preview showed.
+          type: string
+      type: object
+    httpapi.RotateClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        connect:
+          $ref: '#/components/schemas/connect.ConnectResult'
+        credential:
+          type: string
+        rotation:
+          $ref: '#/components/schemas/httpapi.RotationState'
+        snippet:
+          $ref: '#/components/schemas/httpapi.ClientSnippet'
+      type: object
+    httpapi.RotationState:
+      properties:
+        state:
+          type: string
+      type: object
     httpapi.SetActiveProfileRequest:
       properties:
         active_profile:
           type: string
         profile:
+          type: string
+      type: object
+    httpapi.TryProfileRequest:
+      properties:
+        limit:
+          type: integer
+        profile:
+          $ref: '#/components/schemas/config.ProfileConfig'
+        query:
           type: string
       type: object
     httpapi.UndoConnectRequest:
@@ -3576,6 +4559,132 @@ components:
           - install
           - other
           type: string
+      type: object
+    httpapi.UpgradeAdminKeyHoldersRequest:
+      properties:
+        apply:
+          type: boolean
+        mode:
+          type: string
+        precondition_token:
+          type: string
+        profile:
+          type: string
+      type: object
+    httpapi.attentionResponse:
+      properties:
+        count:
+          type: integer
+        generated_at:
+          type: string
+        items:
+          items:
+            $ref: '#/components/schemas/contracts.AttentionItem'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.clientPresence:
+      properties:
+        active_sessions:
+          type: integer
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        config_path:
+          type: string
+        connected:
+          type: boolean
+        connection_unverified:
+          type: boolean
+        credential_checked_at:
+          type: string
+        credential_state:
+          $ref: '#/components/schemas/profile.CredentialState'
+        display_name:
+          type: string
+        display_path:
+          type: string
+        expires_at:
+          type: string
+        icon:
+          type: string
+        id:
+          type: string
+        installed:
+          type: boolean
+        kind:
+          type: string
+        last_seen:
+          type: string
+        profile:
+          type: string
+        profile_missing:
+          type: boolean
+        profile_mode:
+          type: string
+        profile_source:
+          description: |-
+            profile_source is pin (locked) or binding (switchable) and is empty when
+            credential_state is not client.
+          type: string
+        profile_title:
+          type: string
+        reload_hint:
+          type: string
+        rotation_pending:
+          type: boolean
+        sessions:
+          items:
+            $ref: '#/components/schemas/httpapi.clientSession'
+          type: array
+          uniqueItems: false
+        state:
+          type: string
+        token_name:
+          type: string
+      type: object
+    httpapi.clientSession:
+      properties:
+        id:
+          type: string
+        last_activity:
+          type: string
+        profile:
+          description: |-
+            Profile and ProfileSource are the session's latest effective resolution
+            (Spec 108-e FR-033); empty on legacy sessions.
+          type: string
+        profile_source:
+          type: string
+        started_at:
+          type: string
+        work_session_id:
+          type: string
+      type: object
+    httpapi.clientsResponse:
+      properties:
+        clients:
+          items:
+            $ref: '#/components/schemas/httpapi.clientPresence'
+          type: array
+          uniqueItems: false
+        routing: {}
+        warnings:
+          items:
+            $ref: '#/components/schemas/httpapi.ClientWarning'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.securityApproveRequest:
+      properties:
+        block:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        force:
+          type: boolean
       type: object
     management.BulkOperationResult:
       properties:
@@ -3632,6 +4741,300 @@ components:
         timestamp:
           type: string
       type: object
+    profile.AccessStepStatus:
+      type: string
+      x-enum-varnames:
+      - AccessStepPass
+      - AccessStepFail
+      - AccessStepSkip
+    profile.AccessSubjectKind:
+      type: string
+      x-enum-varnames:
+      - AccessSubjectClient
+      - AccessSubjectProfile
+      - AccessSubjectToken
+      - AccessSubjectAnonymous
+    profile.CredentialState:
+      description: |-
+        Spec 108-f ClientView additions (data-model §7). The Spec 109 fields above
+        are unchanged; everything below is additive.
+
+        credential_state is what the client's connection carries (client |
+        admin_key | none | revoked | expired | unknown). The stat-only list never
+        reads a config: it reports the token store, else the last on-demand
+        observation (credential_checked_at says when), else unknown.
+      type: string
+      x-enum-varnames:
+      - CredentialStateClient
+      - CredentialStateAdminKey
+      - CredentialStateNone
+      - CredentialStateRevoked
+      - CredentialStateExpired
+      - CredentialStateUnknown
+    profile.ExplainStep:
+      type: string
+      x-enum-varnames:
+      - StepCredential
+      - StepProfile
+      - StepServerInScope
+      - StepToolRule
+      - StepTierCap
+      - StepTokenPermission
+      - StepGlobalGate
+      - StepServerState
+      - StepToolApproval
+    profile.ExplainVerdict:
+      type: string
+      x-enum-varnames:
+      - ExplainVerdictAllowed
+      - ExplainVerdictBlocked
+      - ExplainVerdictHidden
+    profile.FixAction:
+      type: string
+      x-enum-varnames:
+      - FixAllowInProfile
+      - FixClassifyInProfile
+      - FixAddServerToProfile
+      - FixMoveClient
+      - FixEditToken
+      - FixEnableServer
+      - FixApproveTool
+      - FixChangeSetting
+      - FixReconnectClient
+    profile.WarningCode:
+      type: string
+      x-enum-varnames:
+      - WarningAnonymousDeniedByBindingGuard
+      - WarningClientHoldsAdminKey
+      - WarningClientCredentialExpiring
+      - WarningClientRotationPending
+      - WarningProfileMissing
+      - WarningClientTokenNameConflict
+    profile.WarningSeverity:
+      type: string
+      x-enum-varnames:
+      - WarningSeverityWarn
+      - WarningSeverityInfo
+    runtime.BindingRef:
+      properties:
+        client_id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+        token_name:
+          type: string
+      type: object
+    runtime.EffectiveCounts:
+      properties:
+        by_reason:
+          additionalProperties:
+            type: integer
+          type: object
+        callable:
+          type: integer
+        hidden:
+          type: integer
+        visible:
+          type: integer
+      type: object
+    runtime.EffectiveTool:
+      properties:
+        access:
+          $ref: '#/components/schemas/runtime.ToolAccessView'
+        classification_stale:
+          type: boolean
+        intrinsic_tier:
+          type: string
+        profile_tier:
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    runtime.ExplainProfileView:
+      properties:
+        name:
+          type: string
+        source:
+          type: string
+      type: object
+    runtime.ExplainStepView:
+      properties:
+        detail:
+          type: string
+        status:
+          $ref: '#/components/schemas/profile.AccessStepStatus'
+        step:
+          $ref: '#/components/schemas/profile.ExplainStep'
+      type: object
+    runtime.ExplainSubjectView:
+      properties:
+        kind:
+          $ref: '#/components/schemas/profile.AccessSubjectKind'
+        name:
+          type: string
+      type: object
+    runtime.Fix:
+      properties:
+        action:
+          $ref: '#/components/schemas/profile.FixAction'
+        label:
+          type: string
+        profile:
+          description: |-
+            Profile is set for move_client only: the destination profile slug the fix
+            moves the client to. Target stays the client id (UIs navigate by it) and
+            Label carries the title, so neither can name the slug.
+          type: string
+        step:
+          type: string
+          x-enum-varnames:
+          - StepCredential
+          - StepProfile
+          - StepServerInScope
+          - StepToolRule
+          - StepTierCap
+          - StepTokenPermission
+          - StepGlobalGate
+          - StepServerState
+          - StepToolApproval
+        target:
+          type: string
+      type: object
+    runtime.GuardFix:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
+      type: object
+    runtime.MovedRefs:
+      properties:
+        clients:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.ProfileView:
+      properties:
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        code_execution:
+          type: boolean
+        description:
+          type: string
+        effective_code_execution:
+          type: boolean
+        effective_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        effective_unannotated:
+          type: string
+        is_legacy:
+          type: boolean
+        management_tools:
+          type: boolean
+        max_tier:
+          type: string
+        name:
+          type: string
+        servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          type: string
+        tool_count:
+          description: |-
+            ToolCount is the v2 field: indexed tools on the effective servers.
+            Deprecated: use tool_counts.
+          type: integer
+        tool_counts:
+          $ref: '#/components/schemas/runtime.ToolCounts'
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          type: string
+        used_by:
+          $ref: '#/components/schemas/runtime.UsedBy'
+      type: object
+    runtime.ToolAccessView:
+      properties:
+        callable:
+          type: boolean
+        reason:
+          type: string
+        visible:
+          type: boolean
+      type: object
+    runtime.ToolCounts:
+      properties:
+        destructive:
+          type: integer
+        read:
+          type: integer
+        unannotated_hidden:
+          type: integer
+        write:
+          type: integer
+      type: object
+    runtime.TryHidden:
+      properties:
+        reason:
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    runtime.UsedBy:
+      properties:
+        anonymous_profile:
+          type: boolean
+        clients:
+          items:
+            $ref: '#/components/schemas/runtime.UsedByClient'
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.UsedByClient:
+      properties:
+        id:
+          type: string
+        mode:
+          type: string
+      type: object
+    runtime.WarningAction:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
+      type: object
     secureenv.EnvConfig:
       description: Environment configuration for secure variable filtering
       properties:
@@ -3658,6 +5061,80 @@ components:
           type: boolean
         inherit_system_safe:
           type: boolean
+      type: object
+    storage.ClientCredentialObservation:
+      properties:
+        at:
+          type: string
+        state:
+          type: string
+      type: object
+    storage.OnboardingState:
+      description: |-
+        State is the persisted wizard engagement record. Engaged is true once
+        the wizard was shown and the user completed or skipped it.
+      properties:
+        client_connected_at:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientConnectedAt records, per client id from the fixed connect client
+            registry (internal/connect.GetAllClients — never user input), the last
+            time a connect write succeeded for that client (Spec 109-b FR-042).
+            Written by the connect success path through UpdateOnboardingState so a
+            concurrent onboarding/mark write can never drop it. Consumed by the
+            Verify step / presence layer to tell "connected, never seen" apart from
+            "connected seconds ago, hasn't reconnected yet".
+          type: object
+        client_credential_observed:
+          additionalProperties:
+            $ref: '#/components/schemas/storage.ClientCredentialObservation'
+          description: |-
+            ClientCredentialObserved records, per client id, the LAST credential
+            classification an on-demand read produced (Spec 108-f FR-025, F11): what
+            the client's config held (client | admin_key | none | revoked | expired)
+            and when it was read. The stat-only GET /clients listing never reads a
+            config (Spec 075: no macOS App-Data prompt from a list), so this is how
+            it still reports a client that holds the admin key across restarts. It is
+            written only when the classification CHANGES, by every on-demand read
+            (GET /clients/{id}, GET /connect/{client}, the admin-key upgrade preview,
+            a connect write) and deleted on disconnect. Additive: an older binary
+            ignores it, and a record without it reads as "unknown".
+          type: object
+        client_disconnected_at:
+          additionalProperties:
+            type: string
+          type: object
+        client_last_seen:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientLastSeen records the latest MCP initialize for a recognised client
+            alias. It is intentionally kept with onboarding state: presence is a
+            local UI concern and must still work when telemetry is disabled.
+          type: object
+        connect_step_status:
+          description: |-
+            ConnectStepStatus is one of: "", "completed", "completed_external",
+            "skipped" (Spec 080 FR-001). "completed_external" records a dismissal
+            where the connect step was untouched but the install was already
+            connected outside the wizard (CLI, ConnectModal, manual config).
+          type: string
+        engaged:
+          description: |-
+            Engaged is true once the wizard was shown and the user completed or
+            skipped it. Once true, the wizard does not auto-show again, even if
+            state regresses (e.g. user disconnects all clients).
+          type: boolean
+        engaged_at:
+          description: EngagedAt is the timestamp of completion or explicit skip.
+          type: string
+        first_shown_at:
+          description: FirstShownAt is the timestamp of first wizard render.
+          type: string
+        server_step_status:
+          description: 'ServerStepStatus is one of: "", "completed", "skipped".'
+          type: string
       type: object
     telemetry.FeedbackContext:
       properties:
@@ -3722,6 +5199,92 @@ info:
   version: "1.0"
 openapi: 3.1.0
 paths:
+  /api/v1/access/explain:
+    get:
+      description: For one subject (exactly one of client=<id>, token=<name>, profile=<name>
+        or anonymous=true) and one upstream tool (server:tool), returns the ordered
+        chain of gates a real call would meet - credential, profile, server_in_scope,
+        tool_rule, tier_cap, token_permission, global_gate, server_state, tool_approval
+        - the overall verdict (allowed, blocked, hidden), the first failing step and
+        the fixes for it in preference order. The chain is the one every discovery
+        and dispatch path walks, so `allowed` equals what a real call does. Built-in
+        management tools are not explained (400). A client credential is explained
+        with client=, never token=. Administrators only.
+      parameters:
+      - description: Upstream tool as server:tool
+        in: query
+        name: tool
+        required: true
+        schema:
+          type: string
+      - description: Client id
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Regular agent token name
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Profile name
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Explain an anonymous (credential-less) caller
+        in: query
+        name: anonymous
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The explanation
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not exactly one subject, a built-in tool, or token=client-<id>
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client / token / profile not found
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Explain why a tool is or is not reachable
+      tags:
+      - access
   /api/v1/activity:
     get:
       description: Returns paginated list of activity records with optional filtering
@@ -3742,6 +5305,7 @@ paths:
           - config_change
           - preflight
           - prompt_get
+          - profile_change
           type: string
       - description: Filter by server name
         in: query
@@ -3820,9 +5384,31 @@ paths:
           - medium
           - low
           type: string
-      - description: Filter by agent token name (Spec 028)
+      - description: Alias of token (Spec 028)
         in: query
         name: agent
+        schema:
+          type: string
+      - description: Filter by the token in effect for the call; - selects records
+          with no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by the profile in effect for the call; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by client id; - selects records with no client (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the client's self-reported name (advisory; Spec 108)
+        in: query
+        name: client_name
         schema:
           type: string
       - description: Filter by auth type (Spec 028)
@@ -4015,6 +5601,33 @@ paths:
         name: parent_id
         schema:
           type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Filter by the token in effect for the call; - selects records
+          with no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by the profile in effect for the call; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by client id; - selects records with no client (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the client's self-reported name (advisory; Spec 108)
+        in: query
+        name: client_name
+        schema:
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time
@@ -4053,6 +5666,12 @@ paths:
               schema:
                 type: string
           description: Streamed activity records
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Bad Request
         "401":
           content:
             application/json:
@@ -4083,6 +5702,29 @@ paths:
       - description: 'Group by: server, tool (optional)'
         in: query
         name: group_by
+        schema:
+          type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Count only records made under this token; - selects records with
+          no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Count only records made under this profile; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Count only records made by this client id; - selects records
+          with no client (Spec 108)
+        in: query
+        name: client
         schema:
           type: string
       requestBody:
@@ -4185,6 +5827,29 @@ paths:
           - error_rate
           - p95
           type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Restrict to calls made under this token; - selects records with
+          no token. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Restrict to calls made under this profile; - selects records
+          with no profile. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Restrict to calls made by this client id; - selects records with
+          no client. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
       requestBody:
         content:
           application/json:
@@ -4243,6 +5908,612 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/attention:
+    get:
+      description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
+        reads from it. Filtered per caller: an administrator sees every item; a scoped
+        caller (agent token, or a non-admin server-edition OAuth user session) sees
+        only server items whose server it may enumerate; every other subject type
+        (client, setting) is administrator-only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.attentionResponse'
+          description: The needs-attention list
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the needs-attention list
+      tags:
+      - attention
+  /api/v1/catalog/search:
+    get:
+      description: Fans out to every enabled catalog source (registry) in parallel,
+        merges, de-duplicates and ranks the results (FR-060/061). An empty q returns
+        official + popular sections instead of a flat list. Open to any authenticated
+        caller — added is the only field filtered per caller scope (FR-007).
+      parameters:
+      - description: Free-text search
+        in: query
+        name: q
+        schema:
+          type: string
+      - description: Narrow to one catalog source id
+        in: query
+        name: source
+        schema:
+          type: string
+      - description: 'Not supported: catalog entries carry no tags; a non-empty value
+          returns 400'
+        in: query
+        name: tag
+        schema:
+          type: string
+      - description: Max results (default 20, max 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: tag filtering is not supported
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: configured servers could not be listed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Search the server catalog across every enabled source
+      tags:
+      - catalog
+  /api/v1/clients:
+    get:
+      description: 'Lists every client row (supported, other and custom) with its
+        presence, its credential and its profile binding, plus response-level warnings.
+        The list is content-read-free (Spec 075): credential_state comes from the
+        token store, else the last on-demand observation (credential_checked_at),
+        else unknown. It runs only the time-based half of the rotation reconciler.
+        The profile and client filters match the CURRENT binding and are applied AFTER
+        warnings are computed over the full set.'
+      parameters:
+      - description: Rows whose active credential is bound to this profile; - = bound
+          to All servers
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Exact client id
+        in: query
+        name: client
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Client rows, routing and warnings
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List clients
+      tags:
+      - clients
+    post:
+      description: Creates a per-client credential for a client that is NOT in the
+        connect registry (a script, a CI job, an editor without a connect adapter).
+        The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that
+        carries it in the X-API-Key header. The id follows the client-id rule (lower-case
+        letters, digits, '-' or '_', at most 56 characters) and must not be a supported
+        client's id. A named profile binds the credential locked unless mode says
+        otherwise. Refused with 409 binding_bypassable_without_auth when the binding
+        would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token
+        when a regular token holds client-<id>. Writes one assign record. Personal
+        edition only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.CreateClientRequest'
+        description: id (required), optional display_name, profile, mode and expires_in
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The new client row, its credential (once) and a snippet
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: binding_bypassable_without_auth, or conflicting_token (ClientCredentialConflictResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add a custom client
+      tags:
+      - clients
+  /api/v1/clients/{client}:
+    delete:
+      description: 'Revokes the client''s credential; it stops authenticating at once.
+        With disconnect=true a SUPPORTED client''s mcpproxy entry is removed from
+        its config FIRST, but the credential is revoked either way: revocation never
+        waits for a config write, so a failed write (for example a macOS App-Data
+        denial) leaves the client cut off and is reported as disconnected:false with
+        disconnect_error. A client with no credential record is 409 no_client_credential.
+        disconnect=true on a custom client is ignored. Writes one forget record naming
+        the revoked token. The FR-008a guard is not involved: revoking only removes
+        a binding.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      - description: Also remove the entry from the client's config (supported clients)
+        in: query
+        name: disconnect
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Revoked token name and what happened to the config entry
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: no_client_credential
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Forget a client (revoke its credential)
+      tags:
+      - clients
+    get:
+      description: 'Returns one client row with its sessions (newest 20, each with
+        its latest effective profile). This is the only read that may open the client''s
+        config file: it runs the full rotation reconciler first, classifies the credential
+        the config holds and records the observation. No scope filter is honoured
+        on this route.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Client row
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client not found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one client
+      tags:
+      - clients
+  /api/v1/clients/{client}/binding:
+    put:
+      description: |-
+        Changes the profile binding (and optionally the locked/switchable mode) of a
+        client that holds an active client credential. One service operation shared by
+        every surface: it updates the credential in the token store, clears the stored
+        set_profile selection of every live session of that credential, sends
+        notifications/tools/list_changed to each, emits client.binding_changed and writes
+        one profile_change activity record. It never touches the client's config file.
+        A client without an active client credential (none, admin key, revoked or expired)
+        is refused with 409 no_client_credential and nothing is minted or written. A
+        reassignment that would leave the binding bypassable while require_mcp_auth is off
+        is refused with 409 binding_bypassable_without_auth (FR-008a). Personal edition only.
+      parameters:
+      - description: Client id (lower-case letters, digits, '-' or '_', at most 56
+          characters)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.PutClientBindingRequest'
+        description: profile (required; empty = All servers) and optional mode (locked|switchable)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client row after the change, with its warnings
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: no_client_credential, connect_in_progress (a connect of this
+            client is mid-write), or binding_bypassable_without_auth with bindings
+            and fixes
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Reassign a client's profile and/or mode
+      tags:
+      - clients
+  /api/v1/clients/{client}/rotate:
+    post:
+      description: 'Replaces a client''s secret without ever invalidating the old
+        one mid-flight (FR-021a). A SUPPORTED client is rewritten through connect:
+        staged rotation, binding kept, finalized when the config write succeeds, rolled
+        back (the old secret keeps working) when it fails; a preview''s precondition_token
+        binds the call, a mismatch is the connect 409 precondition_failed. A CUSTOM
+        client gets a new secret returned ONCE with a snippet; both secrets authenticate
+        until POST /clients/{client}/rotate/finalize or 24 hours. A client with no
+        active credential is 409 no_client_credential. The FR-008a guard is not involved:
+        a rotation never changes a binding''s reach. Writes one rotate record when
+        it finalizes.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.RotateClientRequest'
+        description: Optional precondition_token of a connect preview
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client row and the rotation state
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required (or macOS App-Data block)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
+          description: no_client_credential, precondition_failed, connect_in_progress
+            (another connect of this client is mid-write), or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Rotate a client's credential
+      tags:
+      - clients
+  /api/v1/clients/{client}/rotate/finalize:
+    post:
+      description: 'Promotes a client''s pending secret: the old secret stops authenticating.
+        Idempotent: with no rotation in progress it is a no-op success. A client with
+        no client credential is 409 no_client_credential. Writes one rotate record
+        when it promotes.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client row; rotation.state is finalized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: no_client_credential, or connect_in_progress (a connect of
+            this client is mid-write)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Finalize a staged rotation
+      tags:
+      - clients
+  /api/v1/clients/bulk-assign:
+    post:
+      description: 'Moves every client credential bound to from_profile ("" = All
+        servers) onto to_profile ("" = All servers). The guard and the credential
+        precondition apply PER CLIENT: a refused client is reported in skipped[] with
+        the code the single operation returns, the others move and each writes its
+        own assign record and emits client.binding_changed. Personal edition only.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.BulkAssignRequest'
+        description: from_profile and to_profile (both required; empty = All servers)
+          and optional mode
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Moved client ids and the clients that were skipped
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Move every client of one profile to another
+      tags:
+      - clients
+  /api/v1/clients/upgrade-admin-key-holders:
+    post:
+      description: 'Without apply: classifies every supported client whose config
+        still holds the instance admin API key (an on-demand read per client) and
+        returns preview[] (display path, what would change, the masked credential
+        mcp_cli_••••, the binding and a precondition_token per client), a combined
+        precondition_token, and guard when the whole request would be refused by FR-008a;
+        next_step is rotate_admin_api_key when nothing holds the key. Nothing is written
+        or minted. With apply=true: recomputes the preview, refuses with 409 precondition_failed
+        when a sent precondition_token no longer matches, runs the FR-008a guard over
+        the WHOLE request (409 binding_bypassable_without_auth, nothing minted, no
+        file written), then connects each client with force bound to its own token;
+        one client''s failure does not stop the others. Each mint writes its own assign
+        record. The guard only applies when a named profile is given. Personal edition
+        only.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.UpgradeAdminKeyHoldersRequest'
+        description: Optional profile and mode for every upgraded client; apply and
+          precondition_token
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: UpgradePreview (no apply) or UpgradeResult (apply)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: precondition_failed, or binding_bypassable_without_auth
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Upgrade every client that holds the admin API key
+      tags:
+      - clients
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.
@@ -4353,6 +6624,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: 'binding_bypassable_without_auth: the patch would let a client
+            bound to a named profile escape it while require_mcp_auth is off (FR-008a);
+            nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -4403,6 +6690,22 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: 'binding_bypassable_without_auth: the write would let a client
+            bound to a named profile escape it while require_mcp_auth is off (FR-008a);
+            nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -4456,6 +6759,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: binding_bypassable_without_auth (FR-008a); nothing was written
         "500":
           content:
             application/json:
@@ -4516,7 +6825,9 @@ paths:
       description: |-
         Returns the connection status for all known MCP client applications.
         Each entry indicates whether the client config file exists and whether
-        MCPProxy is currently registered in it.
+        MCPProxy is currently registered in it. This stat-only listing never reads
+        a client config (Spec 075), so a client whose config exists reports
+        credential_state "unknown"; GET /connect/{client} resolves it.
       responses:
         "200":
           content:
@@ -4524,6 +6835,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: List of ClientStatus objects
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -4537,7 +6854,7 @@ paths:
         Creates a backup of the existing config before modifying.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4593,9 +6910,13 @@ paths:
         on macOS it is the sole place an App-Data privacy prompt may legitimately
         appear (scoped to this user action). Resolves access_state to
         accessible|absent|denied|malformed and populates remediation when denied.
+        For a connected client it also resolves credential_state (Spec 108 FR-025):
+        client (an active per-client credential), admin_key (the instance admin API
+        key), none, revoked (a rotated-away or revoked credential) or expired. The
+        credential value is classified and never echoed.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4608,6 +6929,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: ClientStatus
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
         "404":
           content:
             application/json:
@@ -4636,9 +6963,20 @@ paths:
         action discriminates the two conflict kinds: "precondition_failed" (stale
         preview — re-preview, do not retry) vs "already_exists" (entry present — pass
         force=true). force=true never rescues a stale token.
+
+        Spec 108 FR-024: the entry carries a per-client mcp_cli_ credential bound to the
+        requested profile (default: All servers, switchable; a reconnect keeps the client's
+        existing binding unless a profile is given), never the instance admin API key.
+        Reconnecting over an active credential is a staged rotation: the old secret keeps
+        working until the config write succeeds. keyless=true writes no credential and is
+        only possible while require_mcp_auth is off (400 otherwise, and with a profile).
+        A write that would let the client escape its profile by omitting its credential
+        while require_mcp_auth is off is refused with 409 binding_bypassable_without_auth
+        (nothing minted or written); a token named client-<id> held by a regular agent
+        token is refused with 409 conflicting_token.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4649,20 +6987,23 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/httpapi.ConnectRequest'
-        description: Optional connection parameters (server_name, force, precondition_token)
+        description: Optional connection parameters (server_name, force, precondition_token,
+          profile, mode, keyless)
       responses:
         "200":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
-          description: ConnectResult
+          description: ConnectResult (credential is the masked mcp_cli_ value, with
+            token_name, profile, mode, keyless and rotation)
         "400":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Bad request
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Bad request; field names the offending input (profile, mode,
+            keyless)
         "403":
           content:
             application/json:
@@ -4681,13 +7022,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
           description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
-            (preview is stale; re-preview)'
+            (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse);
+            or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress
+            (another connect of this client is mid-write) or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)'
         "503":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Service unavailable
+          description: Service unavailable (or no credential store wired while require_mcp_auth
+            is on)
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -4699,8 +7045,10 @@ paths:
       description: |-
         Returns the exact entry a subsequent connect would add to the client's
         config — target path, server key, entry name, and entry contents — WITHOUT
-        modifying the file or creating a backup (Spec 078 US1). The embedded API key
-        is masked in the payload; contains_api_key flags that a credential is written.
+        modifying the file or creating a backup (Spec 078 US1). The per-client credential
+        is masked in the payload (credential, always starting mcp_cli_; contains_api_key is
+        always false since connect never writes the admin API key); profile, mode and
+        keyless echo the requested intent.
         entry_exists distinguishes a create from an overwrite of a same-named entry.
         Reads the config on demand to classify create-vs-overwrite, so on macOS this
         may raise an App-Data privacy prompt; a denial returns 403 + remediation.
@@ -4714,7 +7062,7 @@ paths:
         treat its presence as "Connect unavailable").
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4726,6 +7074,26 @@ paths:
         name: server_name
         schema:
           type: string
+      - description: Profile the client credential would bind to (empty = All servers);
+          mirror POST connect
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: locked|switchable; mirror POST connect
+        in: query
+        name: mode
+        schema:
+          enum:
+          - locked
+          - switchable
+          type: string
+      - description: Preview a credential-less entry (only while require_mcp_auth
+          is off)
+        in: query
+        name: keyless
+        schema:
+          type: boolean
       responses:
         "200":
           content:
@@ -4733,12 +7101,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: ConnectPreview
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid intent (field names the input; keyless with auth on
+            or with a profile)
         "403":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Permission denied (macOS App-Data block)
+          description: Administrator credentials required or access denied by macOS
+            App Data
         "404":
           content:
             application/json:
@@ -4769,10 +7145,12 @@ paths:
         Refuses with 409 when the config changed since the connect (undo never
         clobbers later edits; use DELETE /connect/{client} for a surgical entry
         removal instead). Takes its own safety backup first; its path is returned
-        as backup_path in the result.
+        as backup_path in the result. Undo is "as if the connect never happened": a
+        client credential the connect minted or rotated is revoked unless the restored
+        config still holds it, and the result names it in credential_revoked.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -5047,7 +7425,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Updated OnboardingStateResponse
         "400":
           content:
@@ -5084,7 +7473,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OnboardingStateResponse
         "403":
           content:
@@ -5166,15 +7566,29 @@ paths:
       - tools
   /api/v1/profiles:
     get:
-      description: List all configured profiles with their effective servers and indexed
-        tool count (Profiles v2). A profile scopes tool discovery and calls to a named
-        subset of upstream servers.
+      description: 'Lists every profile as a ProfileView: the config fields as stored,
+        the derived effective values, visible tool counts by tier, 24 h calls and
+        blocked calls, and (administrators only) used_by and the anonymous_profile.
+        A caller that is not an administrator sees only the profiles its entitlement
+        reaches, with servers, rules and switchable_to narrowed to what it may see;
+        an unreachable profile is omitted, never shown empty.'
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.SuccessResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Profile list
         "500":
           content:
@@ -5188,11 +7602,407 @@ paths:
       summary: List configured profiles
       tags:
       - profiles
+    post:
+      description: Adds a profile. The body is a ProfileConfig. A name that already
+        exists is 409 profile_exists; `active` and `try` are reserved by the REST
+        API; a fatal validation rule is 400 with the offending field and the unchanged
+        FR-007 text. A write that would let a client bound to a named profile escape
+        it while require_mcp_auth is off is refused 409 binding_bypassable_without_auth
+        (FR-008a) and nothing is written. Writes one profile_change record.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.ProfileConfig'
+        description: The profile
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Created, with the validator's warnings
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_exists, or binding_bypassable_without_auth (BindingGuardResponse)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Create a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}:
+    delete:
+      description: Deletes a profile. 409 profile_in_use (with used_by) while clients
+        or tokens point at it, unless reassign_to names another existing profile (every
+        pin moves there) or force is set (pins are left dangling, which the resolver
+        treats as deny-all). 409 profile_is_anonymous_profile whenever it is the anonymous_profile
+        and reassign_to is absent, even with force. Both paths remove the name from
+        every switchable_to. Guarded by FR-008a. Writes one `delete` record.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Another existing profile that takes over the pins
+        in: query
+        name: reassign_to
+        schema:
+          type: string
+      - description: Delete although in use, leaving pins dangling
+        in: query
+        name: force
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Deleted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: reassign_to does not name another existing profile
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_in_use, profile_is_anonymous_profile, or binding_bypassable_without_auth
+            (BindingGuardResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Delete a profile
+      tags:
+      - profiles
+    get:
+      description: Returns the ProfileView of the named profile. A caller that is
+        not an administrator gets the same 404 for an unreachable profile as for an
+        unknown one.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The profile
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one profile
+      tags:
+      - profiles
+    put:
+      description: Replaces the named profile with the body (a ProfileConfig whose
+        name, when sent non-empty, must equal the path; 409 name_mismatch otherwise
+        - a rename has its own route; an omitted or empty name takes the path's).
+        A write whose only change is tools.classify is recorded as `classify`. Guarded
+        by FR-008a like a create.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.ProfileConfig'
+        description: The profile
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Updated, with the validator's warnings
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: name_mismatch, or binding_bypassable_without_auth (BindingGuardResponse)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Replace a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}/effective-tools:
+    get:
+      description: 'One row per catalog tool with the verdict of the access chain
+        (the same rendering GET /tools?profile= uses): server, tool, intrinsic_tier,
+        profile_tier, access{visible, callable, reason} and classification_stale.
+        With client=<id> the client''s credential is evaluated UNDER this profile
+        ("what would Cursor get here"). An administrator gets every row plus counts.callable,
+        counts.by_reason and stale_classifications; every other caller gets only visible
+        rows and counts{visible, hidden}, and client= and reason= are refused 403.
+        An unreachable profile answers exactly like an unknown one.'
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Evaluate this client's credential under the profile (administrators
+          only)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Keep only this server's rows
+        in: query
+        name: server
+        schema:
+          type: string
+      - description: Keep only rows with this access reason (administrators only)
+        in: query
+        name: reason
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Effective tools
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: operation requires admin access
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found / client not found
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Effective tools of a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}/rename:
+    post:
+      description: Renames a profile and moves every reference to it - token pins,
+        client bindings, other profiles' switchable_to and the anonymous_profile -
+        in one write (D19). Tokens move first, so a failure part-way never widens
+        a scope. Guarded by FR-008a. Writes one `rename` record.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.RenameProfileRequest'
+        description: new_name
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Renamed; moved lists the clients and tokens that followed
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_exists, or binding_bypassable_without_auth (BindingGuardResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Rename a profile
+      tags:
+      - profiles
   /api/v1/profiles/active:
     get:
-      description: 'Get the server-level default active profile used by UI surfaces
-        (Web UI / tray). Empty string means "all servers". Note: within a live MCP
-        session, the set_profile tool selection takes precedence over this default.'
+      description: 'Deprecated (Spec 108 FR-039; sends a Deprecation header, successor
+        GET /api/v1/profiles). Get the server-level default active profile used by
+        UI surfaces (Web UI / tray). Empty string means "all servers". Note: within
+        a live MCP session, the set_profile tool selection takes precedence over this
+        default.'
       responses:
         "200":
           content:
@@ -5207,9 +8017,10 @@ paths:
       tags:
       - profiles
     put:
-      description: Set the server-level default active profile for UI surfaces. The
-        slug must match a configured profile; pass an empty string to clear. This
-        does not affect live MCP sessions, which use the set_profile tool.
+      description: Deprecated (Spec 108 FR-039; sends a Deprecation header, successor
+        GET /api/v1/profiles). Set the server-level default active profile for UI
+        surfaces. The slug must match a configured profile; pass an empty string to
+        clear. This does not affect live MCP sessions, which use the set_profile tool.
       requestBody:
         content:
           application/json:
@@ -5246,6 +8057,64 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Set the default active profile
+      tags:
+      - profiles
+  /api/v1/profiles/try:
+    post:
+      description: Evaluates a DRAFT profile against a query exactly as retrieve_tools
+        would (policy is applied before the limit) and returns the hits plus what
+        the draft hides (hidden_by_profile and up to 100 {server, tool, reason}).
+        The draft is validated as if it replaced the same-named profile, or was appended
+        under a placeholder name when it has none. Nothing is persisted, no record
+        is written, no event is published and the FR-008a guard does not run. Administrators
+        only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.TryProfileRequest'
+        description: draft profile, query and optional limit (default 10, max 50)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Search result under the draft
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid draft; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Try a draft profile
       tags:
       - profiles
   /api/v1/registries:
@@ -5582,6 +8451,29 @@ paths:
       summary: Add an upstream server from a registry reference
       tags:
       - registries
+  /api/v1/review:
+    get:
+      description: Returns one row per quarantined server or trusted server with pending
+        or changed tools. Scoped callers see only servers they may enumerate.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Review queue
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to load review queue
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the server review queue
+      tags:
+      - review
   /api/v1/routing:
     get:
       description: |-
@@ -5709,6 +8601,13 @@ paths:
     get:
       description: Get a list of all configured upstream MCP servers with their connection
         status and statistics
+      parameters:
+      - description: Restrict to the profile's effective servers; tool_count becomes
+          the number of that server's tools visible under the profile (Spec 108 FR-032)
+        in: query
+        name: profile
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -5716,6 +8615,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GetServersResponse'
           description: Server list with statistics
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (client/token), or '-' on a server
+            filter
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown or unreachable profile
         "500":
           content:
             application/json:
@@ -6372,6 +9284,85 @@ paths:
       summary: Restart an upstream server
       tags:
       - servers
+  /api/v1/servers/{id}/review:
+    get:
+      description: Returns redacted server configuration, captured tool definitions,
+        annotations, scan verdicts, and diffs. Scoped callers receive the same 404
+        for invisible and missing servers.
+      parameters:
+      - description: Server name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server review
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to load server review
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get review details for a server
+      tags:
+      - review
+  /api/v1/servers/{id}/security/approve:
+    post:
+      description: Saves the integrity baseline and optionally blocks selected tools
+        atomically before unquarantining the server.
+      parameters:
+      - description: Server name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.securityApproveRequest'
+        description: Force approval and tool names to keep disabled
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server approved
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request or unknown tool block target
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Dangerous scan verdict requires force or approval failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Approve a server after security review
+      tags:
+      - security
   /api/v1/servers/{id}/tool-calls:
     get:
       description: Retrieves tool call history filtered by upstream server ID. Returns
@@ -6799,7 +9790,9 @@ paths:
   /api/v1/servers/import/path:
     post:
       description: Import MCP server configurations by reading a file from the server's
-        filesystem
+        filesystem. A preview (preview=true) of a file with no MCP servers (empty,
+        {}, or no/empty server map) answers 200 with an empty imported list; an apply
+        of such a file and a malformed file still answer 400.
       parameters:
       - description: If true, return preview without importing
         in: query
@@ -6948,6 +9941,29 @@ paths:
           - active
           - closed
           type: string
+      - description: Filter by the session's latest effective profile; - selects sessions
+          with none (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by the client id the session's credential is bound to;
+          - selects sessions with none (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the token name the session initialized with; - selects
+          sessions with none (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Alias of token
+        in: query
+        name: agent
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -6960,7 +9976,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Invalid status filter
+          description: Invalid status filter, token and agent naming different tokens,
+            or client_name (not supported here; filter by client)
         "401":
           content:
             application/json:
@@ -7076,8 +10093,9 @@ paths:
       - stats
   /api/v1/status:
     get:
-      description: Get comprehensive server status including running state, listen
-        address, upstream statistics, and timestamp
+      description: |-
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
           content:
@@ -7336,6 +10354,21 @@ paths:
         server (including disabled servers and disabled/config-denied tools), enriched
         with approval state and 30-day usage. Backs the global Tools page and the
         CLI global `tools list` (spec 050, issue #437).'
+      parameters:
+      - description: 'View-as (administrator only): the tools this client would see,
+          each with its access verdict {visible, callable, reason} and profile_tier
+          (Spec 108 FR-032)'
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: 'View-as: the tools this profile would expose. An administrator
+          gets every row with a verdict; any other caller gets only the visible rows
+          plus counts {visible, hidden} (Spec 108 FR-032)'
+        in: query
+        name: profile
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -7343,6 +10376,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GlobalToolsResponse'
           description: All tools across all servers
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (token), both client and profile,
+            or '-' on a tools filter
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client= requires administrator credentials
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown or unreachable client / profile
         "500":
           content:
             application/json:

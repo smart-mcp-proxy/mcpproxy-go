@@ -113,6 +113,40 @@ type OnboardingState struct {
 
 	// ServerStepStatus is one of: "", "completed", "skipped".
 	ServerStepStatus string `json:"server_step_status,omitempty"`
+
+	// ClientConnectedAt records, per client id from the fixed connect client
+	// registry (internal/connect.GetAllClients — never user input), the last
+	// time a connect write succeeded for that client (Spec 109-b FR-042).
+	// Written by the connect success path through UpdateOnboardingState so a
+	// concurrent onboarding/mark write can never drop it. Consumed by the
+	// Verify step / presence layer to tell "connected, never seen" apart from
+	// "connected seconds ago, hasn't reconnected yet".
+	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
+
+	// ClientLastSeen records the latest MCP initialize for a recognised client
+	// alias. It is intentionally kept with onboarding state: presence is a
+	// local UI concern and must still work when telemetry is disabled.
+	ClientLastSeen       map[string]time.Time `json:"client_last_seen,omitempty"`
+	ClientDisconnectedAt map[string]time.Time `json:"client_disconnected_at,omitempty"`
+
+	// ClientCredentialObserved records, per client id, the LAST credential
+	// classification an on-demand read produced (Spec 108-f FR-025, F11): what
+	// the client's config held (client | admin_key | none | revoked | expired)
+	// and when it was read. The stat-only GET /clients listing never reads a
+	// config (Spec 075: no macOS App-Data prompt from a list), so this is how
+	// it still reports a client that holds the admin key across restarts. It is
+	// written only when the classification CHANGES, by every on-demand read
+	// (GET /clients/{id}, GET /connect/{client}, the admin-key upgrade preview,
+	// a connect write) and deleted on disconnect. Additive: an older binary
+	// ignores it, and a record without it reads as "unknown".
+	ClientCredentialObserved map[string]ClientCredentialObservation `json:"client_credential_observed,omitempty"`
+}
+
+// ClientCredentialObservation is one on-demand credential classification of a
+// client's config (see OnboardingState.ClientCredentialObserved).
+type ClientCredentialObservation struct {
+	State string    `json:"state"`
+	At    time.Time `json:"at"`
 }
 
 // Meta keys
@@ -219,6 +253,11 @@ type UpstreamRecord struct {
 	// would be wiped on the next save/restart without it. Back-compat by
 	// omission: records written before this field existed decode with nil.
 	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
+	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
+	// client header NAMES to forward on tools/call. Names only, never values.
+	// Persisted here because SaveConfiguration rebuilds the JSON server list
+	// from these records: a field absent here is wiped on the next mutation.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
@@ -267,21 +306,34 @@ const MaxToolHeldSignals = 16
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName           string    `json:"server_name"`
-	ToolName             string    `json:"tool_name"`
-	ApprovedHash         string    `json:"approved_hash"`
-	CurrentHash          string    `json:"current_hash"`
-	HashSchemaVersion    uint64    `json:"hash_schema_version,omitempty"`
-	Status               string    `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt           time.Time `json:"approved_at"`
-	ApprovedBy           string    `json:"approved_by"`
-	PreviousDescription  string    `json:"previous_description,omitempty"`
-	CurrentDescription   string    `json:"current_description,omitempty"`
-	PreviousSchema       string    `json:"previous_schema,omitempty"`
-	CurrentSchema        string    `json:"current_schema,omitempty"`
-	PreviousOutputSchema string    `json:"previous_output_schema,omitempty"`
-	CurrentOutputSchema  string    `json:"current_output_schema,omitempty"`
-	Disabled             bool      `json:"disabled,omitempty"`
+	ServerName           string                  `json:"server_name"`
+	ToolName             string                  `json:"tool_name"`
+	ApprovedHash         string                  `json:"approved_hash"`
+	CurrentHash          string                  `json:"current_hash"`
+	HashSchemaVersion    uint64                  `json:"hash_schema_version,omitempty"`
+	Status               string                  `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt           time.Time               `json:"approved_at"`
+	ApprovedBy           string                  `json:"approved_by"`
+	PreviousDescription  string                  `json:"previous_description,omitempty"`
+	CurrentDescription   string                  `json:"current_description,omitempty"`
+	PreviousAnnotations  *config.ToolAnnotations `json:"previous_annotations,omitempty"`
+	CurrentAnnotations   *config.ToolAnnotations `json:"current_annotations,omitempty"`
+	PreviousSchema       string                  `json:"previous_schema,omitempty"`
+	CurrentSchema        string                  `json:"current_schema,omitempty"`
+	PreviousOutputSchema string                  `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema  string                  `json:"current_output_schema,omitempty"`
+	Disabled             bool                    `json:"disabled,omitempty"`
+
+	// DefinitionChangedAt is when the stored CurrentDescription,
+	// CurrentSchema or CurrentOutputSchema last differed from the prior
+	// record. BoltDB.SaveToolApproval stamps it inside its write transaction
+	// (one seam for every writer) and carries the prior value otherwise. A
+	// brand-new record stays zero: first capture is not a change, so a scan
+	// that preceded capture is not made stale by it. Annotations are
+	// excluded, like the approval hash. It is never part of the hash. The
+	// review composer compares it with the scan start to decide whether a
+	// scan covers the current definition. Additive and omitted when zero.
+	DefinitionChangedAt time.Time `json:"definition_changed_at,omitzero"`
 
 	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
 	// the trust_mode: scan gate hold this tool for human review (spec 086

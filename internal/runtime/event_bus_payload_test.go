@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
@@ -21,6 +22,11 @@ import (
 // used by emitServersChanged. It's stored on Runtime.managementService so the
 // emit path can type-assert and call ListServers.
 type fakeServersLister struct {
+	// Embedded so the fake satisfies the whole typed seam (the runtime now
+	// holds a management.Service, not an interface{}) while implementing only
+	// ListServers. The embedded interface is nil: an unexpected call panics
+	// loudly instead of silently returning a zero value.
+	management.Service
 	servers []*contracts.Server
 	stats   *contracts.ServerStats
 	err     error
@@ -203,6 +209,8 @@ func TestEmitServersChanged_RedactsEnvAndURLSecrets(t *testing.T) {
 // through buildServersChangedPayload — without that threading the call sits
 // on a detached 2-second timer regardless of app-shutdown cancellation.
 type ctxAwareLister struct {
+	// See fakeServersLister: embedded to satisfy the typed seam.
+	management.Service
 	servers []*contracts.Server
 	stats   *contracts.ServerStats
 }

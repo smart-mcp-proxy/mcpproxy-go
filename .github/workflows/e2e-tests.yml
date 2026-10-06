@@ -97,7 +97,7 @@ jobs:
         # they run unguarded in the main-only stress-tests job below so coverage
         # is preserved.
         #
-        # Timeout is 20m to match the Windows sweep in unit-tests.yml. It was
+        # Timeout matches the Windows sweep in unit-tests.yml. It was
         # 4m, which the windows-latest runner could not meet: internal/server
         # took 240s and died at `panic: test timed out after 4m0s` — with a
         # single test only 2s in, so cumulative slowness (Bleve index creation
@@ -106,8 +106,12 @@ jobs:
         # 10m on 2026-09-12 (a74a7cf0f: 449s one push, 600s+ the next, a 4s
         # test in flight), so both budgets moved to 20m. Keep them in step;
         # the same code timing out in one and passing in the other is the
-        # signature of this bug returning.
-        run: go test -v -short -race -timeout 20m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
+        # signature of this bug returning. unit-tests.yml moved its Windows
+        # sweep to 40m when internal/server reached ~1100-1200s; this step was
+        # left at 20m and hit it on 6 of ~10 windows-latest main runs in
+        # 2026-10 (internal/server at 650s to over 1200s, no hang in the
+        # goroutine dumps), so it is 40m again to match.
+        run: go test -v -short -race -timeout 40m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
 
       # Binary tests are too flaky in CI due to server startup timing issues
       # All Binary tests consistently timeout waiting for server to be ready
@@ -252,7 +256,7 @@ jobs:
           go tool cover -html=coverage-logs.out -o coverage-logs.html
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           file: ./coverage.out
           flags: e2e-tests

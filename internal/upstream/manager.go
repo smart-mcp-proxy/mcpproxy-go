@@ -46,6 +46,16 @@ var dockerResolverFn = func(logger *zap.Logger) (string, error) {
 	return shellwrap.ResolveDockerPath(logger)
 }
 
+func runDockerInfo(ctx context.Context, dockerBin string) error {
+	return exec.CommandContext(ctx, dockerBin, "info", "--format", "{{json .ServerVersion}}").Run()
+}
+
+// dockerInfoRunnerFn runs the resolved docker binary's `info` command.
+// Overridable in tests, mirroring dockerResolverFn above so the two sibling
+// fakes checkDockerAvailability needs (which binary, and running it) share one
+// injection idiom instead of two.
+var dockerInfoRunnerFn = runDockerInfo
+
 // Docker recovery constants - internal implementation defaults
 const (
 	dockerCheckInterval      = 30 * time.Second // How often to check Docker availability
@@ -91,8 +101,14 @@ func getDockerRetryInterval(attempt int) time.Duration {
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients   map[string]*managed.Client
-	mu        sync.RWMutex
+	clients map[string]*managed.Client
+	mu      sync.RWMutex
+	// captureMu serializes a bounded quarantined-review persistence against
+	// client replacement/removal. It is deliberately separate from mu: approval
+	// calculation reads manager state, and holding mu.RLock across it would
+	// deadlock behind a queued AddServerConfig writer. Lock order is captureMu
+	// then mu; mutation releases both before disconnecting or invoking callbacks.
+	captureMu sync.RWMutex
 	logger    *zap.Logger
 	logConfig *config.LogConfig
 	// globalConfig holds the proxy-wide config as an atomic pointer so a config
@@ -418,6 +434,7 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
+	m.captureMu.Lock()
 	m.mu.Lock()
 
 	// Check if existing client exists and if config has changed
@@ -455,6 +472,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			// Update the client's config reference to the new config but don't recreate the client
 			// Use thread-safe setter to avoid race with GetServerState()
 			m.mu.Unlock()
+			m.captureMu.Unlock()
 			existingClient.SetConfig(serverConfig)
 			// Spec 093: the per-server limits may have changed even though the
 			// transport config did not.
@@ -467,6 +485,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
 	if err != nil {
 		m.mu.Unlock()
+		m.captureMu.Unlock()
 		// Disconnect old client if we failed to create new one
 		if clientToDisconnect != nil {
 			_ = clientToDisconnect.Disconnect()
@@ -510,6 +529,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 	// IMPORTANT: Release lock before disconnecting to prevent deadlock
 	m.mu.Unlock()
+	m.captureMu.Unlock()
 
 	// Spec 093: publish this server's limits (or retire them when the server is
 	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
@@ -576,6 +596,16 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
+			// The supervisor's reconcile usually owns the connect at startup;
+			// LoadConfiguredServers' AddServer for the same unchanged server then
+			// hits the in-flight guard. Nothing failed.
+			if errors.Is(err, managed.ErrConnectAlreadyActive) {
+				m.logger.Debug("Connect already in progress or established, not starting another",
+					zap.String("id", id),
+					zap.String("name", serverConfig.Name),
+					zap.String("state", client.GetState().String()))
+				return nil
+			}
 			// Check if this is an OAuth error - don't fail AddServer for OAuth
 			errStr := err.Error()
 			isOAuthError := strings.Contains(errStr, "OAuth") ||
@@ -606,6 +636,7 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 // RemoveServer removes an upstream server
 func (m *Manager) RemoveServer(id string) {
 	// Get client reference while holding lock briefly
+	m.captureMu.Lock()
 	m.mu.Lock()
 	client, exists := m.clients[id]
 	if exists {
@@ -613,6 +644,7 @@ func (m *Manager) RemoveServer(id string) {
 		delete(m.clients, id)
 	}
 	m.mu.Unlock()
+	m.captureMu.Unlock()
 
 	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
 	// immediately with the server-unavailable semantics instead of waiting out
@@ -1152,6 +1184,36 @@ func (m *Manager) GetClient(id string) (*managed.Client, bool) {
 	defer m.mu.RUnlock()
 	client, exists := m.clients[id]
 	return client, exists
+}
+
+// WithCurrentClientOnEpoch runs fn only while id still names expected and that
+// exact client remains on expectedEpoch. captureMu makes the pointer check and
+// fn one linearization region with AddServerConfig/RemoveServer (which need
+// its writer lock to replace the entry); the managed-client epoch lock keeps a
+// same-pointer reconnect from changing its connection identity in the middle
+// of fn. fn must be bounded and must not initiate a connection change, because
+// those transitions wait for the locks held here.
+func (m *Manager) WithCurrentClientOnEpoch(id string, expected *managed.Client, expectedEpoch int64, fn func() error) (current bool, err error) {
+	m.captureMu.RLock()
+	defer m.captureMu.RUnlock()
+	m.mu.RLock()
+	client, ok := m.clients[id]
+	m.mu.RUnlock()
+	if !ok || client != expected {
+		return false, nil
+	}
+	return client.WithConnectionEpoch(expectedEpoch, fn)
+}
+
+// CaptureReplacementQueued reports whether a replacement/removal is waiting
+// behind an active capture persistence section. It is primarily useful for
+// observability and deterministic concurrency tests; it never mutates state.
+func (m *Manager) CaptureReplacementQueued() bool {
+	if m.captureMu.TryRLock() {
+		m.captureMu.RUnlock()
+		return false
+	}
+	return true
 }
 
 // GetAllClients returns all clients
@@ -2241,6 +2303,20 @@ func (m *Manager) RetryConnection(serverName string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), retryTimeout)
 		defer cancel()
 
+		// #1317 round 6: this Disconnect()+Connect() sequence is a fourth
+		// automatic reconnect path (OAuth completion, config-change and
+		// token-monitor triggers all reach RetryConnection) that bypasses
+		// tryReconnect/Connect/TryReconnectSync's own guard entirely. A
+		// transient/ambiguous error elsewhere on this client must not kill a
+		// genuinely healthy, still in-flight call here either. Skipping is a
+		// delay, not an abandoned retry: the health loop and the periodic
+		// backgroundConnections sweep both retry this same client later.
+		if client.GuardReconnectAgainstInFlightCall() {
+			m.logger.Info("Connection retry deferred: a tool call is still in flight",
+				zap.String("server", serverName))
+			return
+		}
+
 		// Important: Ensure a clean reconnect only if not already connected.
 		// Managed state guards above should make this idempotent.
 		if derr := client.Disconnect(); derr != nil {
@@ -3021,8 +3097,7 @@ func (m *Manager) checkDockerAvailability(ctx context.Context) error {
 		dockerBin = "docker"
 	}
 
-	cmd := exec.CommandContext(checkCtx, dockerBin, "info", "--format", "{{json .ServerVersion}}")
-	if err := cmd.Run(); err != nil {
+	if err := dockerInfoRunnerFn(checkCtx, dockerBin); err != nil {
 		return fmt.Errorf("docker unavailable: %w", err)
 	}
 	return nil

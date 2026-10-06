@@ -37,7 +37,7 @@ func (m *mockPatchServerController) GetAllServers() ([]map[string]interface{}, e
 	return m.allServers, nil
 }
 
-func (m *mockPatchServerController) GetCurrentConfig() any {
+func (m *mockPatchServerController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
@@ -1168,9 +1168,9 @@ func TestPatchServer_AnnotationOverrides_AdminOnly(t *testing.T) {
 	// When an agent token attempts the PATCH, Then it must be forbidden
 	t.Run("agent token is forbidden", func(t *testing.T) {
 		mock := &mockPatchServerController{
-			apiKey: "admin-secret",
+			apiKey:         "admin-secret",
 			existingServer: existing,
-			allServers: []map[string]interface{}{{"name": "browseros", "id": "browseros"}},
+			allServers:     []map[string]interface{}{{"name": "browseros", "id": "browseros"}},
 		}
 		srv, agentToken := agentTokenServer(t, mock)
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/browseros", bytes.NewReader(body))
@@ -1237,4 +1237,48 @@ func TestPatchServer_AnnotationOverrides_DeleteToEmptyPersistsClear(t *testing.T
 		"delete-to-empty must persist an empty (non-nil) map, not nil-as-preserve")
 	assert.Empty(t, mock.capturedUpdates.AnnotationOverrides, "all overrides must be cleared")
 	assert.Contains(t, w.Body.String(), `"restart_required":false`, "override-only mutation stays hot")
+}
+
+// TestHandlePatchServer_QuarantinedFieldMarksExplicit pins that only a PATCH body
+// that actually carries `quarantined` is an operator decision. Without the
+// explicit bit, UpdateServer must not apply (or storage lower) the quarantine.
+func TestHandlePatchServer_QuarantinedFieldMarksExplicit(t *testing.T) {
+	patch := func(t *testing.T, existingQuarantined bool, body map[string]any) *config.ServerConfig {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name:        "github",
+				Protocol:    "stdio",
+				Enabled:     true,
+				Quarantined: existingQuarantined,
+			},
+		}
+		srv := NewServer(mockCtrl, zap.NewNop().Sugar(), nil)
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		return mockCtrl.capturedUpdates
+	}
+
+	t.Run("explicit false", func(t *testing.T) {
+		got := patch(t, true, map[string]any{"quarantined": false})
+		assert.True(t, got.QuarantineExplicitlySet())
+		assert.False(t, got.Quarantined)
+	})
+	t.Run("explicit true", func(t *testing.T) {
+		got := patch(t, false, map[string]any{"quarantined": true})
+		assert.True(t, got.QuarantineExplicitlySet())
+		assert.True(t, got.Quarantined)
+	})
+	t.Run("omitted", func(t *testing.T) {
+		got := patch(t, true, map[string]any{"args": []string{"x"}})
+		assert.False(t, got.QuarantineExplicitlySet(), "an unrelated PATCH must not carry an operator decision")
+		assert.True(t, got.Quarantined, "existing value is preserved")
+	})
 }

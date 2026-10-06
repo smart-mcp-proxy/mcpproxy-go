@@ -273,6 +273,10 @@ func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
 // arm (only `a_b` configured, no `a/b` anywhere: not in storage, not in the
 // upstream manager, no writer) against the colliding one.
 func newTailLogProxyWithServers(t *testing.T, names ...string) *tailLogCollidingFixture {
+	return newTailLogProxyWithServersAndAnonymous(t, "", names...)
+}
+
+func newTailLogProxyWithServersAndAnonymous(t *testing.T, anonymousProfile string, names ...string) *tailLogCollidingFixture {
 	t.Helper()
 	require.Equal(t, logs.ServerLogFilename(collidingHidden), logs.ServerLogFilename(collidingOwn),
 		"fixture premise: the two raw names must share one log file")
@@ -289,6 +293,10 @@ func newTailLogProxyWithServers(t *testing.T, names ...string) *tailLogColliding
 	cfg.Logging.Compress = false
 	for _, name := range names {
 		cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: name, Protocol: "http", Enabled: false})
+	}
+	if anonymousProfile != "" {
+		cfg.Profiles = []config.ProfileConfig{{Name: "anonymous-scope", Servers: []string{anonymousProfile}, ManagementTools: boolPtr(true)}}
+		cfg.AnonymousProfile = "anonymous-scope"
 	}
 	mainSrv, err := NewServer(cfg, zap.NewNop())
 	require.NoError(t, err)
@@ -576,6 +584,34 @@ func TestTailLog_DockerCollisionConnectError_ForeignContainerWithheldFromScopedC
 			assert.Contains(t, listUpstreamsBodyVia(t, f.proxy, ctx), foreignID)
 		})
 	}
+}
+
+func TestTailLog_DockerCollisionConnectError_ForeignContainerWithheldFromConfinedAnonymous(t *testing.T) {
+	const foreignID = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+	const foreignName = "mcpproxy-a-b-wxyz"
+	collision := `docker: Error response from daemon: Conflict. The container name "/` + foreignName +
+		`" is already in use by container "` + foreignID + `". You have to remove (or rename) that container to be able to reuse that name.`
+	f := newTailLogProxyWithServersAndAnonymous(t, collidingHidden, collidingHidden, "a-b")
+	connectErr := fmt.Errorf("stdio transport (command=%q, docker_isolation=%t): %w", "docker", true,
+		fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n  | %s: EOF", collision))
+	client, ok := f.proxy.upstreamManager.GetClient(collidingHidden)
+	require.True(t, ok)
+	client.StateManager.SetError(connectErr)
+	f.writers[collidingHidden].Error("Connection failed", zap.String("transport", "stdio"), zap.Error(connectErr), logs.ChildOutputField())
+	_ = f.writers[collidingHidden].Sync()
+
+	resp, body := tailLogLinesVia(t, f.proxy, context.Background(), collidingHidden, 50)
+	assert.NotContains(t, body, foreignID)
+	assert.NotContains(t, body, foreignName)
+	assert.NotContains(t, body, "already in use by container")
+	assert.Contains(t, body, `"last_error"`)
+	assert.Equal(t, 0, resp.LinesReturned, "the child-output collision record must be withheld")
+
+	listBody := listUpstreamsBodyVia(t, f.proxy, context.Background())
+	assert.Contains(t, listBody, collidingHidden)
+	assert.NotContains(t, listBody, "a-b")
+	assert.NotContains(t, listBody, foreignID)
+	assert.NotContains(t, listBody, foreignName)
 }
 
 // listUpstreamsBodyVia drives `upstream_servers` `list` through the real

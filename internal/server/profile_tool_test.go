@@ -756,13 +756,24 @@ func selectablePinnedCtx(pin string, allowed ...string) context.Context {
 // The oracle here is deterministic, not wall-clock: the allocation profile of
 // one predicate call is identical for every pin outcome over the same fleet
 // (the early-returning version allocated 2 / 0 / 1 times respectively).
+//
+// AllocsPerRun counts process-wide mallocs, so a goroutine still winding down
+// from an earlier test (a runtime fixture's shutdown, an index observer)
+// inflates whichever case it overlaps — CI once read 48 for one case and 12
+// for the others — and, independently, `go test -race` disables the
+// tiny-object allocator, which can make two otherwise-identical cases differ
+// by a small constant on every back-to-back reading with no gap between
+// them. Noise only ever ADDS, so retryUntilAllocsMatch (defined alongside
+// its identical use in TestProfileMiddleware_RefusalWorkIndependentOfFleet)
+// retries a full reading of the three cases, with a real sleep between
+// attempts, until one attempt finds them all equal.
 func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 	const n = 64
 	alive := selectableProbeConfig(n)
 	deleted := selectableProbeConfig(n)
 	deleted.Profiles[0].Name = "was-the-pin" // same fleet size, the pin is gone
 
-	cases := map[string]struct {
+	caseConfigs := map[string]struct {
 		ctx context.Context
 		cfg *config.Config
 	}{
@@ -770,24 +781,21 @@ func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 		"zero-reach pin first": {selectablePinnedCtx("pin", "other-srv"), alive},
 		"deleted pin":          {selectablePinnedCtx("pin", "pin-srv"), deleted},
 	}
-	// AllocsPerRun counts process-wide mallocs, so a goroutine still winding
-	// down from an earlier test (a runtime fixture's shutdown, an index
-	// observer) inflates whichever case it overlaps — CI once read 48 for
-	// one case and 12 for the others. Noise only ever ADDS, so the minimum
-	// over a few samples of the predicate alone (index built outside the
-	// window) is the deterministic figure this test is about.
-	allocs := map[string]float64{}
-	for name, c := range cases {
-		idx := newProfileIndex(c.cfg)
-		best := math.Inf(1)
-		for i := 0; i < 7; i++ {
-			best = math.Min(best, testing.AllocsPerRun(50, func() { idx.selectableNames(c.ctx) }))
-		}
-		allocs[name] = best
+
+	settleBackgroundGoroutines(t)
+	cases := make(map[string]func(), len(caseConfigs))
+	for name, c := range caseConfigs {
+		idx, ctx := newProfileIndex(c.cfg), c.ctx // index built outside the measured window
+		cases[name] = func() { idx.selectableNames(ctx) }
 	}
-	for name, got := range allocs {
-		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
-	}
+	// Exact parity (tolerance 0): the regression this guards differs by only
+	// 0-2 allocations over a 64-profile fleet, so the 2-alloc slack that
+	// TestProfileMiddleware_RefusalWorkIndependentOfFleet uses for its
+	// 4096-item fleet (#1523) would let it through. This test was not the
+	// flaky one; retries absorb its additive noise.
+	allocs := retryUntilAllocsMatch(15, 50, 0, "reachable pin first", cases)
+	require.Empty(t, allocsMismatch(allocs, "reachable pin first", 0),
+		"every pin outcome must allocate exactly like a reachable pin: %v", allocs)
 }
 
 // TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome pins the
@@ -841,7 +849,19 @@ func TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome(t *testi
 // finding 1): the URL gate's predicate does constant, allocation-free work —
 // zero allocations for every refusal and admission branch, over a fleet of
 // one profile and of 4 097 — so a scoped caller's refusal cannot reveal how
-// many other profiles exist. Pure function, so exact and retry-free.
+// many other profiles exist. Pure function, so the outcome is deterministic,
+// but the MEASUREMENT is not: AllocsPerRun counts process-wide mallocs (see
+// the identical note on TestSelectableProfileNames_PinOutcomesDoSameWork
+// above), so a goroutine still winding down from an earlier test in this
+// package's shared binary — a runtime fixture's shutdown, an SSE/HTTP client
+// closing against an already-stopped httptest server — inflates whichever
+// case's window it overlaps (CI, Server Edition job, 2026-09-20: 13 on
+// "scoped, absent slug" over the 4096-server fleet, zero everywhere else on
+// the identical commit's very next run). Noise only ever ADDS allocations, so
+// the minimum over a few samples per case is the deterministic figure this
+// test is about — never widen it into a non-zero budget, which would mask an
+// actual regression on this hot path instead of just filtering scheduler
+// noise.
 func TestProfileIndex_SelectableAllocatesNothing(t *testing.T) {
 	fleets := map[string]*profileIndex{
 		"no profiles": newProfileIndex(&config.Config{Servers: []*config.ServerConfig{{Name: "pin-srv"}, {Name: "other-srv"}}}),
@@ -868,8 +888,11 @@ func TestProfileIndex_SelectableAllocatesNothing(t *testing.T) {
 	}
 	for fleet, idx := range fleets {
 		for name, c := range cases {
-			allocs := testing.AllocsPerRun(50, func() { idx.selectable(c.ctx, c.slug) })
-			require.Zero(t, allocs, "%s over fleet %q must not allocate", name, fleet)
+			best := math.Inf(1)
+			for i := 0; i < 7; i++ {
+				best = math.Min(best, testing.AllocsPerRun(50, func() { idx.selectable(c.ctx, c.slug) }))
+			}
+			require.Zero(t, best, "%s over fleet %q must not allocate", name, fleet)
 		}
 	}
 }

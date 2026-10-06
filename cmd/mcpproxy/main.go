@@ -27,12 +27,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	bbolterrors "go.etcd.io/bbolt/errors"
@@ -96,6 +96,11 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
 
+// globalOutputFlagUsage is the help text of the root persistent -o/--output flag.
+// It points at `activity export --format`, whose local --output shadows this flag
+// (Spec 109 C6).
+const globalOutputFlagUsage = "Output format: table, json, yaml (terminal rendering; activity export uses --format for its file format)"
+
 func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
@@ -115,14 +120,13 @@ func main() {
 	rootCmd.SetVersionTemplate(versionLine())
 
 	// Add global flags
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
-	rootCmd.PersistentFlags().StringVarP(&dataDir, "data-dir", "d", "", "Data directory path (default: ~/.mcpproxy)")
+	registerRootPathFlags(rootCmd)
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "Log level (trace, debug, info, warn, error) - defaults: server=info, other commands=warn")
 	rootCmd.PersistentFlags().BoolVar(&logToFile, "log-to-file", false, "Enable logging to file in standard OS location (default: console only)")
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
 
 	// Output formatting flags (global)
-	rootCmd.PersistentFlags().StringVarP(&globalOutputFormat, "output", "o", "", "Output format: table, json, yaml")
+	rootCmd.PersistentFlags().StringVarP(&globalOutputFormat, "output", "o", "", globalOutputFlagUsage)
 	rootCmd.PersistentFlags().BoolVar(&globalJSONOutput, "json", false, "Shorthand for -o json")
 	rootCmd.MarkFlagsMutuallyExclusive("output", "json")
 
@@ -186,6 +190,9 @@ func main() {
 	// Add status command
 	statusCmd := GetStatusCommand()
 
+	// Add attention command (Spec 109 FR-001/FR-003)
+	attentionCmd := GetAttentionCommand()
+
 	// Add token command (Spec 028: Agent tokens)
 	tokenCmd := GetTokenCommand()
 
@@ -197,9 +204,13 @@ func main() {
 
 	// Add security command (Spec 039: Security scanner plugins)
 	securityCmd := GetSecurityCommand()
+	reviewCmd := GetReviewCommand()
 
 	// Add connect/disconnect commands
 	connectCmd := GetConnectCommand()
+	clientCmd := GetClientCommand()
+	profileCmd := GetProfileCommand()
+	accessCmd := GetAccessCommand()
 	disconnectCmd := GetDisconnectCommand()
 
 	// Add commands to root
@@ -207,6 +218,7 @@ func main() {
 	rootCmd.AddCommand(newSandboxExecCommand())
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(GetRegistryCommand())
+	rootCmd.AddCommand(GetCatalogCommand())
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(codeCmd)
@@ -218,12 +230,18 @@ func main() {
 	rootCmd.AddCommand(activityCmd)
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(attentionCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(dbCmd)
 	rootCmd.AddCommand(feedbackCmd)
 	rootCmd.AddCommand(securityCmd)
+	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(agentInstructionsCmd)
+	rootCmd.AddCommand(clientCmd)
+	rootCmd.AddCommand(profileCmd)
+	rootCmd.AddCommand(accessCmd)
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(GetVersionCommand())
 	rootCmd.AddCommand(GetUpdateCommand())
@@ -238,12 +256,28 @@ func main() {
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
 
-	if err := rootCmd.Execute(); err != nil {
-		// Check for specific error types to return appropriate exit codes
-		exitCode := classifyError(err)
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(exitCode)
+	if code := executeRoot(rootCmd, os.Stderr); code != ExitCodeSuccess {
+		os.Exit(code)
 	}
+}
+
+// executeRoot runs the command tree and reports a failure exactly once. Cobra
+// prints "Error: <err>" itself unless SilenceErrors is set, and main() used to
+// print it again, so every RunE error (including the connect binding-guard
+// "Fixes:" list) appeared twice. Errors are silenced in cobra and written here
+// once; usage output on flag errors is unchanged (SilenceUsage is untouched).
+func executeRoot(root *cobra.Command, stderr io.Writer) int {
+	root.SilenceErrors = true
+	err := root.Execute()
+	if err == nil {
+		return ExitCodeSuccess
+	}
+	fmt.Fprintf(stderr, "Error: %v\n", err)
+	// Cobra appends this hint itself only when it prints the error.
+	if strings.HasPrefix(err.Error(), "unknown command") {
+		fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", root.CommandPath())
+	}
+	return classifyError(err)
 }
 
 func createSearchServersCommand() *cobra.Command {
@@ -514,31 +548,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	if wasGenerated {
-		// Frame the auto-generated key message for visibility
-		frameMsg := strings.Repeat("*", 80)
-		logger.Warn(frameMsg)
-		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:")
-		logger.Warn("",
-			zap.String("api_key", apiKey),
-			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)),
-			zap.String("source", source.String()))
-		logger.Warn("Note: This key will be saved to your config file for persistence")
-		logger.Warn(frameMsg)
-
-		// Save the auto-generated key to config file for persistence
+		// Save the auto-generated key to config file for persistence, then
+		// report it. SEC-01: the raw key goes to the human sink only - see
+		// announceGeneratedAPIKey.
 		saver.setGeneratedAPIKey(apiKey)
 		configPathToSave := saver.path
+		saveErr := saver.save(cfg, configPathToSave)
 
-		if err := saver.save(cfg, configPathToSave); err != nil {
-			logger.Warn("Failed to save auto-generated API key to config file",
-				zap.Error(err),
-				zap.String("config_path", configPathToSave))
-			logger.Warn("The API key will be regenerated on next restart. To persist it, manually add it to your config file:")
-			logger.Warn("", zap.String("api_key", apiKey))
-		} else {
-			logger.Info("Auto-generated API key saved to config file",
-				zap.String("config_path", configPathToSave))
-		}
+		announceGeneratedAPIKey(logger, os.Stderr, stderrIsTerminal(), generatedAPIKeyInfo{
+			APIKey:     apiKey,
+			Listen:     cfg.Listen,
+			Source:     source.String(),
+			ConfigPath: configPathToSave,
+			SaveErr:    saveErr,
+		})
 	} else {
 		// Mask API key when it comes from environment or config file
 		maskedKey := maskAPIKey(apiKey)
@@ -623,35 +646,26 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var receivedSignal atomic.Value
 	receivedSignal.Store("")
 
-	// Setup signal handling for graceful shutdown with force quit on second signal
+	// Setup signal handling for graceful shutdown with force quit on a further
+	// signal and a hard deadline so a wedged shutdown cannot make the daemon
+	// unkillable. See runSignalHandler in signal_handler.go.
+	//
+	// This starts BEFORE the log line below on purpose: signal.Notify is
+	// already registered, so from here until something reads sigChan the
+	// runtime is swallowing SIGINT/SIGTERM into a one-slot buffer. A log write
+	// can block (a full disk, a stalled pipe to the tray), and a daemon that
+	// cannot be killed while it is logging is the bug this handler exists to
+	// prevent.
+	go runSignalHandler(signalHandlerDeps{
+		sigChan: sigChan,
+		cancel:  cancel,
+		// Spec 024: Store signal for activity logging.
+		onSignal: func(sig os.Signal) { receivedSignal.Store(sig.String()) },
+		exit:     os.Exit,
+		logger:   logger,
+	})
 	logger.Info("Signal handler goroutine starting - waiting for SIGINT or SIGTERM")
 	_ = logger.Sync()
-	go func() {
-		logger.Info("Signal handler goroutine is running, waiting for signal on channel")
-		_ = logger.Sync()
-		sig := <-sigChan
-		receivedSignal.Store(sig.String()) // Spec 024: Store signal for activity logging
-		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
-		_ = logger.Sync() // Flush logs immediately so we can see shutdown messages
-		logger.Info("Press Ctrl+C again within 10 seconds to force quit")
-		_ = logger.Sync() // Flush again
-		cancel()
-
-		// Start a timer for force quit
-		forceQuitTimer := time.NewTimer(10 * time.Second)
-		defer forceQuitTimer.Stop()
-
-		// Wait for second signal or timeout
-		select {
-		case sig2 := <-sigChan:
-			logger.Warn("Received second signal, forcing immediate exit", zap.String("signal", sig2.String()))
-			_ = logger.Sync()
-			os.Exit(ExitCodeGeneralError)
-		case <-forceQuitTimer.C:
-			// Normal shutdown timeout - continue with graceful shutdown
-			logger.Debug("Force quit timer expired, continuing with graceful shutdown")
-		}
-	}()
 
 	// Start the server
 	logger.Info("Starting mcpproxy server")
@@ -937,10 +951,42 @@ func applyServeRuntimeFlags(cmd *cobra.Command, cfg *config.Config) {
 	}
 }
 
+// flagValidationError marks a CLI flag-validation error (e.g. an invalid
+// --status or --trust-mode value) so classifyError returns
+// ExitCodeGeneralError for it directly, before the string heuristics below
+// ever see its text. Those heuristics key on words like "config" and
+// "invalid" that a flag's own enumerated valid-values list can legitimately
+// contain — validateStatusFlag's error text enumerates the real status
+// "needs_config", which used to trip the config-error heuristic and exit 4
+// instead of 1, unlike the otherwise-identical --trust-mode error (whose
+// valid-values list happens not to contain "config").
+type flagValidationError struct{ error }
+
+// cliRefusalError marks a refusal reported by the daemon's REST API. Its text
+// is the daemon's, so classifyError must not run the config/permission string
+// heuristics over it (a message mentioning "config" is not a config-file
+// error); it exits 1.
+type cliRefusalError struct{ error }
+
+func (e cliRefusalError) Unwrap() error { return e.error }
+
+func newFlagValidationError(format string, args ...any) error {
+	return flagValidationError{fmt.Errorf(format, args...)}
+}
+
 // classifyError categorizes errors to return appropriate exit codes
 func classifyError(err error) int {
 	if err == nil {
 		return ExitCodeSuccess
+	}
+
+	var flagErr flagValidationError
+	if errors.As(err, &flagErr) {
+		return ExitCodeGeneralError
+	}
+	var refusalErr cliRefusalError
+	if errors.As(err, &refusalErr) {
+		return ExitCodeGeneralError
 	}
 
 	// Spec 098: a preflight verdict is a RESULT, not a failure of mcpproxy, and

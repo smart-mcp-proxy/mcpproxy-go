@@ -286,7 +286,7 @@ func TestPinnedPortClearsDCRCredentialsRegisteredForAnotherPort(t *testing.T) {
 	storedPort := reserveLoopbackPort(t)
 	pinnedPort := reserveLoopbackPort(t)
 	require.NotEqual(t, storedPort, pinnedPort)
-	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-registered-for-storedPort", "secret", storedPort))
+	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-registered-for-storedPort", "secret", storedPort, ""))
 
 	oauthConfig := CreateOAuthConfig(&config.ServerConfig{
 		Name: serverName,
@@ -299,7 +299,7 @@ func TestPinnedPortClearsDCRCredentialsRegisteredForAnotherPort(t *testing.T) {
 
 	assert.Empty(t, oauthConfig.ClientID,
 		"a DCR client registered for another port must not be shipped with the new pinned redirect_uri")
-	storedClientID, _, _, err := store.GetOAuthClientCredentials(serverKey)
+	storedClientID, _, _, _, err := store.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Empty(t, storedClientID, "the stale DCR record must be cleared so the next login re-registers")
 }
@@ -316,7 +316,7 @@ func TestPinnedPortClearsLegacyDCRCredentials(t *testing.T) {
 	serverURL := upstream.URL + "/mcp"
 	serverKey := GenerateServerKey(serverName, serverURL)
 
-	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-old", "secret", 0))
+	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "dcr-old", "secret", 0, ""))
 
 	pinnedPort := reserveLoopbackPort(t)
 	oauthConfig := CreateOAuthConfig(&config.ServerConfig{
@@ -328,7 +328,7 @@ func TestPinnedPortClearsLegacyDCRCredentials(t *testing.T) {
 	}, store)
 	require.NotNil(t, oauthConfig)
 
-	storedClientID, _, _, err := store.GetOAuthClientCredentials(serverKey)
+	storedClientID, _, _, _, err := store.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Empty(t, storedClientID, "legacy DCR credentials must be cleared even when a port is pinned")
 }
@@ -346,7 +346,7 @@ func TestPinnedPortKeepsStaticCredentials(t *testing.T) {
 	serverKey := GenerateServerKey(serverName, serverURL)
 
 	storedPort := reserveLoopbackPort(t)
-	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "static-client", "static-secret", storedPort))
+	require.NoError(t, store.UpdateOAuthClientCredentials(serverKey, "static-client", "static-secret", storedPort, ""))
 
 	pinnedPort := reserveLoopbackPort(t)
 	require.NotEqual(t, storedPort, pinnedPort)
@@ -362,7 +362,7 @@ func TestPinnedPortKeepsStaticCredentials(t *testing.T) {
 	require.NotNil(t, oauthConfig)
 	assert.Equal(t, "static-client", oauthConfig.ClientID)
 
-	storedClientID, _, _, err := store.GetOAuthClientCredentials(serverKey)
+	storedClientID, _, _, _, err := store.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Equal(t, "static-client", storedClientID, "static credentials must never be cleared")
 }

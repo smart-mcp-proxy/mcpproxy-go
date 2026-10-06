@@ -357,14 +357,26 @@ stdio) keep every capability they have today; the exceptions where an
 administrator's answer deliberately differs from a token's are named and tested
 one by one.
 
-> **Rollout status.** This invariant is being landed surface by surface as the
-> agent-scope hardening series (Spec 105) merges; each release's notes list the
-> surfaces it closes. The rules on this page that are stated as present-tense
-> guarantees — the stored-script rules below, the REST doors listed above and
-> the `read_cache` rule — are enforced by the version that documents them. Until
-> the series is complete, a listing or suggestion on a surface not yet covered
-> can still name an out-of-scope resource; treat that as a known gap, not a
-> configuration mistake.
+> **Rollout status.** The agent-scope hardening series (Spec 105, nine PRs —
+> `A` exact target-tier identity, `B` cache legacy/internal-entry refusal,
+> `D` selectable-profile predicate, `E` per-record log attribution, `H0`
+> stored-script enumeration, `C` scoped `retrieve_tools`, `F` direct-surface
+> publication identity, `G` scope-first refusal shapes, and `H1` — the
+> regression suite this page's guarantees are proven against, covering
+> User Stories 1–3 by id) has shipped its code for every functional
+> requirement (FR-001 through FR-014) across those PRs, and every acceptance
+> scenario in User Stories 1–3 now has a proving test registered by id
+> (`TestScopeCoverage_EveryUserStoryScenario`,
+> `internal/server/scope_differential_test.go`). Most of those tests re-run
+> the dedicated, per-FR differential fixture each PR shipped for its own
+> gaps (e.g. `mcp_retrieve_scope_test.go` for FR-005, `mcp_direct_skew_test.go`
+> for FR-008); a smaller number run directly against the general two-fixture
+> `{a, b, a__b}` harness this file introduces. The rules on this page are
+> stated as present-tense guarantees on that basis, not because every one is
+> proven through the general three-server harness specifically. A hidden
+> server can still influence what an authorized caller experiences only
+> through the **retained, documented effects** named below — never by
+> being named, listed or dispatched to.
 
 > **Who counts as an administrator.** The admin API key, the tray over the
 > local socket, native stdio, an in-process caller — and, under the default
@@ -521,16 +533,16 @@ policy is a separate piece of work.
 
 ## Profile Pinning
 
-A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
+A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile` (the older spelling `--profile-pin` still works but is deprecated), you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
 
 ```bash
 # This token can ONLY ever see/use the "research" profile
 mcpproxy token create \
   --name research-agent \
-  --servers "*" \
-  --permissions read \
-  --profile-pin research
+  --profile research
 ```
+
+The token takes its scope from the profile, so `--servers` and `--permissions` are optional with `--profile`.
 
 Server-side enforcement (no client cooperation required):
 
@@ -542,15 +554,30 @@ Server-side enforcement (no client cooperation required):
 Resolution precedence (highest wins):
 
 ```
-1. agent-token profile_pin   (server-enforced; this section)
-2. /mcp/p/<slug> URL scope    (per-request override)
-3. set_profile session state  (base /mcp endpoint default for the session)
-4. none                        (no profile filtering — all allowed servers)
+1. pin        agent-token profile_pin, or a locked client credential (server-enforced; this section)
+2. url        /mcp/p/<slug> URL scope (per-request override)
+3. session    set_profile session state (base /mcp endpoint default for the session)
+4. binding    the profile of a switchable client credential
+5. anonymous  anonymous_profile, for a caller with no credential
+6. none       no profile filtering — all allowed servers
 ```
+
+See [Which profile applies](./profiles.md#which-profile-applies) for how a client credential's mode and `anonymous_profile` fit in.
 
 **Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is **later removed** from the configuration, the pin resolves to a **deny-all scope**: the token sees no upstream servers and no tools, on the MCP session path and in [preflight](./tools-preflight.md#disclosure-tiers) alike. A pin with **zero reach** — the profile still exists but is empty, names only unconfigured servers, or no longer overlaps the token's `allowed_servers` — is treated exactly like a deleted one on `set_profile` and `/mcp/p/<pin>`, so the token cannot tell whether its own pin still exists. A request under a **deleted** pin is logged with a warning naming the removed profile, not hard-failed at the transport; a refused `/mcp/p/<pin>` initialization (deleted or zero-reach alike) is logged as `profile URL refused for scoped caller`. The pin is a restriction the operator applied, so losing the profile it names must never hand the token a wider view than it had the day before — re-create the profile, or re-mint the token against a live one, to restore it. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
 
 The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
+
+### Token kinds and legacy scope
+
+There are two kinds of token, both listed by `mcpproxy token list` (the `KIND` column) and on the Clients page, **Tokens** tab:
+
+- **`agent`**: a token you create with `mcpproxy token create --profile <p>`, the Web UI or the macOS app. Its scope comes from its profile; the token dialog needs only a name, a profile and an expiry.
+- **`client`**: the per-client credential that `connect` mints (`mcp_cli_…`, token name `client-<id>`). It identifies a client and binds it to a profile (locked or switchable). It is managed on the Clients page, with `mcpproxy client …`, not here: the Tokens list shows it read-only with a link to its client, and it cannot be revoked from the token list. Names starting with `client-` are reserved, so an agent token can never collide with a client credential. A client credential is valid on MCP endpoints only; REST rejects it with `403`.
+
+A token created before profiles existed carries its own `allowed_servers` and `permissions` and no profile: the UIs show it as a **legacy scope**, read-only, with a hint to move it to a profile (`token create --profile` writes a new one; the old token keeps working until you revoke it). `mcpproxy token create` without `--profile` still works with `--servers` or `--permissions`, and prints that hint.
+
+To see which tokens use a profile, filter: `mcpproxy token list --profile work-readonly` (`--profile -` selects tokens with none), `--token <name>`, or open the Clients page, Tokens tab, filtered by `profile` or `token` in the URL. A profile's card links to its tokens. Token activity is filterable the same way: `mcpproxy activity list --token ci-bot`.
 
 ## Managing Tokens
 
@@ -709,10 +736,11 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--name` | Yes | — | Unique token name |
-| `--servers` | Yes | — | Comma-separated server names or `"*"` |
-| `--permissions` | Yes | — | Comma-separated: `read`, `write`, `destructive` |
+| `--profile` | One of `--profile` or `--servers`/`--permissions` | — | Pin the token to a single profile; its scope comes from the profile (see [Profile Pinning](#profile-pinning)) |
+| `--servers` | Legacy scope | — | Comma-separated server names or `"*"` (prefer `--profile`) |
+| `--permissions` | Legacy scope | — | Comma-separated: `read`, `write`, `destructive` (prefer `--profile`) |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
-| `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |
+| `--profile-pin` | No | — | Deprecated alias of `--profile` |
 
 ### Documented invariant (Spec 107 FR-046)
 

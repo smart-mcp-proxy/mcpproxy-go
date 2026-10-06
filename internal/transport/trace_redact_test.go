@@ -2,7 +2,9 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -148,4 +150,73 @@ func TestLoggingTransport_RedactsSSEFrames(t *testing.T) {
 	assert.NotContains(t, zapText, frameSecret)
 	assert.NotContains(t, stdout, frameSecret)
 	assert.Contains(t, zapText, "event=message", "the frame's event type must survive")
+}
+
+// An upstream can echo a forwarded value in the SSE `event:` field.
+func TestLoggingTransport_RedactsSSEEventField(t *testing.T) {
+	const secret = "SUPERSECRETEVENTVALUE"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: " + secret + "\ndata: {}\n\n"))
+	}))
+	defer srv.Close()
+
+	obsCore, logs := observer.New(zapcore.DebugLevel)
+	tr := NewLoggingTransport(srv.Client().Transport, zap.New(obsCore))
+	stdout := captureStdout(t, func() {
+		hr, _ := http.NewRequest(http.MethodGet, "http://x/", http.NoBody)
+		hr.Header.Set("X-User-Id", secret)
+		snap := headerfwd.Capture(hr, map[string]struct{}{"X-User-Id": {}})
+		out := headerfwd.Outbound(snap, headerfwd.Policy{Enabled: true, Transport: "http", Allow: []string{"X-User-Id"}})
+		ctx := headerfwd.WithOutbound(context.Background(), out)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/sse", http.NoBody)
+		require.NoError(t, err)
+		resp, err := tr.RoundTrip(req)
+		require.NoError(t, err)
+		_, _ = io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(observedText(logs), "SSE FRAME") {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	zapText := observedText(logs)
+	require.Contains(t, zapText, "SSE FRAME")
+	assert.NotContains(t, zapText, secret)
+	assert.NotContains(t, stdout, secret)
+}
+
+// Round 4: an upstream that echoes a forwarded value under a differently
+// named response header must not leak it into the trace sinks.
+func TestLoggingTransport_ScrubsEchoedValueInOtherHeader(t *testing.T) {
+	const val = "alice-tenant-42"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Echo-User", val)
+		w.Header().Set("Location", "https://up/cb?user="+val)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	obsCore, logs := observer.New(zapcore.DebugLevel)
+	tr := NewLoggingTransport(srv.Client().Transport, zap.New(obsCore))
+	stdout := captureStdout(t, func() {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Tenant-Id", val)
+		snap := headerfwd.Capture(r, map[string]struct{}{"X-Tenant-Id": {}})
+		out := headerfwd.Outbound(snap, headerfwd.Policy{Enabled: true, Allow: []string{"X-Tenant-Id"}, Transport: "http"})
+		req, err := http.NewRequestWithContext(headerfwd.WithOutbound(context.Background(), out), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+		req.Header.Set("X-Tenant-Id", val)
+		resp, err := tr.RoundTrip(req)
+		require.NoError(t, err)
+		_, _ = io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+	})
+	assert.NotContains(t, stdout, val)
+	assert.NotContains(t, observedText(logs), val)
+	assert.Contains(t, stdout, "X-Echo-User")
 }

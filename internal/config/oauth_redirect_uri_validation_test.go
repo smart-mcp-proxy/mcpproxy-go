@@ -13,19 +13,26 @@ func TestParseLoopbackRedirectURI(t *testing.T) {
 		uri      string
 		wantHost string
 		wantPort int
+		wantPath string
 		wantErr  string
 	}{
-		{name: "loopback ipv4", uri: "http://127.0.0.1:54108/oauth/callback", wantHost: LoopbackIPv4Host, wantPort: 54108},
-		{name: "localhost binds ipv4", uri: "http://localhost:8123/oauth/callback", wantHost: LoopbackIPv4Host, wantPort: 8123},
-		{name: "ipv6 loopback binds ipv6", uri: "http://[::1]:8123/oauth/callback", wantHost: LoopbackIPv6Host, wantPort: 8123},
-		{name: "whitespace tolerated", uri: "  http://127.0.0.1:54108/oauth/callback  ", wantHost: LoopbackIPv4Host, wantPort: 54108},
+		{name: "loopback ipv4", uri: "http://127.0.0.1:54108/oauth/callback", wantHost: LoopbackIPv4Host, wantPort: 54108, wantPath: "/oauth/callback"},
+		{name: "localhost binds ipv4", uri: "http://localhost:8123/oauth/callback", wantHost: LoopbackIPv4Host, wantPort: 8123, wantPath: "/oauth/callback"},
+		{name: "ipv6 loopback binds ipv6", uri: "http://[::1]:8123/oauth/callback", wantHost: LoopbackIPv6Host, wantPort: 8123, wantPath: "/oauth/callback"},
+		{name: "whitespace tolerated", uri: "  http://127.0.0.1:54108/oauth/callback  ", wantHost: LoopbackIPv4Host, wantPort: 54108, wantPath: "/oauth/callback"},
 		{name: "empty", uri: "", wantErr: "empty"},
 		{name: "not a url", uri: "://nope", wantErr: "not a valid URL"},
 		{name: "https scheme", uri: "https://127.0.0.1:54108/oauth/callback", wantErr: "http scheme"},
 		{name: "ftp scheme", uri: "ftp://nope/oauth/callback", wantErr: "http scheme"},
 		{name: "non-loopback host", uri: "https://evil.example.com/nope", wantErr: "http scheme"},
 		{name: "non-loopback http host", uri: "http://evil.example.com/oauth/callback", wantErr: "loopback host"},
-		{name: "gemini callback path", uri: "http://localhost:7777/oauth2callback", wantErr: "callback path"},
+		// issue #1304: a provider that publishes a shared OAuth application with
+		// a fixed, non-default callback path must be usable — mcpproxy's own
+		// callback path is an implementation detail, not something the provider
+		// has to agree with.
+		{name: "custom callback path is honored", uri: "http://localhost:7777/oauth2callback", wantHost: LoopbackIPv4Host, wantPort: 7777, wantPath: "/oauth2callback"},
+		{name: "custom callback path, single segment", uri: "http://127.0.0.1:18080/callback", wantHost: LoopbackIPv4Host, wantPort: 18080, wantPath: "/callback"},
+		{name: "no path defaults to root", uri: "http://127.0.0.1:54108", wantHost: LoopbackIPv4Host, wantPort: 54108, wantPath: "/"},
 		{name: "no port", uri: "http://127.0.0.1/oauth/callback", wantErr: "explicit port"},
 		{name: "port zero", uri: "http://127.0.0.1:0/oauth/callback", wantErr: "invalid port"},
 		{name: "query string", uri: "http://127.0.0.1:54108/oauth/callback?x=1", wantErr: "query string or fragment"},
@@ -33,7 +40,7 @@ func TestParseLoopbackRedirectURI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, port, err := ParseLoopbackRedirectURI(tt.uri)
+			host, port, path, err := ParseLoopbackRedirectURI(tt.uri)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
@@ -46,8 +53,8 @@ func TestParseLoopbackRedirectURI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if host != tt.wantHost || port != tt.wantPort {
-				t.Fatalf("got (%q, %d), want (%q, %d)", host, port, tt.wantHost, tt.wantPort)
+			if host != tt.wantHost || port != tt.wantPort || path != tt.wantPath {
+				t.Fatalf("got (%q, %d, %q), want (%q, %d, %q)", host, port, path, tt.wantHost, tt.wantPort, tt.wantPath)
 			}
 		})
 	}

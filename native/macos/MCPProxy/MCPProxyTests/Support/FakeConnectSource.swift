@@ -56,6 +56,32 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
     private(set) var undoCalls: [(clientId: String, backupName: String?)] = []
     private(set) var disconnectCalls: [String] = []
 
+    // MARK: Spec 108-k: the binding the model sent
+
+    /// What the model asked the preview and the write to carry (T042m).
+    private(set) var previewBindings: [ConnectBinding] = []
+    private(set) var connectBindings: [ConnectBinding] = []
+    /// What `bindingContext()` answers (the profiles and `require_mcp_auth`).
+    var contextResult = ConnectBindingContext()
+
+    func bindingContext() async -> ConnectBindingContext { contextResult }
+
+    func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel {
+        previewBindings.append(binding)
+        return try await connectPreview(clientId, serverName: serverName)
+    }
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?,
+        binding: ConnectBinding
+    ) async throws -> APIClient.ConnectResult {
+        connectBindings.append(binding)
+        return try await connect(clientId, serverName: serverName, force: force, preconditionToken: preconditionToken)
+    }
+
     // MARK: ConnectClientDataSource
 
     func connectClients() async throws -> [APIClient.ClientStatus] {
@@ -124,7 +150,9 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         remediation: String? = nil,
         serverName: String? = nil,
         note: String? = nil,
-        checkedPaths: [String]? = nil
+        checkedPaths: [String]? = nil,
+        displayPath: String? = nil,
+        reloadHint: String? = nil
     ) -> APIClient.ClientStatus {
         let json: [String: Any?] = [
             "id": id,
@@ -139,7 +167,9 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
             "access_state": accessState?.rawValue,
             "remediation": remediation,
             "note": note,
-            "checked_paths": checkedPaths
+            "checked_paths": checkedPaths,
+            "display_path": displayPath,
+            "reload_hint": reloadHint
         ]
         let data = try! JSONSerialization.data(
             withJSONObject: json.compactMapValues { $0 })

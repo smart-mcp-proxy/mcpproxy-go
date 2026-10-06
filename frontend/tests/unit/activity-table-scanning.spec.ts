@@ -82,7 +82,12 @@ async function mountActivity() {
       { path: '/servers/:serverName', component: { template: '<div/>' } },
     ],
   })
-  await router.push('/activity')
+  // Spec 109-k, FR-070: a bare /activity now defaults to the "Tool calls"
+  // view, which would silently drop this suite's `security_scan` fixture row
+  // (a genuinely different concern — folding, legends, KPI tiles, the scan
+  // drawer). `view=all` keeps every type in play, same as before that default
+  // existed.
+  await router.push('/activity?view=all')
   await router.isReady()
   const wrapper = mount(Activity, { global: { plugins: [createPinia(), router] } })
   await flushPromises()
@@ -156,6 +161,8 @@ describe('Activity table — only failures are marked (F5)', () => {
     expect(successCell.text()).toBe('Success')
     // sr-only: present in the accessibility tree, absent from the scan.
     expect(successCell.classes()).toContain('sr-only')
+    // I8a: a visible check icon with a Success title accompanies it.
+    expect(rows(wrapper)[0].find('[data-test="activity-status-icon"] title').text()).toBe('Success')
 
     const errorCell = rows(wrapper)
       .find(r => r.text().includes('Error'))!

@@ -104,7 +104,7 @@ describe('normalizeFieldDefaults', () => {
   it('leaves fields that declare no default untouched', () => {
     const cfg = normalizeFieldDefaults({})
     for (const f of allCatalogFields()) {
-      if (f.defaultValue == null) expect(getPath(cfg, f.key)).toBeUndefined()
+      if (f.defaultValue == null && !f.defaultFor) expect(getPath(cfg, f.key)).toBeUndefined()
     }
   })
 

@@ -189,8 +189,17 @@ func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName st
 		lines = 500
 	}
 
+	// A nil config (a caller that built config.Config{} directly rather than
+	// through config.DefaultConfig(), which always sets Logging) must fall
+	// through to GetLogFilePathWithDir's own empty-LogDir OS-default
+	// behavior, never dereference a nil pointer — same fix as the whole-file
+	// reader (logger.go).
+	logDir := ""
+	if config != nil {
+		logDir = config.LogDir
+	}
 	filename := serverLogFilename(serverName)
-	logFilePath, err := GetLogFilePathWithDir(config.LogDir, filename)
+	logFilePath, err := GetLogFilePathWithDir(logDir, filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get log file path for server %s: %w", serverName, err)
 	}

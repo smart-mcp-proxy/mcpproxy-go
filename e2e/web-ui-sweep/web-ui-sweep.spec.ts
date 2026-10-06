@@ -47,9 +47,16 @@ async function goto(page: Page, route: string, anchor: string) {
 
 test('servers list renders the fleet with KPI counters', async ({ page }) => {
   const errors = watchPageErrors(page)
-  await goto(page, '/servers', '[data-test="kpi-card-total"]')
+  // An empty fleet (no fixture registered) renders the first-run empty state
+  // INSTEAD of the KPI tiles — deliberately hidden until a server exists
+  // (#1049/#1216) — so anchor on whichever of the two the instance should show.
+  await goto(page, '/servers', '[data-test="kpi-card-total"], [data-test="servers-first-run-empty"]')
 
-  await expect(page.locator('[data-test="kpi-card-total"]')).toContainText(/\d/)
+  if (!SERVER && (await page.locator('[data-test="servers-first-run-empty"]').isVisible())) {
+    await expect(page.locator('[data-test="kpi-card-total"]')).toHaveCount(0)
+  } else {
+    await expect(page.locator('[data-test="kpi-card-total"]')).toContainText(/\d/)
+  }
   if (SERVER) {
     await expect(page.locator('[data-test="server-card-title"]', { hasText: SERVER }).first())
       .toBeVisible()
@@ -142,26 +149,22 @@ test('Activity and Usage report the same 24h numbers as the API', async ({ page,
     return { summary: s.data ?? {}, usage: u.data ?? {} }
   }
 
-  const { summary, usage } = await read()
-  const total = Number(summary.total_count ?? 0)
-  const calls = Number(summary.call_count ?? 0)
-
-  if (total === 0) {
-    test.skip(true, 'no activity in the last 24h on this instance')
-  }
-
   // The API-level halves of the invariant. `usage` is served from a cached
-  // snapshot while `summary` counts live, so let them converge rather than
-  // demanding they agree on the first read.
+  // snapshot while `summary` counts live, so keep the exact summary/usage pair
+  // from the successful convergence poll. A pre-poll summary can be stale: on
+  // a fresh instance, the startup activity may be recorded after the first API
+  // read but before Activity renders, making the UI look one event ahead.
+  let converged: Awaited<ReturnType<typeof read>> | undefined
   await expect
     .poll(
       async () => {
         const now = await read()
-        return (
+        const matches =
           Number(now.usage.total_calls ?? -1) === Number(now.summary.call_count ?? -2) &&
           Number(now.usage.total_errors ?? -1) ===
             Number(now.summary.error_count ?? 0) + Number(now.summary.blocked_count ?? 0)
-        )
+        if (matches) converged = now
+        return matches
       },
       {
         timeout: 20_000,
@@ -171,6 +174,16 @@ test('Activity and Usage report the same 24h numbers as the API', async ({ page,
       },
     )
     .toBe(true)
+
+  // Use the summary that actually passed the API consistency check above, not
+  // the earlier startup snapshot.
+  const { summary } = converged!
+  const total = Number(summary.total_count ?? 0)
+  const calls = Number(summary.call_count ?? 0)
+
+  if (total === 0) {
+    test.skip(true, 'no activity in the last 24h on this instance')
+  }
 
   // Activity paints the summary's own fields, and labels the total for what it
   // is: "events" when some rows are not calls, "calls" when every row is one.
@@ -187,7 +200,15 @@ test('Activity and Usage report the same 24h numbers as the API', async ({ page,
   }
 
   // The Usage tile must show the SAME call count the Activity header does.
-  await goto(page, '/usage', '[data-test="usage-view"]')
+  // With no upstream configured, /usage shows the first-run CTA instead of the
+  // charts (#1049) — there is no Usage tile to compare, so stop at the API and
+  // Activity halves above.
+  await goto(page, '/usage', '[data-test="usage-view"], [data-test="dashboard-usage-first-run"]')
+  if (await page.locator('[data-test="dashboard-usage-first-run"]').isVisible()) {
+    expect(SERVER, `/usage shows the first-run CTA although fixture ${SERVER} is registered`).toBe('')
+    expect(errors, `page exceptions: ${errors.join(', ')}`).toHaveLength(0)
+    return
+  }
   await expect(
     page.locator('[data-test="usage-calls-tile"] .stat-value'),
     'Usage "Calls" disagrees with the call count Activity prints for the same window',

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
@@ -20,6 +22,41 @@ type ImportRequest struct {
 	Content     string   `json:"content"`                // Raw JSON or TOML content
 	Format      string   `json:"format,omitempty"`       // Optional format hint
 	ServerNames []string `json:"server_names,omitempty"` // Optional: import only these servers
+
+	// EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+	// F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+	// value the user typed, or a keyring ref path if they chose Secret —
+	// keyed by field name. Applied to the matching imported server's
+	// Env/Headers ONLY when preview=false, directly on the server this
+	// request's own raw Content parses to server-side. This is what lets
+	// the apply call carry the user's edited env/header values without
+	// ever round-tripping the redacted preview: url/command/args on apply
+	// always come from re-parsing Content here, never from a client-held
+	// preview response, so a credential embedded in a URL query param or
+	// argv flag (which the preview necessarily redacted for display) is
+	// never overwritten with the masked placeholder.
+	EnvOverride    map[string]string `json:"env_override,omitempty"`
+	HeaderOverride map[string]string `json:"header_override,omitempty"`
+
+	// AllowPasteFallback opts into detecting a bare URL or a single command
+	// line (FR-064) when Format/format detection would otherwise fail — see
+	// configimport.ImportOptions.AllowPasteFallback for why this must stay
+	// opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+	// every other caller of this endpoint (the general "Import config"
+	// panel, or a direct API call) leaves it false and gets a clear
+	// "unable to detect configuration format" error for a plain one-liner
+	// instead of it being silently guessed at and, on apply, added as a
+	// real server with no confirmation step.
+	AllowPasteFallback bool `json:"allow_paste_fallback,omitempty"`
+}
+
+// ImportFieldOverrides carries env/header values the caller wants applied to
+// the imported server(s) on an apply (preview=false) call — see
+// ImportRequest.EnvOverride/HeaderOverride for why this exists and how it is
+// kept out of preview responses.
+type ImportFieldOverrides struct {
+	Env     map[string]string
+	Headers map[string]string
 }
 
 // ImportResponse represents the response from an import operation
@@ -44,6 +81,34 @@ type ImportedServerResponse struct {
 	OriginalName  string   `json:"original_name"`
 	FieldsSkipped []string `json:"fields_skipped,omitempty"`
 	Warnings      []string `json:"warnings,omitempty"`
+
+	// Summary, Tags, Env and Headers are the Spec 109 FR-064 preview
+	// enrichment (contracts/rest-api.md "Import preview"). Summary and Tags
+	// are built from the already-redacted URL/Command/Args above, so a
+	// secret embedded in argv or a URL query never reaches Summary either.
+	// Env/Headers never carry the raw value — only its presence and two
+	// booleans a surface uses to default the Value/Secret toggle (FR-065).
+	Summary string               `json:"summary,omitempty"`
+	Tags    []string             `json:"tags,omitempty"`
+	Env     []EnvFieldPreview    `json:"env,omitempty"`
+	Headers []HeaderFieldPreview `json:"headers,omitempty"`
+}
+
+// EnvFieldPreview is one env var entry in the import preview.
+type EnvFieldPreview struct {
+	Name               string `json:"name"`
+	ValuePresent       bool   `json:"value_present"`
+	SecretLike         bool   `json:"secret_like"`
+	EmptyOrPlaceholder bool   `json:"empty_or_placeholder"`
+}
+
+// HeaderFieldPreview is one header entry in the import preview. Like env
+// previews, it reports whether the source supplied a value without exposing it.
+type HeaderFieldPreview struct {
+	Name               string `json:"name"`
+	ValuePresent       bool   `json:"value_present"`
+	SecretLike         bool   `json:"secret_like"`
+	EmptyOrPlaceholder bool   `json:"empty_or_placeholder"`
 }
 
 // CanonicalConfigPath represents a well-known config file path
@@ -177,7 +242,7 @@ type ImportFromPathRequest struct {
 
 // handleImportFromPath godoc
 // @Summary Import servers from a file path
-// @Description Import MCP server configurations by reading a file from the server's filesystem
+// @Description Import MCP server configurations by reading a file from the server's filesystem. A preview (preview=true) of a file with no MCP servers (empty, {}, or no/empty server map) answers 200 with an empty imported list; an apply of such a file and a malformed file still answer 400.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -228,9 +293,23 @@ func (s *Server) handleImportFromPath(w http.ResponseWriter, r *http.Request) {
 	// Preview mode?
 	preview := r.URL.Query().Get("preview") == "true"
 
+	// A client config that exists but holds nothing (0 bytes, whitespace) is a
+	// legitimate "nothing to import" answer when auto-previewing detected
+	// clients, not a failure. Apply still reports it.
+	if preview && len(bytes.TrimSpace(content)) == 0 {
+		logger.Debug("Import preview of empty client config", "path", path)
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
+	}
+
 	// Use the common runImport function
-	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview, req.Rename)
+	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview, req.Rename, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			logger.Debug("Import preview of client config with no servers", "path", path)
+			s.writeSuccess(w, emptyImportPreview(req.Format))
+			return
+		}
 		logger.Error("Import from path failed", "path", path, "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -292,9 +371,20 @@ func (s *Server) handleImportServers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An empty "{}" file previews as "nothing to import" (as handleImportFromPath
+	// does), not as a 400 about an undetectable format.
+	if preview && isEmptyJSONObject(content) {
+		s.writeSuccess(w, emptyImportPreview(formatHint))
+		return
+	}
+
 	// Run import (rename not supported via multipart upload — leave nil)
-	result, err := s.runImport(r, content, formatHint, serverNames, preview, nil)
+	result, err := s.runImport(r, content, formatHint, serverNames, preview, nil, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			s.writeSuccess(w, emptyImportPreview(formatHint))
+			return
+		}
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -334,8 +424,21 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 	// Parse query parameter for preview
 	preview := r.URL.Query().Get("preview") == "true"
 
+	var fieldOverrides *ImportFieldOverrides
+	if len(req.EnvOverride) > 0 || len(req.HeaderOverride) > 0 {
+		fieldOverrides = &ImportFieldOverrides{Env: req.EnvOverride, Headers: req.HeaderOverride}
+	}
+
+	// A pasted empty "{}" previews as "nothing to import", not a 400 about an
+	// undetectable format. Other empty configs (e.g. {"mcpServers":{}}) keep
+	// telling the user they hold no servers.
+	if preview && isEmptyJSONObject([]byte(req.Content)) {
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
+	}
+
 	// Run import
-	result, err := s.runImport(r, []byte(req.Content), req.Format, req.ServerNames, preview, nil)
+	result, err := s.runImport(r, []byte(req.Content), req.Format, req.ServerNames, preview, nil, fieldOverrides, req.AllowPasteFallback)
 	if err != nil {
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -348,8 +451,12 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 // runImport executes the import logic and optionally applies the servers.
 // rename is an optional map of OriginalName → new name applied after parsing,
 // before adding the servers — used by the wizard to disambiguate cross-source
-// name collisions. May be nil.
-func (s *Server) runImport(r *http.Request, content []byte, formatHint string, serverNames []string, preview bool, rename map[string]string) (*ImportResponse, error) {
+// name collisions. May be nil. fieldOverrides carries the Paste tab's
+// user-edited env/header values (see ImportRequest.EnvOverride/HeaderOverride)
+// and is applied only when preview is false; may be nil. allowPasteFallback
+// is ImportRequest.AllowPasteFallback — only the Paste tab call site passes
+// true.
+func (s *Server) runImport(r *http.Request, content []byte, formatHint string, serverNames []string, preview bool, rename map[string]string, fieldOverrides *ImportFieldOverrides, allowPasteFallback bool) (*ImportResponse, error) {
 	logger := s.getRequestLogger(r)
 
 	// Spec 046 v2: opt-in trust path. Default behaviour is unchanged
@@ -359,9 +466,15 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 
 	// Build import options
 	opts := &configimport.ImportOptions{
-		Preview:        preview,
-		SkipQuarantine: skipQuarantine,
-		Now:            time.Now(),
+		Preview:            preview,
+		SkipQuarantine:     skipQuarantine,
+		Now:                time.Now(),
+		AllowPasteFallback: allowPasteFallback,
+		// Skip entries that point back at this instance (e.g. the `mcpproxy`
+		// entry Connect wrote into ~/.claude.json) so no import surface — the
+		// onboarding wizard, Add Server > Import, or a direct REST call —
+		// offers mcpproxy as its own upstream.
+		SelfListenAddrs: s.selfListenAddrs(),
 	}
 
 	// Parse format hint
@@ -414,6 +527,58 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 				result.Imported[i].Server.Name = newName
 			}
 		}
+		// configimport validated the pre-rename name; re-check the renamed
+		// servers with the same boot-path validation so a rename cannot
+		// persist an entry the next startup refuses (RC4-IMPORT-001).
+		kept := result.Imported[:0]
+		for _, imported := range result.Imported {
+			if errs := config.ValidateServerForLoad(imported.Server); len(errs) > 0 {
+				msgs := make([]string, 0, len(errs))
+				for _, e := range errs {
+					msgs = append(msgs, e.Error())
+				}
+				result.Failed = append(result.Failed, configimport.FailedServer{
+					Name:    imported.Server.Name,
+					Error:   "invalid_server",
+					Details: strings.Join(msgs, "; "),
+				})
+				continue
+			}
+			kept = append(kept, imported)
+		}
+		result.Imported = kept
+		result.Summary.Imported = len(result.Imported)
+		result.Summary.Failed = len(result.Failed)
+	}
+
+	// Apply the caller's field overrides (Paste tab env/header edits)
+	// directly to the server(s) this call's own raw Content parsed to,
+	// never to a value carried over from an earlier preview response. This
+	// runs BEFORE the response is built so the enrichment (env/headers
+	// classification, summary, tags) describes the values actually persisted
+	// instead of the pre-override source values.
+	if !preview && fieldOverrides != nil {
+		for _, imported := range result.Imported {
+			if len(fieldOverrides.Env) > 0 {
+				if imported.Server.Env == nil {
+					imported.Server.Env = make(map[string]string, len(fieldOverrides.Env))
+				}
+				for k, v := range fieldOverrides.Env {
+					imported.Server.Env[k] = v
+				}
+			}
+			if len(fieldOverrides.Headers) > 0 {
+				if imported.Server.Headers == nil {
+					imported.Server.Headers = make(map[string]string, len(fieldOverrides.Headers))
+				}
+				for k, v := range fieldOverrides.Headers {
+					imported.Server.Headers[k] = v
+				}
+			}
+		}
+		for _, imported := range result.Imported {
+			configimport.Reclassify(imported)
+		}
 	}
 
 	// Build response
@@ -439,16 +604,29 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		// so the operator can still verify that a secret imported and how long
 		// it is without the value itself reaching the wire.
 		view := oauth.RedactedConfigView("", imported.Server)
+		redactedURL := viewString(view, "url", imported.Server.URL)
+		redactedCommand := viewString(view, "command", imported.Server.Command)
+		redactedArgs := oauth.LiveRedaction.Argv(imported.Server.Args)
+
+		// FR-040 preview enrichment comes from configimport.Import, the same
+		// canonical classifier used by the CLI. Its summary is already
+		// redacted; the fields below intentionally omit raw values.
+		env, headers := importFieldPreviews(imported.EnvFields, imported.HeaderFields)
+
 		response.Imported[i] = ImportedServerResponse{
 			Name:          imported.Server.Name,
 			Protocol:      imported.Server.Protocol,
-			URL:           viewString(view, "url", imported.Server.URL),
-			Command:       viewString(view, "command", imported.Server.Command),
-			Args:          oauth.LiveRedaction.Argv(imported.Server.Args),
+			URL:           redactedURL,
+			Command:       redactedCommand,
+			Args:          redactedArgs,
 			SourceFormat:  string(imported.SourceFormat),
 			OriginalName:  imported.OriginalName,
 			FieldsSkipped: imported.FieldsSkipped,
 			Warnings:      imported.Warnings,
+			Summary:       imported.Summary,
+			Tags:          imported.Tags,
+			Env:           env,
+			Headers:       headers,
 		}
 	}
 
@@ -467,6 +645,42 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	return response, nil
 }
 
+// selfListenAddrs returns the addresses this instance answers on, for the
+// import self-reference filter. The bound address is authoritative for the
+// port, but GetListenAddress normalizes a wildcard bind to a display address
+// (127.0.0.1:<port>), so the configured listen is added too: with 0.0.0.0 it
+// makes URLs on the machine's LAN addresses recognizable as self.
+func (s *Server) selfListenAddrs() []string {
+	addrs := []string{s.controller.GetListenAddress()}
+	if cfg := s.controller.GetCurrentConfig(); cfg != nil && cfg.Listen != "" {
+		addrs = append(addrs, cfg.Listen)
+	}
+	return addrs
+}
+
+// isEmptyJSONObject reports whether content is exactly an empty JSON object.
+func isEmptyJSONObject(content []byte) bool {
+	var m map[string]json.RawMessage
+	return json.Unmarshal(bytes.TrimSpace(content), &m) == nil && m != nil && len(m) == 0
+}
+
+// emptyImportPreview is the preview answer for a client config that holds no
+// MCP servers: a successful, empty ImportResponse (all lists non-nil so the
+// JSON carries [] rather than null) whose format comes from the caller's hint.
+func emptyImportPreview(formatHint string) *ImportResponse {
+	resp := &ImportResponse{
+		Imported: []ImportedServerResponse{},
+		Skipped:  []configimport.SkippedServer{},
+		Failed:   []configimport.FailedServer{},
+		Warnings: []string{},
+	}
+	if f := parseFormat(formatHint); f != configimport.FormatUnknown {
+		resp.Format = string(f)
+		resp.FormatName = f.String()
+	}
+	return resp
+}
+
 // parseFormat converts a format string to ConfigFormat
 func parseFormat(format string) configimport.ConfigFormat {
 	switch strings.ToLower(format) {
@@ -480,7 +694,29 @@ func parseFormat(format string) configimport.ConfigFormat {
 		return configimport.FormatCodex
 	case "gemini":
 		return configimport.FormatGemini
+	case "url":
+		return configimport.FormatURL
+	case "command":
+		return configimport.FormatCommand
 	default:
 		return configimport.FormatUnknown
 	}
+}
+
+// importFieldPreviews maps the shared import classifier into the stable REST
+// contract without exposing field values.
+func importFieldPreviews(envFields, headerFields []configimport.ImportedField) (env []EnvFieldPreview, headers []HeaderFieldPreview) {
+	for _, field := range envFields {
+		env = append(env, EnvFieldPreview{
+			Name: field.Name, ValuePresent: field.ValuePresent,
+			SecretLike: field.SecretLike, EmptyOrPlaceholder: field.EmptyOrPlaceholder,
+		})
+	}
+	for _, field := range headerFields {
+		headers = append(headers, HeaderFieldPreview{
+			Name: field.Name, ValuePresent: field.ValuePresent, SecretLike: field.SecretLike,
+			EmptyOrPlaceholder: field.EmptyOrPlaceholder,
+		})
+	}
+	return env, headers
 }

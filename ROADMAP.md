@@ -70,8 +70,8 @@ graph LR
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred done;
-  class ux_audit,action_log_transparency,agent_scope_hardening,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
+  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening done;
+  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
   class tpa_db,remote_access_tunnel,auto_routing_mode,tool_graph todo;
 ```
 
@@ -81,7 +81,6 @@ graph LR
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
-- 🟡 **Spec 107 server edition SSO front door hardened for real IdPs** — In review · P2
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -92,6 +91,7 @@ graph LR
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
+- 🟢 **Spec 107 server edition SSO front door hardened for real IdPs** — Done · P2
 
 ## Epic details
 
@@ -203,63 +203,6 @@ graph LR
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
 | Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175) | 🟢 Done | #1174 #1214 |
-
-</details>
-
-<details>
-<summary>🔵 Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) — In progress · P1</summary>
-
-> The Spec 104 cross-model review verified 'an agent token sees and uses only its granted servers, profile and tiers' against the code one surface at a time and found eight places where a legitimately narrow token could learn about or act on servers outside its grant: cached responses, set_profile and profile-URL responses, retrieve_tools metadata, direct-publication filtering, target-tier execution, aggregated prompts, per-server management ops, and refusal shapes. Spec 105 is the acceptance contract (19 astra rounds, ready-for-plan 2026-09-07). Five fix sessions ran in parallel from the review and MERGED 2026-09-08 (#1223 target tier, #1224 tail_log, #1225 set_profile, #1226 read_cache provenance, #1227 prompt owner + deleted-pin enumeration), each live-verified against a baseline binary and astra-reviewed to CLEAN. Each of those PR bodies carries a 'Follow-ups / Spec 105 gaps' checklist — the todo tasks below are those lists grouped by FR. Prerequisite for auto-routing-mode: Spec 104 FR-016 states the invariant these corrections make true.
-
-Spec: [105-agent-scope-hardening](./specs/105-agent-scope-hardening/)
-
-```mermaid
-graph LR
-  scope_fix_target_tier["FR-009 (dispatch half): call_tool_* requires…"]
-  scope_fix_tail_log["FR-007 (name half): upstream_servers tail_log…"]
-  scope_fix_set_profile["FR-003: set_profile reports token ∩ profile,…"]
-  scope_fix_read_cache["FR-001: cached responses carry the producer's…"]
-  scope_fix_prompts_profile_url["FR-006 + FR-004 (deleted pin): aggregated pro…"]
-  scope_retrieve_tools["FR-005: retrieve_tools filters by scope BEFOR…"]
-  scope_direct_publication["FR-008: direct-surface definitions take owner…"]
-  scope_refusal_shapes["FR-010: scope-first refusal precedence; dispa…"]
-  scope_selectable_profile_predicate["FR-003/FR-004 remainder: selectable-profile p…"]
-  scope_cache_legacy_invalidation["FR-002 + FR-001 remainder: legacy/unstamped a…"]
-  scope_log_attribution["FR-007 remainder: per-record canonical log ow…"]
-  scope_target_identity_producers["FR-009 remainder: producer-side exact-name id…"]
-  scope_regression_suite["FR-011/FR-013/FR-014: two-fixture differentia…"]
-
-  scope_retrieve_tools --> scope_refusal_shapes
-  scope_fix_set_profile --> scope_selectable_profile_predicate
-  scope_fix_prompts_profile_url --> scope_selectable_profile_predicate
-  scope_fix_read_cache --> scope_cache_legacy_invalidation
-  scope_fix_tail_log --> scope_log_attribution
-  scope_fix_target_tier --> scope_target_identity_producers
-  scope_retrieve_tools --> scope_regression_suite
-  scope_direct_publication --> scope_regression_suite
-  scope_refusal_shapes --> scope_regression_suite
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url done;
-  class scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_regression_suite todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| FR-009 (dispatch half): call_tool_* requires the TARGET tool's tier, fail closed on unresolved tiers; approval records keep exact ns:name identity | 🟢 Done | #1223 |
-| FR-007 (name half): upstream_servers tail_log authorizes the server against effective scope before lookup, non-disclosing | 🟢 Done | #1224 |
-| FR-003: set_profile reports token ∩ profile, selectable-profile predicate, non-selectable == nonexistent | 🟢 Done | #1225 |
-| FR-001: cached responses carry the producer's authorization snapshot; read_cache and the REST cache branch refuse narrower readers | 🟢 Done | #1226 |
-| FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin | 🟢 Done | #1227 |
-| FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only | ⚪ Todo | — |
-| FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred | ⚪ Todo | — |
-| FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | ⚪ Todo | — |
-| FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | ⚪ Todo | — |
-| FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | ⚪ Todo | — |
-| FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | ⚪ Todo | — |
-| FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list) | ⚪ Todo | — |
-| FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot | ⚪ Todo | — |
 
 </details>
 
@@ -424,39 +367,6 @@ graph LR
 | Task | Status | Refs |
 | --- | --- | --- |
 | Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question | ⚪ Todo | `MCP-742` |
-
-</details>
-
-<details>
-<summary>🟡 Spec 107 server edition SSO front door hardened for real IdPs — In review · P2</summary>
-
-> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
-
-Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
-
-```mermaid
-graph LR
-  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
-  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
-  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
-  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
-
-  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
-  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
-  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist done;
-  class sso_pr_d_audit_line in_review;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
-| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🟢 Done | #1293 |
-| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | 🟡 In review | #1296 |
 
 </details>
 
@@ -859,6 +769,63 @@ Spec: [102-schema-deferred](./specs/102-schema-deferred/) · PR: #1063
 </details>
 
 <details>
+<summary>🟢 Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) — Done · P1</summary>
+
+> The Spec 104 cross-model review verified 'an agent token sees and uses only its granted servers, profile and tiers' against the code one surface at a time and found eight places where a legitimately narrow token could learn about or act on servers outside its grant: cached responses, set_profile and profile-URL responses, retrieve_tools metadata, direct-publication filtering, target-tier execution, aggregated prompts, per-server management ops, and refusal shapes. Spec 105 is the acceptance contract (19 astra rounds, ready-for-plan 2026-09-07). Five fix sessions ran in parallel from the review and MERGED 2026-09-08 (#1223 target tier, #1224 tail_log, #1225 set_profile, #1226 read_cache provenance, #1227 prompt owner + deleted-pin enumeration), each live-verified against a baseline binary and astra-reviewed to CLEAN. Each of those PR bodies carries a 'Follow-ups / Spec 105 gaps' checklist — the todo tasks below are those lists grouped by FR. Prerequisite for auto-routing-mode: Spec 104 FR-016 states the invariant these corrections make true.
+
+Spec: [105-agent-scope-hardening](./specs/105-agent-scope-hardening/)
+
+```mermaid
+graph LR
+  scope_fix_target_tier["FR-009 (dispatch half): call_tool_* requires…"]
+  scope_fix_tail_log["FR-007 (name half): upstream_servers tail_log…"]
+  scope_fix_set_profile["FR-003: set_profile reports token ∩ profile,…"]
+  scope_fix_read_cache["FR-001: cached responses carry the producer's…"]
+  scope_fix_prompts_profile_url["FR-006 + FR-004 (deleted pin): aggregated pro…"]
+  scope_retrieve_tools["FR-005: retrieve_tools filters by scope BEFOR…"]
+  scope_direct_publication["FR-008: direct-surface definitions take owner…"]
+  scope_refusal_shapes["FR-010: scope-first refusal precedence; dispa…"]
+  scope_selectable_profile_predicate["FR-003/FR-004 remainder: selectable-profile p…"]
+  scope_cache_legacy_invalidation["FR-002 + FR-001 remainder: legacy/unstamped a…"]
+  scope_log_attribution["FR-007 remainder: per-record canonical log ow…"]
+  scope_target_identity_producers["FR-009 remainder: producer-side exact-name id…"]
+  scope_fix_stored_script_admin["FR-012: stored-script enumeration is administ…"]
+  scope_regression_suite["FR-011/FR-013/FR-014: two-fixture differentia…"]
+
+  scope_retrieve_tools --> scope_refusal_shapes
+  scope_fix_set_profile --> scope_selectable_profile_predicate
+  scope_fix_prompts_profile_url --> scope_selectable_profile_predicate
+  scope_fix_read_cache --> scope_cache_legacy_invalidation
+  scope_fix_tail_log --> scope_log_attribution
+  scope_fix_target_tier --> scope_target_identity_producers
+  scope_retrieve_tools --> scope_regression_suite
+  scope_direct_publication --> scope_regression_suite
+  scope_refusal_shapes --> scope_regression_suite
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url,scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_fix_stored_script_admin,scope_regression_suite done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| FR-009 (dispatch half): call_tool_* requires the TARGET tool's tier, fail closed on unresolved tiers; approval records keep exact ns:name identity | 🟢 Done | #1223 |
+| FR-007 (name half): upstream_servers tail_log authorizes the server against effective scope before lookup, non-disclosing | 🟢 Done | #1224 |
+| FR-003: set_profile reports token ∩ profile, selectable-profile predicate, non-selectable == nonexistent | 🟢 Done | #1225 |
+| FR-001: cached responses carry the producer's authorization snapshot; read_cache and the REST cache branch refuse narrower readers | 🟢 Done | #1226 |
+| FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin | 🟢 Done | #1227 |
+| FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only | 🟢 Done | #1325 |
+| FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred | 🟢 Done | #1326 |
+| FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | 🟢 Done | #1328 |
+| FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | 🟢 Done | #1283 |
+| FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | 🟢 Done | #1282 |
+| FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | 🟢 Done | #1284 |
+| FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list) | 🟢 Done | #1279 |
+| FR-012: stored-script enumeration is administrator-only (PR H0) | 🟢 Done | #1285 |
+| FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot | 🟢 Done | #1332 |
+
+</details>
+
+<details>
 <summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
 
 > Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
@@ -881,6 +848,37 @@ graph LR
 
 </details>
 
+<details>
+<summary>🟢 Spec 107 server edition SSO front door hardened for real IdPs — Done · P2</summary>
+
+> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
+
+Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
+
+```mermaid
+graph LR
+  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
+  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
+  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
+  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
+
+  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
+  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
+  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist,sso_pr_d_audit_line done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
+| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🟢 Done | #1293 |
+| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | 🟢 Done | #1296 |
+
+</details>
+
 ## Epics
 
 | Epic | Status | Priority | Progress | Spec | PR |
@@ -888,14 +886,12 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | 42/109 (39%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
-| Spec 107 server edition SSO front door hardened for real IdPs | In review | P2 | 102/126 (81%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -914,7 +910,9 @@ graph LR
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 94/113 (83%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
+| Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
 ## Shipped (archived)
 
@@ -1034,6 +1032,10 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 42/109 (39%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 94/113 (83%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
-| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 102/126 (81%) |
+| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
+| [108-profiles-v3](./specs/108-profiles-v3/) | `shipped` | 194/195 (99%) |
+| [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `shipped` | 257/258 (100%) |
+| [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
+| [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |

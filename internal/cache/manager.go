@@ -146,32 +146,42 @@ var lastKeyNano atomic.Int64
 // tests that seed pre-feature records; production callers stamp the producer
 // via StoreAs.
 func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
-	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, nil)
+	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, nil, "", "")
 }
 
 // StoreAs saves a tool response to cache stamped with the authorization it was
 // produced under and the current RecordVersion. GetRecordsAs refuses readers
 // that could not have produced it.
 func (m *Manager) StoreAs(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer Authorization) error {
-	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, &producer)
+	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, &producer, "", "")
 }
 
-func (m *Manager) storeRecord(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer *Authorization) error {
+// StoreAsForwarded is StoreAs for a result produced by a call that forwarded
+// client headers (Spec 112 FR-017): the entry additionally carries
+// forwardedDigest (Digest of the forwarded set) and forwardedServer (the
+// upstream it went to). Empty digest is equivalent to StoreAs.
+func (m *Manager) StoreAsForwarded(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer Authorization, forwardedDigest, forwardedServer string) error {
+	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, &producer, forwardedDigest, forwardedServer)
+}
+
+func (m *Manager) storeRecord(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer *Authorization, forwardedDigest, forwardedServer string) error {
 	record := &Record{
-		Producer:     producer,
-		Version:      RecordVersion,
-		Key:          key,
-		ToolName:     toolName,
-		Args:         args,
-		Timestamp:    time.Now(),
-		FullContent:  content,
-		RecordPath:   recordPath,
-		TotalRecords: totalRecords,
-		TotalSize:    len(content),
-		ExpiresAt:    time.Now().Add(DefaultTTL),
-		AccessCount:  0,
-		LastAccessed: time.Now(),
-		CreatedAt:    time.Now(),
+		Producer:        producer,
+		ForwardedDigest: forwardedDigest,
+		ForwardedServer: forwardedServer,
+		Version:         RecordVersion,
+		Key:             key,
+		ToolName:        toolName,
+		Args:            args,
+		Timestamp:       time.Now(),
+		FullContent:     content,
+		RecordPath:      recordPath,
+		TotalRecords:    totalRecords,
+		TotalSize:       len(content),
+		ExpiresAt:       time.Now().Add(DefaultTTL),
+		AccessCount:     0,
+		LastAccessed:    time.Now(),
+		CreatedAt:       time.Now(),
 	}
 
 	return m.update(func(tx *bbolt.Tx) error {
@@ -517,8 +527,10 @@ func (m *Manager) getRecords(key string, offset, limit int, guard func(header re
 	}
 
 	response := &ReadCacheResponse{
-		Records:  paginatedRecords,
-		Producer: record.Producer,
+		Records:         paginatedRecords,
+		Producer:        record.Producer,
+		ForwardedDigest: record.ForwardedDigest,
+		ForwardedServer: record.ForwardedServer,
 		Meta: Meta{
 			Key:          key,
 			TotalRecords: totalRecords,

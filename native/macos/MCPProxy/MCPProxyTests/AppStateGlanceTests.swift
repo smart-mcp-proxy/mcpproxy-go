@@ -511,6 +511,21 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertTrue(state.glanceActivity.isEmpty)
     }
 
+    func testScanSettledForwardsTheFinishedServerToReviewSheets() async {
+        let state = AppState()
+        let manager = CoreProcessManager(
+            appState: state,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "scan-settled-\(UUID().uuidString).sock"
+        )
+        let settled = expectation(forNotification: .scanSettled, object: "fixture")
+        await manager.handleSSEEvent(
+            SSEEvent(event: "security.scan_settled", data: "{\"payload\":{\"server_name\":\"fixture\"}}", retry: nil, id: nil),
+            generation: state.connectionGeneration
+        )
+        await fulfillment(of: [settled], timeout: 1)
+    }
+
     // MARK: - Client presence in the summary line (spec 090 FR-019)
 
     /// The summary reports what the clients are DOING, not how many rows the

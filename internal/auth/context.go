@@ -39,6 +39,16 @@ type AuthContext struct {
 	Permissions    []string // Permission tiers (nil = all for admin)
 	ProfilePin     string   // Profile this agent token is pinned to (Profiles v2 T3; empty if unpinned)
 
+	// TokenKind, ClientID and ProfileMode are the Spec 108-c client-
+	// credential identity, copied from AgentToken at authentication
+	// (AgentToken.AuthContext). TokenKind is "" for every non-agent-token
+	// AuthContext (admin, user, anonymous); for an agent-token context it is
+	// KindAgent or KindClient. ClientID and ProfileMode are set iff
+	// TokenKind == KindClient.
+	TokenKind   string
+	ClientID    string
+	ProfileMode string
+
 	// Multi-user OAuth fields (server edition). Empty for non-user auth types.
 	UserID      string // User's unique ULID identifier
 	Email       string // User's email from OAuth provider
@@ -108,6 +118,12 @@ func (ac *AuthContext) IsUser() bool {
 // IsAuthenticated returns true if this context has any authentication type set.
 func (ac *AuthContext) IsAuthenticated() bool {
 	return ac.Type != ""
+}
+
+// IsClientCredential reports whether this context authenticated with a Spec
+// 108-c client credential (kind=client, secret prefix mcp_cli_). Nil-safe.
+func (ac *AuthContext) IsClientCredential() bool {
+	return ac != nil && ac.TokenKind == KindClient
 }
 
 // GetUserID returns the user's unique identifier, or empty string for non-user auth.

@@ -3,46 +3,111 @@
 
 import SwiftUI
 
+/// Sidebar destinations, declared in VISUAL order: the hidden ⌘1…⌘7 shortcuts
+/// iterate `allCases`, so they follow what the user sees (Spec 109-i FR-050).
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard"
+    // Spec 109 FR-051/T064: renamed from "Dashboard" — the needs-attention
+    // list is now this section's first thing, not a banner buried in it.
+    case home = "Home"
+    // Connect
+    case clients = "Clients"
+    // Spec 108-k: a profile is the named scope a client or token is bound to.
+    // Same place and order as the Web sidebar (Clients, Profiles, Servers, Tools).
+    case profiles = "Profiles"
     case servers = "Servers"
     // F16: BM25 tool discovery is the product's headline feature and had no
     // native home — a tray-first user could not answer "which of my 942 tools
     // does X?" without opening a browser.
     case tools = "Tools"
-    case registries = "Registries"
-    case activity = "Activity Log"
+    // Protect
+    case review = "Review Queue"
     case secrets = "Secrets"
-    // F5: TokensView was a complete, API-complete create/list/revoke UI that
-    // nothing instantiated — a headline security feature reachable from the
-    // Web UI and the CLI but not from the app the user has open.
-    case tokens = "Agent Tokens"
+    // Monitor. Spec 109-i: "Activity" (was "Activity Log") to match the Web UI
+    // sidebar. The raw value is the in-process wire value of
+    // `.switchToSidebarTab` and is never persisted. Spec 109 T109: the
+    // Registries item is retired (server discovery lives in the Add Server
+    // sheet's Catalog tab), and F5's Agent Tokens live under Clients.
+    case activity = "Activity"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
-        case .dashboard: return "rectangle.3.group"
+        case .home: return "rectangle.3.group"
+        case .clients: return "person.2"
+        case .profiles: return "person.crop.rectangle.stack"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
-        case .registries: return "books.vertical"
-        case .activity: return "clock.arrow.circlepath"
+        case .review: return "checkmark.shield"
         case .secrets: return "key.fill"
-        case .tokens: return "key.horizontal"
+        case .activity: return "clock.arrow.circlepath"
+        }
+    }
+}
+
+/// The sidebar groups below Home, named exactly as in the Web UI
+/// (contracts/navigation-map.md). Profiles joined Connect with Spec 108-k.
+enum SidebarSection: CaseIterable {
+    case connect, protect, monitor
+
+    var title: String {
+        switch self {
+        case .connect: return "Connect"
+        case .protect: return "Protect"
+        case .monitor: return "Monitor"
         }
     }
 
+    var items: [SidebarItem] {
+        switch self {
+        case .connect: return [.clients, .profiles, .servers, .tools]
+        case .protect: return [.review, .secrets]
+        case .monitor: return [.activity]
+        }
+    }
+}
+
+/// The toolbar "+" menu (Spec 109-i FR-052, Spec 108-k): Server / Client / Token
+/// / Profile, the same four (and order) the Web UI "+ Add" menu offers.
+enum AddMenuItem: String, CaseIterable, Identifiable {
+    case server = "Server"
+    case client = "Client"
+    case token = "Token"
+    case profile = "Profile"
+
+    var id: String { rawValue }
+
+    /// The sidebar section that hosts this action's sheet.
+    var destination: SidebarItem {
+        switch self {
+        case .server: return .servers
+        case .client, .token: return .clients
+        case .profile: return .profiles
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .server: return "server.rack"
+        case .client: return "person.crop.circle.badge.plus"
+        case .token: return "key"
+        case .profile: return "person.crop.rectangle.stack"
+        }
+    }
 }
 
 struct MainWindow: View {
     @ObservedObject var appState: AppState
     @State private var selectedItem: SidebarItem?
+    /// The access explainer is presented from here so it can open from any
+    /// section (Clients row, Tools "Why?", the profile editor).
+    @State private var explainerRequest: ExplainerRequest?
 
     /// `initialTab` seeds the sidebar selection for a window created to land
     /// on a specific section (tray "Open Activity…" → Activity). Once the
     /// window exists, later switches arrive as `.switchToSidebarTab`
     /// notifications instead — state is only readable at creation time.
-    init(appState: AppState, initialTab: SidebarItem = .dashboard) {
+    init(appState: AppState, initialTab: SidebarItem = .home) {
         self.appState = appState
         _selectedItem = State(initialValue: initialTab)
     }
@@ -50,10 +115,12 @@ struct MainWindow: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedItem) {
-                ForEach(SidebarItem.allCases) { item in
-                    Label(item.rawValue, systemImage: item.icon)
-                        .tag(item)
-                        .accessibilityIdentifier("sidebar-\(item.rawValue)")
+                ForEach(Array(MainWindow.sidebarLayout.enumerated()), id: \.offset) { _, group in
+                    if let title = group.title {
+                        Section(title) { sidebarRows(group.items) }
+                    } else {
+                        sidebarRows(group.items)
+                    }
                 }
             }
             // Cap the sidebar width so SwiftUI cannot expand it past a
@@ -61,7 +128,7 @@ struct MainWindow: View {
             // unbounded after certain layout transitions (e.g. exiting a
             // detail view back to the list), leaving the detail pane
             // squeezed into a sliver on the right. 280pt keeps long
-            // labels like "Activity Log" fully readable while leaving
+            // labels like "Review Queue" fully readable while leaving
             // the main content area generous space.
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
             .listStyle(.sidebar)
@@ -75,21 +142,23 @@ struct MainWindow: View {
 
                 // Regular content
                 Group {
-                    switch selectedItem ?? .dashboard {
-                    case .dashboard:
-                        DashboardView(appState: appState)
+                    switch selectedItem ?? .home {
+                    case .home:
+                        HomeView(appState: appState)
+                    case .review:
+                        ReviewQueueView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
                     case .tools:
                         ToolsView(appState: appState)
-                    case .registries:
-                        RegistriesView(appState: appState)
                     case .activity:
                         ActivityView(appState: appState)
                     case .secrets:
                         SecretsView(appState: appState)
-                    case .tokens:
-                        TokensView(appState: appState)
+                    case .clients:
+                        ClientsView(appState: appState)
+                    case .profiles:
+                        ProfilesView(appState: appState)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -98,7 +167,37 @@ struct MainWindow: View {
             .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
+        .toolbar {
+            // Spec 109-i FR-052: one place to add things, from any section.
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    ForEach(AddMenuItem.allCases) { item in
+                        Button {
+                            // Hand the action off BEFORE switching the sidebar:
+                            // a view created by the switch consumes it on appear.
+                            appState.pendingAddAction = item
+                            selectedItem = item.destination
+                        } label: {
+                            Label(item.rawValue, systemImage: item.systemImage)
+                        }
+                        .accessibilityIdentifier("toolbar-add-\(item.rawValue)")
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+                .accessibilityIdentifier("toolbar-add-menu")
+                .help("Add a server, client, agent token or profile")
+            }
+        }
         .background(sidebarShortcuts)
+        // Spec 108-k: a route (a fix button, a Profiles card link, the tray)
+        // names the section that hosts its destination; the destination view
+        // consumes the route itself.
+        .onAppear { followRoute() }
+        .onChange(of: appState.pendingRoute) { _ in followRoute() }
+        .sheet(item: $explainerRequest) { request in
+            AccessExplainerSheet(appState: appState, request: request)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .switchToActivity)) { _ in
             selectedItem = .activity
         }
@@ -108,6 +207,54 @@ struct MainWindow: View {
         .onReceive(NotificationCenter.default.publisher(for: .switchToSidebarTab)) { note in
             guard let item = MainWindow.sidebarItem(from: note) else { return }
             selectedItem = item
+        }
+    }
+
+    /// Home on its own, then Connect / Protect / Monitor (contracts/
+    /// navigation-map.md). Flattening this equals `SidebarItem.allCases`, so the
+    /// ⌘1…⌘7 shortcut order is the visual order.
+    static let sidebarLayout: [(title: String?, items: [SidebarItem])] =
+        [(title: nil, items: [.home])] + SidebarSection.allCases.map { (title: $0.title, items: $0.items) }
+
+    /// Switch the sidebar to the section a pending route targets, and present
+    /// the explainer for an `.explain` route (it has no section of its own).
+    private func followRoute() {
+        guard let route = appState.pendingRoute else { return }
+        if case .explain(let subject, let tool) = route {
+            appState.pendingRoute = nil
+            explainerRequest = ExplainerRequest(subject: subject, tool: tool ?? "")
+            return
+        }
+        if let item = route.sidebarItem { selectedItem = item }
+    }
+
+    /// Count shown beside a sidebar row, 0 for none. Home carries the FR-001
+    /// needs-attention count; Review Queue is one row per server (GET /review),
+    /// deliberately separate from attention.
+    private func badgeCount(for item: SidebarItem) -> Int {
+        switch item {
+        case .home: return appState.attention.count
+        case .review: return appState.reviewQueueCount
+        default: return 0
+        }
+    }
+
+    @ViewBuilder
+    private func sidebarRows(_ items: [SidebarItem]) -> some View {
+        ForEach(items) { item in
+            HStack {
+                Label(item.rawValue, systemImage: item.icon)
+                Spacer()
+                if badgeCount(for: item) > 0 {
+                    Text("\(badgeCount(for: item))")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.orange.opacity(0.2)).clipShape(Capsule())
+                        .accessibilityIdentifier("sidebar-badge-\(item.rawValue)")
+                }
+            }
+            .tag(item)
+            .accessibilityIdentifier("sidebar-\(item.rawValue)")
         }
     }
 
@@ -121,10 +268,10 @@ struct MainWindow: View {
         return SidebarItem(rawValue: raw)
     }
 
-    /// Hidden ⌘1…⌘5 shortcuts to jump straight to each sidebar section. Keeps
-    /// keyboard navigation fast for users and lets UI-test automation reach a
-    /// section (the sidebar List rows aren't directly clickable via the
-    /// accessibility menu API).
+    /// Hidden ⌘1…⌘8 shortcuts to jump straight to each sidebar section, in the
+    /// order the sidebar shows them. Keeps keyboard navigation fast for users
+    /// and lets UI-test automation reach a section (the sidebar List rows
+    /// aren't directly clickable via the accessibility menu API).
     @ViewBuilder
     private var sidebarShortcuts: some View {
         VStack {

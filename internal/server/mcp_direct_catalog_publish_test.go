@@ -89,16 +89,27 @@ func TestResolveDirectTool_DenyOnMissButNotOnNilCatalog(t *testing.T) {
 			"a name the catalog does not admit must be denied, not waved through by re-parsing it")
 	})
 
-	t.Run("a separator-less name is a built-in, not a denial", func(t *testing.T) {
-		// Every upstream tool is named through FormatDirectToolName, which always
-		// inserts "__". A name without one therefore cannot be an upstream
-		// projection — it is a tool this proxy registered itself, and denying it
-		// would delete built-ins off their own surface.
-		for _, name := range []string{"describe_tool", "retrieve_tools"} {
-			entry, decision := p.resolveDirectTool(name)
-			assert.Nil(t, entry, "a built-in has no upstream catalog entry")
-			assert.Equal(t, directResolveBuiltin, decision, "%s must be kept", name)
-		}
+	t.Run("a separator-less name is a built-in ONLY via the explicit set", func(t *testing.T) {
+		// Spec 105 FR-008 (FR008-G2): "built-in" used to be inferred
+		// structurally — any name that fails to parse as server__tool — which
+		// misclassified an upstream tool with an empty raw name ("server__")
+		// the same way (TestResolveDirectTool_EmptyToolNameIsNotABuiltin).
+		// Positive identification replaces it: a name is a built-in only when
+		// it is in builtinDirectToolNames, populated from this surface's own
+		// constructors.
+		entry, decision := p.resolveDirectTool("describe_tool")
+		assert.Nil(t, entry, "a built-in has no upstream catalog entry")
+		assert.Equal(t, directResolveBuiltin, decision, "describe_tool is a REAL direct-surface built-in")
+
+		// "retrieve_tools" has no "__" either, but it is a RETRIEVE-surface
+		// built-in, never registered on the direct surface at all — it must
+		// NOT be positively identified here. With a published, non-empty
+		// catalog that does not admit it, it is denied — never waved through
+		// on the strength of its shape alone.
+		entry, decision = p.resolveDirectTool("retrieve_tools")
+		assert.Nil(t, entry)
+		assert.Equal(t, directResolveDenied, decision,
+			"a name that is neither stamped in the catalog nor an explicit built-in has no registration identity")
 	})
 
 	t.Run("a withheld collision is denied in both id forms", func(t *testing.T) {
@@ -152,13 +163,21 @@ func publishPermsCatalog(p *MCPProxyServer, perms map[string]string) {
 // directToolPermissions map resolved this by accident — a nil map missed, and a
 // miss dropped the tool for a scoped agent — so the behaviour is preserved
 // deliberately here rather than left to be rediscovered.
+//
+// Spec 105 FR-008 (FR008-G2): the fixture's separator-less name is now
+// "describe_tool", a REAL direct-surface built-in identified from the
+// explicit set regardless of catalog state — not "retrieve_tools", which was
+// only ever kept here because a nil catalog's structural fallback could not
+// tell it apart from a genuine built-in (see the sibling test above). A
+// caller-supplied name with no registration identity at all is dropped in the
+// NoCatalog window exactly as an upstream-shaped one is.
 func TestFilterDirectModeToolsForAuth_NoCatalogPreservesPreChangeBehaviour(t *testing.T) {
 	proxy := &MCPProxyServer{}
 	require.Nil(t, proxy.loadDirectCatalog(), "precondition: no catalog published")
 
 	tools := []mcp.Tool{
 		{Name: FormatDirectToolName("github", "get_issue")},
-		{Name: "retrieve_tools"},
+		{Name: "describe_tool"},
 	}
 
 	t.Run("unauthenticated caller keeps everything", func(t *testing.T) {
@@ -178,8 +197,9 @@ func TestFilterDirectModeToolsForAuth_NoCatalogPreservesPreChangeBehaviour(t *te
 		for _, tl := range got {
 			names = append(names, tl.Name)
 		}
-		assert.Equal(t, []string{"retrieve_tools"}, names,
+		assert.Equal(t, []string{"describe_tool"}, names,
 			"with no catalog the tier is unknown, so an upstream tool fails closed for a scoped "+
-				"agent — but a built-in, which has no tier to begin with, must survive")
+				"agent — but a REAL built-in, positively identified by name regardless of catalog "+
+				"state, must survive")
 	})
 }

@@ -67,7 +67,7 @@ daemon. 'list' and 'search' use the daemon when available and otherwise read the
 registries directly.`,
 	}
 
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryEditCmd(), newRegistryRemoveCmd())
 	return cmd
 }
@@ -361,6 +361,7 @@ The printed ID column is what you pass to 'registry add'.`,
 			if registryID == "" {
 				return fmt.Errorf("--registry is required (use 'mcpproxy registry list' to see available ids)")
 			}
+			printCatalogDeprecationNotice("registry search", fmt.Sprintf("catalog search %s --source %s", query, registryID))
 
 			ctx, cancel := registryContext()
 			defer cancel()
@@ -431,6 +432,7 @@ inputs, supply them with --env KEY=VALUE.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			registryID, serverID := args[0], args[1]
+			printCatalogDeprecationNotice("registry add", fmt.Sprintf("catalog add %s/%s", registryID, serverID))
 
 			env, err := parseRegistryEnv(registryAddEnv)
 			if err != nil {
@@ -468,11 +470,7 @@ inputs, supply them with --env KEY=VALUE.`,
 				return nil
 			}
 
-			fmt.Printf("✅ Added '%s'", result.Name)
-			if result.Quarantined {
-				fmt.Printf(" (quarantined — approve with: mcpproxy upstream approve %s)", result.Name)
-			}
-			fmt.Println()
+			fmt.Println(registryAddMessage(result.Name, result.Quarantined))
 			return nil
 		},
 	}
@@ -480,6 +478,18 @@ inputs, supply them with --env KEY=VALUE.`,
 	cmd.Flags().StringArrayVar(&registryAddEnv, "env", nil, "Set an environment variable (KEY=VALUE); repeatable")
 	cmd.Flags().BoolVar(&registryAddEnabled, "enabled", true, "Whether the added server is enabled")
 	return cmd
+}
+
+// registryAddMessage formats the CLI's success confirmation after adding a
+// server from a registry (Spec 109 FR-063): "Added <name> to MCPProxy
+// (quarantined for review)" — the same wording the Web/macOS "Add to
+// MCPProxy" action uses after a successful add.
+func registryAddMessage(name string, quarantined bool) string {
+	msg := fmt.Sprintf("✅ Added %s to MCPProxy", name)
+	if quarantined {
+		msg += fmt.Sprintf(" (quarantined for review — approve with: mcpproxy upstream approve %s)", name)
+	}
+	return msg
 }
 
 // registryAddErrorOutput maps a *cliclient.RegistryAddError to a structured CLI
@@ -612,19 +622,21 @@ func truncateStr(s string, max int) string {
 // command's --config flag and the global --data-dir, falling back to defaults
 // so 'list'/'search' still work without a config file.
 func loadRegistryConfig() (*config.Config, error) {
-	var cfg *config.Config
-	var err error
-	if registryConfigPath != "" {
-		cfg, err = config.LoadFromFile(registryConfigPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	// Go through loadCLIConfig so a --data-dir with no config file anywhere
+	// uses defaults rooted at that directory instead of creating
+	// $HOME/.mcpproxy/mcp_config.json.
+	cfg, err := loadCLIConfig(registryConfigPath)
 	if err != nil {
+		// An explicitly named config that cannot be loaded is an error, not a
+		// reason to silently use defaults.
+		if resolveCLIConfigPath(registryConfigPath) != "" {
+			return nil, err
+		}
 		// Discovery should still work with defaults if no config is present.
 		cfg = config.DefaultConfig()
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
 	}
 	return cfg, nil
 }

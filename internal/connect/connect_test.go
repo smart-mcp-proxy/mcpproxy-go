@@ -319,6 +319,7 @@ func TestConnect_ClaudeCode_AuthOff_NoKeyWritten(t *testing.T) {
 func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	svc, _ := testServiceWithKey(t)
 	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
 
 	result, err := svc.Connect("claude-code", "", false)
 	if err != nil {
@@ -341,8 +342,240 @@ func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected headers object, got %T", entry["headers"])
 	}
-	if headers["X-API-Key"] != "test-key-123" {
-		t.Errorf("Expected X-API-Key header, got %v", headers["X-API-Key"])
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("Expected the minted client credential in X-API-Key (never the admin key), got %v", headers["X-API-Key"])
+	}
+}
+
+// TestConnect_TopLevelJSONNullDoesNotPanic reproduces a config file whose
+// entire content is the 4-byte JSON literal `null` (e.g. a corrupted or
+// half-written file). json.Unmarshal accepts this without error but leaves
+// the destination map nil, and every write path in this package used to
+// assume a non-nil map — `data[serversKey] = serversMap` and the nested
+// setServersMap both panic with "assignment to entry in nil map" on a nil
+// map. This is not client-specific (both the flat-key and nested-key paths
+// route through the same unmarshalLenientJSON), so it's exercised once per
+// path shape.
+func TestConnect_TopLevelJSONNullDoesNotPanic(t *testing.T) {
+	for _, clientID := range []string{"cursor", "zcode"} {
+		t.Run(clientID, func(t *testing.T) {
+			svc, home := testService(t)
+			cfgPath := ConfigPath(clientID, home)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte("null"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := svc.Connect(clientID, "", false)
+			if err != nil {
+				t.Fatalf("Connect panicked or errored on a top-level null config: %v", err)
+			}
+			if !res.Success || res.Action != "created" {
+				t.Fatalf("expected created success, got %+v", res)
+			}
+
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data map[string]interface{}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			if data == nil {
+				t.Fatal("expected a real config object written, got null-equivalent")
+			}
+		})
+	}
+}
+
+func TestConfigPath_ZCode(t *testing.T) {
+	homeDir := t.TempDir()
+	got := ConfigPath("zcode", homeDir)
+	want := filepath.Join(homeDir, ".zcode", "cli", "config.json")
+	if got != want {
+		t.Errorf("ConfigPath(zcode) = %q, want %q", got, want)
+	}
+}
+
+// TestConnect_ZCode_NestedServersKey verifies ZCode's entry is written under
+// the nested {"mcp":{"servers":{...}}} path its own config schema requires
+// (~/.zcode/cli/config.json, per the diagnosing-mcp skill doc) rather than a
+// flat top-level key like every other client, and that an unrelated
+// pre-existing root key survives the write untouched.
+func TestConnect_ZCode_NestedServersKey(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	if !res.Success || res.Action != "created" {
+		t.Fatalf("expected created success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	mcp, ok := data["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected top-level mcp object, got %T", data["mcp"])
+	}
+	servers, ok := mcp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers object, got %T", mcp["servers"])
+	}
+	entry, ok := servers["mcpproxy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers.mcpproxy entry, got %v", servers["mcpproxy"])
+	}
+	if entry["type"] != "http" || entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("unexpected entry shape: %v", entry)
+	}
+}
+
+// TestConnect_ZCode_PreservesSiblingServer verifies an unrelated server
+// already registered under mcp.servers survives a connect alongside the new
+// mcpproxy entry.
+func TestConnect_ZCode_PreservesSiblingServer(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+	if _, ok := servers["mcpproxy"]; !ok {
+		t.Fatalf("expected mcpproxy entry added, got %v", servers)
+	}
+}
+
+func TestConnect_ZCode_AuthOn_UsesHeader(t *testing.T) {
+	svc, _ := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
+
+	result, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	entry := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("expected clean url with header carrier, got %v", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected headers object, got %T", entry["headers"])
+	}
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("expected the minted client credential in X-API-Key, got %v", headers["X-API-Key"])
+	}
+}
+
+// TestDisconnect_ZCode_RemovesNestedEntryOnly verifies disconnect removes just
+// the mcpproxy entry from the nested mcp.servers map, leaving the sibling
+// server and unrelated root keys intact, and that GetStatus correctly reports
+// Connected=false afterward (round-tripping through the same nested lookup
+// GetStatus/entryAccess uses).
+func TestDisconnect_ZCode_RemovesNestedEntryOnly(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"},"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	status, err := svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Connected {
+		t.Fatalf("expected Connected=true after connect, got %+v", status)
+	}
+
+	res, err := svc.Disconnect("zcode", "")
+	if err != nil {
+		t.Fatalf("Disconnect failed: %v", err)
+	}
+	if !res.Success || res.Action != "removed" {
+		t.Fatalf("expected removed success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["mcpproxy"]; ok {
+		t.Fatalf("expected mcpproxy entry removed, got %v", servers)
+	}
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+
+	status, err = svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Connected {
+		t.Fatalf("expected Connected=false after disconnect, got %+v", status)
 	}
 }
 
@@ -776,6 +1009,19 @@ func TestDisconnect_TOML(t *testing.T) {
 // Claude Desktop only speaks stdio, so mcpproxy connects via an mcp-remote
 // stdio bridge instead of a direct HTTP/SSE URL. It must be a supported,
 // one-click client.
+func TestZCode_NoteWarnsAboutAgentsFallbackShadowing(t *testing.T) {
+	client := FindClient("zcode")
+	if client == nil {
+		t.Fatal("expected zcode client definition")
+	}
+	if client.Note == "" {
+		t.Error("zcode should carry a note explaining the .agents/mcp.json shadowing caveat")
+	}
+	if !strings.Contains(client.Note, ".agents/mcp.json") {
+		t.Errorf("zcode note should mention .agents/mcp.json, got: %q", client.Note)
+	}
+}
+
 func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 	client := FindClient("claude-desktop")
 	if client == nil {
@@ -880,6 +1126,10 @@ func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
 		t.Run(map[bool]string{true: "auth-on", false: "auth-off"}[authOn], func(t *testing.T) {
 			svc, homeDir := testServiceWithKey(t)
 			svc.WithRequireMCPAuth(authOn)
+			var minter *fakeMinter
+			if authOn {
+				minter = withFakeMinter(svc)
+			}
 
 			cfgPath := ConfigPath("claude-desktop", homeDir)
 			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
@@ -904,8 +1154,11 @@ func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
 			}
 			if authOn {
 				lastArg, _ := args[len(args)-1].(string)
-				if lastArg != "X-API-Key:test-key-123" {
-					t.Errorf("Expected --header X-API-Key:test-key-123, got %v", lastArg)
+				if lastArg != "X-API-Key:"+minter.lastSecret() {
+					t.Errorf("Expected --header X-API-Key:<minted client credential>, got %v", lastArg)
+				}
+				if strings.Contains(string(raw), "test-key-123") {
+					t.Errorf("the admin API key must never be written, got: %s", raw)
 				}
 				if args[len(args)-2] != "--header" {
 					t.Errorf("Expected --header flag before value, got %v", args[len(args)-2])
@@ -1110,7 +1363,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "subdir", "test.json")
 
 	content := []byte(`{"atomic": true}`)
-	if err := atomicWriteFile(path, content, 0o644); err != nil {
+	if err := atomicWriteFile(path, content, 0o644, nil); err != nil {
 		t.Fatalf("atomicWriteFile failed: %v", err)
 	}
 
@@ -1160,36 +1413,60 @@ func TestBaseURL_NoQuery(t *testing.T) {
 	}
 }
 
-// Spec 078 security fix: with require_mcp_auth off (the default), no credential
-// is written into a client config even when an API key is configured.
-func TestEntryParams_AuthOff_NoCredential(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "my-secret") // require_mcp_auth defaults false
-	p := svc.entryParams(false)
-	if p.credential != "" {
-		t.Errorf("expected no credential when auth is off, got %q", p.credential)
+// Spec 108 FR-024: connect never embeds the admin API key. planCredential
+// decides whether a write mints a client credential at all (plan D9/D10).
+func TestPlanCredential(t *testing.T) {
+	strp := func(s string) *string { return &s }
+	tests := []struct {
+		name    string
+		auth    bool
+		minter  bool
+		intent  CredentialIntent
+		wantErr error
+		wantMnt bool
+	}{
+		{name: "auth off, no minter: legacy keyless entry", auth: false, minter: false},
+		{name: "auth on, no minter: refused, never the admin key", auth: true, minter: false, wantErr: ErrNoCredentialMinter},
+		{name: "auth off with a minter still mints (identity + binding)", auth: false, minter: true, wantMnt: true},
+		{name: "auth on with a minter mints", auth: true, minter: true, wantMnt: true},
+		{name: "keyless with auth on is refused", auth: true, minter: true, intent: CredentialIntent{Keyless: true}, wantErr: ErrKeylessRequiresAuthOff},
+		{name: "keyless with auth off is credential-less", auth: false, minter: true, intent: CredentialIntent{Keyless: true}},
+		{name: "keyless with a profile is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("ro")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with a mode is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Mode: strp("locked")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with All servers (empty profile) is allowed", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("")}},
 	}
-	if svc.containsCredential() {
-		t.Error("containsCredential must be false when auth is off")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService("127.0.0.1:8080", "admin-secret").WithRequireMCPAuth(tt.auth)
+			if tt.minter {
+				withFakeMinter(svc)
+			}
+			mint, err := svc.planCredential(tt.intent)
+			if err != tt.wantErr {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if mint != tt.wantMnt {
+				t.Fatalf("mint = %v, want %v", mint, tt.wantMnt)
+			}
+		})
 	}
 }
 
-// With require_mcp_auth on, the credential is present and the query carrier
-// URL-escapes special characters.
-func TestEntryParams_AuthOn_CredentialPresent(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "key with spaces&x=1").WithRequireMCPAuth(true)
-	p := svc.entryParams(false)
-	if p.credential != "key with spaces&x=1" {
-		t.Errorf("expected raw credential, got %q", p.credential)
+// The query carrier URL-escapes a real secret but leaves the display mask and
+// the pending placeholder literal.
+func TestCredentialQuery(t *testing.T) {
+	base := "http://127.0.0.1:8080/mcp"
+	if got := credentialQuery(base, ""); got != base {
+		t.Errorf("no credential must leave the URL clean, got %s", got)
 	}
-	if !svc.containsCredential() {
-		t.Error("containsCredential must be true when auth is on with a key")
+	if got := credentialQuery(base, "a b&x=1"); strings.Contains(got, " ") || !strings.Contains(got, "apikey=a+b%26x%3D1") {
+		t.Errorf("a real credential must be URL-escaped, got %s", got)
 	}
-	q := credentialQuery(p.baseURL, p.credential)
-	if strings.Contains(q, " ") {
-		t.Errorf("query carrier must URL-escape spaces, got %s", q)
+	if got := credentialQuery(base, maskClientCredential); got != base+"?apikey="+maskClientCredential {
+		t.Errorf("the mask stays literal, got %s", got)
 	}
-	if !strings.Contains(q, "apikey=") {
-		t.Errorf("expected apikey query, got %s", q)
+	if got := credentialQuery(base, pendingCredential); got != base+"?apikey="+pendingCredential {
+		t.Errorf("the pending placeholder stays literal, got %s", got)
 	}
 }
 
@@ -1212,8 +1489,8 @@ func TestFindClient(t *testing.T) {
 
 func TestGetAllClients(t *testing.T) {
 	clients := GetAllClients()
-	if len(clients) != 8 {
-		t.Errorf("Expected 8 clients, got %d", len(clients))
+	if len(clients) != 9 {
+		t.Errorf("Expected 9 clients, got %d", len(clients))
 	}
 
 	// Verify all have non-empty IDs and names
@@ -1361,6 +1638,61 @@ func TestConnectWithPrecondition_ValidTokenWrites(t *testing.T) {
 	})
 }
 
+// TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint closes
+// the coverage gap the DisplayPath/ReloadHint deferred fill-in (Connect's
+// named-return + defer, see the comment above its declaration) exists for: a
+// precondition_failed result is a real branch that returns EARLY, before the
+// bottom `return res, ...` a naive reading might assume is the only exit, so
+// this pins that the deferred fill-in still runs on it.
+func TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	// Drift the file after the preview so the write hits precondition_failed.
+	const drifted = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+	writeFileT(t, cfgPath, drifted)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected a precondition refusal, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
+}
+
+// TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint
+// closes the coverage gap for Disconnect's OpenCode alternate-candidate
+// branch (#922 drift): it returns directly (`return altRes, nil`) instead of
+// falling through to the bottom `return res, ...` the deferred
+// DisplayPath/ReloadHint fill-in sits above — this pins that the deferred
+// fill-in still runs on THIS early return too.
+func TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+
+	// Entry lives in opencode.json, but opencode.jsonc now exists too, so the
+	// resolver targets the .jsonc (higher precedence) while the entry is only
+	// in the .json — the exact drift #922 fixed.
+	candidates := opencodeConfigCandidates(home)
+	jsoncPath, jsonPath := candidates[0], candidates[1]
+	writeFileT(t, jsonPath, `{"mcp":{"mcpproxy":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+	writeFileT(t, jsoncPath, `{"mcp":{}}`)
+
+	res, err := svc.Disconnect("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if res == nil || !res.Success {
+		t.Fatalf("expected the alternate-candidate retry to find and remove the entry, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
+}
+
 // TestConnectWithPrecondition_StaleTokenRefuses walks every drift class the
 // token exists to catch, and proves each refusal is inert: no write, no backup.
 func TestConnectWithPrecondition_StaleTokenRefuses(t *testing.T) {
@@ -1459,19 +1791,19 @@ func TestConnectWithPrecondition_StaleTokenRefuses(t *testing.T) {
 		apiKey, requireAuth := "key-one", false
 		svc := NewServiceWithHome("127.0.0.1:8080", apiKey, home).
 			WithConfigProvider(func() (string, string, bool) { return "127.0.0.1:8080", apiKey, requireAuth })
+		withFakeMinter(svc)
 
 		preview, err := svc.Preview("claude-code", "mcpproxy")
 		if err != nil {
 			t.Fatalf("Preview: %v", err)
 		}
 		if preview.ContainsAPIKey {
-			t.Fatal("fixture should preview a keyless entry")
+			t.Fatal("fixture should never preview the admin key")
 		}
 
-		// The user is looking at a keyless preview; auth is toggled on behind
-		// their back. Writing now would embed a credential the FR-004 notice
-		// never announced — the token must refuse even though the FILE is
-		// untouched.
+		// The user is looking at a preview taken with auth off; auth is toggled
+		// on behind their back. The token binds the auth toggle, so it must
+		// refuse even though the FILE is untouched.
 		requireAuth = true
 
 		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)

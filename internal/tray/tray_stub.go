@@ -23,7 +23,6 @@ type ServerInterface interface {
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
 
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
@@ -51,7 +50,10 @@ func New(_ ServerInterface, logger *zap.SugaredLogger, _ string, _ func()) *App 
 }
 
 // NewWithAPIClient creates a new tray application with an API client (stub version)
-func NewWithAPIClient(_ ServerInterface, _ interface{ OpenWebUI() error }, logger *zap.SugaredLogger, _ string, _ func()) *App {
+func NewWithAPIClient(_ ServerInterface, _ interface {
+	OpenWebUI() error
+	OpenWebUIPath(string) error
+}, logger *zap.SugaredLogger, _ string, _ func()) *App {
 	return &App{
 		logger: logger,
 	}

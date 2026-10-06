@@ -340,6 +340,53 @@ func TestDirectBlockReasonKey_ClassifiesPerGate(t *testing.T) {
 	}
 }
 
+// TestDirectBlockReasonKey_AgreesWithResponse_ConfigDeniedAndApprovalLocked is
+// PR #1326 review round 2, chunk B: a tool can be BOTH config-denied
+// (enabled_tools/disabled_tools) AND pending/changed approval at the same
+// time. directBlockReasonKey and directToolCallabilityResult used to
+// classify that case differently — the emitted telemetry reason described a
+// DIFFERENT block than the response body the caller actually received.
+//
+// The canonical precedence, matching every other dispatch path (toolGate's
+// quarantine -> approval-lock -> generic/config-denied order in
+// handleCallToolVariant/handleCallTool, mcp.go), is that the approval lock
+// wins over a plain config denial. Both functions must agree with THAT order
+// and with each other, for every locked status.
+func TestDirectBlockReasonKey_AgreesWithResponse_ConfigDeniedAndApprovalLocked(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	for _, status := range []string{storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged} {
+		decision := directCallabilityDecision{
+			serverName:     "github",
+			toolName:       "list_repos",
+			serverConfig:   &config.ServerConfig{Name: "github", Enabled: true},
+			configDenied:   true,
+			approvalStatus: status,
+			approval: &storage.ToolApprovalRecord{
+				ServerName: "github", ToolName: "list_repos", Status: status,
+			},
+		}
+
+		reasonKey := directBlockReasonKey(decision)
+		result := proxy.directToolCallabilityResult(context.Background(), decision, map[string]interface{}{})
+		require.NotNil(t, result)
+		text := result.Content[0].(mcp.TextContent).Text
+
+		switch status {
+		case storage.ToolApprovalStatusPending:
+			require.Equal(t, telemetry.BlockReasonToolPendingApproval, reasonKey)
+			require.Contains(t, text, "new_unapproved_tool", "the reason key and the response body must describe the SAME block")
+		case storage.ToolApprovalStatusChanged:
+			require.Equal(t, telemetry.BlockReasonToolChanged, reasonKey)
+			require.Contains(t, text, "tool_description_changed", "the reason key and the response body must describe the SAME block")
+		}
+		// Neither function may fall back to the generic config-denied wording
+		// while the other reports an approval lock.
+		require.NotContains(t, text, blockedToolMessageFor(true),
+			"the approval lock must win over the plain config-denied response")
+	}
+}
+
 // The reason travels with the block result, so the routing handler emits the
 // key that matches the gate that fired.
 func TestDirectToolCallabilityBlockWithReason_Quarantine(t *testing.T) {

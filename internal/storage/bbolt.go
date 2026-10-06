@@ -39,8 +39,10 @@ type BoltDB struct {
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
 
-	// Try to open with timeout, if it fails, immediately return database locked error
-	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
+	// Try to open with timeout, if it fails, immediately return database locked error.
+	// The database holds OAuth tokens and DCR client secrets, so it is created
+	// owner-only (0600).
+	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
 		Timeout: 10 * time.Second,
 	})
 	if err != nil {
@@ -59,6 +61,10 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 		return nil, fmt.Errorf("failed to open bolt database: %w", err)
 	}
 
+	// The mode passed to bbolt.Open only applies when the file is created, so
+	// databases created by older builds keep their 0644 mode. Tighten them here.
+	tightenFilePermissions(dbPath, logger)
+
 	boltDB := &BoltDB{
 		db:     db,
 		logger: logger,
@@ -71,6 +77,34 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	}
 
 	return boltDB, nil
+}
+
+// tightenFilePermissions clears group and other permission bits from path,
+// leaving owner bits untouched so a deliberately stricter mode is never widened.
+// It is best-effort and never prevents the proxy from starting: a mode that
+// cannot be tightened (read-only mount, exotic filesystem, Windows) is logged
+// at warn level (the default log level is info) rather than blocking startup,
+// because the file holds OAuth tokens and DCR client secrets and a failure
+// here means it silently stays group/world readable - that must be visible
+// to an operator without enabling debug logging.
+func tightenFilePermissions(path string, logger *zap.SugaredLogger) {
+	info, err := os.Stat(path)
+	if err != nil {
+		logger.Warnf("Could not stat %s to check file permissions: %v", path, err)
+		return
+	}
+
+	perm := info.Mode().Perm()
+	if perm&0o077 == 0 {
+		return
+	}
+
+	if err := os.Chmod(path, perm&^0o077); err != nil {
+		logger.Warnf("Could not tighten permissions on %s: %v", path, err)
+		return
+	}
+
+	logger.Infof("Tightened permissions on %s from %#o to %#o", path, perm, perm&^0o077)
 }
 
 // Close closes the database
@@ -191,6 +225,39 @@ func (b *BoltDB) SaveUpstream(record *UpstreamRecord) error {
 		}
 		return bucket.Put([]byte(record.ID), data)
 	})
+}
+
+// SaveUpstreamKeepingQuarantine is SaveUpstream with the quarantine-lowering
+// guard: if a record already exists with Quarantined=true and the incoming
+// record would clear it without an explicit decision (explicit=false), the
+// stored quarantine is kept. The read-check-write runs in one bbolt Update
+// transaction so a concurrent QuarantineUpstreamServer cannot be lost between
+// the read and the write. It reports whether the guard kept the quarantine.
+// An undecodable previous record is overwritten, as SaveUpstream would.
+func (b *BoltDB) SaveUpstreamKeepingQuarantine(record *UpstreamRecord, explicit bool) (kept bool, err error) {
+	record.Updated = time.Now()
+
+	err = b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(UpstreamsBucket))
+		if !record.Quarantined && !explicit {
+			if prevData := bucket.Get([]byte(record.ID)); prevData != nil {
+				prev := &UpstreamRecord{}
+				if prev.UnmarshalBinary(prevData) == nil && prev.Quarantined {
+					record.Quarantined = true
+					kept = true
+				}
+			}
+		}
+		data, marshalErr := record.MarshalBinary()
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return bucket.Put([]byte(record.ID), data)
+	})
+	if err != nil {
+		kept = false
+	}
+	return kept, err
 }
 
 // GetUpstream retrieves an upstream server record by ID
@@ -361,15 +428,39 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 // Tool approval operations (tool-level quarantine)
 
 // SaveToolApproval saves a tool approval record
+//
+// It stamps DefinitionChangedAt: when a prior record exists and its current
+// definition content differs from the incoming one the stamp is set to now,
+// otherwise the prior value is carried over. The stamp is also written back to
+// the caller's record.
 func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
+			prior := &ToolApprovalRecord{}
+			if err := prior.UnmarshalBinary(encoded); err == nil {
+				if toolDefinitionContentChanged(prior, record) {
+					record.DefinitionChangedAt = time.Now().UTC()
+				} else {
+					record.DefinitionChangedAt = prior.DefinitionChangedAt
+				}
+			}
+		}
 		data, err := record.MarshalBinary()
 		if err != nil {
 			return err
 		}
 		return bucket.Put([]byte(record.Key()), data)
 	})
+}
+
+// toolDefinitionContentChanged reports whether the current description or
+// schemas differ between two records of the same tool. Annotations are
+// deliberately excluded.
+func toolDefinitionContentChanged(prior, next *ToolApprovalRecord) bool {
+	return prior.CurrentDescription != next.CurrentDescription ||
+		prior.CurrentSchema != next.CurrentSchema ||
+		prior.CurrentOutputSchema != next.CurrentOutputSchema
 }
 
 // StampToolApprovalsIdentityKeyed marks the named records of one server
@@ -663,11 +754,54 @@ func (b *BoltDB) DeleteServerPromptApprovals(serverName string) error {
 
 // Generic operations
 
-// Backup creates a backup of the database
+// Backup creates a backup of the database.
+// The copy carries the same secrets as the live database and the destination is
+// caller-chosen (potentially outside the 0700 data directory), so it is written
+// owner-only.
 func (b *BoltDB) Backup(destPath string) error {
-	return b.db.View(func(tx *bbolt.Tx) error {
-		return tx.CopyFile(destPath, 0644)
-	})
+	// bbolt's Tx.CopyFile opens the destination with O_CREATE|O_TRUNC, so its
+	// mode argument is ignored when the file already exists: writing straight to
+	// destPath would pour the database into whatever permissions a stale backup
+	// happened to carry, and a chmod afterwards comes too late. Stage the copy in
+	// an owner-only temporary file (os.CreateTemp creates it 0600) next to the
+	// destination, then rename it into place - the rename keeps the temp file's
+	// inode and so carries the 0600 mode with it (atomically on POSIX; Go makes
+	// no atomicity promise on Windows).
+	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), ".config.db.backup-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary backup file: %w", err)
+	}
+
+	tmpPath := tmpFile.Name()
+	renamed := false
+	defer func() {
+		tmpFile.Close() //nolint:errcheck // best-effort cleanup; Close below is the checked one
+		if !renamed {
+			os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
+		}
+	}()
+
+	if err := b.db.View(func(tx *bbolt.Tx) error {
+		_, writeErr := tx.WriteTo(tmpFile)
+		return writeErr
+	}); err != nil {
+		return fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to flush backup: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close backup: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("failed to move backup into place: %w", err)
+	}
+	renamed = true
+
+	return nil
 }
 
 // Stats returns database statistics
@@ -745,10 +879,13 @@ func (b *BoltDB) DeleteOAuthToken(serverName string) error {
 	})
 }
 
-// UpdateOAuthClientCredentials updates the client credentials (from DCR) and callback port on an existing token
-// This is called after successful Dynamic Client Registration to persist the obtained client_id/secret
-// and the callback port used for the redirect_uri (Spec 022: OAuth Redirect URI Port Persistence)
-func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string, callbackPort int) error {
+// UpdateOAuthClientCredentials updates the client credentials (from DCR), callback port and the
+// exact redirect URI used, on an existing token record. This is called after successful Dynamic
+// Client Registration to persist the obtained client_id/secret, the callback port used for the
+// redirect_uri (Spec 022: OAuth Redirect URI Port Persistence), and the redirect URI itself so a
+// later change to `oauth.redirect_uri` that keeps the same port but changes the path (issue #1304)
+// can still be detected as stale (comparing port alone would miss it).
+func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		data := bucket.Get([]byte(serverKey))
@@ -763,6 +900,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 			record.ClientID = clientID
 			record.ClientSecret = clientSecret
 			record.CallbackPort = callbackPort
+			record.RedirectURI = redirectURI
 			record.Updated = time.Now()
 		} else {
 			// Create minimal record with just client credentials
@@ -772,6 +910,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 				ClientID:     clientID,
 				ClientSecret: clientSecret,
 				CallbackPort: callbackPort,
+				RedirectURI:  redirectURI,
 				Created:      time.Now(),
 				Updated:      time.Now(),
 			}
@@ -785,9 +924,10 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 	})
 }
 
-// GetOAuthClientCredentials retrieves the client credentials and callback port for token refresh
-// callbackPort returns 0 if not stored (legacy records or fresh records without DCR)
-func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, callbackPort int, err error) {
+// GetOAuthClientCredentials retrieves the client credentials, callback port and redirect URI for
+// token refresh. callbackPort returns 0 and redirectURI returns "" if not stored (legacy records
+// or fresh records without DCR).
+func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, callbackPort int, redirectURI string, err error) {
 	err = b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		data := bucket.Get([]byte(serverKey))
@@ -802,6 +942,7 @@ func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSe
 		clientID = record.ClientID
 		clientSecret = record.ClientSecret
 		callbackPort = record.CallbackPort
+		redirectURI = record.RedirectURI
 		return nil
 	})
 	return
@@ -888,6 +1029,57 @@ func (b *BoltDB) SaveOnboardingState(state *OnboardingState) error {
 		bucket := tx.Bucket([]byte(OnboardingBucket))
 		if bucket == nil {
 			return fmt.Errorf("onboarding bucket not found")
+		}
+
+		data, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+
+		return bucket.Put([]byte(OnboardingStateKey), data)
+	})
+}
+
+// UpdateOnboardingState reads the current onboarding state, applies fn to it,
+// and persists the result — all inside ONE bbolt update transaction (Spec
+// 109-b, T035). Every writer of the record (the mark-state handler, the
+// connect success path, the `initialize` hook) MUST go through this instead
+// of a separate GetOnboardingState + SaveOnboardingState pair: bbolt's
+// b.db.Update transactions are serialized against each other, but two
+// separate Get/Save calls are two separate transactions, so a second writer's
+// change made in the gap between them is silently overwritten by the first
+// writer's stale snapshot on Save. Wrapping both steps in one Update closes
+// that window entirely.
+//
+// A nil fn is a caller error (bbolt would otherwise persist an unmodified
+// read as a no-op write); it returns an error rather than panicking.
+//
+// Callback constraint: fn executes inside the open bbolt write transaction
+// (and, when reached through Manager.UpdateOnboardingState, with Manager.mu
+// held). It must be a short, pure mutation of the state it is given, and MUST
+// NOT call any BoltDB or Manager method or block on I/O: bbolt allows a single
+// writer, so a nested b.db.Update (or a re-acquired Manager.mu) self-deadlocks.
+// If fn returns an error the transaction is rolled back and nothing is
+// persisted.
+func (b *BoltDB) UpdateOnboardingState(fn func(*OnboardingState) error) error {
+	if fn == nil {
+		return fmt.Errorf("UpdateOnboardingState: fn must not be nil")
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OnboardingBucket))
+		if bucket == nil {
+			return fmt.Errorf("onboarding bucket not found")
+		}
+
+		state := &OnboardingState{}
+		if data := bucket.Get([]byte(OnboardingStateKey)); data != nil {
+			if err := json.Unmarshal(data, state); err != nil {
+				return err
+			}
+		}
+
+		if err := fn(state); err != nil {
+			return err
 		}
 
 		data, err := json.Marshal(state)

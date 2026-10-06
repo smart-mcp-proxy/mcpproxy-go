@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory, type NavigationGuard } from 'vue-router'
-import Dashboard from '@/views/Dashboard.vue'
+import Home from '@/views/Home.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -13,37 +13,40 @@ const router = createRouter({
     },
     // Existing routes (admin/personal)
     //
-    // The landing page (`/`) opens the Dashboard on its Usage (analytics)
-    // panel — that is the "analytics dashboard as default landing page"
-    // behaviour. `/usage` and `/overview` render the same Dashboard component
-    // so each panel is deep-linkable and survives a reload; `meta.dashboardView`
-    // is what the component reads to pick the active panel.
+    // Spec 109 FR-051: `/` renders Home — the needs-attention list, the
+    // topology (formerly Dashboard.vue's "Overview" panel) and a usage
+    // summary strip. `/usage` is the full Usage page in its own right
+    // (Usage.vue, no longer wrapped by Dashboard's panel switcher).
+    // `/overview` redirects to `/` — Home replaces the standalone Overview
+    // panel. `Dashboard.vue` is retired.
     {
       path: '/',
-      name: 'dashboard',
-      component: Dashboard,
+      name: 'home',
+      component: Home,
       meta: {
-        title: 'Dashboard',
-        dashboardView: 'usage',
+        title: 'Home',
       },
     },
     {
       path: '/usage',
       name: 'usage',
-      component: Dashboard,
+      component: () => import('@/views/Usage.vue'),
       meta: {
         title: 'Usage Analytics',
-        dashboardView: 'usage',
       },
     },
+    { path: '/clients', name: 'clients', component: () => import('@/views/Clients.vue'), meta: { title: 'Clients' } },
+    // Spec 108-i I4: two SIBLING top-level routes. The Spec 109-i gate on the
+    // sidebar item, the Add menu item and the palette action compares
+    // `route.path === '/profiles'` exactly, so the editor must not be nested
+    // under it.
+    { path: '/profiles', name: 'profiles', component: () => import('@/views/Profiles.vue'), meta: { title: 'Profiles' } },
+    { path: '/profiles/:name', name: 'profile-editor', component: () => import('@/views/ProfileEditor.vue'), props: true, meta: { title: 'Profile' } },
     {
+      // Query and hash are kept explicitly (navigation-map.md "Redirects"),
+      // not left to vue-router's implicit carry-over for named redirects.
       path: '/overview',
-      name: 'dashboard-overview',
-      component: Dashboard,
-      meta: {
-        title: 'Overview',
-        dashboardView: 'overview',
-      },
+      redirect: (to) => ({ path: '/', query: to.query, hash: to.hash }),
     },
     {
       path: '/servers',
@@ -63,12 +66,20 @@ const router = createRouter({
       },
     },
     {
-      path: '/repositories',
-      name: 'repositories',
-      component: () => import('@/views/Repositories.vue'),
+      path: '/add-server',
+      name: 'add-server',
+      component: () => import('@/views/AddServer.vue'),
       meta: {
-        title: 'Repositories',
+        title: 'Add Server',
       },
+    },
+    // Spec 109 FR-062: adding a server now starts at /add-server (outside the
+    // /servers/:serverName path space — no server name, including "add", can
+    // be shadowed by it). /repositories redirects here on the Catalog tab,
+    // and catalog-source management moved to Settings → Catalog sources.
+    {
+      path: '/repositories',
+      redirect: (to) => ({ path: '/add-server', query: { ...to.query, tab: 'catalog' } }),
     },
     // `/search` used to be a third, sidebar-less search surface duplicating the
     // header box and the Tools page (audit F20). Tools is the canonical one —
@@ -80,11 +91,27 @@ const router = createRouter({
       redirect: (to) => ({ path: '/tools', query: to.query, hash: to.hash }),
     },
     {
+      path: '/review/:server',
+      name: 'review-server',
+      component: () => import('@/views/Review.vue'),
+      props: true,
+      meta: { title: 'Review server' },
+    },
+    {
+      path: '/review',
+      name: 'review',
+      component: () => import('@/views/Review.vue'),
+      meta: { title: 'Review queue' },
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/Settings.vue'),
       meta: {
-        title: 'Configuration',
+        // Spec 109 FR-056: named "Settings" everywhere (sidebar, route title,
+        // heading, document title) — "Configuration" was one more of the
+        // three names this page had accumulated (audit W5).
+        title: 'Settings',
       },
     },
     {
@@ -104,12 +131,15 @@ const router = createRouter({
       },
     },
     {
+      // Spec 109-k/109-ux-navigation-consistency FR-070: Sessions is now one
+      // of Activity's views (Tool calls · Sessions · System events · All),
+      // not its own page — `/sessions` keeps working as a redirect so old
+      // links/bookmarks still land somewhere, but the query string (a deep
+      // link like `?session=<id>`) has to survive the hop, same as the
+      // `/review` redirect above.
       path: '/sessions',
       name: 'sessions',
-      component: () => import('@/views/Sessions.vue'),
-      meta: {
-        title: 'MCP Sessions',
-      },
+      redirect: (to) => ({ path: '/activity', query: { ...to.query, view: 'sessions' }, hash: to.hash }),
     },
     {
       path: '/tools',
@@ -129,11 +159,7 @@ const router = createRouter({
     },
     {
       path: '/security',
-      name: 'security',
-      component: () => import('@/views/Security.vue'),
-      meta: {
-        title: 'Security',
-      },
+      redirect: (to) => ({ path: '/review', query: to.query, hash: to.hash }),
     },
     {
       path: '/security/scans/:jobId',
@@ -144,14 +170,7 @@ const router = createRouter({
         title: 'Scan Report',
       },
     },
-    {
-      path: '/tokens',
-      name: 'tokens',
-      component: () => import('@/views/AgentTokens.vue'),
-      meta: {
-        title: 'Agent Tokens',
-      },
-    },
+    { path: '/tokens', name: 'tokens', redirect: (to) => ({ path: '/clients', query: { ...to.query, tab: 'tokens' } }) },
     // Server edition user routes
     {
       path: '/my/servers',
@@ -229,7 +248,7 @@ export const authGuard: NavigationGuard = async (to) => {
   if (!authStore.isTeamsEdition) {
     // Don't show server routes in personal edition
     if (to.path === '/login' || to.path.startsWith('/my/') || to.path.startsWith('/admin/')) {
-      return { name: 'dashboard' }
+      return { name: 'home' }
     }
     // Update title for personal edition
     const title = to.meta.title as string
@@ -242,19 +261,19 @@ export const authGuard: NavigationGuard = async (to) => {
   // Public routes (login) - redirect to dashboard if already authenticated
   if (to.meta.public) {
     if (authStore.isAuthenticated) {
-      return { name: 'dashboard' }
+      return { name: 'home' }
     }
     return
   }
 
   // Require authentication for server edition
   if (!authStore.isAuthenticated) {
-    return { name: 'login' }
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
 
   // Admin-only routes
   if (to.meta.requiresAdmin && !authStore.isAdmin) {
-    return { name: 'dashboard' }
+    return { name: 'home' }
   }
 
   // Update title

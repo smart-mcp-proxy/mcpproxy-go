@@ -2,6 +2,8 @@
 
 # Note: Not using 'set -e' to allow tests to continue even if some fail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -48,9 +50,67 @@ echo "=============================="
 echo -e "${YELLOW}Using everything server for testing${NC}"
 echo ""
 
+# T011a: enumerate a process's descendants (recursively), by PID, so
+# cleanup() can reap exactly what THIS run started/spawned instead of
+# pattern-matching every "mcpproxy"/"launcher-server" process on the
+# machine. A blanket `pkill -f` would also kill the user's own tray-managed
+# core, or another worktree's parallel test run, whenever their command
+# line happens to match the same substring.
+# Review round 4 (finding F3): extracted to its own file so it has a test of
+# its own (descendant-pids.test.sh) rather than living only where an
+# end-to-end run could reach it.
+# shellcheck source=./descendant-pids.sh
+source "$SCRIPT_DIR/descendant-pids.sh"
+
+# Review round 4 (finding F2): snapshot each descendant's command name
+# alongside its PID (as "pid:comm" lines), so the reap loop can verify a
+# captured PID still refers to the SAME process before SIGKILLing it — a
+# bare `kill -0` only proves the PID is alive, not that it wasn't reused by
+# an unrelated process in the window between snapshot and reap.
+snapshot_orphans_with_comm() {
+    local parent="$1"
+    local pid comm
+    for pid in $(descendant_pids "$parent"); do
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -n "$comm" ] && echo "${pid}:${comm}"
+    done
+}
+
+# Review round 4 (finding F5): cleanup() is invoked both from the EXIT trap
+# and, below, from explicit INT/TERM handlers — guard against running the
+# body twice (an INT/TERM handler exits explicitly after calling cleanup,
+# which would otherwise also re-fire the EXIT trap).
+CLEANUP_DONE=0
+
 # Cleanup function
 cleanup() {
+    if [ "$CLEANUP_DONE" = "1" ]; then
+        return
+    fi
+    CLEANUP_DONE=1
+
     echo -e "\n${YELLOW}Cleaning up...${NC}"
+
+    # Snapshot descendants (e.g. the launcher-test fixture, spawned by
+    # mcpproxy itself) BEFORE we touch the parent — once mcpproxy exits,
+    # orphaned children are reparented and this parentage link is lost.
+    # Review round 4 (finding F1, partial): a single snapshot only covers the
+    # instant before we send the kill signal — a child spawned during
+    # mcpproxy's own graceful-shutdown window (below) would otherwise never
+    # be captured, since once mcpproxy exits its children are reparented and
+    # pgrep -P can no longer find them via this PID. We keep re-snapshotting
+    # on every poll of the wait loop, while mcpproxy is confirmed still
+    # alive, to shrink that window to (effectively) zero. This cannot cover
+    # the case where mcpproxy has ALREADY exited (crash/OOM) by the time
+    # cleanup() first runs — its children are reparented before we ever get
+    # a PID to snapshot, and there is no way to recover that parentage link
+    # without reintroducing a system-wide pattern match, which T011a
+    # deliberately removed (see comment above) because it can kill unrelated
+    # mcpproxy instances. Accepted as a known, narrow residual gap.
+    local orphan_candidates=""
+    if [ ! -z "$MCPPROXY_PID" ]; then
+        orphan_candidates=$(snapshot_orphans_with_comm "$MCPPROXY_PID")
+    fi
 
     # Kill mcpproxy if running
     if [ ! -z "$MCPPROXY_PID" ]; then
@@ -64,6 +124,10 @@ cleanup() {
                 echo "Process stopped gracefully"
                 break
             fi
+            # F1: re-snapshot while mcpproxy is still confirmed alive (see
+            # comment above the initial snapshot).
+            orphan_candidates="$orphan_candidates
+$(snapshot_orphans_with_comm "$MCPPROXY_PID")"
             sleep 1
             count=$((count + 1))
         done
@@ -75,13 +139,63 @@ cleanup() {
             sleep 1
         fi
     fi
+    orphan_candidates=$(echo "$orphan_candidates" | sort -u)
 
-    # Additional cleanup - find any remaining mcpproxy processes
-    pkill -f "mcpproxy.*serve" 2>/dev/null || true
-    # Reap the launcher-test fixture if our launcher-lifecycle test
-    # failed before the shutdown reap path could run.
-    pkill -f "launcher-server.*--port 39933" 2>/dev/null || true
+    # T011a: reap only the specific PIDs we saw as children of OUR
+    # mcpproxy process (e.g. the launcher-test fixture, if our
+    # launcher-lifecycle test failed before mcpproxy's own graceful
+    # shutdown reap path could run). Never a system-wide pattern match —
+    # that would also kill unrelated mcpproxy instances (the user's tray
+    # core, another worktree's E2E run, etc.). A PID we captured is only
+    # killed if it is still alive AND its command name still matches what
+    # we recorded at snapshot time (review round 4, finding F2: `kill -0`
+    # alone proves liveness, not identity — in the 1-12+s window between
+    # snapshot and this reap loop, a captured PID could exit and be reused
+    # by an unrelated process, which a bare `kill -0` check would then have
+    # us SIGKILL).
+    local entry pid comm current_comm
+    for entry in $orphan_candidates; do
+        [ -z "$entry" ] && continue
+        pid="${entry%%:*}"
+        comm="${entry#*:}"
+        [ -z "$pid" ] && continue
+        if kill -0 "$pid" 2>/dev/null; then
+            current_comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
+            if [ -n "$current_comm" ] && [ "$current_comm" = "$comm" ]; then
+                echo "Reaping orphaned child process (PID: $pid, $comm)"
+                kill -9 "$pid" 2>/dev/null || true
+            else
+                echo "Skipping PID $pid: process identity changed since snapshot ($comm -> $current_comm), likely PID reuse"
+            fi
+        fi
+    done
     sleep 1
+
+    # Review round 4 (finding F4): the audit_log sub-test's own instance and
+    # scratch dirs/log are normally torn down on its own fall-through path
+    # further down this script — but an early exit (Ctrl-C, a stray `exit`)
+    # while that sub-test is running would otherwise leak AUDIT_PID and its
+    # data/log/jsonl directories, since this trap never referenced them.
+    # These variables are declared later in the script; referencing them
+    # here before that point is safe (bash treats an unset variable as
+    # empty in this non-`set -u` script), and re-running this block after
+    # the sub-test's own cleanup already ran is a harmless no-op (the PID is
+    # already dead, the directories already removed).
+    if [ -n "${AUDIT_PID:-}" ] && kill -0 "$AUDIT_PID" 2>/dev/null; then
+        echo "Stopping audit-log instance (PID: $AUDIT_PID)"
+        kill "$AUDIT_PID" 2>/dev/null || true
+        sleep 1
+        kill -9 "$AUDIT_PID" 2>/dev/null || true
+    fi
+    if [ -n "${AUDIT_DATA_DIR:-}" ] && [ -d "$AUDIT_DATA_DIR" ]; then
+        rm -rf "$AUDIT_DATA_DIR"
+    fi
+    if [ -n "${AUDIT_JSONL_DIR:-}" ] && [ -d "$AUDIT_JSONL_DIR" ]; then
+        rm -rf "$AUDIT_JSONL_DIR"
+    fi
+    if [ -n "${AUDIT_SERVER_LOG:-}" ]; then
+        rm -f "$AUDIT_SERVER_LOG"
+    fi
 
     # Clean up test data
     if [ -d "$TEST_DATA_DIR" ]; then
@@ -100,7 +214,24 @@ cleanup() {
     echo "Cleanup complete"
 }
 
-# Set up cleanup trap
+# Set up cleanup trap.
+# Review round 4 (finding F5): verified empirically (process-group-wide
+# signals, matching what a terminal actually delivers on Ctrl-C) that the
+# plain `trap cleanup EXIT` already ran cleanup correctly for both a real
+# Ctrl-C and a plain SIGTERM — the foreground child (sleep/curl) dies from
+# the same signal, bash's `wait` unblocks, and an untrapped terminating
+# signal still fires the EXIT trap on the way out. The narrower gap this
+# closes: a supervisor/orchestrator (not a terminal) that signals only this
+# script's own PID rather than its process group, in which case delivery is
+# deferred until the current foreground command finishes on its own either
+# way (per bash's documented trap semantics) — but explicit handlers make
+# the resulting exit code deliberate (130/143) instead of whatever bash's
+# default disposition produces, and this is the near-universal idiom for
+# these scripts regardless. `trap - EXIT` inside each handler removes the
+# EXIT trap before the explicit `exit`, so cleanup() (idempotent via
+# CLEANUP_DONE regardless) runs exactly once.
+trap 'trap - EXIT; cleanup; exit 130' INT
+trap 'trap - EXIT; cleanup; exit 143' TERM
 trap cleanup EXIT
 
 # Helper functions
@@ -129,15 +260,20 @@ log_skip() {
     TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
-# Extract API key from server logs
-# Optional $1 overrides the log path (used by scripts/test-extract-api-key.sh).
-# -a forces grep to treat the log as text: the server log can contain NUL bytes
-# (and ANSI color codes), which otherwise make grep report "Binary file ... matches"
-# instead of the match, corrupting API_KEY. See MCP-2404.
+# Extract the API key from the CONFIG FILE the server was started with.
+# Optional $1 overrides the config path (used by scripts/test-extract-api-key.sh).
+#
+# SEC-01: the auto-generated key is deliberately no longer written to the server
+# log - it is a root credential and the log is a plaintext file at rest. The
+# config file is where mcpproxy persists it (the same source
+# scripts/dev-server-edition.sh reads), so that is what we read.
+#
+# The write-back happens during startup, so callers poll: an empty API_KEY here
+# means "not written yet", not "failed".
 extract_api_key() {
-    local log_file="${1:-/tmp/mcpproxy_e2e.log}"
-    if [ -f "$log_file" ]; then
-        API_KEY=$(grep -ao '"api_key": "[^"]*"' "$log_file" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    local config_file="${1:-${CONFIG_FILE:-}}"
+    if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+        API_KEY=$(jq -r '.api_key // empty' "$config_file" 2>/dev/null)
         if [ ! -z "$API_KEY" ]; then
             echo "Extracted API key: ${API_KEY:0:8}..."
         fi
@@ -457,6 +593,14 @@ test_launcher_lifecycle() {
         log_fail "no launcher-server process found via pgrep"
     fi
 
+    # Abort-mode hook (issue #1388): scripts/test-api-e2e-cleanup-check.sh
+    # --abort sets E2E_ABORT_MARKER, waits for this file to appear (the core,
+    # the launcher fixture and the npx child are all up by now), then sends
+    # SIGTERM to this script mid-run to prove the INT/TERM cleanup trap.
+    if [ -n "${E2E_ABORT_MARKER:-}" ]; then
+        touch "$E2E_ABORT_MARKER"
+    fi
+
     # Step 3: restart -> child must be a NEW pid afterwards.
     log_test "Launcher lifecycle: POST /restart reaps + respawns child with new PID"
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/restart\"" >/dev/null
@@ -577,9 +721,16 @@ cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
 # Substitute LISTEN_PORT in config file if not using default 8081
 if [ "$LISTEN_PORT" != "8081" ]; then
-    sed -i '' "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
+    # Portable in-place edit (BSD sed -i needs '', GNU sed rejects it).
+    sed "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
     echo "Updated listen port to :${LISTEN_PORT}"
 fi
+
+# Spec 110 (catalog popularity signal, FR-011 kill switch): E2E must not
+# depend on api.github.com (SC-005) — no outbound GitHub fetch, no rate-limit
+# flakiness, no network dependency for a suite that otherwise runs fully
+# offline against the local server under test.
+export MCPPROXY_CATALOG_POPULARITY=false
 
 # Start server in background
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
@@ -1180,9 +1331,10 @@ AUDIT_API_KEY=""
 AUDIT_PID=""
 AUDIT_MCP_SESSION_ID=""
 
+# See extract_api_key: the key is read from the config file, not the log.
 extract_audit_api_key() {
-    if [ -f "$AUDIT_SERVER_LOG" ]; then
-        AUDIT_API_KEY=$(grep -ao '"api_key": "[^"]*"' "$AUDIT_SERVER_LOG" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    if [ -f "$AUDIT_CONFIG_FILE" ]; then
+        AUDIT_API_KEY=$(jq -r '.api_key // empty' "$AUDIT_CONFIG_FILE" 2>/dev/null)
     fi
 }
 

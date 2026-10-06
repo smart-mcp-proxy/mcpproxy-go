@@ -174,6 +174,13 @@ func TestBuildDirectCatalog_DuplicateOriginIsNotACollision(t *testing.T) {
 //
 // Found by adversarial QA against a running proxy. No unit fixture had ever
 // contained a nameless tool, so nothing here could have caught it.
+//
+// Spec 105 FR-008 (FR008-G7) closes it at the source instead of merely
+// scope-checking it: an upstream tool with an empty raw name has NO
+// registration identity at all, so buildDirectCatalog now refuses to admit it
+// — "hostile__" is absent from the catalog, not present-but-scope-checked —
+// and it is withheld from every caller, administrators included, never only
+// from an out-of-scope one.
 func TestResolveDirectTool_EmptyToolNameIsNotABuiltin(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{ServerName: "hostile", Name: "", Description: "Nameless", ParamsJSON: `{"type":"object"}`, Hash: "h-empty"},
@@ -184,23 +191,34 @@ func TestResolveDirectTool_EmptyToolNameIsNotABuiltin(t *testing.T) {
 	_, _, parses := ParseDirectToolName(display)
 	require.False(t, parses, "the fixture must be a name that does NOT parse, or it proves nothing")
 
+	cat := buildDirectCatalog(tools, nil)
+	assert.Equal(t, 1, cat.Len(), "the nameless tool must never be admitted; only 'we__solo' is")
+
 	p := &MCPProxyServer{}
-	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+	p.publishDirectCatalog(cat)
 
 	entry, decision := p.resolveDirectTool(display)
-	assert.Equal(t, directResolveFound, decision,
-		"a name the catalog admits is an upstream projection, whatever it looks like")
-	require.NotNil(t, entry)
-	assert.Equal(t, "hostile", entry.ServerName,
-		"and it must resolve to its real origin, so the scope gate sees the right server")
+	assert.Equal(t, directResolveDenied, decision,
+		"an empty raw name has no registration identity — the catalog never admitted it, so it is denied, not found")
+	assert.Nil(t, entry)
+
+	// The real, non-empty-named tool from the same build is unaffected.
+	entry, decision = p.resolveDirectTool("we__solo")
+	require.Equal(t, directResolveFound, decision)
+	assert.Equal(t, "we", entry.ServerName)
 
 	// Real built-ins are still built-ins.
 	_, builtinDecision := p.resolveDirectTool("describe_tool")
 	assert.Equal(t, directResolveBuiltin, builtinDecision)
 }
 
-// The disclosure itself: a scoped token must not see the nameless tool of a
-// server outside its scope.
+// The disclosure itself: NO caller — scoped, unrestricted, or administrator —
+// may see the nameless tool, per FR008-G7's "withheld from every caller"
+// rule. The scoped-only assertion from before Spec 105 PR F is kept (it still
+// holds, now via non-admission rather than a scope check); the unrestricted
+// and administrator cases are new and are exactly what distinguishes
+// "withheld because it lacks an identity" from "withheld because it is out of
+// scope".
 func TestFilterDirectModeToolsForAuth_EmptyToolNameIsScopeChecked(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{ServerName: "hostile", Name: "", Description: "Nameless", ParamsJSON: `{"type":"object"}`, Hash: "h-empty"},
@@ -210,22 +228,34 @@ func TestFilterDirectModeToolsForAuth_EmptyToolNameIsScopeChecked(t *testing.T) 
 	p := &MCPProxyServer{}
 	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
 
-	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+	rawTools := []mcp.Tool{
+		{Name: "hostile__"}, {Name: "we__solo"}, {Name: "describe_tool"},
+	}
+
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type: auth.AuthTypeAgent, AgentName: "scoped",
 		AllowedServers: []string{"we"},
 		Permissions:    []string{auth.PermRead},
 	})
-
-	filtered := p.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
-		{Name: "hostile__"}, {Name: "we__solo"}, {Name: "describe_tool"},
+	unrestrictedAgent := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "unrestricted",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 	})
 
-	names := make([]string, 0, len(filtered))
-	for _, tool := range filtered {
-		names = append(names, tool.Name)
+	for name, ctx := range map[string]context.Context{
+		"scoped agent":       scoped,
+		"unrestricted agent": unrestrictedAgent,
+		"administrator":      context.Background(),
+	} {
+		filtered := p.filterDirectModeToolsForAuth(ctx, rawTools)
+
+		names := make([]string, 0, len(filtered))
+		for _, tool := range filtered {
+			names = append(names, tool.Name)
+		}
+		assert.NotContainsf(t, names, "hostile__", "%s: a tool with no registration identity is withheld from EVERY caller (SC-005)", name)
+		assert.Containsf(t, names, "we__solo", "%s", name)
+		assert.Containsf(t, names, "describe_tool", "%s: real built-ins stay visible", name)
 	}
-	assert.NotContains(t, names, "hostile__",
-		"a tool on an out-of-scope server must not be disclosed, even with an empty name")
-	assert.Contains(t, names, "we__solo")
-	assert.Contains(t, names, "describe_tool", "real built-ins stay visible")
 }

@@ -1,0 +1,30 @@
+{
+  "name": "list",
+  "description": "List client presence",
+  "usage": "mcpproxy client list [flags]",
+  "flags": [
+    {
+      "name": "client",
+      "description": "Only the client with this id",
+      "type": "string"
+    },
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for list",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "profile",
+      "description": "Only clients currently bound to this profile (\"-\" = All servers)",
+      "type": "string"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}

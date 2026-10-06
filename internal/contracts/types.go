@@ -2,10 +2,15 @@
 package contracts
 
 import (
+	"errors"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
+
+// ErrServerNotFound is returned (wrapped) by controllers when a named upstream
+// server does not exist, so the REST layer can answer 404 via errors.Is.
+var ErrServerNotFound = errors.New("server not found")
 
 // APIResponse is the standard wrapper for all API responses
 type APIResponse struct {
@@ -92,13 +97,17 @@ type Server struct {
 	// prompt-aggregation override. Tri-state *bool — nil/omitted means "inherit
 	// default aggregation". Surfaced on GET so a caller that PATCHed the override
 	// can read it back; PATCH/POST accept it via AddServerRequest.
-	ExposePrompts *bool                `json:"expose_prompts,omitempty"`
+	ExposePrompts *bool `json:"expose_prompts,omitempty"`
 	// AnnotationOverrides mirrors config.ServerConfig.AnnotationOverrides:
 	// per-server per-tool annotation fixes. Surfaced on GET so a caller that
 	// PATCHed overrides (or the Web UI editor) can read them back; PATCH/POST
 	// accept them via AddServerRequest. Omitted when empty.
 	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
-	SecurityScan  *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
+	// ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
+	// allowlist of inbound MCP client header NAMES forwarded to this server on
+	// tools/call. Names only, never values. Omitted when empty.
+	ForwardHeaders []string             `json:"forward_headers,omitempty"`
+	SecurityScan   *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit
@@ -334,18 +343,38 @@ type MCPSession struct {
 	// reconnects that make up one stretch of user work.
 	WorkspaceName string `json:"workspace_name,omitempty"`
 	WorkSessionID string `json:"work_session_id,omitempty"`
+
+	// Scope attribution (Spec 108 FR-033). ClientID and TokenName are the
+	// credential the session initialized with; Profile and ProfileSource are
+	// the session's latest effective resolution. Empty on legacy sessions.
+	ClientID      string `json:"client_id,omitempty"`
+	TokenName     string `json:"token_name,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	ProfileSource string `json:"profile_source,omitempty"`
 }
 
 // Tool represents an MCP tool with its metadata
 type Tool struct {
-	Name           string                 `json:"name"`
-	ServerName     string                 `json:"server_name"`
-	Description    string                 `json:"description"`
-	Schema         map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
-	Usage          int                    `json:"usage"`
-	LastUsed       *time.Time             `json:"last_used,omitempty"`
-	Annotations    *ToolAnnotation        `json:"annotations,omitempty"`
-	ApprovalStatus string                 `json:"approval_status,omitempty"`
+	Name        string                 `json:"name"`
+	ServerName  string                 `json:"server_name"`
+	Description string                 `json:"description"`
+	Schema      map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
+	Usage       int                    `json:"usage"`
+	LastUsed    *time.Time             `json:"last_used,omitempty"`
+	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
+	// Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+	// Annotations — read|write|destructive|unannotated. Set by every producer
+	// of a Tool (enrichServerTools, the global tools handler); never left for
+	// a consuming surface to compute.
+	Tier           Tier   `json:"tier,omitempty"`
+	ApprovalStatus string `json:"approval_status,omitempty"`
+	// ProfileTier and Access are present only in a view-as listing (a tools
+	// listing with ?client= or ?profile=, Spec 108 FR-032). ProfileTier is the
+	// tool's tier under the viewed subject's profile (Tier above stays the
+	// intrinsic tier); Access is the subject's verdict for the tool. Absent
+	// otherwise, so an ordinary listing is byte-identical to before.
+	ProfileTier Tier        `json:"profile_tier,omitempty"`
+	Access      *ToolAccess `json:"access,omitempty"`
 	// Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
 	// available without a second round-trip to the approvals endpoint. Absent
 	// in the JSON when false (default) to keep responses compact.
@@ -441,6 +470,14 @@ type ServerTokenMetrics struct {
 	SavedTokens             int            `json:"saved_tokens"`                // Difference
 	SavedTokensPercentage   float64        `json:"saved_tokens_percentage"`     // Percentage saved
 	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
+	// Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+	// true while AverageQueryResultSize is a synthetic simulation (a sample of
+	// the first `tools_limit` tools' schemas — no real retrieve_tools call has
+	// completed yet in this runtime's usage aggregate); false once at least one
+	// real retrieve_tools call has, at which point AverageQueryResultSize is
+	// derived from the real observed average response size instead. The Web
+	// UI and macOS render an "estimate" label while this is true.
+	Estimated bool `json:"estimated"`
 }
 
 // UsageAggregateResponse is the GET /api/v1/activity/usage payload (Spec 069 A3).
@@ -457,15 +494,20 @@ type ServerTokenMetrics struct {
 //     requested span. Timeline is therefore not filtered by tool/server/status.
 //   - tool/server/status act as membership filters on the per-tool rollup.
 type UsageAggregateResponse struct {
-	Window                string            `json:"window"`
-	GeneratedAt           time.Time         `json:"generated_at"`
-	FreshnessMs           int64             `json:"freshness_ms"` // age of the underlying snapshot in ms
-	TokenSource           string            `json:"token_source"` // "bytes" (size-based proxy, FR-006)
-	TokensSaved           int               `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
-	TokensSavedPercentage float64           `json:"tokens_saved_percentage"`
-	Tools                 []UsageToolStat   `json:"tools"`
-	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
-	Timeline              []UsageTimeBucket `json:"timeline"`
+	Window                string    `json:"window"`
+	GeneratedAt           time.Time `json:"generated_at"`
+	FreshnessMs           int64     `json:"freshness_ms"` // age of the underlying snapshot in ms
+	TokenSource           string    `json:"token_source"` // "bytes" (size-based proxy, FR-006)
+	TokensSaved           int       `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
+	TokensSavedPercentage float64   `json:"tokens_saved_percentage"`
+	// TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+	// true while TokensSaved is a synthetic simulation rather than derived
+	// from a real retrieve_tools call. Dropped (false, the zero value) for a
+	// scoped caller along with TokensSaved itself, above.
+	TokensSavedEstimated bool              `json:"tokens_saved_estimated"`
+	Tools                []UsageToolStat   `json:"tools"`
+	Other                *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
+	Timeline             []UsageTimeBucket `json:"timeline"`
 	// TotalCalls and TotalErrors are the headline counts for the window: the sum
 	// of the timeline this same response carries, so the tiles and the histogram
 	// under them cannot disagree. They are NOT the sum of Tools — that list is
@@ -624,6 +666,29 @@ type GlobalToolsResponse struct {
 	Stats         GlobalToolsStats `json:"stats"`
 	Partial       bool             `json:"partial,omitempty"`
 	FailedServers []string         `json:"failed_servers,omitempty"`
+	// Counts is present only for a NON-administrator profile view-as (Spec 108
+	// FR-032): the response then lists only the visible rows, and this is the
+	// only trace of the rest, with no per-server, per-tier or per-reason
+	// breakdown.
+	Counts *ViewAsCounts `json:"counts,omitempty"`
+}
+
+// ToolAccess is a view-as verdict for one tool (Spec 108 FR-032). Reason is
+// empty when the tool is callable; otherwise it is one of profile.AccessReasons
+// (server_not_in_profile, denied_by_rule, unannotated_hidden, above_tier_cap,
+// credential, profile, server_in_scope, token_permission, global_gate,
+// server_state, tool_approval). Visible means the subject's discovery would
+// list the tool; Callable means a real call would succeed.
+type ToolAccess struct {
+	Visible  bool   `json:"visible"`
+	Callable bool   `json:"callable"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ViewAsCounts is the row accounting of a non-administrator profile view-as.
+type ViewAsCounts struct {
+	Visible int `json:"visible"`
+	Hidden  int `json:"hidden"`
 }
 
 // SearchToolsResponse is the response for GET /api/v1/index/search
@@ -1273,7 +1338,24 @@ type HealthStatus struct {
 	Detail string `json:"detail,omitempty"`
 
 	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)
+	// Invariant: Action always equals Actions[0], or "" when Actions is empty.
 	Action string `json:"action,omitempty"`
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Web UI, macOS, tray, CLI) — Spec 109 FR-010/FR-011. Values: "ready",
+	// "connecting", "sign_in_required", "needs_review", "needs_secret",
+	// "needs_config", "error", "disabled". Unlike Level (a severity signal for
+	// badge/tray coloring only), no renderer may print Level as text.
+	Status string `json:"status"`
+
+	// Usable reports whether the server can currently serve tool calls. True
+	// only when Status == "ready".
+	Usable bool `json:"usable"`
+
+	// Actions lists every applicable next step in priority order (FR-012):
+	// login > set_secret > configure > edit_url > approve > restart >
+	// view_logs > enable. Always non-nil (empty slice, never null).
+	Actions []string `json:"actions"`
 }
 
 // UpdateInfo represents version update check information

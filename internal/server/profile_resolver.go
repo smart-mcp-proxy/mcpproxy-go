@@ -185,12 +185,26 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 // the class of bug rounds 9/11/14/15 closed on the admission and resolution
 // paths.
 func (p *MCPProxyServer) resolveActiveProfileWithIndex(ctx context.Context) (string, *profile.ProfileScope, *profileIndex) {
+	name, scope, idx, _ := p.resolveActiveProfileWithSource(ctx)
+	return name, scope, idx
+}
+
+// resolveActiveProfileWithSource is resolveActiveProfileWithIndex, additionally
+// reporting which resolution tier produced the (name, scope) pair (Spec 108
+// FR-011): retrieve_tools needs this to decide whether its `profile` field may
+// name the effective slug at all — only when the caller itself selected it
+// (source url or session) — never when it merely inherited a token pin,
+// which would tell a caller it is pinned and to what (research D27). Only
+// the three tiers 108-b resolves (pin, url, session) are distinguished here;
+// the binding and anonymous tiers land in 108-c/108-d, which extend this
+// function's cases rather than duplicate them.
+func (p *MCPProxyServer) resolveActiveProfileWithSource(ctx context.Context) (string, *profile.ProfileScope, *profileIndex, profile.Source) {
 	idx, ok := profileRequestIndexFromContext(ctx)
 	if !ok {
 		idx = p.profileIndexFor(p.currentConfig())
 	}
-	name, scope := p.resolveActiveProfileFromIndex(ctx, idx)
-	return name, scope, idx
+	name, scope, source := p.resolveActiveProfileWithSourceFromIndex(ctx, idx)
+	return name, scope, idx, source
 }
 
 // resolveActiveProfileIn is resolveActiveProfile against an explicit config
@@ -237,6 +251,16 @@ func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config
 // current (shorter) Profiles slice and index out of range; resolving both
 // from the ONE pair the caller already has cannot.
 func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx *profileIndex) (string, *profile.ProfileScope) {
+	name, scope, _ := p.resolveActiveProfileWithSourceFromIndex(ctx, idx)
+	return name, scope
+}
+
+// resolveActiveProfileWithSourceFromIndex is resolveActiveProfileFromIndex,
+// additionally reporting the profile.Source tier the (name, scope) pair
+// resolved through (Spec 108 FR-011). It is the ONE place this precedence is
+// implemented; resolveActiveProfileFromIndex is a thin wrapper over it so the
+// two can never drift.
+func (p *MCPProxyServer) resolveActiveProfileWithSourceFromIndex(ctx context.Context, idx *profileIndex) (string, *profile.ProfileScope, profile.Source) {
 	// 1. Agent-token pin (T3). When present it is authoritative and bounds
 	//    everything below — including the case where the pinned profile has been
 	//    removed from config since the token was minted.
@@ -252,19 +276,19 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 	//    preflight paths cannot disagree about what a pinned token may see.
 	if pin := profilePinFromContext(ctx); pin != "" {
 		if scope := profileScopeFromIndex(idx, pin); scope != nil {
-			return pin, scope
+			return pin, scope, profile.SourcePin
 		}
 		if p.logger != nil {
 			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; resolving to a deny-all scope",
 				zap.String("profile_pin", pin))
 		}
-		return pin, profile.NewProfileScope(pin, nil)
+		return pin, profile.NewProfileScope(pin, nil), profile.SourcePin
 	}
 
 	// 2. Explicit URL profile (Spec 057). Authoritative for this request, so it
 	//    overrides any stored session selection on the same connection.
 	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
-		return urlScope.Name, urlScope
+		return urlScope.Name, urlScope, profile.SourceURL
 	}
 
 	// 3. Session selection set via the set_profile tool on the base /mcp endpoint.
@@ -272,7 +296,7 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 		if sid := sessionIDFromContext(ctx); sid != "" {
 			if name := p.sessionStore.GetActiveProfile(sid); name != "" {
 				if scope := profileScopeFromIndex(idx, name); scope != nil {
-					return name, scope
+					return name, scope, profile.SourceSession
 				}
 				// Stored profile vanished from config — drop the stale selection.
 				p.sessionStore.SetActiveProfile(sid, "")
@@ -281,7 +305,7 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 	}
 
 	// 4. No profile in effect.
-	return "", nil
+	return "", nil, profile.SourceNone
 }
 
 // resolveEffectiveProfileForJustSetSlug is resolveActiveProfileFromIndex's
@@ -312,7 +336,16 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 // review round 2). idx.position is the O(1) existence check the pin/slug
 // tiers actually need.
 func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) string {
-	if pin := profilePinFromContext(ctx); pin != "" {
+	// A SWITCHABLE client credential's ProfilePin is its BINDING (the base for
+	// switchable_to), which FR-020 ranks BELOW the url and session tiers. It is
+	// authoritative only while no selection is in effect, so a just-written
+	// slug must be reported instead of the binding. A locked credential and a
+	// regular agent-token pin stay authoritative.
+	switchableBinding := ""
+	if pin, mode, ok := clientCredentialFromContext(ctx); ok && mode != auth.ProfileModeLocked {
+		switchableBinding = pin
+	}
+	if pin := profilePinFromContext(ctx); pin != "" && pin != switchableBinding {
 		if idx != nil && idx.position(pin) >= 0 {
 			return pin
 		}
@@ -330,10 +363,12 @@ func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Conte
 	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
 		return urlScope.Name
 	}
-	if slug != "" && idx != nil && idx.position(slug) >= 0 {
+	if slug != "" && idx != nil && idx.position(slug) >= 0 && (switchableBinding == "" || idx.position(switchableBinding) >= 0) {
 		return slug
 	}
-	return ""
+	// No selection in effect: a switchable credential falls back to its binding
+	// (a dangling binding stays deny-all, as resolveV3Base resolves it).
+	return switchableBinding
 }
 
 // profileScopeFromIndex builds the ProfileScope for slug's FULL membership

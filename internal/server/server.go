@@ -47,7 +47,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
-	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
 
 // Status represents the current status of the server
@@ -151,6 +150,13 @@ type Server struct {
 	// admissionScanMu.
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
+
+	// Automatic tool definition capture after a settled scan (see
+	// review_capture.go). reviewCaptureFn defaults to
+	// runtime.RefreshServerTools and is replaceable in tests;
+	// reviewCaptureInFlight is the per-server single-flight guard.
+	reviewCaptureFn       func(ctx context.Context, serverName string) error
+	reviewCaptureInFlight sync.Map
 
 	// Informational Pass-1 baseline scanning (see scan_informational.go).
 	// infoScanKnown holds every server name observed since process start, so a
@@ -377,6 +383,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	mcpProxy.auditSink = server.auditSink
 
 	server.mcpProxy = mcpProxy
+	// FR-008a: the one evaluator behind every guarded write (config routes,
+	// connect, client bindings) and the runtime anonymous guard.
+	rt.SetBindingGuard(mcpProxy)
+	// Spec 108-f: the profiles service asks the same proxy for effective tools,
+	// try, explain and tool counts, and tells it to rewrite live sessions'
+	// stored selections on a rename or delete.
+	rt.SetProfileEvaluator(mcpProxy)
+	rt.ProfilesService().SetSessionHook(mcpProxy)
+	// FR-026: a binding change clears the stored set_profile selection of every
+	// live session of that credential and sends tools/list_changed to each.
+	rt.ClientsService().SetNotifier(mcpProxy)
 
 	go server.forwardRuntimeStatus()
 
@@ -400,14 +417,41 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the observer runs on the exact *Config about to be stored — and the
 	// startup snapshot now, which NewService stored without running any
 	// observer (see warmProfileIndex).
-	if svc := server.runtime.ConfigService(); svc != nil {
-		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
-	}
+	server.installProfilePublishObserver(mcpProxy)
 	server.warmProfileIndex()
 
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
+}
+
+// installProfilePublishObserver registers the pre-publish observer that indexes
+// every config snapshot (Spec 105 FR-004) and, for a snapshot that changed a
+// profile or the anonymous_profile, enqueues the FR-027 notification and the
+// profiles.changed event (Spec 108-f F9, F10). One observer covers a
+// profiles-service write and a hand edit alike. It returns the notifier (nil
+// when the runtime has no config service).
+func (s *Server) installProfilePublishObserver(mcpProxy *MCPProxyServer) *profileChangeNotifier {
+	svc := s.runtime.ConfigService()
+	if svc == nil {
+		return nil
+	}
+	notifier := newProfileChangeNotifier(mcpProxy, func(name, change string) { s.runtime.EmitProfilesChanged(name, change, "") })
+	mcpProxy.profileNotifier = notifier
+	notifier.start()
+	svc.AddPrePublishObserver(func(cfg *config.Config) {
+		// The snapshot this one replaces, read BEFORE the warm path stores the
+		// new pair: the FR-027 delta is computed between the two.
+		var previous *config.Config
+		if old := s.profileIndexes.Current(); old != nil {
+			previous = old.cfg
+		}
+		s.profileIndexes.warmPublishing(cfg)
+		if previous != nil && previous != cfg {
+			notifier.enqueue(previous, cfg)
+		}
+	})
+	return notifier
 }
 
 // trustedProxiesProvider yields the LIVE trusted_proxies list (Spec 107
@@ -436,6 +480,19 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 // requests get admin context for backward compatibility. Tray connections
 // always bypass auth.
 func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
+	// Spec 105 FR-010 D13/gap G6: install the mutable direct-request-kind box
+	// (mcp_direct_scope.go) on every request's ctx BEFORE it reaches mcp-go's
+	// HandleMessage, which is what lets the BeforeListTools/BeforeCallTool
+	// hooks (initRoutingModeServers) write this request's real kind into it —
+	// the box must already be present when the hook runs, or the write is a
+	// no-op and the direct discovery filters fall back to their safe
+	// (list-time) default. Wrapping `next` here, rather than adding the box
+	// separately in each of this middleware's several return branches, means
+	// every branch's `next.ServeHTTP(w, r.WithContext(ctx))` carries it
+	// automatically, on top of whatever AuthContext that branch attaches.
+	// Harmless on every endpoint but /mcp/all, whose filters are the only
+	// consumers.
+	next = directRequestKindMiddleware(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := httpapi.ExtractToken(r)
 		if token == "" {
@@ -474,8 +531,11 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check if this is an agent token
-		if strings.HasPrefix(token, auth.TokenPrefixStr) {
+		// Check if this is an agent token OR a Spec 108-c client credential
+		// (mcp_cli_): both authenticate on MCP through the same validator
+		// (storage.ValidateAgentToken), which enforces the FR-021 fail-closed
+		// invariants for whichever kind the prefix claims.
+		if strings.HasPrefix(token, auth.TokenPrefixStr) || strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 			cfg := s.runtime.Config()
 			if cfg == nil {
 				// Fail closed. Forwarding here would hand the request on with NO
@@ -529,7 +589,9 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check if it matches the global API key — treat as admin
 		cfg := s.runtime.Config()
-		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
+		// Timing-safe compare; ConstantTimeEqual also rejects an empty key or
+		// token, subsuming the previous `cfg.APIKey != ""` guard.
+		if cfg != nil && auth.ConstantTimeEqual(token, cfg.APIKey) {
 			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindAPIKey))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -641,9 +703,37 @@ func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
 	s.runtime.UnsubscribeEvents(ch)
 }
 
+// Attention returns the current needs-attention list (Spec 109 FR-001), the
+// same snapshot the runtime's debounced subscriber maintains.
+func (s *Server) Attention() []contracts.AttentionItem {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Attention()
+}
+
+// GetReviewQueue forwards the REST review read through the production server
+// controller to the runtime implementation. The HTTP API is mounted with
+// *Server as its controller, so handler-level tests alone do not prove this
+// adapter is wired.
+func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueue(ctx)
+}
+
+// GetServerReview forwards the scoped REST review read to the runtime.
+func (s *Server) GetServerReview(ctx context.Context, serverName string) (*runtime.ServerReview, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetServerReview(ctx, serverName)
+}
+
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
-func (s *Server) GetManagementService() interface{} {
+func (s *Server) GetManagementService() management.Service {
 	if s.runtime == nil {
 		return nil
 	}
@@ -698,6 +788,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 				s.mcpProxy.RefreshPrompts()
+				// retrieve_tools' description names the reachable servers;
+				// re-list clients when that set changes.
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
 			// and must have its baseline scan triggered so the settle handler can
@@ -739,6 +832,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// session, so an unguarded call would make any unrelated config
 				// edit look, to a client, exactly like the tool set changing.
 				s.mcpProxy.RefreshDirectModeToolsOnSerializationChange()
+				// advertise_upstream_servers is hot-reloadable: re-list
+				// retrieve_tools clients when it flips (guarded on change).
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced
@@ -757,6 +853,10 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
 			serverName, _ := evt.Payload["server_name"].(string)
 			s.maybeAutoApproveScanSettled(context.Background(), serverName)
+			// A freshly scanned, still-quarantined server has its tool
+			// definitions captured for review (never blocks this loop).
+			status, _ := evt.Payload["status"].(string)
+			s.maybeCaptureReviewDefinitions(serverName, status)
 		}
 	}
 }
@@ -1067,7 +1167,7 @@ func (s *Server) Start(ctx context.Context) error {
 		// not serving.
 		s.runtime.SetServedRoutingMode(config.ResolveRoutingMode(routingMode))
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode),
-			clientFacingStreamableOptions()...)
+			clientFacingStreamableOptions(s.liveConfig)...)
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
@@ -1953,11 +2053,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	if updates.Protocol != "" {
 		existing.Protocol = updates.Protocol
 	}
-	// Booleans are always applied since the handler only calls UpdateServer
-	// when the caller explicitly provided these fields
+	// Enabled and ReconnectOnUse are always applied: the REST handler resolves
+	// them against the existing server before calling UpdateServer.
 	existing.Enabled = updates.Enabled
-	existing.Quarantined = updates.Quarantined
 	existing.ReconnectOnUse = updates.ReconnectOnUse
+	// Quarantine is applied only when the caller stated it (the REST PATCH
+	// handler marks the explicit bit when the body carries `quarantined`).
+	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+	// false copied from a config snapshot, which must never un-quarantine.
+	if updates.QuarantineExplicitlySet() {
+		existing.Quarantined = updates.Quarantined
+		existing.MarkQuarantineExplicitlySet(true)
+	}
 
 	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
 	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
@@ -1967,6 +2074,13 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	// nil-preserve contract.
 	if updates.AutoApproveToolChanges != nil {
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
+	}
+
+	// ForwardHeaders (Spec 112): nil means "leave unchanged"; a non-nil slice
+	// replaces the allowlist and an empty one clears it. The PATCH handler
+	// preserves the existing slice when the request omits the field.
+	if updates.ForwardHeaders != nil {
+		existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
 	}
 
 	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
@@ -2726,6 +2840,11 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
+	// An active client binding can turn an otherwise unprofiled anonymous
+	// caller into a deny-all BindingGuarded resolution. Compute it before the
+	// publication-gap branch too, so that branch cannot restore URL probing.
+	bindingGuardedAnonymous := anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+		s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 
 	if profiles == nil {
 		// Acquire could not pair this request's own runtime.Config() read
@@ -2739,7 +2858,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		// (Spec 105 PR D review round 11, MUST-FIX). An administrator-shaped
 		// caller is not timing-contract-bound (SC-005) and falls back to a
 		// fresh build over the live config, matching pre-105 behaviour.
-		if auth.IsScopedCaller(r.Context()) {
+		if auth.IsScopedCaller(r.Context()) || bindingGuardedAnonymous {
 			var agentName string
 			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
 				agentName = ac.AgentName
@@ -2752,18 +2871,33 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 			return
 		}
 		profiles = s.profileIndexes.For(s.runtimeConfig())
+		bindingGuardedAnonymous = anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+			s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 	}
 	cfg := profiles.cfg
+	if bindingGuardedAnonymous {
+		// ResolveProfileV3 represents this anonymous request with a deny-all
+		// scope. selectable intentionally treats administrator-shaped callers
+		// as selectable, so applying it here would re-open the URL inventory.
+		// Refuse before the slug lookup, exactly like every other inaccessible
+		// profile outcome.
+		s.logger.Info("profile URL refused for scoped caller",
+			zap.String("profile", slug),
+			zap.String("remote_addr", r.RemoteAddr))
+		profileNotSelectable(w, slug)
+		return
+	}
+	confinedAnonymous := anonymousProfileCaller(r.Context()) && cfg != nil && cfg.AnonymousProfile != ""
 
 	// One slug → profile index per snapshot (built before the snapshot was
 	// published, see warmProfileIndex): the gate below and the lookup after
 	// it resolve the slug directly, so neither the refusal nor the admission
 	// walks cfg.Profiles.
 
-	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It
+	// Spec 105 FR-004: the selectable-profile gate for confined callers. It
 	// evaluates the requested profile (and the pin) ONLY — never the
 	// selectable list, whose cost is fleet-sized (profileIndex.selectable).
-	if auth.IsScopedCaller(r.Context()) {
+	if auth.IsScopedCaller(r.Context()) || confinedAnonymous {
 		if !profiles.selectable(r.Context(), slug) {
 			// Silent towards the agent, not towards the operator: the gate
 			// answers before the logging handler mounted inside it, so this
@@ -2789,7 +2923,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		return
 	}
 
-	// Look up profile by slug (lock-free snapshot). A scoped caller that
+	// Look up profile by slug (lock-free snapshot). A confined caller that
 	// passed the gate always resolves here — the predicate only admits
 	// configured profiles. The position is kept, not just the *ProfileConfig,
 	// so the effective-server computation below can reuse this exact
@@ -2934,12 +3068,12 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the write deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if err := rc.SetReadDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the read deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		next.ServeHTTP(w, r)
@@ -2985,13 +3119,13 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 			s.logger.Debug("Could not clear the write deadline for a streaming route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			if err := rc.SetReadDeadline(time.Time{}); err != nil {
 				s.logger.Debug("Could not clear the read deadline for a streaming route",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 					zap.Error(err))
 			}
 		}
@@ -3029,11 +3163,26 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 //     Lifting this pin is a deliberate, separately verified change; it is a
 //     function rather than a package variable so it cannot be flipped at
 //     runtime or from a test.
-func clientFacingStreamableOptions() []server.StreamableHTTPOption {
+//
+//   - WithHTTPContextFunc (Spec 112): captures the allowlist-eligible client
+//     headers of each POST into the request context so they can be forwarded
+//     to upstream tools/call. cfgProvider supplies the live config; nil
+//     disables capture. This is the single capture point, which is why it
+//     lives in this shared option set.
+func clientFacingStreamableOptions(cfgProvider func() *config.Config) []server.StreamableHTTPOption {
 	return []server.StreamableHTTPOption{
 		server.WithDisableLocalhostProtection(true),
 		server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...),
+		server.WithHTTPContextFunc(captureClientHeaders(cfgProvider)),
 	}
+}
+
+// liveConfig returns the runtime's current config, tolerating a nil runtime.
+func (s *Server) liveConfig() *config.Config {
+	if s == nil || s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Config()
 }
 
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
@@ -3090,55 +3239,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux := http.NewServeMux()
 
 	// Create a logging wrapper for debugging client connections
-	loggingHandler := func(handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			// Extract connection source from context
-			source := GetConnectionSource(r.Context())
-
-			// Log incoming request with connection details
-			s.logger.Debug("MCP client request received",
-				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("source", string(source)),
-				zap.String("user_agent", r.UserAgent()),
-				zap.String("content_type", r.Header.Get("Content-Type")),
-				zap.String("connection", r.Header.Get("Connection")),
-				zap.Int64("content_length", r.ContentLength),
-			)
-
-			// Create response writer wrapper to capture status and errors
-			wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
-
-			// Handle the request
-			handler.ServeHTTP(wrappedWriter, r)
-
-			duration := time.Since(start)
-
-			// Log response with timing and status
-			if wrappedWriter.statusCode >= 400 {
-				s.logger.Warn("MCP client request completed with error",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			} else {
-				s.logger.Debug("MCP client request completed successfully",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			}
-		})
-	}
+	loggingHandler := s.mcpLoggingHandler
 
 	// Standard MCP endpoint according to the specification
 	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement.
@@ -3159,21 +3260,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Each endpoint always serves its specific routing mode regardless of config.
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(directStreamable)))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
@@ -3182,7 +3283,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Profile resolution is done by profileMiddleware which runs AFTER mcpAuthMiddleware
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
@@ -3202,6 +3303,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	if s.auditSink != nil {
 		httpAPIServer.SetAuditSink(s.auditSink)
 	}
+	// Spec 108-f: the profiles service behind /profiles and /access/explain
+	// (both editions: profiles are admin-owned config in either).
+	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
+	// Spec 108-h: the `profiles` admin MCP tool reads the same admin views the
+	// REST routes do (one implementation, FR-037).
+	s.mcpProxy.SetAdminViews(httpAPIServer)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()
@@ -3256,6 +3363,20 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				}
 				return c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)
 			})
+		// Spec 108 FR-024: connect never writes the admin API key. Every write
+		// embeds a per-client `mcp_cli_` credential minted by the runtime's
+		// clients service, which also reconciles interrupted rotations from
+		// what each client's config actually holds (FR-021a).
+		if clients := s.runtime.ClientsService(); clients != nil {
+			connectSvc.WithCredentialMinter(clients.ConnectMinter())
+			clients.SetConfigReader(connectSvc)
+			httpAPIServer.SetClientsService(clients)
+			go func() {
+				if err := clients.Reconcile(s.runtime.AppContext()); err != nil {
+					s.logger.Warn("client rotation reconcile failed", zap.Error(err))
+				}
+			}()
+		}
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry
@@ -3320,22 +3441,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			secService.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 		}
 		secService.SetIsolationModeResolver(func(serverName string) string {
-			liveCfg := s.runtime.Config()
-			if liveCfg == nil || liveCfg.DockerIsolation == nil {
-				return ""
-			}
-			var sc *config.ServerConfig
-			for _, candidate := range liveCfg.Servers {
-				if candidate != nil && candidate.Name == serverName {
-					sc = candidate
-					break
-				}
-			}
-			if sc == nil {
-				return "" // unknown server → fall back to the engine-wide default
-			}
-			im := core.NewIsolationManager(liveCfg.DockerIsolation)
-			return string(im.ResolveMode(sc))
+			return scannerIsolationModeFor(s.runtime.Config(), serverName)
 		})
 		secService.SetInstanceID(core.GetInstanceID())
 		secService.SetEmitter(s.runtime)
@@ -3354,7 +3460,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// security_scan from every server on every SSE delivery — same bug
 		// class as the pre-existing quarantine-stats staleness PR #463
 		// already fixes for Quarantine.
-		if mgmtSvc, ok := s.runtime.GetManagementService().(management.Service); ok && mgmtSvc != nil {
+		if mgmtSvc := s.runtime.GetManagementService(); mgmtSvc != nil {
 			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
 		}
 		s.setSecurityScanner(secService)
@@ -3397,7 +3503,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				token = strings.TrimPrefix(h, "Bearer ")
 			}
 		}
-		if token != cfg.APIKey {
+		if !auth.ConstantTimeEqual(token, cfg.APIKey) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -3418,7 +3524,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
 	// at both layers: no telemetry service or no funnel store → no-op.
-	webUIHandler := web.NewHandlerWithIndexCallback(s.logger.Sugar(), func() {
+	webUIHandler := newWebUIHandler(cfg, s.logger.Sugar(), func() {
 		if ts := s.runtime.TelemetryService(); ts != nil {
 			ts.RecordWebUIOpen()
 		}
@@ -3773,9 +3879,28 @@ func (s *Server) ValidateConfig(cfg *config.Config) ([]config.ValidationError, e
 	return s.runtime.ValidateConfig(cfg)
 }
 
-// ApplyConfig applies a new configuration
+// ApplyConfig applies a new configuration. It is the single funnel behind
+// PATCH /config, POST /config/apply and PATCH /config/docker-isolation, so the
+// FR-008a binding guard lives here: a write that would let a client bound to a
+// named profile escape it while require_mcp_auth is off returns
+// *runtime.BindingGuardError and writes nothing. File-watcher reloads (hand
+// edits) are not refused; the runtime guard in ResolveProfileV3 covers them.
 func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.ConfigApplyResult, error) {
-	return s.runtime.ApplyConfig(cfg, cfgPath)
+	return s.runtime.GuardedApplyConfig(cfg, cfgPath)
+}
+
+// MutateConfig is the config funnel (Spec 108-f F2): the read of the desired
+// config, the caller's mutation, the FR-008a guard, an optional token re-pin and
+// the write run under one lock, and the write's profile_change records are
+// attributed to actor. PATCH /config, POST /config/apply, PATCH
+// /config/docker-isolation and every profiles-service mutation go through it.
+func (s *Server) MutateConfig(
+	ctx context.Context,
+	actor runtime.Actor,
+	mutate func(desired *config.Config) (runtime.ChangeHint, error),
+	tokens runtime.TokenRewrite,
+) (*runtime.ConfigApplyResult, *runtime.ConfigDiff, error) {
+	return s.runtime.MutateConfig(ctx, actor, mutate, tokens)
 }
 
 // GetTokenSavings calculates and returns token savings statistics
@@ -3932,6 +4057,14 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 				"description": result.Tool.Description,
 				"server_name": result.Tool.ServerName,
 			}
+			// Spec 109 FR-028/review round 1: without this, contracts'
+			// AnnotationTier(nil) always resolved to TierUnannotated for
+			// every search hit, regardless of the tool's real annotations,
+			// so the same tool's tier badge disagreed between the normal
+			// Tools list and the search box.
+			if result.Tool.Annotations != nil {
+				toolData["annotations"] = result.Tool.Annotations
+			}
 			// Parse params JSON as input schema if available
 			if result.Tool.ParamsJSON != "" {
 				var inputSchema map[string]interface{}
@@ -3994,7 +4127,7 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 	// Check if server exists
 	_, exists := s.runtime.UpstreamManager().GetClient(serverName)
 	if !exists {
-		return nil, fmt.Errorf("server not found: %s", serverName)
+		return nil, fmt.Errorf("%w: %s", contracts.ErrServerNotFound, serverName)
 	}
 
 	// Read from server-specific log file
@@ -4137,7 +4270,10 @@ func (s *Server) EmitActiveProfileChanged(profile string) {
 }
 
 // GetCurrentConfig returns the current configuration
-func (s *Server) GetCurrentConfig() interface{} {
+func (s *Server) GetCurrentConfig() *config.Config {
+	if s.runtime == nil {
+		return nil
+	}
 	return s.runtime.GetCurrentConfig()
 }
 
@@ -4181,30 +4317,49 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	if callArgs == nil {
 		callArgs = original.Arguments
 	}
-
-	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
-	// own annotations snapshot is the canonical target tier here — the same
-	// signal tierForAnnotations derives from a live gate's identity lookup
-	// elsewhere — so a replayed destructive/write call is not reported as
-	// `operation:"unknown"` when the snapshot is available. Left empty (and
-	// so defaulted to "unknown" by installAuditAttempt) when the record
-	// carries no annotations at all: mirrors mcp.go's own choice not to use
-	// tierForAnnotations' found=false "destructive" default for the AUDIT
-	// line — that default is an AUTHORIZATION fail-closed, and would
-	// misrepresent an unresolved tier as maximally risky rather than simply
-	// unknown to the proxy.
+	// Install the attempt before the profile gate so an authorization refusal
+	// is recorded with the same audit context as every other dispatch path.
 	var operation string
 	if original.Annotations != nil {
 		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
 	}
+	requestID := mintCorrelationID(original.ServerName, original.ToolName)
 	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
-		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
+		RequestID: requestID,
 		Server:    original.ServerName,
 		Tool:      original.ToolName,
 		Operation: operation,
 		Surface:   auditSurfaceREST,
 		Args:      callArgs,
 	})
+
+	// Spec 108 FR-015: replay is a dispatch path, so evaluate its recorded
+	// server/tool against the same request-scoped profile resolution before
+	// audit authorization or upstream I/O. Profile server scope is concealed
+	// as not-found; tool policy denials retain the shared refusal text.
+	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
+	ctx, profileResolution := s.mcpProxy.resolveForDispatch(ctx, profileIndex)
+	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
+		return nil, profile.ErrToolOutsideProfile
+	}
+	if policy := profileResolution.Policy; policy != nil {
+		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
+			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
+			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
+				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
+			return nil, refusal
+		}
+	}
+
+	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
+	// own annotations snapshot supplies the operation tier above before any
+	// gate runs, so a denied replay has the same correctly classified audit
+	// context as a dispatched replay.
 	// Spec 107 FR-012: `decision: allow` MUST be written after the last gate
 	// and before the upstream call (round-3 cross-review finding, PR-D) —
 	// auditToolCall's own backfill only runs on completion, which would
@@ -4291,8 +4446,8 @@ func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int, scop
 
 // GetRecentSessions retrieves recent MCP sessions, optionally filtered by
 // status ("active" / "closed"; empty means no filter).
-func (s *Server) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
-	return s.runtime.GetRecentSessions(limit, status)
+func (s *Server) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	return s.runtime.GetRecentSessions(f)
 }
 
 // GetSessionByID retrieves a session by its ID
@@ -4448,6 +4603,12 @@ func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
 	return s.runtime.SaveOnboardingState(state)
 }
 
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b).
+func (s *Server) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	return s.runtime.UpdateOnboardingState(fn)
+}
+
 // GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and
 // the capped list of recognized client names. Used by the v2 onboarding wizard
 // (Spec 046 v2) to drive the Verify tab. Nil-safe: when telemetry isn't wired
@@ -4473,6 +4634,17 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 	}
 	return a.server.UnquarantineServer(serverName)
 }
+
+// RecordToolBlocksForSecurityApproval publishes audit events for blocks that
+// the scanner service committed atomically with the approved baseline.
+func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {
+	if a.server == nil || a.server.runtime == nil {
+		return
+	}
+	a.server.runtime.RecordToolBlocksForSecurityApproval(serverName, toolNames, blockedBy)
+}
+
+var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to
@@ -4824,4 +4996,72 @@ func (p *configServerInfoProvider) IsConnected(serverName string) bool {
 		return false
 	}
 	return serverStatus.Connected
+}
+
+// mcpLoggingHandler wraps an MCP route with the request/response debug lines
+// that every /mcp mount shares. Extracted from startCustomHTTPServer so the
+// log fields it writes are reachable from a test without binding a listener.
+func (s *Server) mcpLoggingHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Extract connection source from context
+		source := GetConnectionSource(r.Context())
+
+		// SEC-01 follow-up: `/mcp/` and `/mcp/p/` are SUBTREE patterns, so
+		// everything after the prefix is whatever the caller sent, and
+		// r.URL.Path arrives percent-DECODED — an `?apikey=<KEY>` or a
+		// `Bearer <token>` encoded into the request target reaches this field
+		// as the real thing. The renderer is internal/oauth's, the same one
+		// internal/httpapi's access log uses: one rule for every log sink.
+		//
+		// Rendered ONCE for all three lines below. zap evaluates a field's
+		// value eagerly, so this runs whether or not Debug is enabled, and the
+		// renderer walks the path per segment; doing it twice per request
+		// would double that cost for nothing. Its input is capped inside
+		// LogSafeRequestPath (see maxLogSafeRequestBytes), which is what keeps
+		// the work per request bounded on this anonymous-by-default endpoint.
+		safePath := oauth.LogSafeRequestPath(r.URL.Path)
+
+		// Log incoming request with connection details
+		s.logger.Debug("MCP client request received",
+			zap.String("method", r.Method),
+			zap.String("path", safePath),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("source", string(source)),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("content_type", r.Header.Get("Content-Type")),
+			zap.String("connection", r.Header.Get("Connection")),
+			zap.Int64("content_length", r.ContentLength),
+		)
+
+		// Create response writer wrapper to capture status and errors
+		wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+		// Handle the request
+		handler.ServeHTTP(wrappedWriter, r)
+
+		duration := time.Since(start)
+
+		// Log response with timing and status
+		if wrappedWriter.statusCode >= 400 {
+			s.logger.Warn("MCP client request completed with error",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		} else {
+			s.logger.Debug("MCP client request completed successfully",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		}
+	})
 }

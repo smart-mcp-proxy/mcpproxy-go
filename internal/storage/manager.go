@@ -113,7 +113,15 @@ func (m *Manager) GetBoltDB() *BoltDB {
 
 // Upstream operations
 
-// SaveUpstreamServer saves an upstream server configuration
+// SaveUpstreamServer saves an upstream server configuration.
+//
+// Invariant: it never lowers a recorded Quarantined=true. Only
+// QuarantineUpstreamServer (the review/approve door) or a config that carries an
+// explicit operator decision (QuarantineExplicitlySet) may clear it. A Go-built
+// or file-decoded ServerConfig that merely says Quarantined=false is
+// indistinguishable from "never stated", so it must not erase a quarantine the
+// admission gate recorded. The guard changes only the persisted record, never
+// the caller's struct.
 func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -140,6 +148,7 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		LauncherWaitTimeout:    serverConfig.LauncherWaitTimeout,
 		EnabledTools:           serverConfig.EnabledTools,
 		DisabledTools:          serverConfig.DisabledTools,
+		ForwardHeaders:         serverConfig.ForwardHeaders,
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,
@@ -154,7 +163,13 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		AnnotationOverrides:      config.CloneAnnotationOverrides(serverConfig.AnnotationOverrides),
 	}
 
-	return m.db.SaveUpstream(record)
+	kept, err := m.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		m.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name,
+			"action", "use the quarantine review (QuarantineServer) or state \"quarantined\": false in mcp_config.json")
+	}
+	return err
 }
 
 // GetUpstreamServer retrieves an upstream server by name
@@ -188,6 +203,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		LauncherWaitTimeout:    record.LauncherWaitTimeout,
 		EnabledTools:           record.EnabledTools,
 		DisabledTools:          record.DisabledTools,
+		ForwardHeaders:         record.ForwardHeaders,
 
 		SourceRegistryID:         record.SourceRegistryID,
 		SourceRegistryProvenance: record.SourceRegistryProvenance,
@@ -236,6 +252,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			LauncherWaitTimeout:    record.LauncherWaitTimeout,
 			EnabledTools:           record.EnabledTools,
 			DisabledTools:          record.DisabledTools,
+			ForwardHeaders:         record.ForwardHeaders,
 
 			SourceRegistryID:         record.SourceRegistryID,
 			SourceRegistryProvenance: record.SourceRegistryProvenance,
@@ -282,22 +299,23 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 
 		if record.Quarantined {
 			quarantinedServers = append(quarantinedServers, &config.ServerConfig{
-				Name:          record.Name,
-				URL:           record.URL,
-				Protocol:      record.Protocol,
-				Command:       record.Command,
-				Args:          record.Args,
-				WorkingDir:    record.WorkingDir,
-				Env:           record.Env,
-				Headers:       record.Headers,
-				OAuth:         record.OAuth,
-				Enabled:       record.Enabled,
-				Quarantined:   record.Quarantined,
-				Created:       record.Created,
-				Updated:       record.Updated,
-				Isolation:     record.Isolation,
-				EnabledTools:  record.EnabledTools,
-				DisabledTools: record.DisabledTools,
+				Name:           record.Name,
+				URL:            record.URL,
+				Protocol:       record.Protocol,
+				Command:        record.Command,
+				Args:           record.Args,
+				WorkingDir:     record.WorkingDir,
+				Env:            record.Env,
+				Headers:        record.Headers,
+				OAuth:          record.OAuth,
+				Enabled:        record.Enabled,
+				Quarantined:    record.Quarantined,
+				Created:        record.Created,
+				Updated:        record.Updated,
+				Isolation:      record.Isolation,
+				EnabledTools:   record.EnabledTools,
+				DisabledTools:  record.DisabledTools,
+				ForwardHeaders: record.ForwardHeaders,
 
 				SourceRegistryID:         record.SourceRegistryID,
 				SourceRegistryProvenance: record.SourceRegistryProvenance,
@@ -762,6 +780,15 @@ func (m *Manager) SaveIntegrityBaseline(baseline *scanner.IntegrityBaseline) err
 	return m.db.SaveIntegrityBaseline(baseline)
 }
 
+// SaveIntegrityBaselineWithBlocks commits the scan approval and the selected
+// disabled tool records atomically in the underlying bbolt database.
+func (m *Manager) SaveIntegrityBaselineWithBlocks(baseline *scanner.IntegrityBaseline, blocks []scanner.ToolApprovalBlock) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+}
+
 // GetIntegrityBaseline retrieves an integrity baseline by server name
 func (m *Manager) GetIntegrityBaseline(serverName string) (*scanner.IntegrityBaseline, error) {
 	m.mu.RLock()
@@ -999,6 +1026,48 @@ func (m *Manager) GetToolStats(topN int) ([]map[string]interface{}, error) {
 		result = append(result, map[string]interface{}{
 			"tool_name": tool.ToolName,
 			"count":     tool.Count,
+		})
+	}
+
+	return result, nil
+}
+
+// GetToolStatsFiltered is GetToolStats restricted to records keep admits
+// (Spec 105 FR-005 G2): the sort-then-cut-to-topN happens AFTER filtering,
+// unlike GetToolStatistics/GetToolStats which cut first — a caller whose
+// authorized population excludes some records must never let a hidden or
+// unapproved tool's usage count evict an authorized tool from the topN
+// window. keep receives the full "server:tool" name exactly as recorded by
+// IncrementToolUsage. A nil keep behaves like GetToolStats (nothing filtered).
+func (m *Manager) GetToolStatsFiltered(keep func(toolName string) bool, topN int) ([]map[string]interface{}, error) {
+	m.mu.RLock()
+	records, err := m.db.ListToolStats()
+	m.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]*ToolStatRecord, 0, len(records))
+	for _, record := range records {
+		if keep == nil || keep(record.ToolName) {
+			filtered = append(filtered, record)
+		}
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Count > filtered[j].Count
+	})
+	if topN > 0 && len(filtered) > topN {
+		filtered = filtered[:topN]
+	}
+
+	// Non-nil so usage_summary.top_tools serializes as [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	result := make([]map[string]interface{}, 0, len(filtered))
+	for _, record := range filtered {
+		result = append(result, map[string]interface{}{
+			"tool_name": record.ToolName,
+			"count":     record.Count,
 		})
 	}
 
@@ -1403,6 +1472,36 @@ type SessionRecord struct {
 	WorkspaceRoot string `json:"workspace_root,omitempty"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
 	WorkSessionID string `json:"work_session_id,omitempty"`
+
+	// Scope attribution (Spec 108 FR-028/FR-033). TokenName and ClientID are the
+	// credential the session initialized with; Profile/ProfileSource are the
+	// session's LATEST resolution (written through on change by
+	// SetSessionProfile). Legacy rows decode empty and read as unattributed.
+	TokenName     string `json:"token_name,omitempty"`
+	ClientID      string `json:"client_id,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	ProfileSource string `json:"profile_source,omitempty"`
+}
+
+// SessionFilter selects sessions for GetRecentSessionsFiltered. Empty string
+// fields are unfiltered; "-" (ScopeFilterUnattributed) selects sessions with
+// no value. Profile is the session's latest effective profile; ClientID and
+// TokenName are the credential at initialize.
+type SessionFilter struct {
+	Limit     int
+	Status    string
+	Profile   string
+	ClientID  string
+	TokenName string
+}
+
+func (f SessionFilter) matches(s *SessionRecord) bool {
+	if f.Status != "" && s.Status != f.Status {
+		return false
+	}
+	return scopeValueMatches(f.Profile, s.Profile) &&
+		scopeValueMatches(f.ClientID, s.ClientID) &&
+		scopeValueMatches(f.TokenName, s.TokenName)
 }
 
 // sessionRetentionLimit is the hard cap on stored session records. The cap is
@@ -1453,6 +1552,10 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 				existingSession.HasRoots = session.HasRoots
 				existingSession.HasSampling = session.HasSampling
 				existingSession.Experimental = session.Experimental
+				// A re-created session is live again (re-initialize on a
+				// soft-closed id must not leave the record closed).
+				existingSession.Status = "active"
+				existingSession.EndTime = nil
 				session = &existingSession
 				m.logger.Debugw("Updating existing session with new data", "session_id", session.ID, "client_name", session.ClientName)
 				break
@@ -1535,6 +1638,42 @@ func (m *Manager) CloseSession(sessionID string) error {
 	})
 }
 
+// ReopenSession marks a closed session active again and clears its end time. It
+// is a no-op for an unknown or already-active session (no duplicate record).
+func (m *Manager) ReopenSession(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if !strings.HasSuffix(string(k), "_"+sessionID) {
+				continue
+			}
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				return fmt.Errorf("failed to unmarshal session: %w", err)
+			}
+			if session.Status == "active" {
+				return nil
+			}
+			session.Status = "active"
+			session.EndTime = nil
+			session.LastActivity = time.Now()
+			data, err := json.Marshal(session)
+			if err != nil {
+				return fmt.Errorf("failed to marshal session: %w", err)
+			}
+			return bucket.Put(k, data)
+		}
+		return nil
+	})
+}
+
 // GetRecentSessions returns the sessions that were active most recently.
 //
 // "Recent" means LastActivity, not StartTime. Bucket keys are
@@ -1556,6 +1695,15 @@ func (m *Manager) CloseSession(sessionID string) error {
 // returned total counts the whole bucket when unfiltered, and every matching
 // record when filtered.
 func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord, int, error) {
+	return m.GetRecentSessionsFiltered(SessionFilter{Limit: limit, Status: status})
+}
+
+// GetRecentSessionsFiltered is GetRecentSessions with the Spec 108 scope
+// filters. Every filter is applied after the LastActivity sort and BEFORE the
+// limit, so total is the filtered count and an old-but-matching session is
+// never truncated out by a page of newer non-matching ones.
+func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, int, error) {
+	limit := f.Limit
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1593,11 +1741,11 @@ func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord,
 		return all[i].StartTime.After(all[j].StartTime)
 	})
 
-	if status != "" {
+	if f.Status != "" || f.Profile != "" || f.ClientID != "" || f.TokenName != "" {
 		total := 0
 		sessions := make([]*SessionRecord, 0, limit)
 		for _, session := range all {
-			if session.Status != status {
+			if !f.matches(session) {
 				continue
 			}
 			total++
@@ -1737,6 +1885,42 @@ func (m *Manager) SetSessionWorkspace(sessionID, workspaceRoot string) error {
 			return fmt.Errorf("failed to marshal session: %w", err)
 		}
 		return bucket.Put(sessionKey, data)
+	})
+}
+
+// SetSessionProfile writes a session's latest profile resolution through to its
+// persisted row (Spec 108 FR-033). A session that is not persisted yet is a
+// no-op: EnsurePersisted copies the in-memory resolution when it persists.
+func (m *Manager) SetSessionProfile(sessionID, profile, source string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return nil
+		}
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if !strings.HasSuffix(string(k), "_"+sessionID) {
+				continue
+			}
+			var session SessionRecord
+			if err := json.Unmarshal(v, &session); err != nil {
+				return fmt.Errorf("failed to unmarshal session: %w", err)
+			}
+			if session.Profile == profile && session.ProfileSource == source {
+				return nil
+			}
+			session.Profile = profile
+			session.ProfileSource = source
+			data, err := json.Marshal(session)
+			if err != nil {
+				return fmt.Errorf("failed to marshal session: %w", err)
+			}
+			return bucket.Put(append([]byte(nil), k...), data)
+		}
+		return nil
 	})
 }
 
@@ -2423,4 +2607,22 @@ func (m *Manager) SaveOnboardingState(state *OnboardingState) error {
 	defer m.mu.Unlock()
 
 	return m.db.SaveOnboardingState(state)
+}
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists the result in one bbolt transaction (Spec 109-b, T035). Every
+// writer of the record must use this instead of a separate
+// Get/SaveOnboardingState pair — see BoltDB.UpdateOnboardingState.
+//
+// Callback constraint: fn runs while m.mu is write-locked AND inside a bbolt
+// write transaction. It must be a short, pure mutation of the *OnboardingState
+// it is handed. It MUST NOT call any Manager or BoltDB method (Get/Save/
+// UpdateOnboardingState, or anything else that takes m.mu or opens a bbolt
+// transaction) and must not block on I/O or other goroutines: re-entering
+// either lock deadlocks, and slow work stalls every other storage operation.
+func (m *Manager) UpdateOnboardingState(fn func(*OnboardingState) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.UpdateOnboardingState(fn)
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // mockSessionController records the status argument the handler pushes down, so
@@ -24,17 +25,20 @@ type mockSessionController struct {
 	sessions  []*contracts.MCPSession
 	gotLimit  int
 	gotStatus string
+	gotFilter storage.SessionFilter
 	callCount int
 }
 
-func (m *mockSessionController) GetCurrentConfig() any {
+func (m *mockSessionController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
-func (m *mockSessionController) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
+func (m *mockSessionController) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	m.callCount++
-	m.gotLimit = limit
-	m.gotStatus = status
+	m.gotLimit = f.Limit
+	m.gotStatus = f.Status
+	m.gotFilter = f
+	status := f.Status
 
 	var out []*contracts.MCPSession
 	for _, s := range m.sessions {

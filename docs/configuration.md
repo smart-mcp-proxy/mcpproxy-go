@@ -7,18 +7,19 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 1. [Configuration File Location](#configuration-file-location)
 2. [Basic Configuration](#basic-configuration)
 3. [Server Configuration](#server-configuration)
-4. [Security Settings](#security-settings)
-5. [Tokenizer Configuration](#tokenizer-configuration)
-6. [TLS/HTTPS Configuration](#tlshttps-configuration)
-7. [Logging Configuration](#logging-configuration)
-8. [Docker Isolation](#docker-isolation)
-9. [Docker Recovery](#docker-recovery)
-10. [Environment Configuration](#environment-configuration)
-11. [Code Execution](#code-execution)
-12. [Feature Flags](#feature-flags)
-13. [Registries](#registries)
-14. [Update Check](#update-check)
-15. [Complete Example](#complete-example)
+4. [Profiles](#profiles-profiles-and-anonymous_profile)
+5. [Security Settings](#security-settings)
+6. [Tokenizer Configuration](#tokenizer-configuration)
+7. [TLS/HTTPS Configuration](#tlshttps-configuration)
+8. [Logging Configuration](#logging-configuration)
+9. [Docker Isolation](#docker-isolation)
+10. [Docker Recovery](#docker-recovery)
+11. [Environment Configuration](#environment-configuration)
+12. [Code Execution](#code-execution)
+13. [Feature Flags](#feature-flags)
+14. [Registries](#registries)
+15. [Update Check](#update-check)
+16. [Complete Example](#complete-example)
 
 ---
 
@@ -414,12 +415,46 @@ it and none can double-report it.
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
-| `quarantined` | boolean | No | Security quarantine status (default: `false` for manually added servers, `true` for LLM-added servers) |
+| `quarantined` | boolean | No | Security quarantine status. The default depends on how the server arrives. A server added through the UI, CLI, REST API or an AI agent follows its [trust mode](features/security-quarantine.md#trust-modes-auto--scan--manual) at add time (quarantined under the default `manual` mode). A server you add by editing this file, with no `quarantined` key and no prior `config.db` record, is **held for review** on first load when quarantine is enabled and its trust mode is not `auto` (no `trust_mode` means `manual`, unless a legacy `auto_approve_tool_changes: true` or `skip_quarantine: true` resolves it to `auto`). An explicit `"quarantined": false` admits it, and an explicit `true` holds it. A server that is already recorded in `config.db` keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](features/security-quarantine.md#servers-added-by-hand-editing-mcp_configjson) for the full admission rules. |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
 | `expose_prompts` | boolean | No | Per-server override for whether this server's MCP prompts are aggregated into mcpproxy's `prompts/list`. Only takes effect when the global `aggregate_upstream_prompts` master switch is on. Omit to expose prompts whenever the server advertises `Capabilities.Prompts`; `false` opts this server out even if it does. |
 | `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
+| `forward_headers` | array | No | Names of inbound MCP client HTTP headers to forward to this server on `tools/call`. Exact names only. See [Client Header Forwarding](#client-header-forwarding). Ignored for `stdio` and `sse`. `[]` clears it. |
 | `created` | string | No | ISO 8601 timestamp (auto-generated) |
 | `updated` | string | No | ISO 8601 timestamp (auto-updated) |
+
+### Client Header Forwarding
+
+MCPProxy can forward selected HTTP headers from the MCP client's request to an upstream server, for example `X-Tenant-Id` or a per-user `X-User-Id`, so an upstream that keys behaviour on a header can see it. It is enabled by default but inert until a server lists header names.
+
+```json
+{
+  "forward_client_headers": true,
+  "mcpServers": [
+    {
+      "name": "tenant-api",
+      "url": "https://api.example.com/mcp",
+      "protocol": "streamable-http",
+      "headers": { "Authorization": "Bearer static-token" },
+      "forward_headers": ["X-Tenant-Id", "X-User-Id"]
+    }
+  ]
+}
+```
+
+- **Format**: `forward_headers` is a list of header **names** (case-insensitive, exact match, no wildcards, at most 32 per server). Values are never configured; they come from each inbound request.
+- **Default and switches**: the top-level `forward_client_headers` defaults to on when absent. Set it to `false`, or start with `MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off`, to stop all forwarding without editing servers. A server with no `forward_headers` forwards nothing. Changes apply to the next call, with no reconnect.
+- **Precedence**: forwarded headers have the lowest precedence. They never replace a header that MCPProxy, OAuth or the server's static `headers` set. A name that equals a static header key is rejected on write and skipped at runtime, so the configured value always wins. On OAuth servers the upstream always receives MCPProxy's own token.
+- **Deny list**: these are never forwarded, even if listed: `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Cookie`, `Set-Cookie`, `Forwarded`, `X-Real-Ip`, `X-Forwarded-*`; `Host`, `Connection` and other hop-by-hop headers (and any name in the request's own `Connection` header), `Proxy-*`; `Content-*`, `Accept`, `Accept-Encoding`, `Range`, `If-*`, `Last-Event-Id`, `Mcp-*`; `Traceparent`, `Tracestate`, `Baggage`, `X-Request-Id`, `X-Mcpproxy-*`, `Sec-*`; `User-Agent`, `Origin`, `Referer`. The filter is re-applied on every request; write-time validation is only a convenience.
+- **Transports**: streamable HTTP only (`protocol: http`, `streamable-http`, or `auto` resolving to it). Header forwarding is not implemented for the deprecated `sse` transport (SSE upstreams still work, they just never receive forwarded headers), and `stdio` servers have no HTTP request to carry headers. An allowlist on either is ignored, and a warning names the header.
+- **Which upstream requests carry headers**: only the `tools/call` request made for a call that arrives on an MCP endpoint (`/mcp`, `/mcp/all` and the other MCP mounts): `call_tool_read|write|destructive`, direct `server__tool` calls, and `code_execution` sub-calls. These never carry them: `initialize`, `tools/list`, prompts, pings and notifications, reconnects (including `reconnect_on_use`), health checks, background discovery and indexing, `upstream_servers refresh`, quarantine inspection, the REST API (`/api/v1/tools/call` and friends), the CLI, and OAuth flows.
+- **Limits**: each value at most 4 KiB, 16 KiB total per request. Oversized values, empty values and values with control characters are dropped. Repeated inbound headers are joined with `, `.
+- **Redirects**: if an upstream redirects a `tools/call` to a different origin, the forwarded headers are removed from the redirected request.
+- **Redaction**: MCPProxy never writes forwarded values to logs, the activity log, tool-call records, audit lines, events or error text; only names appear. Trace logging masks them too. If an upstream echoes a value back in an error or a result, the copy MCPProxy stores or logs has it replaced by `[forwarded:<Name>]`. This is best effort: it catches the exact value (and its JSON-escaped form), not a transformed one (base64, URL-encoding, hashing, splitting), and values shorter than 4 characters are only caught in name-anchored forms. The client still receives the unmodified result. Results that came from a call with forwarded headers are only served from `read_cache` to a request carrying the same forwarded values.
+- **Trust warning**: forwarded values are **unverified client assertions**, not authenticated identity. Any client that can reach `/mcp` can send any value, including another user's `X-User-Id`. MCPProxy copies values and does not check them. Only forward a header to an upstream that authenticates it some other way, or when every client that can reach MCPProxy is trusted to assert it.
+- **Limitations**: MCPProxy keeps one shared upstream session per server, so `initialize` never carries client headers and session-bound identity is not supported. Sampling, elicitation and the session-close request carry none. Plain `http://` to a non-loopback upstream sends values in cleartext.
+
+To verify locally, run `mcpfixture --transport http --port 18080 --echo-headers` and call its `echo_headers` tool through MCPProxy; it returns the headers the upstream received.
 
 ### Protocol Types
 
@@ -609,8 +644,14 @@ exact string to the provider as `redirect_uri`:
 ```
 
 The value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host
-(`127.0.0.1`, `localhost` or `::1`), an explicit port, and the
-`/oauth/callback` path. Register the same URL with the provider.
+(`127.0.0.1`, `localhost` or `::1`), and an explicit port. mcpproxy binds its
+callback listener to whatever path the URI specifies, so a provider that only
+lets you register a different one (some publish a single shared OAuth
+application whose callback path an individual user cannot change) still
+works — e.g. `http://127.0.0.1:54108/callback`. A pin with no path at all
+(`http://127.0.0.1:54108`) binds `/`, not `/oauth/callback`; `/oauth/callback`
+is only the default when `redirect_uri` is omitted entirely and mcpproxy
+allocates a dynamic port. Register the same URL with the provider.
 
 Prefer `127.0.0.1`. `localhost` is accepted, and the string is sent to the
 provider exactly as written, but the listener binds `127.0.0.1` — on a host
@@ -648,6 +689,58 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
 ---
 
+## Profiles (`profiles`) and `anonymous_profile`
+
+A profile is a named view over your upstream servers with a tool policy. The full model, the resolution order and the refusal texts are in [Profiles](features/profiles.md); this is the configuration reference.
+
+```json
+{
+  "require_mcp_auth": true,
+  "anonymous_profile": "",
+  "profiles": [
+    {
+      "name": "work-readonly",
+      "title": "Work · Read-only",
+      "description": "GitHub and Notion, read tools only",
+      "servers": ["github", "notion"],
+      "max_tier": "read",
+      "unannotated": "deny",
+      "tools": {
+        "allow": ["notion:update_page"],
+        "deny": ["github:*secret*"],
+        "classify": { "github:search_code": "read" }
+      },
+      "code_execution": false,
+      "management_tools": false,
+      "switchable_to": ["work-full"]
+    },
+    { "name": "work-full", "servers": ["github", "notion", "filesystem"] }
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `profiles[].name` | string | required | Slug `^[a-z0-9][a-z0-9_-]{0,62}$`. Reserved: `all`, `code`, `call`, `p` (URL segments), `active`, `try` (REST routes). Duplicates are a fatal error |
+| `profiles[].servers` | string[] | required | Servers the profile reaches. An unknown server is a warning and is skipped; an empty list denies everything |
+| `profiles[].title` | string | name | Display title, at most 80 characters |
+| `profiles[].description` | string | none | At most 500 characters |
+| `profiles[].max_tier` | `read` \| `write` \| `destructive` | no cap | The highest tool tier the profile admits |
+| `profiles[].unannotated` | `deny` \| `as_write` \| `as_read` | `deny` under a `read` or `write` cap, otherwise `as_read` | How to treat a tool that declares no tier |
+| `profiles[].tools.allow` | string[] | none | `server:tool` patterns (`*` is the only wildcard) admitted even above the cap. Cannot add a server |
+| `profiles[].tools.deny` | string[] | none | Patterns hidden from the profile. Deny beats allow |
+| `profiles[].tools.classify` | object | none | `server:tool` to `read`, `write` or `destructive`; applies only to tools with no annotations |
+| `profiles[].code_execution` | boolean | off under a `read` or `write` cap, otherwise inherits `enable_code_execution` | `false` removes the `code_execution` tool for the profile; the global flag always wins |
+| `profiles[].management_tools` | boolean | inherit | `true` shows `upstream_servers` and `quarantine_security` (still limited by the caller's own permissions); `false` hides them |
+| `profiles[].switchable_to` | string[] | unset (none) | Profiles a client bound to this profile, or a confined anonymous caller, may switch to with `set_profile` |
+| `anonymous_profile` | string | empty (unconfined) | Confines every caller that presents no credential, or an unrecognised token while `require_mcp_auth` is off, to this profile. A missing profile denies everything and logs a warning |
+
+A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
+
+With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](features/profiles.md#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
+
+---
+
 ## Security Settings
 
 ```json
@@ -664,7 +757,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
+| `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated, enforced, and written back to this config file (printed to the terminal once on first run; never written to the log files) |
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on loopback listeners (reverse-proxy deployments). See below |
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured; any other peer's forwarded headers are ignored and `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES`. Hot-reloadable. Invalid entry: `trusted_proxies[N] "value" is not a valid CIDR or IP address` (boot, PATCH and apply). See [Reverse Proxy Deployment](operations/reverse-proxy.md#trusted_proxies-forwarded-headers) |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
@@ -675,7 +768,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 **Security Notes:**
 - **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
-- **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
+- **Auto-Generation**: If no API key is provided, one is generated, persisted to the config file, and printed once to the terminal (stderr). It is deliberately **not** written to the log files - to recover it later, read `api_key` from `~/.mcpproxy/mcp_config.json`
 - **Tray Integration**: Tray app automatically manages API keys for core communication
 
 ## Audit Log
@@ -737,6 +830,11 @@ Add the public domain(s) to `trusted_hosts` to allow them:
 - A request that carries an `Origin` header must likewise have a loopback or trusted
   origin host (MCP spec requirement); requests without `Origin` (non-browser clients,
   reverse proxies) are never rejected by the Origin check.
+- The same allowlist drives CORS on the REST API (`/api/v1/*`) and the `/events` SSE
+  stream: the request `Origin` is echoed back in `Access-Control-Allow-Origin` only when
+  it is loopback or trusted, and no CORS headers are sent otherwise. Earlier versions
+  sent `Access-Control-Allow-Origin: *` there unconditionally, so a separate web app that
+  calls the REST API cross-origin now needs its host in `trusted_hosts`.
 - Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted; requests on
   non-loopback listeners are never subject to Host validation.
 - Environment override: `MCPPROXY_TRUSTED_HOSTS` (comma-separated list).
@@ -1285,6 +1383,20 @@ You can edit this from the Web UI under **Settings → Advanced → MCP server i
 
 **Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
 
+Whatever the base text, each connection also gets a per-caller **YOUR ACCESS** block appended. It lists the active profile, the connected servers that caller can reach and its allowed operations, all filtered to its profile and agent-token scope. See [Agent Instructions](/features/agent-instructions).
+
+### Advertising upstream servers
+
+```json
+{
+  "advertise_upstream_servers": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `advertise_upstream_servers` | bool | `true` | Name the caller's reachable upstream servers in the initialize instructions and in the `retrieve_tools` description, so agents use proxied tools instead of shell CLIs. Names are always filtered to the caller's profile and agent-token scope. Set `false` to keep server names out of client context; operation limits are still stated. Read live. |
+
 **Warning:** the text is operator-published content, returned verbatim to **every** client that initializes — including [agent tokens](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn) scoped to a subset of servers. Do not put server names, hostnames, credentials or other secrets in it.
 
 ---
@@ -1675,6 +1787,7 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_MAX_CONCURRENT_REQUESTS` | `max_concurrent_requests` | Global aggregate cap on concurrent upstream tool calls (`0` disables it). See [Concurrency Limits](#concurrency-limits--request-queueing) |
 | `MCPPROXY_QUEUE_SIZE` | `queue_size` | Global aggregate wait-queue length (`0` = shed at the cap) |
 | `MCPPROXY_QUEUE_TIMEOUT` | `queue_timeout` | Global aggregate queue wait budget, e.g. `30s` |
+| `MCPPROXY_FORWARD_CLIENT_HEADERS` | `forward_client_headers` | `false`, `0` or `off` disables [client header forwarding](#client-header-forwarding) for the process. Never persisted to the config file. Any other value is ignored. |
 | `MCPPROXY_DISABLE_OAUTH` | - | Disable OAuth for testing |
 | `HEADLESS` | - | Run in headless mode |
 
@@ -1696,6 +1809,7 @@ MCPProxy validates configuration on startup. Common validation errors:
 - **Invalid protocol**: Must be `stdio`, `http`, `sse`, `streamable-http`, or `auto`
 - **Missing command**: stdio servers require `command` field
 - **Missing url**: HTTP-based servers require `url` field
+- **Invalid forward_headers**: names must be valid HTTP tokens, not on the [deny list](#client-header-forwarding), at most 32 entries, and not equal to a key of the same server's static `headers`. Writes through the REST API, `upstream_servers` and config apply are rejected with the header name; a config file with a bad entry still loads, the entry is dropped and a warning names the header and server.
 - **Invalid timeout**: Must be a valid duration string (e.g., `"30s"`, `"2m"`)
 
 Run `mcpproxy doctor` to check configuration health.

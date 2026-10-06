@@ -16,7 +16,9 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -90,6 +92,20 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	p.recordMCPSurface()
 	p.recordBuiltinTool("code_execution")
 	p.logger.Debug("code_execution tool called")
+	profileIdx := p.profileIndexCurrent(ctx)
+	if profileIdx == nil {
+		return mcp.NewToolResultError("unknown tool: code_execution"), nil
+	}
+	ctx, profileResolution := p.resolveForDispatch(ctx, profileIdx)
+	danglingProfile := profileResolution.Base != "" && profileIdx.position(profileResolution.Base) < 0
+	if profileResolution.BindingGuarded || danglingProfile || (profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution) {
+		requestID := mintActivityRequestID("", "code_execution")
+		refusal := profile.ErrCodeExecutionBlocked
+		recordCodeExecRefusal(ctx, refusal)
+		p.emitActivityPolicyDecisionWithBlockReason(ctx, "", "code_execution", sessionIDFromContext(ctx), requestID,
+			"blocked", refusal.Error(), telemetry.BlockReasonOther, string(profile.BlockReasonCodeExecution))
+		return mcp.NewToolResultError("unknown tool: code_execution"), nil
+	}
 
 	// enable_code_execution is a FEATURE switch, so it is enforced where every
 	// surface passes rather than at registration. The MCP surfaces gate by
@@ -267,30 +283,48 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// form is wired so the lookup's read is the nested call's ONE persisted
 	// read: the bridge (CallToolWithGate) dispatches on the gate it captured
 	// rather than taking a second one (codex r9 I1).
-	options.ToolGateFunc = p.lookupToolGate
+	options.ToolGateFunc = func(serverName, toolName string) (string, jsruntime.ToolGate) {
+		required, rawGate := p.lookupToolGate(serverName, toolName)
+		sandbox, ok := rawGate.(*sandboxGate)
+		if !ok || sandbox == nil || profileResolution.Policy == nil {
+			return required, rawGate
+		}
+		identity := sandbox.gate.identity
+		if !sandbox.gated {
+			identity = p.resolveExactToolIdentityWith(nil, serverName, toolName)
+		}
+		admitted, reason, tier := profileResolution.Policy.Decide(
+			serverName, toolName, profile.IntrinsicTier(identity.Annotations, identity.Found),
+		)
+		if !admitted && reason != profile.ReasonServerNotInProfile {
+			sandbox.profileRefusal, sandbox.profileBlockReason = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName, profileRefusalSubject(profileResolution, profileIdx))
+		}
+		return required, rawGate
+	}
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
-	p.applyProfileScopeToExecution(ctx, &options)
+	p.applyResolvedProfileScopeToExecution(&options, profileResolution.Scope)
 
 	// Spec 107 T103/T104: the wrapper itself writes no audit line (it is a
 	// built-in), but it captures the SCRIPT's caller for every nested line
 	// and installs the sandbox's authorization-decision observer so a
 	// scope/permission refusal decided inside jsruntime — which never
 	// reaches the bridge — still gets its `authz deny`, with parent_id.
+	options.ParentID = parentCallID
+	scriptCaller := auditCallerFromContext(ctx)
+	toolCaller.auditProfile, _ = p.resolveActiveProfile(ctx)
+	options.AuthzObserver = &nestedAuthzObserver{
+		proxy:         p,
+		toolCaller:    toolCaller,
+		parentCtx:     ctx,
+		caller:        scriptCaller,
+		sessionID:     sessionID,
+		clientName:    clientName,
+		clientVersion: clientVersion,
+		profile:       toolCaller.auditProfile,
+	}
 	if p.auditSink != nil {
-		scriptCaller := auditCallerFromContext(ctx)
 		toolCaller.auditCaller = &scriptCaller
-		toolCaller.auditProfile, _ = p.resolveActiveProfile(ctx)
-		options.ParentID = parentCallID
-		options.AuthzObserver = &nestedAuthzObserver{
-			proxy:         p,
-			parentCtx:     ctx,
-			caller:        scriptCaller,
-			sessionID:     sessionID,
-			clientName:    clientName,
-			clientVersion: clientVersion,
-			profile:       toolCaller.auditProfile,
-		}
 	}
 
 	// Execute code
@@ -306,7 +340,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Update execution start time to actual execution start
 	executionStart = time.Now()
-	result := jsruntime.Execute(ctx, toolCaller, code, options)
+	// Spec 112 FR-016.3: execution-level sink; nested sub-calls fold their
+	// outbound sets into it (see upstreamToolCaller.CallTool).
+	execCtx, execFwdSink := headerfwd.WithSink(ctx)
+	result := jsruntime.Execute(execCtx, toolCaller, code, options)
+	execFwdOut := execFwdSink.Outbound()
 	executionDuration := time.Since(executionStart)
 
 	// Log execution result with metrics
@@ -321,7 +359,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			zap.String("execution_id", options.ExecutionID),
 			zap.Duration("execution_duration", executionDuration),
 			zap.String("error_code", string(result.Error.Code)),
-			zap.String("error_message", result.Error.Message),
+			zap.String("error_message", scrubForRecord(result.Error.Message, execFwdOut)),
 			zap.Int("tool_calls_made", len(toolCaller.getToolCalls())),
 		)
 	}
@@ -394,7 +432,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		ServerName:       "mcpproxy",       // Built-in tool
 		ToolName:         "code_execution",
 		Arguments:        codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input),
-		Response:         result,
+		Response:         scrubResultForRecord(result, execFwdOut),
 		Duration:         int64(executionDuration),
 		Timestamp:        executionStart,
 		ConfigPath:       configPath,
@@ -443,7 +481,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	} else {
 		status = "error"
 		if result.Error != nil {
-			errorMsg = result.Error.Message
+			errorMsg = scrubForRecord(result.Error.Message, execFwdOut)
 		}
 	}
 	codeExecArgs := codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input)
@@ -470,7 +508,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil, codeExecContentTrust)
+	p.emitActivityInternalToolCall(ctx, "code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, scrubResultForRecord(result, execFwdOut), nil, codeExecContentTrust)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
@@ -785,8 +823,36 @@ type upstreamToolCaller struct {
 // dispatchGate's second result carried along: false means no gate was
 // evaluated (a proxy without storage).
 type sandboxGate struct {
-	gate  toolGate
-	gated bool
+	gate               toolGate
+	gated              bool
+	profileRefusal     string
+	profileBlockReason profile.BlockReason
+}
+
+// The sandbox asserts these two methods separately (jsruntime
+// resolveDispatchGates). Changing ProfilePolicyRefusal's signature would
+// silently stop the assertion matching and DROP nested profile refusals, so
+// both are pinned at compile time.
+var _ interface {
+	ProfilePolicyRefusal() string
+	ProfilePolicyBlockReason() string
+} = (*sandboxGate)(nil)
+
+func (g *sandboxGate) ProfilePolicyRefusal() string {
+	if g == nil {
+		return ""
+	}
+	return g.profileRefusal
+}
+
+// ProfilePolicyBlockReason is the typed cause (profile_tier, profile_rule,
+// profile_unannotated) of the refusal ProfilePolicyRefusal reports, "" when the
+// gate is not refused (Spec 108 FR-029).
+func (g *sandboxGate) ProfilePolicyBlockReason() string {
+	if g == nil {
+		return ""
+	}
+	return string(g.profileBlockReason)
 }
 
 // CallTool implements jsruntime.ToolCaller. It takes the gate read itself,
@@ -887,7 +953,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		if u.proxy != nil {
 			u.proxy.auditAuthz(ctx, "deny", policyRefusalReasonKey(gate))
 		}
-		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 		return nil, refusal
 	}
 	if u.proxy != nil && u.proxy.dispatchGatePause != nil {
@@ -933,7 +999,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
 			u.proxy.auditAuthz(ctx, "deny", telemetry.BlockReasonToolNotCallable)
-			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 			return nil, refusal
 		}
 		certified = live
@@ -958,11 +1024,18 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		result *mcp.CallToolResult
 		err    error
 	)
+	// Spec 112 FR-016.3: a per-sub-call sink receives this call's outbound set;
+	// it is also folded into the execution-level sink so the code_execution
+	// wrapper's own records can be scrubbed with everything any sub-call sent.
+	parentFwdSink := headerfwd.SinkFrom(ctx)
+	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	if certified.certified() {
-		result, err = client.CallToolOnEpoch(ctx, toolName, args, certified.DiscoveryEpoch)
+		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
-		result, err = client.CallTool(ctx, toolName, args)
+		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
+	fwdOut := fwdSink.Outbound()
+	parentFwdSink.Merge(fwdOut)
 	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
 		duration := time.Since(startTime)
@@ -975,7 +1048,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		if u.proxy != nil {
 			u.proxy.auditToolCall(ctx, "error", "", "", duration.Milliseconds(), nil, nil)
 		}
-		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 		return nil, refusal
 	}
 	if err == nil {
@@ -994,12 +1067,16 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// is a fourth upstream dispatch path, so it classifies an isError:true
 	// answer as a failure exactly like call_tool_* does — otherwise the same
 	// upstream rejection is a clean success here and an error there.
-	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
-	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
+	//
+	// Spec 112: the result handed to the script (below) is untouched; every
+	// record written from it sees the scrubbed copy.
+	recResult := scrubResultForRecord(result, fwdOut)
+	u.recordUpstreamCall(serverName, toolName, startTime, duration, recResult, err)
+	u.storeToolCallInHistory(serverName, toolName, args, recResult, err, startTime, duration)
 	if err != nil {
 		auditNoteError(ctx, err)
 	}
-	u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, result, err, startTime, duration)
+	u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, recResult, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),
@@ -1173,17 +1250,20 @@ func subCallByteSizes(args map[string]interface{}, result interface{}) (requestB
 // ctx is the sub-call's context carrying its audit.Attempt (Spec 107): the
 // `authz deny` was written by the caller at the refusing gate, so the funnel
 // this goes through writes no further audit line for a blocked status.
-func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
+//
+// blockReason is the profile.BlockReason of a profile tool-policy refusal
+// (Spec 108 FR-029); every other refusal passes "".
+func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration, blockReason string) {
 	if u.proxy == nil {
 		return
 	}
-	u.proxy.emitActivityToolCallCompleted(ctx,
+	u.proxy.emitActivityToolCallCompletedWithBlockReason(ctx,
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
 		// The policy gate refused this before dispatch, so there IS no response
 		// and 0 response bytes is a true zero, not an unmeasured one. The
 		// request was still formed and is measured like any other.
-		"", nil, "", "", rawByteSize(args), 0, "", nil, u.parentCallID)
+		"", nil, "", "", rawByteSize(args), 0, "", nil, u.parentCallID, blockReason)
 }
 
 // shedHasCanonicalRecord reports whether callErr is a limiter shed the
@@ -1501,7 +1581,18 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 	if options == nil {
 		return
 	}
-	_, profileScope := p.resolveActiveProfile(ctx)
+	_, profileScope, idx := p.resolveActiveProfileWithIndex(ctx)
+	resolution := p.ResolveProfileV3(ctx, idx)
+	if resolution.Scope != nil {
+		profileScope = resolution.Scope
+	}
+	p.applyResolvedProfileScopeToExecution(options, profileScope)
+}
+
+func (p *MCPProxyServer) applyResolvedProfileScopeToExecution(options *jsruntime.ExecutionOptions, profileScope *profile.ProfileScope) {
+	if options == nil {
+		return
+	}
 	if profileScope == nil {
 		return
 	}

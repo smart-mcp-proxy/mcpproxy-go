@@ -17,6 +17,12 @@ import { createRouter, createWebHistory } from 'vue-router'
 const SERVER = 'context7-docs'
 
 let serverQuarantined = true
+// Review round 2 (109-e medium finding): scanner-gate-wording.spec.ts's own
+// no-scan-mode test was deleted when ServerCard's copy of this dialog was
+// removed (Spec 109, 109-e), on the claim that this file covers "both modes"
+// — it did not; this file had only the findings-mode fixture below. Toggling
+// `withScan` lets the same mount function drive either dialog mode.
+let withScan = true
 
 vi.mock('@/services/api', () => {
   const ok = (data: unknown = {}) => Promise.resolve({ success: true, data })
@@ -32,14 +38,18 @@ vi.mock('@/services/api', () => {
               enabled: true,
               connected: false,
               quarantined: serverQuarantined,
-              trust_mode: 'scan',
+              trust_mode: withScan ? 'scan' : 'manual',
               tool_count: 0,
-              security_scan: {
-                status: 'dangerous',
-                risk_score: 60,
-                last_scan_at: '2026-09-05T10:00:00Z',
-                finding_counts: { dangerous: 2, warning: 0, info: 0, total: 2 },
-              },
+              ...(withScan
+                ? {
+                    security_scan: {
+                      status: 'dangerous',
+                      risk_score: 60,
+                      last_scan_at: '2026-09-05T10:00:00Z',
+                      finding_counts: { dangerous: 2, warning: 0, info: 0, total: 2 },
+                    },
+                  }
+                : {}),
             },
           ],
         })
@@ -84,17 +94,32 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   serverQuarantined = true
+  withScan = true
 })
 
-describe('ServerDetail — the approve dialog names the gate it skips (F09)', () => {
-  it('says what force approval does instead of naming an undefined "scanner gate"', async () => {
+describe('ServerDetail — approval enters informed review (Spec 109-g)', () => {
+  it('opens review instead of a force-approval dialog for dangerous findings', async () => {
     const wrapper = await mountDetail()
     await wrapper.get('[data-test="quarantine-action-approve"]').trigger('click')
 
-    const modal = wrapper.get('.modal-open')
-    expect(modal.text()).toContain('2 dangerous findings')
-    expect(modal.text()).not.toContain('the scanner gate')
-    expect(modal.text()).toContain('skips the scan-based approval gate')
-    expect(modal.text()).toContain('unquarantines this server')
+    expect(wrapper.find('.modal-open').exists()).toBe(false)
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
+  })
+
+  // Review round 2 (109-e medium finding): the gate sentence
+  // ("skips the scan-based approval gate…") is shared by BOTH dialog modes —
+  // it must say nothing about findings, because the no_scan mode has none.
+  // scanner-gate-wording.spec.ts pinned this for ServerCard's now-deleted
+  // copy of the dialog; deleting that test left this exact regression class
+  // (the shared sentence mentioning findings even with no scan) uncoverable
+  // anywhere — server-detail-quarantine-banner.spec.ts's own no-scan-mode
+  // test only checks the "No Security Scan Run" title, never this body text.
+  it('opens review instead of a force-approval dialog when no scan exists', async () => {
+    withScan = false
+    const wrapper = await mountDetail()
+    await wrapper.get('[data-test="quarantine-action-approve"]').trigger('click')
+
+    expect(wrapper.find('.modal-open').exists()).toBe(false)
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 })

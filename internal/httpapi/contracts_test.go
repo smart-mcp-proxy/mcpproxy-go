@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -25,10 +26,12 @@ import (
 )
 
 // MockServerController implements ServerController for testing
-type MockServerController struct{}
+type MockServerController struct {
+	attentionItems []contracts.AttentionItem
+}
 
 // mockManagementService provides a test implementation of management service methods
-type mockManagementService struct{}
+type mockManagementService struct{ management.Service }
 
 func (m *mockManagementService) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
 	return []*contracts.Server{
@@ -62,6 +65,26 @@ func (m *mockManagementService) RestartServer(ctx context.Context, name string) 
 	return nil
 }
 
+// RestartAll/EnableAll/DisableAll: without an explicit override here the call
+// falls through to the embedded nil management.Service and panics. chi's
+// Recoverer turns that into a bare 500 so TestMutatingServerRoutes_AdminAllowed
+// (which only asserts != 401 and the gate message's absence) never caught it —
+// but on windows/amd64 the recovered hardware fault corrupts the Go heap under
+// Go 1.26 (golang/go#81238), crashing an unrelated package's tests later in
+// the same run. Same nil-tolerance fix as handleAddFromRegistry's cfg==nil
+// guard: make the mock never panic in the first place.
+func (m *mockManagementService) RestartAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) EnableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) DisableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
 func (m *mockManagementService) GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{
@@ -91,7 +114,7 @@ func (m *mockManagementService) TriggerOAuthLogout(ctx context.Context, name str
 
 func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
-func (m *MockServerController) GetManagementService() interface{} {
+func (m *MockServerController) GetManagementService() management.Service {
 	return &mockManagementService{}
 }
 func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
@@ -127,6 +150,9 @@ func (m *MockServerController) SubscribeEvents() chan internalRuntime.Event {
 	return make(chan internalRuntime.Event, 16)
 }
 func (m *MockServerController) UnsubscribeEvents(chan internalRuntime.Event) {}
+func (m *MockServerController) Attention() []contracts.AttentionItem {
+	return m.attentionItems
+}
 
 func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
@@ -170,7 +196,7 @@ func (m *MockServerController) GetDockerRecoveryStatus() *storage.DockerRecovery
 	}
 }
 func (m *MockServerController) IsDockerAvailable() bool { return true }
-func (m *MockServerController) GetRecentSessions(_ int, _ string) ([]*contracts.MCPSession, int, error) {
+func (m *MockServerController) GetRecentSessions(_ storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	return []*contracts.MCPSession{}, 0, nil
 }
 func (m *MockServerController) GetSessionByID(_ string) (*contracts.MCPSession, error) {
@@ -236,7 +262,15 @@ func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil
 func (m *MockServerController) NotifySecretsChanged(_ context.Context, _, _ string) error {
 	return nil
 }
-func (m *MockServerController) GetCurrentConfig() interface{} { return map[string]interface{}{} }
+
+// mockControllerAPIKey is the admin key every request through a
+// MockServerController-backed server must present: since SEC-02 the auth
+// middleware refuses a request it cannot authenticate instead of forwarding it.
+const mockControllerAPIKey = "mock-controller-admin-key"
+
+func (m *MockServerController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: mockControllerAPIKey}
+}
 
 // Tool call history methods
 func (m *MockServerController) GetToolCalls(_ int, _ int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
@@ -386,8 +420,12 @@ func (m *MockServerController) GetOnboardingState() (*storage.OnboardingState, e
 	return &storage.OnboardingState{}, nil
 }
 func (m *MockServerController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
-func (m *MockServerController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
-func (m *MockServerController) RecordUpdateFailure(_ string) (bool, error)           { return false, nil }
+func (m *MockServerController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st := &storage.OnboardingState{}
+	return fn(st)
+}
+func (m *MockServerController) GetActivationFirstMCPClient() (bool, []string) { return false, nil }
+func (m *MockServerController) RecordUpdateFailure(_ string) (bool, error)    { return false, nil }
 
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {
@@ -436,6 +474,7 @@ func TestAPIContractCompliance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create request
 			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 
 			// Execute request
@@ -572,6 +611,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 	for _, tt := range actionTests {
 		t.Run(tt.path, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 
 			server.ServeHTTP(w, req)
@@ -598,6 +638,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 	// Test login endpoint (Spec 020: returns OAuthStartResponse instead of ServerActionResponse)
 	t.Run("/api/v1/servers/test-server/login", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/v1/servers/test-server/login", http.NoBody)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
 		w := httptest.NewRecorder()
 
 		server.ServeHTTP(w, req)
@@ -632,6 +673,7 @@ func TestInfoEndpointReturnsVersion(t *testing.T) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 
 	server.ServeHTTP(w, req)
@@ -676,6 +718,7 @@ func TestInfoEndpointIncludesUpdateInfo(t *testing.T) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 
 	server.ServeHTTP(w, req)
@@ -748,6 +791,7 @@ func BenchmarkAPIResponseMarshaling(b *testing.B) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

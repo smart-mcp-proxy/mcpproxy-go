@@ -48,6 +48,12 @@ type PreconditionState struct {
 	// invalidates the preview too — otherwise a credential could be embedded
 	// without the FR-004 notice ever having been shown.
 	PendingEntry json.RawMessage
+	// Intent is the credential intent the operation was previewed with
+	// (profile, mode, keyless, and whether auth is required). The real secret
+	// is unknown at preview time and never enters the digest — PendingEntry
+	// carries a fixed placeholder instead — so an auth toggle or a changed
+	// intent still drifts the token (Spec 108 D17).
+	Intent json.RawMessage
 }
 
 // DerivePreconditionToken computes the opaque precondition token that binds a
@@ -79,6 +85,7 @@ func DerivePreconditionToken(key []byte, state PreconditionState) string {
 	writeTokenField(mac, []byte(state.ResolvedEntryName))
 	writeTokenField(mac, state.RawResolvedEntry)
 	writeTokenField(mac, state.PendingEntry)
+	writeTokenField(mac, state.Intent)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -122,7 +129,7 @@ func (s *Service) preconditionKey() []byte {
 // The raw entry is re-marshaled canonically (encoding/json sorts object keys)
 // rather than hashed as source bytes, so reformatting the config alone does not
 // invalidate a preview while any semantic change to the entry does.
-func (s *Service) preconditionToken(clientID, cfgPath, requestedName string, fileExists bool, existing *existingEntry, pendingEntry map[string]interface{}) string {
+func (s *Service) preconditionToken(clientID, cfgPath, requestedName string, fileExists bool, existing *existingEntry, intent CredentialIntent) string {
 	var resolvedName string
 	var rawResolved json.RawMessage
 	if existing != nil {
@@ -139,8 +146,35 @@ func (s *Service) preconditionToken(clientID, cfgPath, requestedName string, fil
 		FileExists:        fileExists,
 		ResolvedEntryName: resolvedName,
 		RawResolvedEntry:  rawResolved,
-		PendingEntry:      canonicalJSON(pendingEntry),
+		PendingEntry:      canonicalJSON(s.pendingEntry(clientID, intent)),
+		Intent:            canonicalJSON(s.intentState(intent)),
 	})
+}
+
+// pendingEntry is the entry the proxy would write right now, with the fixed
+// placeholder standing in for a credential that does not exist yet (or none
+// for a keyless connect), so proxy-side drift invalidates a preview without
+// the real secret ever entering the digest.
+func (s *Service) pendingEntry(clientID string, intent CredentialIntent) map[string]interface{} {
+	credential := ""
+	if mint, err := s.planCredential(intent); err == nil && mint {
+		credential = pendingCredential
+	}
+	return buildServerEntry(clientID, s.entryParams(credential))
+}
+
+// intentState is the canonical, secret-free projection of a credential intent
+// (plus the auth toggle) that the precondition token binds.
+func (s *Service) intentState(intent CredentialIntent) map[string]interface{} {
+	_, _, requireAuth := s.resolveConfig()
+	state := map[string]interface{}{"keyless": intent.Keyless, "require_mcp_auth": requireAuth}
+	if intent.Profile != nil {
+		state["profile"] = *intent.Profile
+	}
+	if intent.Mode != nil {
+		state["mode"] = *intent.Mode
+	}
+	return state
 }
 
 // actionPreconditionFailed is the machine-readable discriminator for a write
@@ -158,12 +192,11 @@ const actionPreconditionFailed = "precondition_failed"
 // The state is passed in, not re-resolved: the write acts on exactly this
 // resolution, so checking a second, independently-resolved one would compare a
 // state neither the preview nor the write ever used (Spec 091 FR-005).
-func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, token string, fileExists bool, existing *existingEntry) *ConnectResult {
+func (s *Service) checkPrecondition(client *ClientDef, cfgPath, serverName, token string, fileExists bool, existing *existingEntry, intent CredentialIntent) *ConnectResult {
 	// serverName rides INTO the MAC, not just into the message below: it is the
 	// key this write would create, and a token that ignored it could be
 	// replayed under a different name the user never previewed.
-	current := s.preconditionToken(client.ID, cfgPath, serverName, fileExists, existing,
-		buildServerEntry(client.ID, s.entryParams(false)))
+	current := s.preconditionToken(client.ID, cfgPath, serverName, fileExists, existing, intent)
 	// Constant-time: the token is a MAC, and a byte-at-a-time comparison would
 	// leak enough to forge one.
 	if hmac.Equal([]byte(current), []byte(token)) {

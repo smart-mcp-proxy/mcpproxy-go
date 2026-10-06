@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
-import { ref, computed, onScopeDispose } from 'vue'
+import { ref, computed, onScopeDispose, toRaw } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
+import { isScopeParamAvailable, setAvailableFeatures } from '@/composables/useScopeQuery'
 
 /** Pseudo-theme: follow the operating system's light/dark preference. */
 export const SYSTEM_THEME = 'system'
@@ -163,24 +164,53 @@ export const useSystemStore = defineStore('system', () => {
   // render a warning we cannot substantiate.
   const codeExecutionEnabled = computed(() => routing.value?.code_execution_enabled ?? true)
 
+  // A disconnect is a capability boundary, not merely a socket close. Keep
+  // the retry handle and source generation here so an old errored source
+  // cannot reopen an admin stream after App drops core eligibility.
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let eventSourceGeneration = 0
+
+  function clearReconnectTimer() {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
   // Actions
   function connectEventSource() {
+    clearReconnectTimer()
+    const generation = ++eventSourceGeneration
     if (eventSource.value) {
       eventSource.value.close()
     }
 
     console.log('Attempting to connect EventSource...')
-    console.log('API key status:', {
-      hasApiKey: api.hasAPIKey(),
-      apiKeyPreview: api.getAPIKeyPreview()
-    })
+    // SEC-07: log only whether a key is present. This used to include
+    // api.getAPIKeyPreview(), i.e. the first 8 characters of the admin key.
+    console.log('API key status:', { hasApiKey: api.hasAPIKey() })
 
     const es = api.createEventSource()
     eventSource.value = es
+    const isCurrentSource = () => generation === eventSourceGeneration && toRaw(eventSource.value) === es
 
     es.onopen = () => {
+      if (!isCurrentSource()) return
       connected.value = true
       console.log('EventSource connected successfully')
+
+      // Review finding: FR-002's threshold-crossing attention events
+      // (server_error, client_never_seen, …) fire only once, at the moment
+      // the threshold is crossed. A drop that spans that moment loses the
+      // frame forever, and the header pill / sidebar badge / Home list stay
+      // wrong until an unrelated change happens to fire a fresh event. Every
+      // (re)connect — the initial one and every retry after `onerror` — is
+      // exactly the point a missed event could have been lost, so resync by
+      // re-dispatching the same window event the live `attention.changed`
+      // handler below dispatches; the attention store's own handler ignores
+      // the detail and just refetches (silent), so an extra one on first
+      // connect is harmless.
+      window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
     }
 
     es.onmessage = (event) => {
@@ -236,6 +266,38 @@ export const useSystemStore = defineStore('system', () => {
         console.error('Failed to parse SSE servers.changed event:', error)
       }
     })
+
+    // Listen for attention.changed events (Spec 109 FR-001/FR-006). The
+    // rendered payload is already narrowed to {count, ids} per caller — the
+    // attention store refetches GET /attention for the full item shape
+    // (summaries, fixes) rather than reconstructing it from ids here.
+    es.addEventListener('attention.changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE attention.changed event:', error)
+      }
+    })
+
+    es.addEventListener('review.changed', (event) => {
+      try {
+        window.dispatchEvent(new CustomEvent('mcpproxy:review-changed', { detail: JSON.parse(event.data) }))
+      } catch (error) {
+        console.error('Failed to parse SSE review.changed event:', error)
+      }
+    })
+
+    // Spec 108-f FR-038: both are invalidations. The payload is not used; the
+    // profiles store and the clients store refetch. Scoped subscribers never
+    // receive either event, so nothing relies on them for correctness.
+    for (const name of ['profiles.changed', 'client.binding_changed']) {
+      es.addEventListener(name, (event) => {
+        let detail: unknown = null
+        try { detail = JSON.parse((event as MessageEvent).data) } catch { /* the event is a bare invalidation */ }
+        window.dispatchEvent(new CustomEvent(`mcpproxy:${name}`, { detail }))
+      })
+    }
 
     // Listen for config.reloaded events
     es.addEventListener('config.reloaded', (event) => {
@@ -385,9 +447,17 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    es.onerror = (event) => {
+    es.onerror = () => {
+      // Browser EventSource instances can deliver a queued error after close
+      // or replacement. It belongs to the retired generation and must not
+      // schedule a reconnect for the current (or disconnected) principal.
+      if (!isCurrentSource()) return
       connected.value = false
-      console.error('EventSource error occurred:', event)
+      // SEC-07: do NOT log the error event. Its `target` is the EventSource,
+      // whose `url` carries the API key as a ?apikey= query parameter, so
+      // logging the event puts the WHOLE key in the devtools console. The
+      // event itself carries no diagnostic detail beyond readyState anyway.
+      console.error('EventSource error occurred; readyState:', es.readyState)
 
       // Check if this might be an authentication error
       if (es.readyState === EventSource.CLOSED) {
@@ -400,8 +470,12 @@ export const useSystemStore = defineStore('system', () => {
         }
       }
 
-      // Retry connection after a delay
-      setTimeout(() => {
+      // Retry once after a delay while this exact source remains current.
+      // Multiple error callbacks from the same EventSource share one timer.
+      if (reconnectTimer !== null) return
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        if (!isCurrentSource()) return
         console.log('Retrying EventSource connection in 5 seconds...')
         connectEventSource()
       }, 5000)
@@ -409,6 +483,8 @@ export const useSystemStore = defineStore('system', () => {
   }
 
   function disconnectEventSource() {
+    eventSourceGeneration++
+    clearReconnectTimer()
     if (eventSource.value) {
       eventSource.value.close()
       eventSource.value = null
@@ -641,6 +717,57 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  // Spec 109-k FR-080a: GET /api/v1/status.features.scope_filters is the one
+  // place useScopeQuery's profile/client/token rows learn whether this build
+  // supports them (zcode round 1, F1 — setAvailableFeatures previously had no
+  // production caller, so those rows stayed permanently hidden even once
+  // Spec 108 ships the feature). The SSE "status" event carries a much
+  // narrower payload (internal/httpapi/server.go) and does not include
+  // `features`, so this has to be a REST fetch, not something read off the
+  // existing event-stream `status` ref.
+  //
+  // Spec 108-j J3: `scopeFeaturesKnown` flips once that fetch has finished, on
+  // success OR failure, and waitForScopeFeatures() is the gate a page awaits
+  // before its FIRST fetch when its URL carries profile/client/token. Without
+  // it a page that mounts before /status answers sends the first request
+  // unfiltered (the parameter is still hidden, rule 7), loads every row and
+  // refetches: the flash url-filter-contract.md rule 1 forbids.
+  const scopeFeaturesKnown = ref(false)
+  let markScopeFeaturesKnown: () => void = () => {}
+  const scopeFeaturesSettled = new Promise<void>(resolve => { markScopeFeaturesKnown = resolve })
+
+  async function fetchScopeFilterFeatures() {
+    try {
+      const response = await api.getStatus()
+      if (response.success && response.data) {
+        setAvailableFeatures(response.data.features?.scope_filters)
+      }
+    } catch (error) {
+      console.error('Failed to fetch status features:', error)
+    } finally {
+      scopeFeaturesKnown.value = true
+      markScopeFeaturesKnown()
+    }
+  }
+
+  // Resolves when the feature list is known, or after `timeoutMs`. The timeout is
+  // deliberate (plan J3): a /status that never answers must not leave a page on a
+  // spinner forever, so the params then stay hidden (rule 7), the page fetches
+  // unfiltered and shows a disabled "Filter unavailable on this server" chip, and
+  // the features arriving later trigger a filtered refetch. A build whose features
+  // were already set elsewhere needs no wait.
+  async function waitForScopeFeatures(timeoutMs = 2000): Promise<void> {
+    if (scopeFeaturesKnown.value) return
+    if (['profile', 'client', 'token'].some(name => isScopeParamAvailable(name))) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs) })
+    try {
+      await Promise.race([scopeFeaturesSettled, timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   // Initialize theme on store creation
   loadTheme()
 
@@ -690,6 +817,9 @@ export const useSystemStore = defineStore('system', () => {
     clearToasts,
     fetchInfo,
     fetchRouting,
+    fetchScopeFilterFeatures,
+    scopeFeaturesKnown,
+    waitForScopeFeatures,
     applyModeField,
     checkForUpdates,
     setAuthRequired,

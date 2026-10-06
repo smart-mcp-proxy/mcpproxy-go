@@ -21,7 +21,9 @@ type mockProfilesController struct {
 	cfg    *config.Config
 }
 
-func (m *mockProfilesController) GetCurrentConfig() any { return &config.Config{APIKey: m.apiKey} }
+func (m *mockProfilesController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: m.apiKey}
+}
 
 func (m *mockProfilesController) GetConfig() (*config.Config, error) { return m.cfg, nil }
 

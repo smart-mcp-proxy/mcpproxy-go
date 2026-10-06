@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func setupTestStorageForToolApproval(t *testing.T) (*Manager, func()) {
@@ -36,15 +38,17 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	record := &ToolApprovalRecord{
-		ServerName:         "github",
-		ToolName:           "create_issue",
-		ApprovedHash:       "abc123",
-		CurrentHash:        "abc123",
-		Status:             ToolApprovalStatusApproved,
-		ApprovedAt:         now,
-		ApprovedBy:         "admin",
-		CurrentDescription: "Creates a new GitHub issue",
-		CurrentSchema:      `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		ServerName:          "github",
+		ToolName:            "create_issue",
+		ApprovedHash:        "abc123",
+		CurrentHash:         "abc123",
+		Status:              ToolApprovalStatusApproved,
+		ApprovedAt:          now,
+		ApprovedBy:          "admin",
+		CurrentDescription:  "Creates a new GitHub issue",
+		CurrentSchema:       `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		CurrentAnnotations:  &config.ToolAnnotations{Title: "Issue creator"},
+		PreviousAnnotations: &config.ToolAnnotations{Title: "Old issue creator"},
 	}
 
 	// Save
@@ -63,6 +67,8 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	assert.Equal(t, "admin", retrieved.ApprovedBy)
 	assert.Equal(t, "Creates a new GitHub issue", retrieved.CurrentDescription)
 	assert.Equal(t, `{"type":"object","properties":{"title":{"type":"string"}}}`, retrieved.CurrentSchema)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Issue creator"}, retrieved.CurrentAnnotations)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Old issue creator"}, retrieved.PreviousAnnotations)
 }
 
 func TestToolApprovalRecord_GetNotFound(t *testing.T) {
@@ -399,4 +405,52 @@ func TestToolApprovalRecord_StampIdentityKeyed_ReChecksAtWriteTime(t *testing.T)
 	none, err := manager.StampToolApprovalsIdentityKeyed("a", nil)
 	require.NoError(t, err)
 	assert.Empty(t, none)
+}
+
+// TestListToolApprovals_PrefixFilterRunsBeforeDecode locks in the ordering
+// internal/httpapi's computeUsableServers fault-isolation fallback depends
+// on: BoltDB.ListToolApprovals filters by the "<server>:" key prefix BEFORE
+// it decodes each record, so a corrupt record stored under one server's
+// prefix only fails a ListToolApprovals call scoped to THAT server, never a
+// call scoped to another server. The existing onboarding_usable_test.go
+// coverage only exercises this through a mock with hardcoded errors; this
+// writes an actual undecodable record into a real bbolt bucket so a future
+// refactor that decodes before filtering (or skips-and-continues on a bad
+// record) fails here instead of silently breaking the fallback it backs.
+func TestListToolApprovals_PrefixFilterRunsBeforeDecode(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	healthy := &ToolApprovalRecord{
+		ServerName:   "healthy",
+		ToolName:     "list_issues",
+		ApprovedHash: "abc123",
+		CurrentHash:  "abc123",
+		Status:       ToolApprovalStatusApproved,
+		ApprovedAt:   time.Now().UTC().Truncate(time.Millisecond),
+	}
+	require.NoError(t, manager.SaveToolApproval(healthy))
+
+	// Inject a record that cannot decode, under a DIFFERENT server's prefix.
+	// SaveToolApproval can only ever write a valid record, so this bypasses
+	// it and writes raw bytes directly, exactly as an on-disk corruption
+	// would look.
+	err := manager.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		return bucket.Put([]byte("corrupt:broken"), []byte("not valid json"))
+	})
+	require.NoError(t, err)
+
+	// A call scoped to "healthy" must not see, and must not fail on, the
+	// corrupt record filed under "corrupt:".
+	records, err := manager.ListToolApprovals("healthy")
+	require.NoError(t, err, "a corrupt record under a different server's prefix must not fail this server's own list")
+	require.Len(t, records, 1)
+	assert.Equal(t, "list_issues", records[0].ToolName)
+
+	// The aggregate ("" = all servers) call DOES reach the corrupt record and
+	// must fail — this is exactly the failure computeUsableServers falls
+	// back from to the per-server calls above.
+	_, err = manager.ListToolApprovals("")
+	assert.Error(t, err, "an aggregate call must surface a corrupt record anywhere in the bucket")
 }

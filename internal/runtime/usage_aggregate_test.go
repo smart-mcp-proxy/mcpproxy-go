@@ -220,13 +220,31 @@ func TestUsageAggregate_Clone_IsDeepCopy(t *testing.T) {
 	agg := newUsageAggregate()
 	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	agg.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	agg.ClientCalls["cursor"] = map[int64]int64{ts.Unix(): 1}
 
 	clone := agg.clone()
 	// Mutating the original after cloning must not affect the clone.
 	agg.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	agg.ClientCalls["cursor"][ts.Unix()]++
 
 	assert.Equal(t, int64(2), agg.Tools[toolKey("s", "t")].Calls)
 	assert.Equal(t, int64(1), clone.Tools[toolKey("s", "t")].Calls, "clone must be independent")
+	assert.Equal(t, int64(1), clone.ClientCalls["cursor"][ts.Unix()], "client-call buckets must be independent")
+}
+
+func TestUsageStore_SnapshotIncludesIndependentClientCalls(t *testing.T) {
+	store := newUsageStore()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	record := toolCall("s", "t", "success", 10, 0, 100, ts)
+	record.Metadata = map[string]interface{}{"client_name": "Cursor"}
+	store.Apply(record)
+
+	snapshot := store.Snapshot()
+	bucket := ts.UTC().Truncate(time.Hour).Unix()
+	require.Equal(t, int64(1), snapshot.ClientCalls["cursor"][bucket])
+
+	store.working.ClientCalls["cursor"][bucket]++
+	require.Equal(t, int64(1), snapshot.ClientCalls["cursor"][bucket], "published UsageSnapshot must not share client-call maps with the working aggregate")
 }
 
 // TestUsageStore_SnapshotReflectsWrites_ReadsNeverBlock validates the actor
@@ -381,4 +399,158 @@ func TestUsageAggregate_TruncatedBuiltinDoesNotInflateDeliveredBytes(t *testing.
 	}
 	assert.EqualValues(t, 50_000, upstream,
 		"an upstream response was consumed whole; only the STORED copy was cut")
+}
+
+// Spec 109-k / audit finding F-Token (zcode round 1): the ServerTokenMetrics
+// "estimate" flip reads AvgRetrieveToolsRespBytes, a DEDICATED counter, not
+// the per-tool rollup — applyToolRollup's default case drops
+// internal_tool_call records (including retrieve_tools) before they ever
+// reach a.tool(...), so a lookup into a.Tools for retrieve_tools always
+// misses. This test pins that the dedicated counter is folded correctly and
+// stays independent of the per-tool exclusion.
+func TestUsageAggregate_RetrieveToolsSizing(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	retrieveTools := func(status string, respBytes int, truncated bool) *storage.ActivityRecord {
+		return &storage.ActivityRecord{
+			Type:              storage.ActivityTypeInternalToolCall,
+			ToolName:          "retrieve_tools",
+			ServerName:        "", // internal built-ins name no server
+			Status:            status,
+			ResponseBytes:     respBytes,
+			ResponseTruncated: truncated,
+			Timestamp:         base,
+		}
+	}
+
+	t.Run("no calls yet: not ok", func(t *testing.T) {
+		agg := newUsageAggregate()
+		_, ok := agg.AvgRetrieveToolsRespBytes()
+		assert.False(t, ok)
+	})
+
+	t.Run("real successful calls produce a real average, independent of the per-tool rollup", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 3000, false))
+		agg.Apply(retrieveTools("success", 5000, false))
+
+		avg, ok := agg.AvgRetrieveToolsRespBytes()
+		require.True(t, ok)
+		assert.EqualValues(t, 4000, avg)
+
+		// The per-tool rollup must NOT gain a "retrieve_tools" row (it would
+		// invent a tool no upstream owns — applyToolRollup's own contract).
+		assert.Empty(t, agg.Tools, "retrieve_tools must not appear in the per-tool rollup")
+	})
+
+	t.Run("a failed call is not sized", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("error", 3000, false))
+		_, ok := agg.AvgRetrieveToolsRespBytes()
+		assert.False(t, ok)
+	})
+
+	t.Run("a truncated call is excluded (its ResponseBytes overstates delivery)", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 1_000_000, true))
+		_, ok := agg.AvgRetrieveToolsRespBytes()
+		assert.False(t, ok, "a truncated retrieve_tools record must not seed the real average")
+	})
+
+	t.Run("clone carries the counters", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 4000, false))
+		clone := agg.clone()
+		avg, ok := clone.AvgRetrieveToolsRespBytes()
+		require.True(t, ok)
+		assert.EqualValues(t, 4000, avg)
+		assert.True(t, clone.HasObservedRetrieveToolsCall())
+	})
+}
+
+// TestUsageAggregate_HasObservedRetrieveToolsCall pins the fix for the review
+// finding that a deployment whose retrieve_tools responses routinely exceed
+// tool_response_limit left RetrieveToolsSizedCalls (and so
+// AvgRetrieveToolsRespBytes's ok) at zero forever, even though real calls had
+// plainly completed — contradicting contracts.ServerTokenMetrics.Estimated's
+// documented "false once at least one real retrieve_tools call has ...
+// completed". HasObservedRetrieveToolsCall answers that question
+// independently of whether any call was sized.
+func TestUsageAggregate_HasObservedRetrieveToolsCall(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	retrieveTools := func(status string, respBytes int, truncated bool) *storage.ActivityRecord {
+		return &storage.ActivityRecord{
+			Type:              storage.ActivityTypeInternalToolCall,
+			ToolName:          "retrieve_tools",
+			Status:            status,
+			ResponseBytes:     respBytes,
+			ResponseTruncated: truncated,
+			Timestamp:         base,
+		}
+	}
+
+	t.Run("no calls yet", func(t *testing.T) {
+		agg := newUsageAggregate()
+		assert.False(t, agg.HasObservedRetrieveToolsCall())
+	})
+
+	t.Run("a failed call does not count as observed", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("error", 3000, false))
+		assert.False(t, agg.HasObservedRetrieveToolsCall())
+	})
+
+	t.Run("every observed call truncated: still observed, though not sized", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 1_000_000, true))
+		assert.True(t, agg.HasObservedRetrieveToolsCall(), "a real call completed even though it was truncated")
+		_, sizedOK := agg.AvgRetrieveToolsRespBytes()
+		assert.False(t, sizedOK, "a truncated call still must not seed the real SIZE average")
+	})
+
+	t.Run("a non-truncated call is both observed and sized", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 4000, false))
+		assert.True(t, agg.HasObservedRetrieveToolsCall())
+		_, sizedOK := agg.AvgRetrieveToolsRespBytes()
+		assert.True(t, sizedOK)
+	})
+}
+
+func TestUsageAggregate_ClientCallsSinceUsesPersistedClientName(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for _, client := range []string{"Claude Code", "cursor", "claude-code"} {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base,
+			Metadata: map[string]interface{}{"client_name": client},
+		})
+	}
+	// This legacy record is outside the rolling interval.
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base.Add(-25 * time.Hour),
+		Metadata: map[string]interface{}{"client_name": "claude-code"},
+	})
+	require.Equal(t, 2, agg.ClientCallsSince([]string{"claude-code", "Claude Code"}, base.Add(-24*time.Hour)))
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+}
+
+func TestUsageAggregate_ClientCallsRetentionPreservesSupportedClients(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for i := 0; i < 40; i++ {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Metadata: map[string]interface{}{"client_name": fmt.Sprintf("other-client-%02d", i)},
+		})
+	}
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base,
+		Metadata: map[string]interface{}{"client_name": "cursor"},
+	})
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+	require.LessOrEqual(t, len(agg.ClientCalls), 32)
 }

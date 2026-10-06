@@ -102,30 +102,46 @@ curl "http://127.0.0.1:8080/api/v1/activity?request_id=a1b2c3d4-e5f6-7890-abcd-e
 
 #### GET /api/v1/status
 
-Get server status and statistics.
+Get server status and statistics. The `data` object carries `running`, `edition`, `listen_addr`, `routing_mode`, `upstream_stats`, `started_at`, `timestamp` and the blocks below. (An earlier version of this page showed a different shape; it was stale.)
 
-**Response:**
+**Response (abridged):**
 ```json
 {
-  "status": "running",
-  "version": "0.11.0",
-  "uptime": 3600,
-  "servers": {
-    "total": 5,
-    "connected": 4,
-    "quarantined": 1
-  },
-  "tools": {
-    "total": 42
+  "success": true,
+  "data": {
+    "running": true,
+    "edition": "personal",
+    "listen_addr": "127.0.0.1:8080",
+    "routing_mode": "retrieve_tools",
+    "upstream_stats": { "total_servers": 5, "connected_servers": 4, "quarantined_servers": 1, "total_tools": 42 },
+    "telemetry": { "enabled": false, "source": "env", "disabled_by": "MCPPROXY_TELEMETRY=false" }
   }
 }
 ```
+
+**`telemetry`** is the effective telemetry state of the running core, so a UI can say whether telemetry is on and why. It is withheld from scoped callers (agent tokens), like `activation`.
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Whether the core sends telemetry. Always equal to the resolved state: an environment opt-out wins over the config file. |
+| `source` | `env` (an environment variable disabled it), `config` (`telemetry.enabled` is set in the config file, true or false) or `default` (unset, which means on). |
+| `disabled_by` | Present only when `source` is `env`: `DO_NOT_TRACK`, `CI` or `MCPPROXY_TELEMETRY=false`. |
+
+`GET /api/v1/config` keeps returning the stored `telemetry.enabled`, which can differ from `enabled` here when an environment variable overrides it. A dev (non-release) build never transmits whatever `enabled` says.
+
+While an environment variable forces telemetry off, `POST /api/v1/config/apply` and `PATCH /api/v1/config` answer `422` and write nothing if the document would change `telemetry.enabled` (the value is judged after decoding, so a miscased key is caught too). A document that leaves `telemetry.enabled` as stored is accepted.
 
 ### Servers
 
 #### GET /api/v1/servers
 
 List all upstream servers with unified health status.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `profile` | string | Restrict to the named profile's effective servers (intersected with the servers the caller may see). Each row's `tool_count` becomes the number of that server's tools **visible** under the profile, and `stats` are recomputed over the returned rows. An unknown or unreachable profile returns `404 profile not found`. `-` returns `400`. `client` and `token` are not server filters and return `400 unsupported_scope_filter` |
 
 ##### Header redaction and the mask format
 
@@ -226,7 +242,9 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "level": "healthy",
           "admin_state": "enabled",
           "summary": "Connected (15 tools)",
-          "action": ""
+          "status": "ready",
+          "usable": true,
+          "actions": []
         }
       },
       {
@@ -240,8 +258,10 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "level": "unhealthy",
           "admin_state": "enabled",
           "summary": "Token expired",
-          "detail": "OAuth access token has expired",
-          "action": "login"
+          "action": "login",
+          "status": "sign_in_required",
+          "usable": false,
+          "actions": ["login"]
         }
       }
     ]
@@ -253,11 +273,14 @@ a prompt-injected agent could otherwise read another upstream's PAT via
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `level` | string | Health level: `healthy`, `degraded`, or `unhealthy` |
+| `level` | string | Severity signal for badge/tray coloring only: `healthy`, `degraded`, or `unhealthy`. **No surface may render this as text** (Spec 109 FR-011) — render `status` through the one label table instead |
 | `admin_state` | string | Admin state: `enabled`, `disabled`, or `quarantined` |
 | `summary` | string | Human-readable status message |
 | `detail` | string | Optional additional context about the status |
-| `action` | string | Suggested remediation: `login`, `restart`, `enable`, `approve`, `view_logs`, or empty |
+| `action` | string | Suggested remediation, always equal to `actions[0]` (or empty when `actions` is empty): `login`, `restart`, `enable`, `approve`, `view_logs`, `set_secret`, `configure`, `edit_url`, or empty |
+| `status` | string | (Spec 109 FR-010) The one status vocabulary every surface renders as text: `ready`, `connecting`, `sign_in_required`, `needs_review`, `needs_secret`, `needs_config`, `error`, `disabled` |
+| `usable` | boolean | (Spec 109 FR-010) True only when `status == "ready"` — whether the server can currently serve tool calls |
+| `actions` | string[] | (Spec 109 FR-012) Every applicable next step, in priority order: `login` > `set_secret` > `configure` > `edit_url` > `approve` > `restart` > `view_logs` > `enable` |
 
 #### PATCH /api/v1/servers/{name}
 
@@ -643,6 +666,19 @@ search/filter/sort over the full set. For relevance-ranked discovery use
 > appear is filtered. `GET /api/v1/tools` (above) is the unfiltered operator
 > overview and still lists quarantined servers' tools with their state.
 
+**Query Parameters (view-as):**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `client` | string | Administrator only. Show what this client would see and be able to call. The client's credential, binding and current state are resolved exactly as its connection resolves them. A caller that is not an administrator gets `403 operation requires admin access`; an unknown client gets `404 client not found` |
+| `profile` | string | Show what this profile would expose. An unknown profile, or one a non-administrator cannot reach, returns the same `404 profile not found` |
+
+`client` and `profile` are mutually exclusive (`400 use either client or profile, not both`), `-` is not valid here (`400`), and `token` is not a tools filter (`400 unsupported_scope_filter`).
+
+With either parameter every row gains `profile_tier` (the tool's tier under the subject's profile; `tier` stays the tool's intrinsic tier) and `access {visible, callable, reason}`. `visible` means the subject's discovery would list the tool; `callable` means a real call would succeed, and it equals the outcome of one for every row. `reason` is empty when callable, otherwise it names the first failing step of the access chain (`credential`, `profile`, `server_in_scope`, `tool_rule`, `tier_cap`, `token_permission`, `global_gate`, `server_state`, `tool_approval`), where the profile decision reports its own reasons: `server_not_in_profile`, `denied_by_rule`, `unannotated_hidden`, `above_tier_cap`. `read_only_mode` gates management operations only, never an upstream tool, so it is never a `reason` for an upstream row. Rows of a quarantined server are not listed, with or without view-as.
+
+An administrator gets every row. A non-administrator (`profile=` only) gets just the rows that are visible under the profile, without a `reason`, plus `counts {visible, hidden}` for the rest; excluded rows, their tiers and their reasons are administrator-only. `stats` are recomputed over the returned rows. Without `client` or `profile` the response is unchanged.
+
 **Response:**
 ```json
 {
@@ -841,6 +877,145 @@ upstream drift (both report `hash_mismatch`, with different `detail`). Current
 pins are discoverable on ready preflight results and on the operator-tier tool
 listings above.
 
+### Attention
+
+#### GET /api/v1/attention
+
+The one needs-attention list every surface renders (the Web UI Home page, header pill and sidebar badge, the macOS tray and Home section, `mcpproxy attention`, the first line of `mcpproxy status` and the first section of `mcpproxy doctor`). Both editions. See [Needs Attention](../features/needs-attention.md) for the kinds, ranks and fixes.
+
+Administrators see every item. A scoped caller (an agent token, or a non-admin user session) sees only the items whose server it may enumerate, never a client or setting item, with `count` recomputed from the narrowed list.
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "generated_at": "2026-09-25T06:12:03Z",
+    "items": [
+      {
+        "id": "sign_in_required:server:github",
+        "kind": "sign_in_required",
+        "rank": 10,
+        "subject": {"type": "server", "id": "github", "name": "github"},
+        "summary": "github: sign in required",
+        "detail": "OAuth · api.githubcopilot.com",
+        "fix": {"verb": "login", "label": "Sign in", "target": "/servers/github"},
+        "since": "2026-09-25T06:02:11Z"
+      },
+      {
+        "id": "server_review:server:github",
+        "kind": "server_review",
+        "rank": 50,
+        "subject": {"type": "server", "id": "github", "name": "github"},
+        "summary": "github: waiting for review",
+        "fix": {"verb": "review", "label": "Review", "target": "/review/github"},
+        "since": "2026-09-25T06:01:40Z"
+      }
+    ]
+  }
+}
+```
+
+Items are sorted by `rank` ascending, then by `subject.name`; `id` (`kind:type:subject[:state]`) is stable, so a client can diff successive lists. `fix.target` is a Web UI route, and a fix never approves anything by itself. The SSE event `attention.changed` (`{count, ids}`) is emitted when the set of ids changes; see [Real-time Updates](#real-time-updates).
+
+### Review
+
+#### GET /api/v1/review
+
+The review queue: one row per server awaiting review, either a quarantined server (`kind: server_review`) or a trusted server with new or changed tools (`kind: tool_review`, with `pending` and `changed` counts). `count` is the number of rows, the number the Review queue badge shows. For a scoped caller (an agent token or a non-admin user session) the queue lists only the servers that caller may see.
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "servers": [
+      {"server": "filesystem", "kind": "server_review", "quarantined": true, "tools_captured": 14,
+       "tier_counts": {"read": 9, "write": 3, "destructive": 2, "unannotated": 0, "unknown": 0},
+       "scan": {"verdict": "clean", "risk_score": 0}, "since": "2026-09-25T06:01:40Z"},
+      {"server": "github", "kind": "tool_review", "quarantined": false, "pending": 0, "changed": 1,
+       "since": "2026-09-25T06:10:00Z"}
+    ]
+  }
+}
+```
+
+#### GET /api/v1/servers/{id}/review
+
+The review payload of one server: a summary of the server (secrets in the URL, headers, environment and command line are always redacted) and every tool with its captured definition. A server the caller cannot see answers the same `404` as a missing one.
+
+```json
+{
+  "success": true,
+  "data": {
+    "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
+               "scan": {"verdict": "clean", "risk_score": 0, "coverage": "current", "tools_scanned": 2},
+               "definitions_captured": true},
+    "tools": [
+      {"name": "edit_file", "description": "Make line-based edits to a text file", "input_schema": {"type": "object"},
+       "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending",
+       "disabled": false, "scan_verdict": "clean"},
+      {"name": "search_code", "description": "Search the code", "annotations": null, "tier": "unknown",
+       "approval_status": "changed", "scan_verdict": "warnings",
+       "previous": {"description": "Search files", "input_schema": {}, "annotations": null},
+       "diff": {"description": "@@ -1 +1 @@\n-Search files\n+Search the code", "input_schema": "", "annotations": ""}}
+    ]
+  }
+}
+```
+
+- `tier` is `read`, `write`, `destructive`, `unannotated` (annotations captured, no hints) or `unknown` (nothing captured, a record from before the review screen). It comes from one function, so the Web UI, macOS, `mcpproxy tools list --tier` and the MCP `quarantine_security` inspect operations show the same value.
+- `approval_status` is `approved`, `pending` (shown as "New, needs review") or `changed` ("Changed, needs review").
+- `scan.coverage` says whether the scan verdict describes the definitions in the payload: `current` (the latest completed scan analysed every captured definition as it is now), `stale` (some definitions were added or changed after that scan; `scan.unscanned_tools` lists them), `not_captured` (no definitions captured), `tools_not_scanned` (the scan completed but exported no tool definitions), `scanning` (a scan is running) or `none` (no completed scan). Show `risk_score` only for `current`. `scan.tools_scanned` is the number of definitions that scan exported.
+- `default_allowed` (always present) is the review screens' fail-closed default selection: `true` for an approved tool, or for a pending or changed `read` tool with `scan_verdict` `clean` that is not held; `false` for everything else (write, destructive, unannotated, unknown, not scanned, warnings, dangerous, held, or already disabled). A client that finds no such field (an older core) treats it as `false`.
+- `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
+- `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
+- Descriptions are returned verbatim and must be rendered as inert text.
+
+The review decisions use these routes (all existing):
+
+| Decision | Route |
+|---|---|
+| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...]}`; the `block` tools are blocked in the same transaction that records the integrity baseline, before the server is unquarantined |
+| Reject server | `POST /api/v1/servers/{id}/security/reject` |
+| Approve tools | `POST /api/v1/servers/{id}/tools/approve` |
+| Reject (block) tools | `POST /api/v1/servers/{id}/tools/block` |
+
+`POST /api/v1/servers/{id}/unquarantine` is kept for API compatibility only; no first-party surface calls it. See [Review Commands](../cli/review-commands.md).
+
+### Catalog
+
+#### GET /api/v1/catalog/search
+
+Search every enabled catalog source (registry) at once. Both editions; open to any authenticated caller, with `added` the only field that depends on the caller's scope.
+
+| Parameter | Description |
+|---|---|
+| `q` | Free-text query. Empty returns `results: []` and fills `sections` (`official` and `popular`, up to 12 each) |
+| `source` | Narrow to one catalog source id, applied before ranking and the limit |
+| `limit` | Maximum results (default 20, maximum 50) |
+| `tag` | Not supported: catalog entries carry no tags, so a non-empty value returns `400` |
+
+```json
+{
+  "success": true,
+  "data": {
+    "query": "github",
+    "results": [
+      {"source": "official", "id": "io.github.github/github-mcp-server", "title": "GitHub",
+       "publisher": "github", "verified": true, "official": true, "popularity": {"stars": 21000},
+       "description": "GitHub's official MCP server", "transport": "http",
+       "install": {"url": "https://api.githubcopilot.com/mcp/"},
+       "required_inputs": [{"name": "GITHUB_TOKEN", "secret_like": true}], "added": false}
+    ],
+    "sections": null,
+    "unavailable": [{"source": "community", "reason": "timeout after 5s"}]
+  }
+}
+```
+
+Results are ranked by how well the name matches the query first (the publisher equals the query, then an exact name, a name prefix, a name word, a substring or description, and last a match through the namespace alone, which is how `io.github.*` entries match), then official source, verified publisher, popularity (a missing value counts as zero), title and id. `verified` means the publisher owns the source repository (or the entry comes from a trusted Docker or reference source), `official` means the entry comes from a built-in source, and `title` is the server's own title when it has one. The order is identical on the Web UI, macOS, the CLI (`mcpproxy catalog search`) and the MCP `search_servers` tool. A source that fails or times out is listed in `unavailable` and the other sources' results are still returned. When the daemon has a recent listing of that source (at most 24 hours old, kept in memory and filled by every successful fetch), the matches come from it instead: those results carry `from_cache: true` and the `unavailable` entry gains `fallback: "cached_listing"` and `cached_at`, so the source still reads as unavailable. An empty `q` lists `popular` before `official` in every surface, and `official` starts with the curated reference servers. `added` is true when a configured server visible to the caller has the same source and install target, and then `added_server_name` names it. Adding an entry stays `POST /api/v1/registries/{id}/servers/{serverId}/add`, which always quarantines the new server; see [Registry Add](../features/registry-add.md).
+
 ### Registries
 
 Discover MCP servers in known registries and add them as quarantined upstreams.
@@ -904,7 +1079,7 @@ Drop a registry's cached server lists. Returns
 #### GET /api/v1/connect
 
 Lists the connection status of every known MCP client (Claude Desktop, Cursor,
-VS Code, Codex, Gemini, OpenCode, …).
+VS Code, Codex, Gemini, OpenCode, ZCode, …).
 
 As of Spec 075, the overall listing determines each client's installed state
 using **file-existence metadata only** (`os.Stat`) and performs **zero config
@@ -988,14 +1163,47 @@ kinds:
 See [Connect Clients](../features/connect-clients.md) for the token's contents
 and threat model.
 
+**Client credential (Spec 108).** The body also accepts `profile` (a profile
+name; `""` is All servers; omitted means All servers for a fresh credential and
+the existing binding on a reconnect, including over an expired credential; a
+revoked one restarts at All servers), `mode` (`locked` or `switchable`) and
+`keyless`. The write embeds a per-client `mcp_cli_` credential, never the admin
+API key, and the result carries `credential` (masked), `token_name`, `profile`,
+`mode`, `keyless` and, for a reconnect over an active credential, `rotation`
+(`finalized`). Refusals write nothing: `400 {error, field}` for an unknown
+profile, an invalid mode, or `keyless` with `require_mcp_auth` on or with a
+profile; `409 binding_bypassable_without_auth` (`bindings`, `fixes`) when the
+binding would be bypassable while `require_mcp_auth` is off; `409` with
+`conflicting_token` when `client-<id>` is held by a regular agent token.
+
+#### PUT /api/v1/clients/{client}/binding
+
+Reassigns a client's profile and/or mode (personal edition, administrator
+only). Body `{"profile": "<name or empty for All servers>", "mode": "locked|switchable"}`
+(`profile` required; `mode` optional — omitted keeps the current mode, except
+that an empty profile means switchable). Applies only to a client that holds an
+active client credential; otherwise `409 {code: "no_client_credential"}` and
+nothing is minted. Updates the credential in the token store, clears the stored
+`set_profile` selection of every live session of that credential, sends
+`notifications/tools/list_changed` to each and writes one `profile_change`
+activity record; the client's config file is never touched. A reassignment that
+would leave the binding bypassable is refused with `409
+binding_bypassable_without_auth`. `PATCH /api/v1/config`, `POST
+/api/v1/config/apply` and `PATCH /api/v1/config/docker-isolation` answer the
+same `409` when the write would create that condition. The response is
+`{client, warnings}`: the full client row (see `GET /api/v1/clients`) and the
+warnings about it.
+
 #### GET /api/v1/connect/{client}/preview
 
 Returns the exact change a subsequent connect would make — target config path,
 format (`json`/`toml`), server key, entry name, and the exact entry contents —
 **without** modifying the file or creating a backup (Spec 078 US1). An embedded
-API key is masked in the payload (`contains_api_key` flags that a credential is
-written); `entry_exists` distinguishes a create from an overwrite of a
-same-named entry. Reads the config on demand to classify create-vs-overwrite,
+client credential is masked in the payload (`credential`, always
+`mcp_cli_••••`; `contains_api_key` is always `false` since connect never
+writes the admin API key); `profile`, `mode` and `keyless` echo the requested
+intent (`?profile=&mode=&keyless=`); `entry_exists` distinguishes a create from
+an overwrite of a same-named entry. Reads the config on demand to classify create-vs-overwrite,
 so on macOS this may raise an App-Data prompt; a denial returns `403` +
 remediation. Optional `?server_name=` mirrors the name a subsequent connect
 would use.
@@ -1064,6 +1272,217 @@ The overall `GET /api/v1/connect` listing never triggers this prompt (it is
 content-read-free); only the per-client routes above (status, preview,
 connect/disconnect, undo) can.
 
+### Clients (personal edition)
+
+Client routes live under `/api/v1/clients` and are administrator-only. They do
+not exist in the server edition, which has no per-client credentials.
+
+#### GET /api/v1/clients
+
+Every client row (`kind` is `supported`, `other` or `custom`) and response-level
+`warnings[]`. The Spec 109 presence fields (`id`, `display_name`, `kind`, `icon`,
+`state`, `installed`, `connected`, `config_path`, `display_path`, `last_seen`,
+`active_sessions`, `calls_24h`, `reload_hint`) are unchanged; Profiles v3 adds:
+
+| Field | Meaning |
+|-------|---------|
+| `credential_state` | `client`, `admin_key`, `none`, `revoked`, `expired` or `unknown` |
+| `credential_checked_at` | When the classification was last read from the client's config (present when it came from an observation) |
+| `token_name`, `profile`, `profile_title`, `profile_mode`, `profile_source` | The binding. `profile_source` is `pin` (locked) or `binding` (switchable) and is empty unless `credential_state` is `client` |
+| `profile_missing` | The bound profile no longer exists: the client is denied everything |
+| `expires_at`, `rotation_pending`, `blocked_24h` | Credential expiry, an unfinished rotation, blocked calls in the last 24 hours |
+
+The list never reads a client config (macOS shows no App-Data prompt for it).
+`credential_state` comes from the token store, else from the last on-demand
+classification (`GET /clients/{client}`, `GET /connect/{client}`, the admin-key
+upgrade preview), else it is `unknown`. A `custom` row is a credential added
+with `POST /clients`; a revoked custom row is omitted here and still served by
+the detail route.
+
+`warnings[]` items are `{code, severity, client_id?, message, action?, bindings?, fixes?}`.
+Codes: `anonymous_denied_by_binding_guard`, `client_holds_admin_key` (action
+`upgrade_admin_key_holders`), `client_credential_expiring`,
+`client_rotation_pending` (severity `info`), `profile_missing` and
+`client_token_name_conflict`.
+
+| Query | Meaning |
+|-------|---------|
+| `profile` | Rows whose active credential is bound to this profile (a dangling pin included); `-` = bound to All servers. A row with no active credential matches no profile |
+| `client` | Exact client id (also `other:<id>` and custom ids) |
+
+The filters apply after `warnings` are computed over the full set. An unknown
+value is not an error. `token` is not a clients filter (`400 unsupported_scope_filter`).
+
+#### GET /api/v1/clients/{client}
+
+The row plus `sessions[]` (the latest 20, each with its `profile` and
+`profile_source`). This is the one read that may open the client's config: it
+runs the full rotation reconciler first, classifies the credential the config
+holds and records the observation. No scope filter is honoured here.
+
+#### POST /api/v1/clients
+
+Adds a custom client (one not in the connect registry). Body `{id,
+display_name?, profile?, mode?, expires_in?}`; `expires_in` defaults to and is
+capped at 365 days. `201 {client, credential, snippet}`: `credential` is the
+`mcp_cli_` secret, shown once; `snippet.generic_http` is a paste-ready JSON
+config that carries it in the `X-API-Key` header. Refusals: `400 {error, field}`
+(the id rule, a supported client's id, profile, mode, `expires_in`,
+`display_name`), `409 binding_bypassable_without_auth`, `409` with
+`conflicting_token`.
+
+#### POST /api/v1/clients/{client}/rotate
+
+Replaces the secret without invalidating the old one mid-flight. For a
+supported client it rewrites the entry through connect (staged rotation, the
+binding is kept, finalized when the write succeeds, rolled back when it
+fails); body `{precondition_token?}` binds it to a connect preview, and a
+mismatch is the connect `409` with `action: "precondition_failed"`. Response
+`{client, connect, rotation: {state: "finalized"}}`. For a custom client the
+response is `{client, credential, snippet, rotation: {state: "pending"}}`; both
+secrets authenticate until `POST /clients/{client}/rotate/finalize` or 24 hours.
+A client with no active credential is `409 no_client_credential`.
+
+#### POST /api/v1/clients/{client}/rotate/finalize
+
+Promotes the pending secret; the old one stops authenticating. Idempotent.
+`{client, rotation: {state: "finalized"}}`.
+
+#### DELETE /api/v1/clients/{client}
+
+Revokes the client's credential. With `disconnect=true` a supported client's
+config entry is removed first, but the credential is revoked either way:
+revocation never waits for a file write. Response `{revoked, disconnected,
+disconnect_error?}`. No credential record: `409 no_client_credential`.
+
+#### POST /api/v1/clients/bulk-assign
+
+Body `{from_profile, to_profile, mode?}` (both required; `""` = All servers).
+Moves every client bound to `from_profile`. The FR-008a guard and the
+credential precondition apply per client: `{moved: [ids], skipped: [{client_id,
+code, error}]}`. Each moved client writes an `assign` record and emits
+`client.binding_changed`.
+
+#### POST /api/v1/clients/upgrade-admin-key-holders
+
+Moves every supported client whose config still holds the admin API key onto a
+per-client credential. Body `{profile?, mode?, apply?, precondition_token?}`.
+Without `apply` it returns `{preview: [{client_id, display_name, display_path,
+diff, credential: "mcp_cli_••••", profile, mode, precondition_token}],
+precondition_token, guard?, next_step?}`; nothing is written or minted, `guard`
+reports the refusal an apply would get, and `next_step` is
+`rotate_admin_api_key` when nothing holds the key. With `apply: true` a sent
+`precondition_token` that no longer matches is `409` with `code:
+"precondition_failed"`; a named profile that would make the bindings
+bypassable is `409 binding_bypassable_without_auth` (nothing minted, no file
+written); otherwise `{upgraded, failed: [{client_id, error}], next_step?}`. The
+guard applies only when a named profile is given.
+
+### Profiles
+
+Profile routes exist in both editions. Every mutating route is administrator
+only and writes one `profile_change` record; none is gated by `read_only_mode`.
+A write that would let a bound client escape its profile by omitting its
+credential while `require_mcp_auth` is off is refused `409
+binding_bypassable_without_auth` (personal edition) and writes nothing.
+
+#### GET /api/v1/profiles
+
+`{profiles: ProfileView[], anonymous_profile?}`. A `ProfileView` has the config
+fields as stored (`name`, `title`, `description`, `servers`, `max_tier`,
+`unannotated`, `tools {allow, deny, classify}`, `code_execution`,
+`management_tools`, `switchable_to`), the derived `effective_servers`,
+`effective_unannotated`, `effective_code_execution`, `is_legacy`,
+`tool_counts {read, write, destructive, unannotated_hidden}` (visible tools by
+the tier the profile gives them), the deprecated v2 `tool_count`, `calls_24h`,
+`blocked_24h`, and `used_by {clients, tokens, anonymous_profile}`.
+
+A caller that is not an administrator sees only profiles its entitlement
+reaches (an unreachable one is omitted, never shown empty), with `servers`,
+rule entries and `switchable_to` narrowed to what it may see. `used_by` and
+`anonymous_profile` are administrator-only and omitted, not emptied, otherwise.
+
+#### GET /api/v1/profiles/{name}
+
+One `ProfileView`. A non-administrator gets the same `404 profile not found`
+for an unreachable profile as for an unknown one.
+
+#### POST /api/v1/profiles, PUT /api/v1/profiles/{name}
+
+Body is a `ProfileConfig`. `POST` answers `201 {profile, warnings}`; `PUT`
+answers `200` with the same shape and requires the body's name, when it is sent,
+to equal the path (`409 name_mismatch`). A `PUT` body whose `name` is omitted or
+an empty string takes the path's name (accepted by the spec as a convenience for
+the Web UI and CLI); a different non-empty name is always refused. `409 profile_exists`; `400 {error, field}` names the
+offending field with the unchanged validator text. `active` and `try` are
+reserved by the REST API. A `PUT` whose only change is `tools.classify` is
+recorded as `classify`.
+
+#### POST /api/v1/profiles/{name}/rename
+
+Body `{new_name}`. Moves token pins, client bindings, other profiles'
+`switchable_to` and the `anonymous_profile` in one write; tokens move first, so
+a failure never widens a scope. `{profile, moved: {clients, tokens}}`.
+
+#### DELETE /api/v1/profiles/{name}
+
+Query `reassign_to` and `force`. `409 profile_in_use` (with `used_by`) while
+clients or tokens point at it, unless `reassign_to` names another existing
+profile (every pin moves there) or `force` leaves them dangling (deny-all).
+`409 profile_is_anonymous_profile` whenever it is the `anonymous_profile` and
+`reassign_to` is absent, even with `force`. Both paths remove the name from every
+`switchable_to`. `{deleted, moved, anonymous_profile_moved_to?}`.
+
+#### GET /api/v1/profiles/{name}/effective-tools
+
+Query `client`, `server`, `reason`. One row per catalog tool: `server`, `tool`,
+`intrinsic_tier`, `profile_tier`, `access {visible, callable, reason}`,
+`classification_stale`. With `client=` the client's credential is evaluated under
+this profile. An administrator also gets `counts.callable`, `counts.by_reason`
+and `stale_classifications`; every other caller gets only visible rows and
+`counts {visible, hidden}`, and `client=` / `reason=` are `403`.
+
+#### POST /api/v1/profiles/try
+
+Body `{profile, query, limit?}` (default 10, maximum 50). Evaluates a draft
+profile as `retrieve_tools` would, with policy applied before the limit, and
+returns the hits, `hidden_by_profile` and up to 100 `hidden {server, tool,
+reason}`. Nothing is persisted, no record is written, the guard does not run.
+
+#### GET /api/v1/profiles/active, PUT /api/v1/profiles/active
+
+Deprecated. Both send `Deprecation: true` and a `Link` header whose
+`successor-version` is `/api/v1/profiles`. Behaviour and `active_profile.changed`
+are unchanged.
+
+### Access explain
+
+#### GET /api/v1/access/explain
+
+Query `tool` (an upstream `server:tool`) and exactly one of `client`, `token`,
+`profile` or `anonymous=true`. Administrator only. Returns the ordered chain of
+gates a real call would meet (`credential`, `profile`, `server_in_scope`,
+`tool_rule`, `tier_cap`, `token_permission`, `global_gate`, `server_state`,
+`tool_approval`), each `pass`, `fail` or `skip`; the `verdict` (`allowed` =
+callable, `hidden` = not visible, `blocked` = visible but not callable); the
+`first_failure`; and `fixes[]` for it in preference order, each `{step, action,
+target, label}`. The chain is the one every discovery and dispatch path walks, so
+`allowed` equals what a real call does. Errors: `400 exactly one of client, token,
+profile, anonymous is required`, `400 use client=<id> for a client credential`
+(a `client-` token name), `400 access/explain covers upstream tools (server:tool)
+only`, `404` for an unknown client, token or profile.
+
+### Tokens
+
+`GET /api/v1/tokens` rows add `kind` (`agent` or `client`), `client_id`,
+`profile_mode` and `legacy_scope` (true when `allowed_servers` is not `["*"]` or
+the permissions are not all three). `?profile=<name>` matches the **current**
+`profile_pin` of either kind (`-` = unpinned) and `?token=<name>` is an exact
+name; an unknown value returns no rows. `POST /api/v1/tokens` accepts `profile`
+(the Profiles v3 spelling of `profile_pin`; with it, omitted `allowed_servers`
+and `permissions` default to `["*"]` and all three). A name starting with
+`client-` is `400 {error, field: "name"}`.
+
 ### Real-time Updates
 
 #### GET /events
@@ -1081,6 +1500,9 @@ Events include:
 - `activity.tool_call.started` - Tool call initiated
 - `activity.tool_call.completed` - Tool call finished
 - `activity.policy_decision` - Tool call blocked by policy
+- `profiles.changed` - A profile was created, updated, renamed, deleted or the `anonymous_profile` changed (an invalidation: refetch `GET /api/v1/profiles`)
+- `client.binding_changed` - A client's profile or mode was reassigned (an invalidation: refetch `GET /api/v1/clients`)
+- `attention.changed` - The [Needs attention](../features/needs-attention.md) list changed (`{count, ids}`, narrowed per subscriber; refetch `GET /api/v1/attention`).
 
 The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
 tray over the unix socket) receives every event exactly as the event bus
@@ -1091,6 +1513,7 @@ published it. For an agent token limited by `allowed_servers` (issue #1166):
 | Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
 | `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
+| `profiles.changed`, `client.binding_changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
 | Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses
@@ -1251,6 +1674,11 @@ List recent MCP sessions.
 | `offset` | integer | Pagination offset (default: 0) |
 | `parent_id` | string | Return only the sub-calls of one `code_execution` (value = the parent record's `request_id`) |
 | `status` | string | Filter by session status: `active`, `closed`. Any other value returns `400`. |
+| `profile` | string | Sessions whose **latest effective** profile is this name; `-` selects sessions with none |
+| `client` | string | Sessions whose credential is bound to this client id; `-` selects sessions with none |
+| `token` | string | Sessions that initialized with this token name; `-` selects sessions with none. `agent` is an alias of `token`; naming two different tokens returns `400` |
+
+Each row carries `client_id`, `token_name`, `profile` and `profile_source` (`pin`, `binding`, `url`, `session`, `anonymous` or `none`); they are empty on sessions recorded before Profiles v3. `client_name` is not a sessions filter and returns `400` (`client_name is not supported on this endpoint; filter by client`). The scope filters are applied before the `limit` truncation, so `total` is the filtered count.
 
 The `status` filter is applied during the storage walk, **before** the `limit`
 truncation, so a long-running session that is still active is returned even when
@@ -1281,10 +1709,20 @@ List activity records with filtering and pagination.
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |
 | `status` | string | Filter by status: `success`, `error`, `blocked` |
+| `profile` | string | Filter by the profile in effect when the call ran (also matches the legacy `metadata.profile`); `-` selects records with none |
+| `client` | string | Filter by client id (the client's binding); `-` selects records with none |
+| `token` | string | Filter by the token name in effect (also matches records written before Profiles v3 through their stored agent name); `-` selects records with none. `agent` is an alias of `token`; naming two different tokens returns `400` |
+| `client_name` | string | Filter by the client's self-reported `clientInfo.name`. Advisory, never authoritative: a client can claim any name. Accepted by `GET /activity` and `GET /activity/export` only |
 | `start_time` | string | Filter after this time (RFC3339) |
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
+
+**Scope attribution (Profiles v3).** Every record written for an MCP or REST request carries the values in effect when the call ran: `profile`, `profile_source`, `client_id`, `client_name`, `token_name`, and `block_reason` for a blocked call. They are never rewritten, so reassigning a client later does not change history. Records with no request context (system events, configuration changes, concurrency-limiter rejections) are unattributed, and a `profile_change` record carries the new profile, the client id and the token name.
+
+A non-administrator caller sees another token's `profile`, `profile_source`, `client_id` and `token_name` blanked, and its own `profile`, `client` and `token` filters evaluate that same view, so a filter cannot be used to learn what another token did.
+
+The same `profile`, `client` and `token` filters (and the `agent` alias) apply to `GET /api/v1/activity/summary`, `GET /api/v1/activity/usage` and `GET /api/v1/activity/export`; `client_name` is rejected on `/activity/summary` and `/activity/usage` with `400`. Under a scope filter `/activity/usage` is computed from the matching records of the requested window (per-tool figures are window-bounded rather than lifetime, and the global tokens-saved headline is omitted). Export CSV appends `profile,profile_source,client_id,client_name,token_name,block_reason` after `parent_id`.
 
 **Response:**
 ```json

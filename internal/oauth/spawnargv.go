@@ -81,7 +81,7 @@ func (r Redaction) SpawnArgv(argv []string) []string {
 	// bytes past the marker).
 	staged := shellwrap.RedactDockerArgsWith(argv, r.masker())
 	// Stage 2: the semantic flag-name + value-shape rule.
-	return r.argvWith(staged, true, r.spawnCommandTokens)
+	return r.argvWith(staged, true, func(s string) string { return r.commandStringTokens(s, true) })
 }
 
 // SpawnCommandString masks a whole child command LINE for a LOG sink — the
@@ -91,13 +91,23 @@ func (r Redaction) SpawnCommandString(s string) string {
 	if s == "" {
 		return s
 	}
-	return r.spawnCommandTokens(shellwrap.RedactDockerCommandStringWith(s, r.masker()))
+	return r.commandStringTokens(shellwrap.RedactDockerCommandStringWith(s, r.masker()), true)
 }
 
-// spawnCommandTokens applies the argv rules to a command STRING that stage 1
-// has already run over, preserving the original spacing so the line stays
-// readable.
-func (r Redaction) spawnCommandTokens(s string) string {
+// CommandString masks credentials in a human-readable command string for
+// configuration read surfaces. It applies flag-name and value-shape rules
+// without the log-only structural Docker env rule or spawn-specific flag
+// relaxations.
+func (r Redaction) CommandString(s string) string {
+	if s == "" {
+		return s
+	}
+	return r.commandStringTokens(s, false)
+}
+
+// commandStringTokens applies argv rules to a command STRING, preserving the
+// original whitespace so the line stays readable.
+func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	segs := splitCommandSegments(s)
 	tokens := make([]string, 0, len(segs))
 	for _, seg := range segs {
@@ -108,7 +118,7 @@ func (r Redaction) spawnCommandTokens(s string) string {
 	if len(tokens) == 0 {
 		return s
 	}
-	masked := r.argvWith(tokens, true, nil)
+	masked := r.argvWith(tokens, spawnRules, nil)
 
 	var b strings.Builder
 	b.Grow(len(s))

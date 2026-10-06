@@ -11,6 +11,8 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/google/uuid"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // ExecutionOptions contains optional parameters for JavaScript execution
@@ -67,8 +69,10 @@ type AuthzGateReport struct {
 	CanonicalTarget string // "server:tool"
 	Denied          bool
 	Code            ErrorCode // the envelope code of the refusal (SERVER_NOT_ALLOWED, ACCESS_DENIED, PERMISSION_DENIED)
+	Message         string    // the envelope message shown to the script caller
 	RequiredPerm    string    // the tier the lookup resolved, when one was resolved
 	Arguments       map[string]interface{}
+	BlockReason     string // host-defined typed cause of a profile policy refusal (Spec 108 FR-029); empty for every other refusal
 }
 
 // AuthzObserver receives AuthzGateReports. Implementations must be safe for
@@ -85,6 +89,18 @@ type AuthInfo struct {
 	AgentName      string   // Name of the agent token
 	AllowedServers []string // Servers this token can access (nil = all)
 	Permissions    []string // Permission tiers: "read", "write", "destructive"
+}
+
+// isAdmin reports whether this identity is one of the two administrator
+// AuthInfo.Type values — the same short-circuit CanAccessServer and
+// HasPermission apply internally, promoted to its own predicate (Spec 105
+// FR-010 gap G7) so a caller outside those two methods can ask the same
+// question without re-deriving it. A nil receiver is NOT an administrator
+// here (unlike the two methods above, whose nil-tolerant "everything is
+// allowed" default exists for the STDIO/in-process caller that carries no
+// AuthInfo at all — a different case from "this AuthInfo IS one").
+func (a *AuthInfo) isAdmin() bool {
+	return a != nil && (a.Type == "admin" || a.Type == "admin_user")
 }
 
 // CanAccessServer checks whether this auth context can access the named server.
@@ -491,7 +507,7 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 // T104). It is the ONLY reporting seam: resolveDispatchGates calls it on
 // every refusing return, once, so a refusal is never re-reported by the
 // completion path (which a refused call never reaches). nil observer = no-op.
-func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code ErrorCode, requiredPerm string, args map[string]interface{}) {
+func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code ErrorCode, message, requiredPerm string, args map[string]interface{}, blockReason string) {
 	if ec.authzObserver == nil {
 		return
 	}
@@ -503,8 +519,10 @@ func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code
 		CanonicalTarget: serverName + ":" + toolName,
 		Denied:          true,
 		Code:            code,
+		Message:         message,
 		RequiredPerm:    requiredPerm,
 		Arguments:       stripAuthInjectedArgs(args),
+		BlockReason:     blockReason,
 	})
 }
 
@@ -542,17 +560,52 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	// Check allowed servers. When restrictToAllowed is set (active Spec 057
 	// profile), the map is enforced even when empty — an empty effective set
 	// means "deny everything". Otherwise an empty map means "no restriction".
-	if (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName] {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, "", args)
-		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), "", nil
+	//
+	// Spec 105 FR-010 gap G7: when this execution carries a real agent
+	// token, the profile-derived allowedServerMap and the token's OWN server
+	// scope are two independent restrictions on the SAME effective set
+	// (profile ∩ token) and must answer with ONE refusal regardless of
+	// which one excludes a given server — a server inside the profile pin
+	// but outside the token, and a server outside BOTH (or nonexistent),
+	// must be indistinguishable. Evaluate both before returning either error
+	// so the ONE body always used for an agent caller (ErrorCodeAccessDenied)
+	// is what a bare profile-map miss also gets.
+	//
+	// "carries a real agent token" is NOT "authInfo != nil": mcp_code_
+	// execution.go's applyProfileScopeToExecution populates AuthInfo for
+	// EVERY authenticated caller, administrators included (an HTTP admin's
+	// AuthInfo.Type is "admin"/"admin_user"). Routing an admin through the
+	// agent-only branch above would rename a profile-only exclusion's
+	// wording to the token-scope body even though the admin holds no token
+	// to conflate it with — a caller-kind regression codex round-1 review
+	// caught. isAdmin() is the same short-circuit CanAccessServer and
+	// HasPermission already apply internally. Administrators — real ones
+	// (authInfo.isAdmin()) and the stdio/in-process caller that carries no
+	// AuthInfo at all (authInfo == nil) — both fall through to the
+	// profile-only branch below, unchanged from pre-105.
+	profileDenies := (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName]
+	// The typed block_reason is recorded only when the PROFILE excluded the
+	// server (profileDenies). The refusal text is unchanged either way
+	// (Spec 105 G7); a legacy token whose own server list is the only thing
+	// excluding it keeps an empty reason (the Spec 105 out-of-scope row).
+	scopeReason := ""
+	// Keyed on restrictToAllowed, which only the profile path sets: a
+	// caller-supplied options.allowed_servers with no profile is not a
+	// profile refusal. When a profile IS active the merged (profile ∩ caller)
+	// set cannot say which side excluded the server; it stays profile-labeled.
+	if profileDenies && ec.restrictToAllowed {
+		scopeReason = string(profile.BlockReasonServerScope)
 	}
-
-	// Auth context enforcement (Spec 031): the token's server scope answers
-	// before anything about the tool is looked up, so an out-of-scope server
-	// is refused without disclosing whether the name resolves on it.
-	if ec.authInfo != nil && !ec.authInfo.CanAccessServer(serverName) {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, "", args)
-		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
+	if ec.authInfo != nil && !ec.authInfo.isAdmin() {
+		if profileDenies || !ec.authInfo.CanAccessServer(serverName) {
+			message := fmt.Sprintf("token does not have access to server '%s'", serverName)
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, "", args, scopeReason)
+			return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
+		}
+	} else if profileDenies {
+		message := fmt.Sprintf("server not allowed: %s", serverName)
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, message, "", args, scopeReason)
+		return errorEnvelope(ErrorCodeServerNotAllowed, message), "", nil
 	}
 
 	// Determine required permission via annotation lookup. The gate-capturing
@@ -577,10 +630,23 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 		// to the same identity rule as every HTTP caller. It answers with the
 		// permission envelope, never with an upstream's own "tool not found".
 		if requiredPerm == PermissionTierUnresolved {
-			ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
-			return errorEnvelope(ErrorCodePermissionDenied,
-				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
-					serverName, toolName, serverName)), "", nil
+			message := fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
+				serverName, toolName, serverName)
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, message, requiredPerm, args, "")
+			return errorEnvelope(ErrorCodePermissionDenied, message), "", nil
+		}
+		if refusal, ok := gate.(interface{ ProfilePolicyRefusal() string }); ok {
+			if message := refusal.ProfilePolicyRefusal(); message != "" {
+				// The typed reason comes from a SECOND optional method so the
+				// refusal never depends on it (Spec 108 FR-029): a gate that
+				// only implements ProfilePolicyRefusal still refuses.
+				blockReason := ""
+				if typed, ok := gate.(interface{ ProfilePolicyBlockReason() string }); ok {
+					blockReason = typed.ProfilePolicyBlockReason()
+				}
+				ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, requiredPerm, args, blockReason)
+				return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
+			}
 		}
 	}
 
@@ -592,9 +658,9 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
-		return errorEnvelope(ErrorCodePermissionDenied,
-			fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)), "", nil
+		message := fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, message, requiredPerm, args, "")
+		return errorEnvelope(ErrorCodePermissionDenied, message), "", nil
 	}
 
 	return nil, requiredPerm, gate

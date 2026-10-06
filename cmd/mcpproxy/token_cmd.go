@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +25,11 @@ var (
 	tokenPermissions string
 	tokenExpires     string
 	tokenProfilePin  string
+	tokenProfile     string
+
+	// token list filters (Spec 108-g, FR-031)
+	tokenListProfile string
+	tokenListToken   string
 
 	// tokenConfigPath is the token command's --config override (GH #897).
 	tokenConfigPath string
@@ -46,7 +53,7 @@ Examples:
   mcpproxy token revoke deploy-bot`,
 	}
 
-	tokenCmd.PersistentFlags().StringVarP(&tokenConfigPath, "config", "c", "", "Path to configuration file")
+	addConfigFlag(tokenCmd.PersistentFlags(), &tokenConfigPath, "Path to configuration file")
 
 	// Subcommands
 	tokenCmd.AddCommand(newTokenCreateCmd())
@@ -68,36 +75,46 @@ func newTokenCreateCmd() *cobra.Command {
 The token is displayed once on creation and cannot be retrieved again.
 Store it securely.
 
+Pin the token to a profile (--profile) and its scope comes from the profile. The
+older --servers/--permissions scope still works and is marked "legacy scope";
+without --profile at least one of them is required.
+
 Examples:
+  mcpproxy token create --name ci --profile work-readonly
   mcpproxy token create --name deploy-bot --servers github,gitlab --permissions read,write
-  mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d
-  mcpproxy token create --name full-access --servers github --permissions read,write,destructive --expires 90d`,
+  mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d`,
 		RunE: runTokenCreate,
 	}
 
-	cmd.Flags().StringVar(&tokenName, "name", "", "Token name (required, unique)")
-	cmd.Flags().StringVar(&tokenServers, "servers", "", "Comma-separated list of allowed server names, or \"*\" for all (required)")
-	cmd.Flags().StringVar(&tokenPermissions, "permissions", "", "Comma-separated permission tiers: read, write, destructive (required, must include read)")
+	cmd.Flags().StringVar(&tokenName, "name", "", "Token name (required, unique; names starting with \"client-\" are reserved)")
+	cmd.Flags().StringVar(&tokenProfile, "profile", "", "Pin the token to a profile: its scope comes from the profile and it cannot switch (recommended)")
+	cmd.Flags().StringVar(&tokenServers, "servers", "", "Legacy scope: comma-separated allowed server names, or \"*\" for all (use --profile instead)")
+	cmd.Flags().StringVar(&tokenPermissions, "permissions", "", "Legacy scope: comma-separated permission tiers read, write, destructive (use --profile instead)")
 	cmd.Flags().StringVar(&tokenExpires, "expires", "30d", "Token expiry duration (e.g., 7d, 30d, 90d, 365d)")
-	cmd.Flags().StringVar(&tokenProfilePin, "profile-pin", "", "Pin this token to a profile; it can only operate in that profile (cannot switch via set_profile or /mcp/p/<other>)")
+	cmd.Flags().StringVar(&tokenProfilePin, "profile-pin", "", "Deprecated alias of --profile")
+	_ = cmd.Flags().MarkHidden("profile-pin")
 	_ = cmd.MarkFlagRequired("name")
-	_ = cmd.MarkFlagRequired("servers")
-	_ = cmd.MarkFlagRequired("permissions")
 
 	return cmd
 }
 
 func newTokenListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all agent tokens",
-		Long: `List all configured agent tokens with their status, permissions, and expiry.
+		Long: `List all configured agent tokens with their kind, binding, status, permissions and
+expiry. --profile filters by the token's current profile pin ("-" = unpinned);
+--token selects one token by name.
 
 Examples:
   mcpproxy token list
+  mcpproxy token list --profile work-readonly
   mcpproxy token list -o json`,
 		RunE: runTokenList,
 	}
+	cmd.Flags().StringVar(&tokenListProfile, "profile", "", `Only tokens currently pinned to this profile ("-" = unpinned)`)
+	cmd.Flags().StringVar(&tokenListToken, "token", "", "Only the token with this name")
+	return cmd
 }
 
 func newTokenShowCmd() *cobra.Command {
@@ -154,23 +171,42 @@ func newTokenCLIClient() (*cliclient.Client, *config.Config, error) {
 }
 
 func runTokenCreate(_ *cobra.Command, _ []string) error {
+	// Validate locally before any request (exit 1, nothing sent).
+	profileName := tokenProfile
+	if tokenProfilePin != "" {
+		fmt.Fprintln(os.Stderr, "--profile-pin is deprecated; use --profile")
+		if profileName != "" && profileName != tokenProfilePin {
+			return newFlagValidationError("--profile and --profile-pin name different profiles; use only --profile")
+		}
+		profileName = tokenProfilePin
+	}
+	legacyScope := tokenServers != "" || tokenPermissions != ""
+	if profileName == "" && !legacyScope {
+		return newFlagValidationError("either --profile or --servers/--permissions is required")
+	}
+	if profileName == "" && legacyScope {
+		fmt.Fprintln(os.Stderr, "hint: consider --profile <name> instead of --servers/--permissions (legacy scope)")
+	}
+
 	client, _, err := newTokenCLIClient()
 	if err != nil {
 		return err
 	}
 
-	// Build request body
-	servers := splitAndTrim(tokenServers)
-	permissions := splitAndTrim(tokenPermissions)
-
+	// Build request body: the profile carries the scope, so the legacy fields
+	// are sent only when given (REST defaults them under --profile).
 	body := map[string]interface{}{
-		"name":            tokenName,
-		"allowed_servers": servers,
-		"permissions":     permissions,
-		"expires_in":      tokenExpires,
+		"name":       tokenName,
+		"expires_in": tokenExpires,
 	}
-	if tokenProfilePin != "" {
-		body["profile_pin"] = tokenProfilePin
+	if profileName != "" {
+		body["profile"] = profileName
+	}
+	if tokenServers != "" {
+		body["allowed_servers"] = splitAndTrim(tokenServers)
+	}
+	if tokenPermissions != "" {
+		body["permissions"] = splitAndTrim(tokenPermissions)
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -201,12 +237,8 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Format output
-	format := ResolveOutputFormat()
-	if format == "json" {
-		formatted, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(formatted))
-		return nil
+	if structuredOutput() {
+		return printTokenStructured(result)
 	}
 
 	// Table output — highlight the token since it's only shown once
@@ -222,10 +254,24 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 	printListField("  Servers:     ", result, "allowed_servers")
 	printListField("  Permissions: ", result, "permissions")
 	if pin := getMapString(result, "profile_pin"); pin != "" {
-		fmt.Printf("  Profile Pin: %s\n", pin)
+		fmt.Printf("  Profile:     %s\n", pin)
 	}
 	printField("  Expires:     ", result, "expires_at")
 
+	return nil
+}
+
+// printTokenStructured prints a token response as json or yaml.
+func printTokenStructured(result map[string]interface{}) error {
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return err
+	}
+	out, err := formatter.Format(result)
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.TrimRight(out, "\n"))
 	return nil
 }
 
@@ -238,7 +284,19 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/tokens", nil)
+	path := "/api/v1/tokens"
+	q := url.Values{}
+	if tokenListProfile != "" {
+		q.Set("profile", tokenListProfile)
+	}
+	if tokenListToken != "" {
+		q.Set("token", tokenListToken)
+	}
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+
+	resp, err := client.DoRaw(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("failed to list tokens: %w", err)
 	}
@@ -258,11 +316,8 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	format := ResolveOutputFormat()
-	if format == "json" {
-		formatted, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(formatted))
-		return nil
+	if structuredOutput() {
+		return printTokenStructured(result)
 	}
 
 	tokens, ok := result["tokens"].([]interface{})
@@ -271,29 +326,23 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Table format
-	fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-12s %-25s\n",
-		"NAME", "PREFIX", "SERVERS", "PERMISSIONS", "REVOKED", "PROFILE PIN", "EXPIRES")
-	fmt.Println(strings.Repeat("-", 128))
-
+	rows := make([][]string, 0, len(tokens))
 	for _, t := range tokens {
 		tok, ok := t.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		name := getMapString(tok, "name")
-		prefix := getMapString(tok, "token_prefix")
 		revoked := "no"
 		if r, ok := tok["revoked"].(bool); ok && r {
 			revoked = "yes"
 		}
-
-		serverList := joinInterfaceSlice(tok, "allowed_servers", 23)
-		permList := joinInterfaceSlice(tok, "permissions", 0)
-
-		pin := getMapString(tok, "profile_pin")
-		if pin == "" {
-			pin = "-"
+		legacy := "no"
+		if l, ok := tok["legacy_scope"].(bool); ok && l {
+			legacy = "yes"
+		}
+		kind := getMapString(tok, "kind")
+		if kind == "" {
+			kind = "agent"
 		}
 
 		expiresAt := getMapString(tok, "expires_at")
@@ -303,11 +352,14 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 			}
 		}
 
-		fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-12s %-25s\n",
-			name, prefix, serverList, permList, revoked, pin, expiresAt)
+		rows = append(rows, []string{
+			getMapString(tok, "name"), getMapString(tok, "token_prefix"), kind,
+			dash(getMapString(tok, "client_id")), dash(getMapString(tok, "profile_pin")), dash(getMapString(tok, "profile_mode")),
+			dash(joinInterfaceSlice(tok, "allowed_servers", 23)), dash(joinInterfaceSlice(tok, "permissions", 0)),
+			legacy, revoked, expiresAt,
+		})
 	}
-
-	return nil
+	return printTable([]string{"NAME", "PREFIX", "KIND", "CLIENT", "PROFILE", "MODE", "SERVERS", "PERMISSIONS", "LEGACY SCOPE", "REVOKED", "EXPIRES"}, rows)
 }
 
 func runTokenShow(_ *cobra.Command, args []string) error {
@@ -343,20 +395,35 @@ func runTokenShow(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	format := ResolveOutputFormat()
-	if format == "json" {
-		formatted, _ := json.MarshalIndent(result, "", "  ")
-		fmt.Println(string(formatted))
-		return nil
+	if structuredOutput() {
+		return printTokenStructured(result)
 	}
 
 	// Pretty print
 	printField("Name:           ", result, "name")
 	printField("Token Prefix:   ", result, "token_prefix")
+	kind := getMapString(result, "kind")
+	if kind == "" {
+		kind = "agent"
+	}
+	fmt.Printf("Kind:           %s\n", kind)
+	if clientID := getMapString(result, "client_id"); clientID != "" {
+		fmt.Printf("Client:         %s\n", clientID)
+	}
 	printListField("Servers:        ", result, "allowed_servers")
 	printListField("Permissions:    ", result, "permissions")
 	if pin := getMapString(result, "profile_pin"); pin != "" {
-		fmt.Printf("Profile Pin:    %s\n", pin)
+		fmt.Printf("Profile:        %s\n", pin)
+	}
+	if mode := getMapString(result, "profile_mode"); mode != "" {
+		fmt.Printf("Mode:           %s\n", mode)
+	}
+	if legacy, ok := result["legacy_scope"].(bool); ok && legacy {
+		fmt.Printf("Legacy scope:   yes (servers %s, permissions %s) — migrate: mcpproxy token create --profile <p>\n",
+			joinInterfaceSlice(result, "allowed_servers", 0), joinInterfaceSlice(result, "permissions", 0))
+	}
+	if kind == "client" {
+		fmt.Printf("Manage with:    mcpproxy client show %s\n", getMapString(result, "client_id"))
 	}
 	if revoked, ok := result["revoked"].(bool); ok {
 		fmt.Printf("Revoked:        %v\n", revoked)
@@ -555,10 +622,15 @@ func parseAPIError(body []byte, statusCode int, operation string) error {
 	var errResp map[string]interface{}
 	if err := json.Unmarshal(body, &errResp); err == nil {
 		if errMsg, ok := errResp["error"].(string); ok {
-			return fmt.Errorf("failed to %s: %s", operation, errMsg)
+			if field, ok := errResp["field"].(string); ok && field != "" {
+				// A validator refusal names its field; exit 1 like every
+				// other flag-validation failure.
+				return flagValidationError{fmt.Errorf("failed to %s: %s (field: %s)", operation, errMsg, field)}
+			}
+			return cliRefusalError{fmt.Errorf("failed to %s: %s", operation, errMsg)}
 		}
 	}
-	return fmt.Errorf("failed to %s: HTTP %d: %s", operation, statusCode, string(body))
+	return cliRefusalError{fmt.Errorf("failed to %s: HTTP %d: %s", operation, statusCode, string(body))}
 }
 
 func getMapString(m map[string]interface{}, key string) string {

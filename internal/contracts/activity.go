@@ -50,6 +50,27 @@ type ActivityRecord struct {
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
 
+	// Caller identity (Spec 028), lifted out of the internal `_auth_*` argument
+	// keys that the REST boundary strips. Only these two filterable fields are
+	// surfaced; the token prefix and server-edition user identity stay internal.
+	// A scoped (non-admin) caller sees them only on rows it made itself.
+
+	AuthType  string `json:"auth_type,omitempty"`  // "admin", "agent", "user" or "admin_user"; empty without an auth context or on another caller's row for a scoped caller
+	AgentName string `json:"agent_name,omitempty"` // Agent token name when auth_type is "agent"
+
+	// Scope attribution (Spec 108 FR-029): the profile, client and token in
+	// effect when the call ran. Stamped at write time, never rewritten. For a
+	// scoped (non-admin) caller the profile/profile_source/client_id/token_name
+	// of a row it did not make are blanked (binding disclosure is admin-only);
+	// client_name is self-reported and stays. Absent on records written before
+	// Spec 108 and on records with no MCP/REST request context.
+	Profile       string `json:"profile,omitempty"`        // Effective profile name (profile_change: the new profile)
+	ProfileSource string `json:"profile_source,omitempty"` // pin|binding|url|session|anonymous|none
+	ClientID      string `json:"client_id,omitempty"`      // Client id from the client-credential binding
+	ClientName    string `json:"client_name,omitempty"`    // Self-reported clientInfo.name (advisory)
+	TokenName     string `json:"token_name,omitempty"`     // Agent/client token name
+	BlockReason   string `json:"block_reason,omitempty"`   // Typed cause of a profile policy refusal
+
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
 	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:
 	// with payloads suppressed there is no text left to measure, so a consumer
@@ -142,14 +163,33 @@ type ActivitySummaryResponse struct {
 	CallErrorCount int                 `json:"call_error_count"`
 	TopServers     []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
 	TopTools       []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
-	StartTime      string              `json:"start_time"`            // Start of the period (RFC3339)
-	EndTime        string              `json:"end_time"`              // End of the period (RFC3339)
+	// PerServer covers EVERY server with at least one call in the period
+	// (unlike TopServers, which is capped at 5 and carries no error counts).
+	// Spec 109 FR-013: the server-card stats line and the macOS Servers rows
+	// read this — one `GET /activity/summary` response per page load — rather
+	// than issuing a per-server activity query each. Computed in the same
+	// counting pass as the totals above, from the same CountsAsCall/
+	// IsManagementBuiltin definitions TopServers already uses.
+	PerServer []ActivityPerServer `json:"per_server,omitempty"`
+	StartTime string              `json:"start_time"` // Start of the period (RFC3339)
+	EndTime   string              `json:"end_time"`   // End of the period (RFC3339)
 }
 
 // ActivityTopServer represents a server's activity count in the summary
 type ActivityTopServer struct {
 	Name  string `json:"name"`  // Server name
 	Count int    `json:"count"` // Activity count
+}
+
+// ActivityPerServer is one server's call/error/recency counters within the
+// summary period (Spec 109 FR-013, additive to ActivitySummaryResponse).
+type ActivityPerServer struct {
+	Name   string `json:"name"`   // Server name
+	Calls  int    `json:"calls"`  // Calls counted per storage.CountsAsCall
+	Errors int    `json:"errors"` // Of those calls, how many failed
+	// LastCallAt is RFC3339, or "" if the server had no call in the period
+	// (PerServer only lists servers that did, so this is always set).
+	LastCallAt string `json:"last_call_at"`
 }
 
 // ActivityTopTool represents a tool's activity count in the summary

@@ -55,6 +55,23 @@ func TestDirectToolCallabilityBlock_ConfigDeniedTool(t *testing.T) {
 		Enabled:       true,
 		DisabledTools: []string{"delete_repo"},
 	}))
+	// A pre-existing APPROVED record isolates this test's target: the tool
+	// case (config-denied) from the approval-lock gate. Without one, a fresh
+	// direct-mode evaluation with no approval record at all synthesizes an
+	// implicit "pending" record while the quarantine gate is active (Spec 105
+	// FR-009), and — per PR #1326 review round 2 finding #1 — the approval
+	// lock now correctly wins over a plain config denial, matching the
+	// established handleCallToolVariant/handleCallTool precedence
+	// (toolGate.lockStatus checked before the generic/config-denied block).
+	// That combined scenario is covered by
+	// TestDirectBlockReasonKey_AgreesWithResponse_ConfigDeniedAndApprovalLocked
+	// in preflight_telemetry_test.go; this test isolates the config-denied
+	// response body in the case that ambiguity does not arise.
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "delete_repo",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
 
 	result := proxy.directToolCallabilityBlock(context.Background(), "github", "delete_repo", map[string]interface{}{})
 	require.NotNil(t, result)
@@ -205,6 +222,53 @@ func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 	assert.Equal(t, []string{FormatDirectToolName("github", "allowed")}, directCallabilityToolNamesForTest(filtered))
 
 	assert.Equal(t, tools, proxy.filterDirectToolsForAgentCallability(context.Background(), tools))
+}
+
+// TestFilterDirectToolsForAgentCallability_UserTypeIsScopeRestrictedToo is the
+// Spec 105 PR G regression for this gate: it used to key on
+// `authCtx.Type == auth.AuthTypeAgent`, which let a server-edition OAuth
+// "user" context fall through to the operator-visible branch (unfiltered,
+// same as admin) and see pending/disabled tools it cannot actually call. A
+// "user" is not an administrator — server-edition-multiuser-auth.md reserves
+// "sees all activity, manages users" for the admin role — so it must be
+// gated exactly like an agent token here too (isScopeRestrictedCaller).
+func TestFilterDirectToolsForAgentCallability_UserTypeIsScopeRestrictedToo(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "github", Enabled: true}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "allowed",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "pending",
+		Status:     storage.ToolApprovalStatusPending,
+	}))
+
+	tools := []mcp.Tool{
+		{Name: FormatDirectToolName("github", "allowed")},
+		{Name: FormatDirectToolName("github", "pending")},
+	}
+	publishPermsCatalog(proxy, map[string]string{
+		FormatDirectToolName("github", "allowed"): auth.PermRead,
+		FormatDirectToolName("github", "pending"): auth.PermRead,
+	})
+
+	userCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "u1",
+		AllowedServers: []string{"github"},
+	})
+
+	filtered := proxy.filterDirectToolsForAgentCallability(userCtx, tools)
+	assert.Equal(t, []string{FormatDirectToolName("github", "allowed")}, directCallabilityToolNamesForTest(filtered),
+		"a scoped OAuth user must not see a tool pending approval, same as an equivalently-scoped agent token")
+
+	// Positive control: an OAuth admin_user keeps the operator-visible view.
+	adminUserCtx := auth.WithAuthContext(context.Background(), auth.AdminUserContext("a1", "admin@example.com", "Admin", "google"))
+	assert.Equal(t, tools, proxy.filterDirectToolsForAgentCallability(adminUserCtx, tools),
+		"an OAuth admin user keeps the operator-visible discovery behavior, like api-key admin")
 }
 
 func directCallabilityToolNamesForTest(tools []mcp.Tool) []string {

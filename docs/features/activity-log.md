@@ -130,7 +130,12 @@ Each tool call record includes:
 Every upstream tool call a sandboxed `code_execution` script makes is recorded
 as a first-class `tool_call` record with its own `request_id` and a `parent_id`
 equal to the parent `code_execution` record's `request_id` (`source` is
-`internal`; a policy-refused sub-call is recorded with status `blocked`).
+`internal`; a policy-refused sub-call is recorded with status `blocked`; when
+the refusal comes from the caller's profile it also carries `block_reason`:
+`profile_tier`, `profile_rule` or `profile_unannotated`; a sub-call to a
+server outside the caller's profile carries `profile_server_scope`. The
+refusal text the script sees is unchanged, and a legacy token refused only by
+its own server list carries no `block_reason`).
 Filter with `parent_id=<parent request_id>` to list a script's sub-calls, or
 `request_id=<child's parent_id>` to find the parent — the Web UI drawer, the
 macOS Activity window, and `mcpproxy activity list --parent-id` all expose the

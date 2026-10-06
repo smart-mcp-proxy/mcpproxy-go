@@ -117,7 +117,9 @@ final class APIClientConnectTests: XCTestCase {
         ConnectStubURLProtocol.responseBody = Data("""
         {"success":false,
          "data":{"success":false,"client":"claude-code","action":"precondition_failed",
-                 "message":"the config changed since the preview"},
+                 "message":"the config changed since the preview",
+                 "display_path":"~/.claude.json",
+                 "reload_hint":"Run /mcp in Claude Code (or restart it) to load MCPProxy"},
          "error":"the config changed since the preview"}
         """.utf8)
         let client = ConnectStubURLProtocol.makeClient()
@@ -127,11 +129,16 @@ final class APIClientConnectTests: XCTestCase {
                 "claude-code", serverName: "mcpproxy", force: true, preconditionToken: "stale")
             XCTFail("a stale token must not resolve as a successful connect")
         } catch let error as APIClientError {
-            guard case .connectConflict(let action, let message) = error else {
+            guard case .connectConflict(let action, let message, let displayPath, let reloadHint) = error else {
                 return XCTFail("expected .connectConflict, got \(error)")
             }
             XCTAssertEqual(action, "precondition_failed")
             XCTAssertEqual(message, "the config changed since the preview")
+            // Review round 3 finding: connectConflict(from:) used to keep only
+            // action/message and drop the core's display_path/reload_hint,
+            // which it fills on every ConnectResult branch including this one.
+            XCTAssertEqual(displayPath, "~/.claude.json")
+            XCTAssertEqual(reloadHint, "Run /mcp in Claude Code (or restart it) to load MCPProxy")
         }
     }
 
@@ -151,7 +158,7 @@ final class APIClientConnectTests: XCTestCase {
                 "claude-code", serverName: "mcpproxy", force: false, preconditionToken: "tok")
             XCTFail("a 409 must not resolve as a successful connect")
         } catch let error as APIClientError {
-            guard case .connectConflict(let action, _) = error else {
+            guard case .connectConflict(let action, _, _, _) = error else {
                 return XCTFail("expected .connectConflict, got \(error)")
             }
             XCTAssertEqual(action, "already_exists")

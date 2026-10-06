@@ -2,11 +2,11 @@
   <div ref="rootEl" class="space-y-6">
     <!-- Header -->
     <div class="flex items-center gap-4">
-      <router-link to="/security" class="btn btn-ghost btn-sm gap-1">
+      <router-link to="/review" class="btn btn-ghost btn-sm gap-1">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
         </svg>
-        Security
+        Review queue
       </router-link>
       <div class="flex-1">
         <h1 class="text-3xl font-bold">Scan Report</h1>
@@ -199,6 +199,8 @@
         </div>
 
         <div v-for="group in groupedFindings" :key="group.type"
+          data-test="finding-group"
+          :data-threat-type="group.type"
           class="collapse collapse-arrow bg-base-100 shadow-md"
           :class="{ 'collapse-open': group.defaultOpen }"
         >
@@ -642,7 +644,7 @@
                 :title="hasUnresolvedCritical ? 'Unresolved dangerous findings — use Force Approve' : 'Approve and unquarantine this server'"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                Approve Server
+                Review Server
               </button>
               <button
                 v-if="serverAdminState === 'quarantined' && hasUnresolvedCritical"
@@ -653,7 +655,7 @@
                 title="Unquarantine this server despite its dangerous findings"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                Force Approve
+                Review dangerous findings
               </button>
               <button
                 v-if="serverAdminState === 'quarantined'"
@@ -675,7 +677,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
 import { formatDateTime } from '@/utils/datetime'
 import { useServersStore } from '@/stores/servers'
@@ -686,6 +688,7 @@ import type { SecurityScanFinding, ThreatType } from '@/types/api'
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const route = useRoute()
+const router = useRouter()
 
 const props = defineProps<{
   jobId: string
@@ -849,16 +852,25 @@ async function scrollToFirstHighlight() {
 // `supply_chain` threat type, so they are filtered out of `groupedFindings`.
 // 'uncategorized' is rendered as "Other Findings" so AI-scanner output that
 // ClassifyThreat can't pattern-match stays visible instead of silently vanishing.
-const threatTypeLabels: Record<Exclude<ThreatType, 'supply_chain'>, string> = {
+// Any threat_type not listed here (a newer backend, a third-party scanner) is
+// folded into 'uncategorized' too — a finding the risk score counts must never
+// be missing from this section.
+type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
+const threatTypeLabels: Record<DisplayThreatType, string> = {
   tool_poisoning: 'Tool Poisoning',
   prompt_injection: 'Prompt Injection',
+  exfiltration: 'Data Exfiltration',
   rug_pull: 'Rug Pull Detection',
   malicious_code: 'Malicious Code',
   uncategorized: 'Other Findings',
 }
+// Render order — the keys of threatTypeLabels.
+const typeOrder = Object.keys(threatTypeLabels) as DisplayThreatType[]
+const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'exfiltration', 'rug_pull', 'malicious_code']
 
-type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
-const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
+function displayThreatType(raw: string | undefined): DisplayThreatType {
+  return raw && Object.prototype.hasOwnProperty.call(threatTypeLabels, raw) ? (raw as DisplayThreatType) : 'uncategorized'
+}
 
 interface FindingGroup {
   type: DisplayThreatType
@@ -881,24 +893,21 @@ const groupedFindings = computed<FindingGroup[]>(() => {
 
   const groups = new Map<DisplayThreatType, SecurityScanFinding[]>()
   for (const f of nonCveFindings) {
-    const rawType = (f.threat_type || 'uncategorized') as ThreatType
-    // Legacy data may still carry threat_type === 'supply_chain' on a non-CVE
-    // finding. Fold it into 'uncategorized' so it stays visible instead of
-    // being silently dropped.
-    const type: DisplayThreatType = rawType === 'supply_chain' ? 'uncategorized' : rawType
+    // Unknown types — and legacy threat_type === 'supply_chain' on a non-CVE
+    // finding — fold into 'uncategorized' so they stay visible.
+    const type = displayThreatType(f.threat_type)
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(f)
   }
 
   const result: FindingGroup[] = []
-  const typeOrder: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'uncategorized']
   for (const type of typeOrder) {
     const findings = groups.get(type)
     if (!findings) continue
     const hasDangerous = findings.some(f => f.threat_level === 'dangerous')
     result.push({
       type,
-      label: threatTypeLabels[type] || type,
+      label: threatTypeLabels[type],
       findings,
       // A highlighted finding must not be hidden inside a collapsed group —
       // scrolling to something invisible helps nobody (spec 088 FR-011).
@@ -999,50 +1008,12 @@ const hasUnresolvedCritical = computed(() => blockingFindingCount.value > 0)
 
 async function approveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Approve ${report.value.server_name}? This will unquarantine and re-enable the server.`)) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(report.value.server_name, false)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Approved',
-      message: `${report.value.server_name} has been approved and unquarantined`,
-    })
-    await loadServerStatus()
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approve Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
+  await router.push(`/review/${encodeURIComponent(report.value.server_name)}`)
 }
 
 async function forceApproveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Force-approve ${report.value.server_name}? This unquarantines the server despite ${blockingFindingCount.value} dangerous finding(s).`)) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(report.value.server_name, true)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Force-Approved',
-      // Same noun as the confirmation the user just accepted and as the 409
-      // this bypassed — "critical" is a severity bucket the gate never reads.
-      message: `${report.value.server_name} was force-approved despite ${blockingFindingCount.value} dangerous finding(s)`,
-    })
-    await loadServerStatus()
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Force Approve Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
+  await router.push(`/review/${encodeURIComponent(report.value.server_name)}`)
 }
 
 async function rejectServer() {

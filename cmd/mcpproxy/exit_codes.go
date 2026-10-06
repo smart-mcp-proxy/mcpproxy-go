@@ -28,8 +28,15 @@ const (
 	// ExitCodePermissionError indicates insufficient permissions (file access, port binding)
 	ExitCodePermissionError = 5
 
+	// ExitCodeShutdownTimeout indicates graceful shutdown exceeded its hard
+	// deadline after a SIGINT/SIGTERM and the process killed itself so a
+	// supervisor (launchd/systemd, or the tray's process monitor) can restart
+	// it. It is deliberately NOT produced by classifyError: it is not a
+	// startup outcome, it is a shutdown that never finished.
+	ExitCodeShutdownTimeout = 6
+
 	// Spec 098 preflight verdict codes. They are a SEPARATE band from the codes
-	// above on purpose: 0-5 describe whether mcpproxy could run, 10-12 describe
+	// above on purpose: 0-6 describe whether mcpproxy could run (or stop), 10-12 describe
 	// what a preflight found, so a cron wrapper can branch retry-vs-page-vs-fix
 	// on the exit code alone without parsing JSON (SC-003). Their values are the
 	// spec's, and preflight.ExitCode is the single mapping — these constants

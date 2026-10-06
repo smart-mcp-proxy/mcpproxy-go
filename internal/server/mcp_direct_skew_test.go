@@ -176,22 +176,25 @@ var skewBase = func() []*config.ToolMetadata {
 // Group 1 — closed by design (the ordering)
 // ---------------------------------------------------------------------------
 
-// An ADDED name is in the registry before its catalog entry lands. What a
-// session sees then depends on whether its listing goes through the catalog at
-// all — and that is NOT uniform:
+// An ADDED name is in the registry before its catalog entry lands.
 //
-//   - A SCOPED session (agent token or active profile) is filtered through the
-//     catalog, which does not admit the name yet, so it is denied on both
-//     sides. This is the case D13 describes.
-//   - An UNSCOPED session short-circuits both filters
-//     (mcp_direct_scope.go: `if !isScopedAgent && profileScope == nil { return
-//     tools }`) and is served the raw registry, so it DOES see the new name
-//     while describe still answers not_found for it.
+// Spec 105 PR F (FR-008, FR008-G1) closes the window this test used to
+// document as a residual. Before this fix, both filters resolved a rendered
+// tool's identity by looking up its NAME in whatever catalog happened to be
+// live — which, in this window, is still the PREVIOUS generation, one that
+// does not admit "fs__stat" at all — so a scoped session was denied and an
+// unscoped one fell through to the "serve the raw registry" fallback, seeing
+// the name with nothing to check it against.
 //
-// Neither leaks: the scoped case denies both, and the unscoped residual is
-// listed-but-undescribable — the safe direction, and for a session that is
-// entitled to the whole surface anyway. D13's "the filters deny it" is
-// therefore true of scoped sessions specifically, not of every session.
+// Now renderDirectTools stamps each tool with the identity of the SAME
+// catalog build that produced its handler (Spec 105 FR-008), and the filters
+// read that stamp first. Since SetTools lands the NEW registry (with its
+// stamps) before this pause even starts, every session — scoped or not — sees
+// "fs__stat" immediately, correctly attributed to "fs", with no residual left
+// to document. describe_tool is untouched by this PR and still answers from
+// the published catalog, so it remains one generation behind for the width of
+// the window — the SAFE "listed-but-undescribable" direction SC-007 (Spec
+// 102) has always permitted, never the reverse.
 func TestSkew_AddedNameBeforeItsCatalogEntry(t *testing.T) {
 	f := newSkewFixture(t, skewBase())
 	unscoped := context.Background()
@@ -212,14 +215,13 @@ func TestSkew_AddedNameBeforeItsCatalogEntry(t *testing.T) {
 	}))
 
 	f.rebuildPaused(t, added, func() {
-		assert.NotContains(t, f.listed(scoped), "fs__stat",
-			"a scoped session is filtered through the catalog, which has not admitted it yet")
-		assert.False(t, f.describable(scoped, "fs__stat"))
+		assert.Contains(t, f.listed(scoped), "fs__stat",
+			"the stamp on the newly-registered tool already says owner \"fs\", in scope, so a scoped session sees it immediately")
+		assert.False(t, f.describable(scoped, "fs__stat"),
+			"describe still answers from the previous, unpublished catalog — listed-but-undescribable, the safe direction")
 
-		assert.Contains(t, f.listed(unscoped), "fs__stat",
-			"an unscoped session is served the raw registry — documenting the residual")
-		assert.False(t, f.describable(unscoped, "fs__stat"),
-			"…and describe still answers not_found: listed-but-undescribable, the safe direction")
+		assert.Contains(t, f.listed(unscoped), "fs__stat")
+		assert.False(t, f.describable(unscoped, "fs__stat"))
 	})
 
 	// After the publish both sessions agree, in both directions.
@@ -281,9 +283,25 @@ func TestSkew_DescriptionChangeIsSelfConsistentOnBothSides(t *testing.T) {
 // An ORIGIN FLIP: the SAME display name, owned by a different upstream in the
 // next generation. Only the "__" ambiguity makes this expressible —
 // "a__b__c" is (server "a", tool "b__c") or (server "a__b", tool "c") — and it
-// is the sharpest form of the skew question, because during the window the
-// filters scope-check against the OLD origin while the registry already holds
-// the NEW origin's handler.
+// is the sharpest form of the skew question.
+//
+// Spec 105 PR F (FR-008, FR008-G1/G3/G5) closes it. Before this fix, the
+// filters scope-checked "a__b__c" by looking its NAME up in whatever catalog
+// happened to be live — during this window, still the OLD one, which says the
+// owner is "a" — while the registry already held the NEW origin's handler, so
+// an old-scoped token saw the tool listed under the wrong owner and was only
+// refused once it actually dispatched, by a message that NAMED the new owner
+// (D12's disclosure).
+//
+// Now renderDirectTools stamps each registered tool with the identity of the
+// SAME build that produced its handler, and the filters read that stamp
+// first — never a fresh catalog lookup. Since SetTools lands the NEW registry
+// (new stamp: owner "a__b") before this pause starts, an old-only token is
+// excluded from the listing immediately, and if a call is still attempted
+// against the stale/registered handler directly (bypassing mcp-go's own
+// call-time re-evaluation, which would otherwise answer the SAME
+// unregistered-name envelope first — Spec 105 T086a), the refusal it gets
+// names neither origin.
 //
 // An earlier version of this test flipped alpha__run to beta__run, which are
 // different display names and therefore not an origin flip at all; it asserted
@@ -315,25 +333,43 @@ func TestSkew_OriginFlipNeverSplitsScopeFromDispatch(t *testing.T) {
 	})
 
 	f.rebuildPaused(t, newOrigin, func() {
-		// The stale catalog still says this name belongs to "a", so the filters
-		// admit it for this token…
+		// The stale CATALOG still says this name belongs to "a" — describe_tool,
+		// unchanged by this PR, still resolves through it — but the LISTING no
+		// longer does: the registered tool's own stamp already says "a__b",
+		// out of scope for this token, so it is absent immediately.
 		entry, ok := f.proxy.resolveDirectDescribeID(oldOnly, display)
-		require.True(t, ok, "the stale catalog still resolves the name")
-		require.Equal(t, "a", entry.ServerName, "…to the OLD origin")
-		require.Contains(t, f.listed(oldOnly), display, "so it is still listed")
+		require.True(t, ok, "the stale catalog still resolves the name for describe")
+		require.Equal(t, "a", entry.ServerName, "…to the OLD origin — a residual describe_tool is out of this PR's scope")
 
-		// …but the registry already holds the NEW origin's handler, and that
-		// handler re-derives authorization from the entry IT captured. The
-		// split is closed at the only place it matters: the call is refused,
-		// against the origin that would actually be dispatched to.
+		assert.NotContains(t, f.listed(oldOnly), display,
+			"the listing reads the NEW stamp on the registered tool, not the stale catalog, so it is excluded immediately")
+
+		// The registry already holds the NEW origin's handler, invoked here
+		// directly (bypassing mcp-go's own call-time filter re-evaluation,
+		// which — now that the filters are stamp-based — would already refuse
+		// this with the SAME text a wholly unregistered name gets, before the
+		// handler ever ran; see TestDirectProtocol_StampNeverOnWire_FilterReEvaluatedAtCallTime).
+		// This is the handler's OWN defense-in-depth check, and D12 forbids it
+		// from naming either origin. It is now returned as the handler's own
+		// error (PR #1326 review round 2, chunk C), not a NewToolResultError,
+		// so the envelope KIND also converges on the filter's protocol-level
+		// refusal rather than staying a successful isError:true result.
 		result, err := f.registeredHandler(t, display)(oldOnly, mcp.CallToolRequest{
 			Params: mcp.CallToolParams{Name: display},
 		})
-		require.NoError(t, err)
-		require.True(t, result.IsError,
-			"a token scoped to the old origin must not reach the new one through a stale listing")
-		assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "does not have access to server 'a__b'",
-			"the refusal must name the origin actually dispatched to, not the one the listing implied")
+		require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+		require.Error(t, err, "a token scoped to the old origin must not reach the new one through a stale listing")
+		text := err.Error()
+		// "a__b__c" (the caller-supplied display name, which D12 permits
+		// echoing) happens to contain "a__b" as a raw substring, so the
+		// disclosure check is against the OLD message's own distinguishing
+		// phrasing — naming the origin AS a server, in a sentence that
+		// confirms a scope check fired — not against that coincidental
+		// substring.
+		assert.Equal(t, "tool 'a__b__c' not found: tool not found", text,
+			"the refusal must be worded exactly like an unregistered name's, never naming the origin actually dispatched to (D12)")
+		assert.NotContains(t, text, "does not have access", "nor disclose that a scope check is what fired")
+		assert.NotContains(t, text, "Owned by", "nor leak the entry's own description")
 	})
 
 	// After the publish the listing agrees with the registry again: the name
@@ -457,12 +493,18 @@ func TestSkew_OutputSchemaOnlyChangeIsSilentlyStale(t *testing.T) {
 	assert.Contains(t, entry.OutputSchemaJSON, "bytes")
 }
 
-// Residual 3 (T003): an ANNOTATIONS-only change — read becoming destructive —
-// can be listed and described one generation stale. The compensating property
-// is that CALL-TIME authorization never reads the catalog: the handler
-// re-derives the tier from the annotations it was registered with, and a
-// read-scoped token is refused the call even while the stale listing still
-// shows the tool.
+// An ANNOTATIONS-only change — read becoming destructive — used to be listed
+// one generation stale (Spec 102's "residual 3"), because the listing filter
+// re-derived the tier from a fresh catalog lookup, and the catalog is still
+// the OLD (read-tier) generation for the width of this window.
+//
+// Spec 105 PR F closes it: renderDirectTools now stamps each registered tool
+// with the tier of the SAME build that produced its handler, so as soon as
+// SetTools lands the NEW (destructive-tier) registration — before this pause
+// even starts — a read-scoped token's listing reflects it immediately. No
+// earlier revocation is required (US3 scenario 3): the withholding tracks the
+// handler actually registered at each seam, exactly like the call-time
+// authorization already did.
 func TestSkew_AnnotationsOnlyChangeIsStaleButNeverAdmitsTheCall(t *testing.T) {
 	before := []*config.ToolMetadata{
 		skewTool("fs", "purge", "Purge", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}),
@@ -479,12 +521,15 @@ func TestSkew_AnnotationsOnlyChangeIsStaleButNeverAdmitsTheCall(t *testing.T) {
 	})
 
 	f.rebuildPaused(t, after, func() {
-		assert.Contains(t, f.listed(readOnly), "fs__purge",
-			"documenting residual 3: the read-scoped token still sees the tool, one generation stale")
+		assert.NotContains(t, f.listed(readOnly), "fs__purge",
+			"the newly-registered tool's own stamp already says tier destructive, so a read-scoped token is withheld immediately, not one generation stale")
 
-		// …but the call is refused. Dispatched through the handler mcp-go
-		// actually holds — building one here would prove only that a handler
-		// constructed by the test refuses, not that the REGISTERED one does.
+		// …and the call is refused, exactly as before this PR: call-time
+		// authorization never reads the catalog OR the stamp — the handler
+		// re-derives the tier from the annotations it was registered with.
+		// Dispatched through the handler mcp-go actually holds — building one
+		// here would prove only that a handler constructed by the test
+		// refuses, not that the REGISTERED one does.
 		result, err := f.registeredHandler(t, "fs__purge")(readOnly, mcp.CallToolRequest{
 			Params: mcp.CallToolParams{Name: "fs__purge"},
 		})

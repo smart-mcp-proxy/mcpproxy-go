@@ -3,6 +3,7 @@ import {
   formatRunDuration,
   formatRunSpan,
   groupActivityRuns,
+  quarantineBatchSummary,
   runDurationRange,
 } from '@/utils/activity'
 
@@ -182,6 +183,74 @@ describe('groupActivityRuns', () => {
   })
 })
 
+// Spec 109-k (activity-scope-filters), acceptance scenario 6, and the
+// verified zcode review finding on this fix: a tool_quarantine_change run
+// folds WITHOUT agreeing on tool_name (unlike every other type above), so a
+// server's batch of per-tool baseline approvals reads as "N tools approved"
+// instead of 14 near-identical rows — but only within a bounded window, so
+// two genuinely separate same-server, same-status actions hours apart never
+// silently merge into one summary line just because nothing of a different
+// type happened to land between them.
+describe('groupActivityRuns — tool_quarantine_change batch fold', () => {
+  const quarantine = (over: Record<string, unknown> = {}) => ({
+    id: `qc-${Math.random().toString(36).slice(2)}`,
+    type: 'tool_quarantine_change',
+    server_name: 'filesystem',
+    tool_name: 'some_tool',
+    status: 'approved',
+    timestamp: '2026-08-21T10:00:00Z',
+    ...over,
+  })
+
+  it('folds 14 per-tool approvals (different tool_name each) into one run', () => {
+    const rows = Array.from({ length: 14 }, (_, i) => quarantine({ id: `qc-${i}`, tool_name: `tool_${i}` }))
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].count).toBe(14)
+    expect(quarantineBatchSummary(runs[0].lead, runs[0].count)).toBe('filesystem: 14 tools approved')
+  })
+
+  it('does NOT fold two same-server, same-status batches more than 5 minutes apart', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', timestamp: '2026-08-21T10:00:00Z' }),
+      quarantine({ id: 'b', tool_name: 'y', timestamp: '2026-08-21T10:01:00Z' }),
+      // A second, later action on the same server — nothing of a different
+      // type happened to land between them, so identity/adjacency alone
+      // would otherwise merge it into the first run.
+      quarantine({ id: 'c', tool_name: 'z', timestamp: '2026-08-21T10:30:00Z' }),
+    ]
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(2)
+    expect(runs[0].count).toBe(2)
+    expect(runs[1].count).toBe(1)
+    expect(runs[1].lead.id).toBe('c')
+  })
+
+  it('does fold within the 5-minute window, even with a gap between individual records', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', timestamp: '2026-08-21T10:00:00Z' }),
+      quarantine({ id: 'b', tool_name: 'y', timestamp: '2026-08-21T10:04:00Z' }),
+    ]
+    expect(groupActivityRuns(rows)).toHaveLength(1)
+  })
+
+  it('still requires server and status to agree, exactly like the identity fields for every other type', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', server_name: 'filesystem' }),
+      quarantine({ id: 'b', tool_name: 'y', server_name: 'github' }),
+      quarantine({ id: 'c', tool_name: 'z', server_name: 'filesystem', status: 'blocked' }),
+    ]
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(3)
+  })
+
+  it('a lone tool_quarantine_change record is not folded (no "1 tools" label)', () => {
+    const runs = groupActivityRuns([quarantine({ id: 'a', tool_name: 'read' })])
+    expect(runs).toHaveLength(1)
+    expect(runs[0].count).toBe(1)
+  })
+})
+
 describe('what a folded row prints', () => {
   it('reports one duration when the run agreed, and a range when it did not', () => {
     expect(formatRunDuration([call({ duration_ms: 4 }), call({ duration_ms: 4 })])).toBe('4ms')
@@ -208,5 +277,34 @@ describe('what a folded row prints', () => {
         call({ timestamp: '2026-08-21T10:00:00.400Z' }),
       ])
     ).toBe('')
+  })
+})
+
+describe('groupActivityRuns attribution identity (Spec 108-j FR-029)', () => {
+  it("never folds identical calls from different clients under one caller's chips", () => {
+    const rows = [
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro' }),
+      call({ id: 'b', client_id: 'claude-code', profile: 'work-ro' }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('never folds calls under different profiles or tokens', () => {
+    expect(groupActivityRuns([
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro' }),
+      call({ id: 'b', client_id: 'cursor', profile: 'personal' }),
+    ]).map(r => r.count)).toEqual([1, 1])
+    expect(groupActivityRuns([
+      call({ id: 'a', token_name: 'ro-bot' }),
+      call({ id: 'b', token_name: 'rw-bot' }),
+    ]).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('still folds calls from the same caller', () => {
+    const rows = [
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro', profile_source: 'pin' }),
+      call({ id: 'b', client_id: 'cursor', profile: 'work-ro', profile_source: 'pin' }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([2])
   })
 })

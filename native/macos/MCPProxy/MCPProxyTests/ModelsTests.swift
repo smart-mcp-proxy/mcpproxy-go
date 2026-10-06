@@ -128,6 +128,19 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(health.healthAction)
     }
 
+    func testHealthActionParsesEditURL() throws {
+        // HealthAction previously had no case for "edit_url", so
+        // HealthAction(rawValue:) returned nil for it and the Dashboard's
+        // AttentionRow rendered no action button at all for a server whose
+        // actions[0] is edit_url — silently missing the CTA that the Web UI
+        // and CLI both show.
+        let json = """
+        {"level": "unhealthy", "admin_state": "enabled", "summary": "Bad endpoint", "action": "edit_url"}
+        """
+        let health = try decode(HealthStatus.self, from: json)
+        XCTAssertEqual(health.healthAction, .editURL)
+    }
+
     // MARK: - HealthLevel Enum
 
     func testHealthLevelSFSymbolNames() {
@@ -152,6 +165,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.viewLogs.label, "View Logs")
         XCTAssertEqual(HealthAction.setSecret.label, "Set Secret")
         XCTAssertEqual(HealthAction.configure.label, "Configure")
+        XCTAssertEqual(HealthAction.editURL.label, "Edit URL")
     }
 
     // MARK: - ServerStatus
@@ -646,6 +660,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stats.tokenMetrics?.savedTokensPercentage), 95.83, accuracy: 0.01)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["github"], 80000)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["gitlab"], 40000)
+        // zcode review round 1, F7: `estimated` absent from an older core's
+        // response must default to false, not fail to decode.
+        XCTAssertEqual(stats.tokenMetrics?.estimated, false)
+    }
+
+    // zcode review round 1, F7: FR-073/T120 names macOS as one of the three
+    // surfaces (Web, CLI, macOS) that must show the token-savings estimate —
+    // contracts.ServerTokenMetrics.Estimated had no Swift counterpart at all.
+    func testDecodeTokenMetricsEstimatedTrue() throws {
+        let json = """
+        {
+            "total_server_tool_list_size": 120000,
+            "average_query_result_size": 5000,
+            "saved_tokens": 115000,
+            "saved_tokens_percentage": 95.83,
+            "per_server_tool_list_sizes": {},
+            "estimated": true
+        }
+        """
+        let metrics = try decode(TokenMetrics.self, from: json)
+        XCTAssertTrue(metrics.estimated)
     }
 
     func testDecodeUpstreamStatsMinimal() throws {
@@ -948,7 +983,7 @@ final class ModelsTests: XCTestCase {
 
     func testHealthActionCaseIterable() {
         let allCases = HealthAction.allCases
-        XCTAssertEqual(allCases.count, 7)
+        XCTAssertEqual(allCases.count, 8)
     }
 
     func testHealthActionRawValues() {
@@ -959,6 +994,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.enable.rawValue, "enable")
         XCTAssertEqual(HealthAction.approve.rawValue, "approve")
         XCTAssertEqual(HealthAction.configure.rawValue, "configure")
+        XCTAssertEqual(HealthAction.editURL.rawValue, "edit_url")
     }
 
     // MARK: - ActivityEntry glance accessors (spec 090, data-model.md)

@@ -33,6 +33,29 @@
       </div>
     </div>
 
+    <!-- Spec 109-l P10c (url-filter-contract.md: Servers `profile`, requires
+         scope_filters): the Profile select and its removable chip. Hidden until
+         the build lists `profile`; the URL keeps the parameter untouched
+         meanwhile (rule 7). -->
+    <div v-if="profileScopeAvailable || profileChipVisible" class="space-y-2" data-test="servers-scope-controls">
+      <div v-if="profileScopeAvailable" class="form-control w-full sm:w-64">
+        <label class="label py-1" for="servers-profile-select"><span class="label-text text-xs">Profile</span></label>
+        <select
+          id="servers-profile-select"
+          class="select select-bordered select-sm w-full"
+          data-test="servers-profile-select"
+          :disabled="profilesStore.loading"
+          :value="profileValue"
+          @change="pickProfile($event)"
+        >
+          <option value="">All profiles</option>
+          <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}</option>
+          <option v-if="profileOrphan" :value="profileValue">{{ profileValue }}</option>
+        </select>
+      </div>
+      <ScopeChips page="servers" :scope-query="scopeQuery" :disabled="disabledScope" :unavailable="scopeUnavailableNames" />
+    </div>
+
     <!-- Everything between the header and the server grid describes a list that
          does not exist yet on a fresh install: four zero-valued stat tiles,
          four zero-count filter pills and a search box with nothing to search.
@@ -48,8 +71,8 @@
         @click="filter = 'all'"
       >
         <div class="stat-title">Total Servers</div>
-        <div class="stat-value">{{ serversStore.serverCount.total }}</div>
-        <div class="stat-desc">{{ serversStore.serverCount.enabled }} enabled</div>
+        <div class="stat-value">{{ counts.total }}</div>
+        <div class="stat-desc">{{ counts.enabled }} enabled</div>
       </button>
 
       <button
@@ -60,7 +83,7 @@
         @click="filter = filter === 'connected' ? 'all' : 'connected'"
       >
         <div class="stat-title">Connected</div>
-        <div class="stat-value text-success">{{ serversStore.serverCount.connected }}</div>
+        <div class="stat-value text-success">{{ counts.connected }}</div>
         <!--
           Audit finding F27 (#1046): this read "50% online" for 2 connected out
           of 4 servers, one of which was switched off and one quarantined. A
@@ -80,13 +103,13 @@
         @click="filter = filter === 'quarantined' ? 'all' : 'quarantined'"
       >
         <div class="stat-title">Quarantined</div>
-        <div class="stat-value text-warning">{{ serversStore.serverCount.quarantined }}</div>
+        <div class="stat-value text-warning">{{ counts.quarantined }}</div>
         <div class="stat-desc">Need security review</div>
       </button>
 
       <div class="stat" data-test="kpi-card-total-tools">
         <div class="stat-title">Total Tools</div>
-        <div class="stat-value text-info">{{ serversStore.totalTools }}</div>
+        <div class="stat-value text-info">{{ totalTools }}</div>
         <div class="stat-desc">Available across all servers</div>
       </div>
     </div>
@@ -98,25 +121,25 @@
           @click="filter = 'all'"
           :class="['btn btn-sm', filter === 'all' ? 'btn-primary' : 'btn-outline']"
         >
-          All ({{ serversStore.servers.length }})
+          All ({{ rows.length }})
         </button>
         <button
           @click="filter = 'connected'"
           :class="['btn btn-sm', filter === 'connected' ? 'btn-primary' : 'btn-outline']"
         >
-          Connected ({{ serversStore.connectedServers.length }})
+          Connected ({{ connectedRows.length }})
         </button>
         <button
           @click="filter = 'enabled'"
           :class="['btn btn-sm', filter === 'enabled' ? 'btn-primary' : 'btn-outline']"
         >
-          Enabled ({{ serversStore.enabledServers.length }})
+          Enabled ({{ enabledRows.length }})
         </button>
         <button
           @click="filter = 'quarantined'"
           :class="['btn btn-sm', filter === 'quarantined' ? 'btn-primary' : 'btn-outline']"
         >
-          Quarantined ({{ serversStore.quarantinedServers.length }})
+          Quarantined ({{ quarantinedRows.length }})
         </button>
       </div>
 
@@ -152,9 +175,20 @@
     </div>
 
     <!-- Loading State -->
-    <div v-if="serversStore.loading.loading" class="text-center py-12">
+    <div v-if="serversStore.loading.loading || scopedBusy" class="text-center py-12">
       <span class="loading loading-spinner loading-lg"></span>
       <p class="mt-4">Loading servers...</p>
+    </div>
+
+    <!-- Spec 109-l: the viewed profile does not exist (404) or the scoped list
+         failed. An inline message with a way out, never a blanked page. -->
+    <div v-else-if="profileActive && scopedNotFound" class="alert alert-warning" role="alert" data-test="servers-profile-not-found">
+      <div class="flex-1 text-sm">Profile not found</div>
+      <button type="button" class="btn btn-sm" data-test="servers-profile-clear" @click="clearProfile">Clear</button>
+    </div>
+    <div v-else-if="profileActive && scopedError" class="alert alert-error" role="alert" data-test="servers-profile-error">
+      <div class="flex-1 text-sm">{{ scopedError }}</div>
+      <button type="button" class="btn btn-sm" @click="loadScoped(false)">Try Again</button>
     </div>
 
     <!-- Error State: the load failed and we have nothing to fall back on.
@@ -194,7 +228,7 @@
       </p>
       <div class="flex flex-wrap gap-2 justify-center">
         <button
-          @click="showAddServer = true"
+          @click="router.push('/add-server')"
           class="btn btn-primary"
           data-test="servers-empty-add"
         >
@@ -204,11 +238,11 @@
           Add Server
         </button>
         <router-link
-          to="/repositories"
+          to="/add-server?tab=catalog"
           class="btn btn-outline"
           data-test="servers-empty-registry"
         >
-          Browse Registry
+          Browse catalog
         </router-link>
       </div>
       <p class="mt-4 text-sm">
@@ -242,11 +276,14 @@
       <svg class="w-24 h-24 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
       </svg>
-      <h3 class="text-xl font-semibold mb-2">No servers found</h3>
+      <h3 class="text-xl font-semibold mb-2">{{ profileActive && !searchQuery && filter === 'all' ? 'No servers in this profile' : 'No servers found' }}</h3>
       <p class="text-base-content/70 mb-4">
         {{ searchQuery ? 'No servers match your search criteria' : `No ${filter === 'all' ? '' : filter} servers available`.replace(/\s+/g, ' ').trim() }}
       </p>
-      <button v-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
+      <button v-if="profileActive && !searchQuery && filter === 'all'" type="button" class="btn btn-outline" data-test="servers-profile-clear" @click="clearProfile">
+        Clear
+      </button>
+      <button v-else-if="searchQuery" @click="searchQuery = ''" class="btn btn-outline">
         Clear Search
       </button>
       <button v-else @click="filter = 'all'" class="btn btn-outline">
@@ -265,6 +302,7 @@
         v-for="server in filteredServers"
         :key="server.name"
         :server="server"
+        :activity-stats="perServerActivity[server.name]"
         v-memo="[
           server.connected,
           server.connecting,
@@ -282,7 +320,31 @@
           // count is tracked too -- the quarantine note renders it, so a rescan
           // that stays `warnings` but changes the count must still re-render.
           server.security_scan?.status,
-          server.security_scan?.finding_counts?.warning
+          server.security_scan?.finding_counts?.warning,
+          // Spec 109 FR-013: the card's status line and its ONE primary
+          // button are now driven entirely by `health` — mergeServers()
+          // above replaces `existingServer.health` with a fresh object
+          // reference on every poll (Object.assign), so without these keys
+          // a health change carrying none of the OTHER memoized fields
+          // (e.g. actions gaining a token-expiring login nudge on an
+          // otherwise unchanged connected/enabled/quarantined server) would
+          // leave the primary button stale. Picking the scalar fields, not
+          // `server.health` itself, is what makes the comparison meaningful
+          // despite the new object reference each poll.
+          server.health?.status,
+          server.health?.summary,
+          server.health?.detail,
+          server.health?.admin_state,
+          server.health?.level,
+          // `action` always equals `actions[0]` (or '' when actions is
+          // empty) per contracts.ts — the plain scalar equivalent of
+          // actions[0], without an optional array-index chain.
+          server.health?.action,
+          // Spec 109 FR-013: the card's stats line reads this per-server slice
+          // of the one activity summary fetch.
+          perServerActivity[server.name]?.calls,
+          perServerActivity[server.name]?.errors,
+          perServerActivity[server.name]?.last_call_at
         ]"
       />
     </TransitionGroup>
@@ -290,56 +352,263 @@
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serversHints" />
 
-    <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="onServerAdded" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
+import type { Server } from '@/types'
 import ServerCard from '@/components/ServerCard.vue'
-import AddServerModal from '@/components/AddServerModal.vue'
-import { serverDetailPath } from '@/utils/serverRoute'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
+import { isServerConnected } from '@/utils/health'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import type { ActivityPerServer } from '@/types'
+
+type ServerFilter = 'all' | 'connected' | 'enabled' | 'quarantined' | 'needs_review'
+const KNOWN_FILTERS: ServerFilter[] = ['all', 'connected', 'enabled', 'quarantined', 'needs_review']
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const profilesStore = useProfilesStore()
 const onboardingStore = useOnboardingStore()
+const route = useRoute()
 const router = useRouter()
-const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')
+const scopeQuery = useScopeQuery('servers')
+const filter = ref<ServerFilter>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
-const showAddServer = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
+
+// Spec 109 FR-013: the server card's stats line (last call, 24h errors)
+// reads this ONE per-page-load summary rather than issuing a request per
+// card. Keyed by server name; a server absent from the map had no call in
+// the period.
+const perServerActivity = ref<Record<string, ActivityPerServer>>({})
+
+async function loadActivitySummary() {
+  try {
+    const res = await api.getActivitySummary('24h')
+    if (res.success && res.data) {
+      const byName: Record<string, ActivityPerServer> = {}
+      for (const entry of res.data.per_server ?? []) {
+        byName[entry.name] = entry
+      }
+      perServerActivity.value = byName
+    }
+  } catch {
+    // Best-effort: the card falls back to "never" / 0 errors, which is a
+    // safe (if stale) default — a failed summary fetch must not block the
+    // rest of the Servers page from rendering.
+  }
+}
+
+// Spec 109-k (activity-scope-filters), T119: Servers wired to the URL filter
+// contract (url-filter-contract.md — `status` and `q` are client-side only
+// here, `GET /servers` takes no query string). Read on mount and on every
+// route change, one-directional (URL -> local state), matching Tools.vue's
+// existing `q` pattern — this is what makes the `/review` -> `/servers?status
+// =needs_review` redirect (router T026a) actually filter the list instead of
+// silently landing on the unfiltered one.
+function isNeedsReview(server: Server): boolean {
+  if (server.quarantined) return true
+  const q = server.quarantine
+  return !!q && (q.pending_count ?? 0) + (q.changed_count ?? 0) > 0
+}
+
+function applyScopeQueryParams() {
+  const status = route.query.status
+  if (typeof status === 'string' && (KNOWN_FILTERS as string[]).includes(status)) {
+    filter.value = status as ServerFilter
+  }
+  const q = route.query.q
+  if (typeof q === 'string' && q !== searchQuery.value) {
+    searchQuery.value = q
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Spec 109-l P10c: the `profile` scope. A profile in the URL asks
+// GET /servers?profile=<p> for the servers (and tool counts) that profile
+// admits. The result is page-local: the shared servers store keeps the full
+// list (the sidebar, header and Dashboard read it), so a scoped view never
+// leaks into them.
+// ---------------------------------------------------------------------------
+const UNATTRIBUTED_NOTE = 'Unattributed applies to Activity and Usage only'
+
+const profileScopeAvailable = computed(() => isScopeParamAvailable('profile'))
+const profileValue = computed(() => scopeQuery.state.profile ?? '')
+const profileChipVisible = computed(() => scopeQuery.chips.value.some(chip => chip.name === 'profile'))
+const profileOrphan = computed(() =>
+  profileValue.value !== '' && profileValue.value !== '-' &&
+  !profilesStore.profiles.some(profile => profile.name === profileValue.value))
+const disabledScope = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  if (profileValue.value === '-' && profileScopeAvailable.value) out.profile = UNATTRIBUTED_NOTE
+  return out
+})
+
+// The profile the request will carry: `-` (unattributed) applies to Activity and
+// Usage only, so it is a disabled chip here and never sent.
+const appliedProfile = computed(() => {
+  if (!profileScopeAvailable.value) return ''
+  const value = scopeQuery.toRest()?.profile ?? ''
+  return value === '-' ? '' : value
+})
+const profileActive = computed(() => appliedProfile.value !== '')
+
+// Rule 1 (no flash): while the URL names a profile but /status has not yet said
+// whether this build supports it, show the spinner, not the unfiltered list.
+const scopeWaiting = ref(false)
+const scopeWaitTimedOut = ref(false)
+const scopeUnavailableNames = computed(() => {
+  const value = route.query.profile
+  return scopeWaitTimedOut.value && !profileScopeAvailable.value && typeof value === 'string' && value !== '' ? ['profile'] : []
+})
+
+const scopedServers = ref<Server[] | null>(null)
+const scopedLoading = ref(false)
+const scopedError = ref('')
+const scopedNotFound = ref(false)
+const scopedBusy = computed(() => scopeWaiting.value || (profileActive.value && scopedLoading.value && scopedServers.value === null))
+
+let scopedSeq = 0
+async function loadScoped(silent: boolean) {
+  const profile = appliedProfile.value
+  const seq = ++scopedSeq
+  if (!profile) {
+    scopedServers.value = null
+    scopedLoading.value = false
+    scopedError.value = ''
+    scopedNotFound.value = false
+    return
+  }
+  if (!silent) {
+    scopedServers.value = null
+    scopedLoading.value = true
+  }
+  scopedError.value = ''
+  scopedNotFound.value = false
+  try {
+    const response = await api.getServers({ profile })
+    if (seq !== scopedSeq) return
+    if (response.success && response.data) {
+      scopedServers.value = response.data.servers ?? []
+    } else {
+      scopedServers.value = []
+      scopedError.value = response.error || 'Failed to load servers'
+    }
+  } catch (err) {
+    if (seq !== scopedSeq) return
+    scopedServers.value = []
+    const status = (err as { status?: number } | null)?.status
+    if (status === 404) scopedNotFound.value = true
+    else scopedError.value = err instanceof Error ? err.message : 'Failed to load servers'
+  } finally {
+    if (seq === scopedSeq) scopedLoading.value = false
+  }
+}
+
+function pickProfile(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  scopeQuery.set({ profile: value || undefined })
+}
+
+function clearProfile() {
+  scopeQuery.clear(['profile'])
+}
+
+// The applied profile changed (the select, a chip, a link, or the feature list
+// arriving after mount): refetch under it.
+watch(appliedProfile, () => { void loadScoped(false) })
+
+// The shared list refreshes on SSE; keep a scoped view live (debounced).
+let scopedRefreshTimer: ReturnType<typeof setTimeout> | null = null
+watch(
+  () => serversStore.servers.map(s => `${s.name}|${s.connected}|${s.enabled}|${s.quarantined}|${s.tool_count}|${s.health?.status ?? ''}|${s.security_scan?.status ?? ''}|${s.security_scan?.finding_counts?.warning ?? ''}`).join(','),
+  () => {
+    if (!profileActive.value) return
+    if (scopedRefreshTimer) clearTimeout(scopedRefreshTimer)
+    scopedRefreshTimer = setTimeout(() => { void loadScoped(true) }, 300)
+  },
+)
+onBeforeUnmount(() => { if (scopedRefreshTimer) clearTimeout(scopedRefreshTimer) })
+
+// A profile edited elsewhere (the editor, the Profiles page) changes which
+// servers a scoped view lists; the server list itself did not change, so the
+// fingerprint above would never notice.
+function onProfilesChanged() {
+  if (profileActive.value) void loadScoped(true)
+}
+onMounted(() => window.addEventListener(PROFILES_CHANGED_EVENT, onProfilesChanged))
+onBeforeUnmount(() => window.removeEventListener(PROFILES_CHANGED_EVENT, onProfilesChanged))
+
+// What the page displays: the profile's list when one is applied, otherwise the
+// shared store. Every tile, pill and card below reads these, never the store.
+const rows = computed<Server[]>(() => (profileActive.value ? (scopedServers.value ?? []) : serversStore.servers))
+const connectedRows = computed(() => rows.value.filter(isServerConnected))
+const enabledRows = computed(() => rows.value.filter(s => s.enabled))
+const quarantinedRows = computed(() => rows.value.filter(s => s.quarantined))
+const counts = computed(() => ({
+  total: rows.value.length,
+  connected: connectedRows.value.length,
+  enabled: enabledRows.value.length,
+  quarantined: quarantinedRows.value.length,
+}))
+// Only tools that are actually available count: enabled, not quarantined (#285, #1064).
+const totalTools = computed(() =>
+  rows.value.filter(s => s.enabled && !s.quarantined).reduce((sum, server) => sum + server.tool_count, 0))
+
+onMounted(async () => {
+  void loadActivitySummary()
+  applyScopeQueryParams()
+  if (profileScopeAvailable.value && !profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
+  const urlHasProfile = typeof route.query.profile === 'string' && route.query.profile !== ''
+  if (urlHasProfile && !profileScopeAvailable.value) {
+    scopeWaiting.value = true
+    await systemStore.waitForScopeFeatures()
+    scopeWaitTimedOut.value = true
+    scopeWaiting.value = false
+  }
+  if (profileActive.value) await loadScoped(false)
+})
+watch(profileScopeAvailable, available => {
+  if (available && !profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
+})
+watch(() => [route.query.status, route.query.q], applyScopeQueryParams)
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the read side
+// above was the whole story — a filter pill or the search box updated
+// `filter`/`searchQuery` but never wrote back, so "Clear Filters" visibly
+// reset the controls while the address bar kept the stale `?status=&q=`
+// (SC-009's URL round-trip). `filter === 'all'` is the unfiltered default and
+// clears the param entirely, matching applyScopeQueryParams()'s own read.
+watch([filter, searchQuery], () => {
+  scopeQuery.set({
+    status: filter.value === 'all' ? undefined : filter.value,
+    q: searchQuery.value || undefined,
+  })
+})
 
 // The page chrome (stat tiles, filter pills, search) only describes a list that
 // exists. `servers.length` — not `loaded` — is the right gate: it is also false
 // while the very first fetch is in flight, so a fresh install never flashes a
 // row of zeroes before the empty state resolves.
-const hasServers = computed(() => serversStore.servers.length > 0)
+const hasServers = computed(() => rows.value.length > 0)
 
 // Telling the user "you have no servers" is a claim, and only a list that
 // actually arrived can support it. `loaded` (set once any successful list has
 // been applied) is what distinguishes "none configured" from "we don't know
 // yet" — `servers` starts empty either way.
 const isFirstRun = computed(() => serversStore.loaded && serversStore.servers.length === 0)
-
-function onServerAdded(serverName?: string) {
-  showAddServer.value = false
-  void serversStore.fetchServers()
-  // UX audit F07: a single add hands off to that server's detail view, where
-  // connect/scan/review/approve is already on screen. The bulk/import path
-  // emits no name and keeps the old refresh-in-place behaviour.
-  if (serverName) {
-    void router.push(serverDetailPath(serverName))
-  }
-}
 
 // The setup wizard is mounted by Dashboard.vue, so opening it from here means
 // navigating there first; the store carries the tab request across the hop.
@@ -354,24 +623,27 @@ function openImportWizard() {
  * percentage. With nothing enabled there is no ratio to report, only a fact.
  */
 const connectedSummary = computed(() => {
-  const { connected, enabled } = serversStore.serverCount
+  const { connected, enabled } = counts.value
   if (enabled === 0) return 'no servers enabled'
   return `${connected} of ${enabled} enabled online`
 })
 
 const filteredServers = computed(() => {
-  let servers = serversStore.servers
+  let servers = rows.value
 
   // Apply filter
   switch (filter.value) {
     case 'connected':
-      servers = serversStore.connectedServers
+      servers = connectedRows.value
       break
     case 'enabled':
-      servers = serversStore.enabledServers
+      servers = enabledRows.value
       break
     case 'quarantined':
-      servers = serversStore.quarantinedServers
+      servers = quarantinedRows.value
+      break
+    case 'needs_review':
+      servers = rows.value.filter(isNeedsReview)
       break
     default:
       // 'all' - no additional filtering
@@ -393,6 +665,8 @@ const filteredServers = computed(() => {
 
 async function refreshServers() {
   await serversStore.fetchServers()
+  if (profileActive.value) await loadScoped(true)
+  void loadActivitySummary()
 }
 
 async function scanAllServers() {

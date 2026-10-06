@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -91,6 +92,14 @@ func seedReplayableCall(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, se
 // audit line's `operation` tier.
 func seedReplayableCallWithAnnotations(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, server, tool, url string, annotations *config.ToolAnnotations) string {
 	t.Helper()
+	return seedReplayableCallWithID(t, proxy, mainSrv, "replay-fixture-1", server, tool, url, annotations)
+}
+
+// seedReplayableCallWithID is seedReplayableCallWithAnnotations with the
+// persisted record's id chosen by the caller, so one test can seed several
+// replayable records (Spec 108 T046b seeds one per profile-scope outcome).
+func seedReplayableCallWithID(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, callID, server, tool, url string, annotations *config.ToolAnnotations) string {
+	t.Helper()
 	sm := mainSrv.runtime.StorageManager()
 
 	serverCfg := &config.ServerConfig{Name: server, URL: url, Protocol: "streamable-http", Enabled: true}
@@ -100,7 +109,6 @@ func seedReplayableCallWithAnnotations(t *testing.T, proxy *MCPProxyServer, main
 	require.NoError(t, mainSrv.runtime.UpstreamManager().AddServerConfig(server, serverCfg))
 	require.NoError(t, mainSrv.runtime.UpstreamManager().ConnectAll(context.Background()))
 
-	callID := "replay-fixture-1"
 	require.NoError(t, sm.RecordToolCall(&storage.ToolCallRecord{
 		ID:          callID,
 		ServerID:    identity.ID,
@@ -145,6 +153,93 @@ func TestReplayToolCall_WritesAuthzAllowThenToolCallSuccess(t *testing.T) {
 	assert.Equal(t, "tool_call", lines[1]["event"])
 	assert.Equal(t, "success", lines[1]["outcome"])
 	assert.Equal(t, lines[0]["request_id"], lines[1]["request_id"])
+}
+
+func TestReplayToolCall_ProfilePolicyRefusesBeforeUpstream(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
+		cfg.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}}
+		cfg.Profiles = []config.ProfileConfig{{
+			Name: "replay-readonly", Servers: []string{"github"},
+			Tools: &config.ProfileToolRules{Deny: []string{"github:create_issue"}},
+		}}
+	})
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	go rt.ActivityService().Start(rt.AppContext(), rt)
+	startDeadline := time.Now().Add(5 * time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before replay is refused")
+	mainSrv := &Server{runtime: rt, mcpProxy: proxy}
+	url, calls := startRuntimeCountingUpstream(t, proxy, "github", "create_issue")
+	callID := seedReplayableCall(t, proxy, mainSrv, "github", "create_issue", url)
+
+	_, err := mainSrv.ReplayToolCall(urlProfileCtx(proxy, "replay-readonly"), callID, nil)
+
+	var refusal *profile.ToolBlockedError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, profile.BlockReasonRule, refusal.Reason)
+	require.Empty(t, calls.dispatched(), "profile-denied replay must stop before upstream I/O")
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 1, "a profile-refused replay writes one authorization denial")
+	assert.Equal(t, "authz", lines[0]["event"])
+	assert.Equal(t, "deny", lines[0]["decision"])
+
+	require.Eventually(t, func() bool {
+		records, _, listErr := rt.StorageManager().ListActivities(storage.ActivityFilter{Limit: 50})
+		if listErr != nil {
+			return false
+		}
+		for _, record := range records {
+			if record.Type == storage.ActivityTypePolicyDecision && record.ServerName == "github" && record.ToolName == "create_issue" {
+				return record.Status == "blocked" && record.Metadata[storage.MetadataKeyBlockReason] == string(profile.BlockReasonRule)
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "a profile-refused replay persists its blocked activity reason")
+}
+
+func TestReplayToolCall_ProfileScopeRefusesWithAuditAndActivity(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
+		cfg.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}}
+		cfg.Profiles = []config.ProfileConfig{{Name: "replay-out-of-scope", Servers: []string{"other"}}}
+	})
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	go rt.ActivityService().Start(rt.AppContext(), rt)
+	startDeadline := time.Now().Add(5 * time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before replay is refused")
+	mainSrv := &Server{runtime: rt, mcpProxy: proxy}
+	url, calls := startRuntimeCountingUpstream(t, proxy, "github", "create_issue")
+	callID := seedReplayableCall(t, proxy, mainSrv, "github", "create_issue", url)
+
+	_, err := mainSrv.ReplayToolCall(urlProfileCtx(proxy, "replay-out-of-scope"), callID, nil)
+	require.ErrorIs(t, err, profile.ErrToolOutsideProfile)
+	require.Empty(t, calls.dispatched(), "out-of-scope replay must stop before upstream I/O")
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 1, "a profile-scope refusal writes one authorization denial")
+	assert.Equal(t, "authz", lines[0]["event"])
+	assert.Equal(t, "deny", lines[0]["decision"])
+	assert.Equal(t, "profile_scope", lines[0]["reason"])
+
+	require.Eventually(t, func() bool {
+		records, _, listErr := rt.StorageManager().ListActivities(storage.ActivityFilter{Limit: 50})
+		if listErr != nil {
+			return false
+		}
+		for _, record := range records {
+			if record.Type == storage.ActivityTypePolicyDecision && record.ServerName == "github" && record.ToolName == "create_issue" {
+				return record.Status == "blocked" && record.Metadata["reason"] == profile.ErrToolOutsideProfile.Error()
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "a profile-scope replay refusal persists a blocked activity record")
 }
 
 func TestReplayToolCall_UnresolvedIDDelegatesUnaudited(t *testing.T) {

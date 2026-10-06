@@ -54,6 +54,8 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		// them (or the Web UI editor) can read them back. Deep-copied so the
 		// wire view never aliases the stored config map.
 		AnnotationOverrides: config.CloneAnnotationOverrides(cfg.AnnotationOverrides),
+		// Spec 112: allowlist of forwarded client header names (no values).
+		ForwardHeaders: append([]string(nil), cfg.ForwardHeaders...),
 		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
 		// caller that PATCHed a limit can read it back.
 		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
@@ -278,6 +280,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			v := exposePrompts
 			server.ExposePrompts = &v
 		}
+		// Spec 112: forward_headers is a list of header names. The generic map
+		// carries []string from the runtime projection or []interface{} after a
+		// JSON round-trip.
+		server.ForwardHeaders = stringListFromAny(generic["forward_headers"])
 		// Spec 086: per-server trust tier round-trips as a plain string.
 		if trustMode, ok := generic["trust_mode"].(string); ok {
 			server.TrustMode = trustMode
@@ -472,6 +478,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			server.SourceRegistryProvenance = prov
 		}
 
+		// Unified health object (incl. Spec 109 status/usable/actions). The
+		// runtime emits a *HealthStatus; a JSON-decoded map is also accepted.
+		server.Health = healthFromGeneric(generic["health"])
+
 		servers = append(servers, server)
 	}
 
@@ -529,6 +539,9 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 				OpenWorldHint:   annotationsPtr.OpenWorldHint,
 			}
 		}
+		// Spec 109 FR-028/X11: computed here, once, for every producer of a
+		// Tool — never left for the Web/macOS/CLI surface to derive locally.
+		tool.Tier = AnnotationTier(toolAnnotationToConfig(tool.Annotations))
 
 		tools = append(tools, tool)
 	}
@@ -722,4 +735,72 @@ func convertMapToToolAnnotation(m map[string]interface{}) *ToolAnnotation {
 	}
 
 	return annotation
+}
+
+// toolAnnotationToConfig adapts the wire-shaped ToolAnnotation to
+// config.ToolAnnotations — the type AnnotationTier takes — so the tier
+// computation stays the single pure function in tier.go rather than being
+// duplicated against this package's own annotation type.
+func toolAnnotationToConfig(a *ToolAnnotation) *config.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &config.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
+}
+
+// stringListFromAny converts a []string or []interface{} of strings (the two
+// shapes a generic server map takes, depending on whether it crossed a JSON
+// round-trip) into a []string. Anything else, or an empty list, yields nil.
+func stringListFromAny(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		out = append(out, t...)
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// healthFromGeneric projects the "health" entry of a generic server map onto a
+// *HealthStatus. It accepts the runtime's *HealthStatus / HealthStatus and a
+// JSON-decoded map[string]interface{}; anything else (including absent or nil)
+// yields nil. The result never aliases the input and Actions is never nil.
+func healthFromGeneric(raw interface{}) *HealthStatus {
+	var h HealthStatus
+	switch v := raw.(type) {
+	case *HealthStatus:
+		if v == nil {
+			return nil
+		}
+		h = *v
+	case HealthStatus:
+		h = v
+	case map[string]interface{}:
+		if v == nil {
+			return nil
+		}
+		// JSON round-trip: the field set and tags are owned by HealthStatus.
+		b, err := json.Marshal(v)
+		if err != nil || json.Unmarshal(b, &h) != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	h.Actions = append([]string{}, h.Actions...)
+	return &h
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -20,13 +21,17 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -122,6 +127,20 @@ type Runtime struct {
 	selfWriteMu      sync.Mutex
 	recentSelfWrites []selfWriteEntry
 
+	// preFixReported holds the servers the "predate the config-load admission
+	// gate" advisory has already named in this process, so the gate passes at
+	// startup and on every later publish do not repeat it.
+	preFixMu       sync.Mutex
+	preFixReported map[string]struct{}
+
+	// bootKnownServers is the set of servers config.db held the first time
+	// the admission gate read it in this process (RC-UPG-001). Only those can
+	// carry a stale record from an older release; a server added while this
+	// process runs is saved to config.db before its config is published, so
+	// the gate must not read it as "known but never approved".
+	bootKnownOnce    sync.Once
+	bootKnownServers map[string]struct{}
+
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status
@@ -138,6 +157,13 @@ type Runtime struct {
 	indexManager    *index.Manager
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
+	// popularityProvider is the Spec 110 catalog popularity signal's
+	// bbolt-backed GitHub-stars provider, installed process-wide via
+	// registries.SetPopularityProvider unconditionally at startup — the
+	// FR-011 kill switch is read INSIDE the provider constructor, so this is
+	// never nil, it just starts no workers when disabled. io.Closer so this
+	// file never needs to name the unexported provider type.
+	popularityProvider io.Closer
 	// promptsRefresh debounces upstream prompts/list_changed notifications into a
 	// single RefreshPrompts fan-out (F13). Nil until lifecycle registration.
 	promptsRefresh *promptsRefreshDebouncer
@@ -158,9 +184,14 @@ type Runtime struct {
 	// outcome of the PREVIOUS process instance, derived exactly once in New
 	// when the marker is armed (FR-010/FR-011) and handed to the telemetry
 	// service in SetTelemetry.
-	prechurnStore     telemetry.PreChurnStore
-	previousShutdown  string
-	managementService interface{}      // Initialized later to avoid import cycle
+	prechurnStore    telemetry.PreChurnStore
+	previousShutdown string
+	// managementService is the unified lifecycle/diagnostics service. It is
+	// installed after New (SetManagementService) because the service is built
+	// on top of the Runtime, not because the type has to be erased: the
+	// management package does not import runtime, so the field carries the
+	// real interface and every consumer gets a compile-time contract.
+	managementService management.Service
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -183,6 +214,11 @@ type Runtime struct {
 	// lifecycle storm into one settled event per server per scan.
 	scanNotify *scanNotifyDebouncer
 
+	// Spec 109 FR-001: the one needs-attention list every surface reads.
+	// Recomputes (debounced) on servers.changed and on a threshold timer for
+	// time-based items (FR-002).
+	attention *attentionSubscriber
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -201,6 +237,16 @@ type Runtime struct {
 	// pre-105 records and the stamp write, so a test can land an operator
 	// write in that window and assert it survives. Nil in production.
 	legacyStampBeforeWrite func()
+
+	// quarantinedCaptureBeforePersist is a test-only interleaving seam for the
+	// inspection capture's final current-connection validation. It lets the
+	// regression suite replace a client after tools/list but before any approval
+	// record is written. Nil in production.
+	quarantinedCaptureBeforePersist func()
+	// quarantinedCaptureDuringPersist runs inside the manager/client
+	// linearization region immediately before review records are stored. It is
+	// test-only and nil in production.
+	quarantinedCaptureDuringPersist func()
 
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between
@@ -229,6 +275,23 @@ type Runtime struct {
 	dockerProbeResult bool
 	dockerProbedAt    time.Time
 	dockerProbeKnown  bool
+
+	// FR-008a binding guard: the injected evaluator and the mutex that
+	// serializes guard-check + write for every guarded path (binding_guard.go).
+	bindingGuardMu sync.RWMutex
+	bindingGuard   BindingGuard
+	bindingWriteMu sync.Mutex
+	// pinStoreOverride replaces the storage manager as the target of a token
+	// pin rewrite (UpdateConfig); tests inject failures through it.
+	pinStoreOverride ProfilePinStore
+	// clientsService is Spec 108's single client-credential service.
+	clientsService *ClientsService
+	// profilesService is Spec 108-f's single profiles service; the evaluator
+	// and session hook are installed by the server.
+	profilesService    *ProfilesService
+	profileEvaluatorMu sync.RWMutex
+	profileEvaluator   ProfileEvaluator
+	profileSessionHook ProfileSessionHook
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -287,6 +350,19 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		_ = storageManager.Close()
 		return nil, fmt.Errorf("failed to initialize cache manager: %w", err)
 	}
+
+	// Spec 110 (catalog popularity signal): a bbolt-backed GitHub-stars
+	// provider, installed process-wide so BuildCatalogHit/SearchAll (catalog
+	// search, CLI, MCP search_servers with registry omitted) can show real
+	// popularity. FR-011's kill switch (MCPPROXY_CATALOG_POPULARITY=false) is
+	// read inside the constructor, so this is unconditional — a disabled
+	// provider still answers Lookup from whatever is already cached, it just
+	// starts no fetch workers.
+	popularityProvider := registries.NewGitHubStarsProvider(registries.PopularityOptions{
+		DB:     storageManager.GetDB(),
+		Logger: logger,
+	})
+	registries.SetPopularityProvider(popularityProvider)
 
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
@@ -385,24 +461,25 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	rt := &Runtime{
 		cfg: cfg,
 		// Boot: memory and disk agree by definition.
-		desiredCfg:       cfg,
-		cfgPath:          cfgPath,
-		logger:           logger,
-		configSvc:        configSvc,
-		storageManager:   storageManager,
-		indexManager:     indexManager,
-		upstreamManager:  upstreamManager,
-		cacheManager:     cacheManager,
-		sigCache:         toolsig.NewCache(),
-		secretResolver:   secretResolver,
-		tokenizer:        tokenizer,
-		refreshManager:   refreshManager,
-		activityService:  activityService,
-		supervisor:       supervisorInstance,
-		prechurnStore:    prechurnStore,
-		previousShutdown: previousShutdown,
-		appCtx:           appCtx,
-		appCancel:        appCancel,
+		desiredCfg:         cfg,
+		cfgPath:            cfgPath,
+		logger:             logger,
+		configSvc:          configSvc,
+		storageManager:     storageManager,
+		indexManager:       indexManager,
+		upstreamManager:    upstreamManager,
+		cacheManager:       cacheManager,
+		popularityProvider: popularityProvider,
+		sigCache:           toolsig.NewCache(),
+		secretResolver:     secretResolver,
+		tokenizer:          tokenizer,
+		refreshManager:     refreshManager,
+		activityService:    activityService,
+		supervisor:         supervisorInstance,
+		prechurnStore:      prechurnStore,
+		previousShutdown:   previousShutdown,
+		appCtx:             appCtx,
+		appCancel:          appCancel,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -417,6 +494,25 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 	rt.truncator.Store(truncator)
 
+	// Spec 108 FR-026: the one clients service behind every client-credential
+	// operation. It shares bindingWriteMu with the guarded config apply so a
+	// binding write and a config write can never combine into a bypassable
+	// state (plan D3).
+	rt.clientsService = NewClientsService(ClientsServiceDeps{
+		Store: storageManager,
+		HMACKey: func() ([]byte, error) {
+			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
+		},
+		Config:   rt.Config,
+		Guard:    rt.BindingGuard,
+		Activity: storageManager.SaveActivity,
+		Publish:  rt.publishEvent,
+		Mu:       &rt.bindingWriteMu,
+		Logger:   logger,
+	})
+
+	rt.profilesService = newProfilesService(rt)
+
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
@@ -427,12 +523,30 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// signals of a reconnect storm without noticeably delaying the result.
 	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
+	// Spec 109 FR-001: one needs-attention list computed from the same
+	// servers.changed rows the coalescer above builds. 200ms trails the
+	// coalescer's own 50ms window so a burst settles into one recompute.
+	rt.attention = newAttentionSubscriber(rt, 200*time.Millisecond)
+	rt.attention.start(appCtx)
+
 	// Spec 093 FR-012/FR-013: origin-independent shed seam. Installed here (not
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
 
 	return rt, nil
+}
+
+// Attention returns the current needs-attention list (Spec 109 FR-001): one
+// function, served verbatim by GET /api/v1/attention (filtered per caller by
+// internal/httpapi), the CLI `attention`/`status`/`doctor` commands, and the
+// same snapshot the SSE attention.changed event is derived from. Safe to call
+// concurrently with the background recompute (atomic snapshot read).
+func (r *Runtime) Attention() []contracts.AttentionItem {
+	if r.attention == nil {
+		return nil
+	}
+	return r.attention.Items()
 }
 
 // Config returns the underlying configuration pointer.
@@ -863,6 +977,12 @@ func (r *Runtime) Close() error {
 		r.cacheManager.Close()
 	}
 
+	// Spec 110: stop the popularity provider's background fetch workers.
+	// Safe even if it was never installed (nil) or already closed.
+	if r.popularityProvider != nil {
+		_ = r.popularityProvider.Close()
+	}
+
 	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt
 	// writers — activity records, retention pruning, usage-snapshot flushes,
 	// async sensitive-data detection. The appCancel at the top of Close
@@ -1118,8 +1238,9 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 	return nil
 }
 
-// GetCurrentConfig returns the current configuration
-func (r *Runtime) GetCurrentConfig() interface{} {
+// GetCurrentConfig returns the current configuration. It may be nil only
+// before the config is installed; New rejects a nil config outright.
+func (r *Runtime) GetCurrentConfig() *config.Config {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
@@ -1553,14 +1674,15 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int, sco
 
 // GetRecentSessions returns recent MCP sessions.
 //
-// status filters on the session status ("active" / "closed"); an empty string
-// means no filtering. Both the filter and the last-activity ordering are pushed
-// down into storage, so they are applied before truncation to limit.
-func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
+// f.Status filters on the session status ("active" / "closed"); f.Profile,
+// f.ClientID and f.TokenName are the Spec 108 scope filters ("-" = unattributed).
+// The filters and the last-activity ordering are pushed down into storage, so
+// they are applied before truncation to f.Limit.
+func (r *Runtime) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	storageRecords, total, err := r.storageManager.GetRecentSessions(limit, status)
+	storageRecords, total, err := r.storageManager.GetRecentSessionsFiltered(f)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get recent sessions: %w", err)
 	}
@@ -1583,6 +1705,10 @@ func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPS
 			Experimental:  rec.Experimental,
 			WorkspaceName: rec.WorkspaceName,
 			WorkSessionID: rec.WorkSessionID,
+			ClientID:      rec.ClientID,
+			TokenName:     rec.TokenName,
+			Profile:       rec.Profile,
+			ProfileSource: rec.ProfileSource,
 		})
 	}
 
@@ -1625,6 +1751,10 @@ func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error
 		Experimental:  rec.Experimental,
 		WorkspaceName: rec.WorkspaceName,
 		WorkSessionID: rec.WorkSessionID,
+		ClientID:      rec.ClientID,
+		TokenName:     rec.TokenName,
+		Profile:       rec.Profile,
+		ProfileSource: rec.ProfileSource,
 	}, nil
 }
 
@@ -1833,7 +1963,10 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// Apply hot-reloadable changes
 	oldCfg := r.cfg
 	r.cfg = newCfg
-	if cfgPath != "" {
+	// Skip the write when the path is unchanged: LoadConfiguredServers goroutines
+	// spawned by an earlier apply read r.cfgPath without this lock, and two
+	// back-to-back funnel writes would otherwise race on an identical value.
+	if cfgPath != "" && cfgPath != r.cfgPath {
 		r.cfgPath = cfgPath
 	}
 
@@ -1890,6 +2023,16 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// This must happen BEFORE LoadConfiguredServers to ensure supervisor reconciles
 	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {
 		r.logger.Error("Failed to update config service", zap.Error(err))
+	}
+
+	// Issue #1458: a profile edit is live the moment the apply returns, so its
+	// per-profile search index must be too, not after the next discovery pass.
+	// A stale index only hides in-scope tools (retrieve_tools re-admits every
+	// hit against the live profile scope), but a widened or new profile would
+	// search an incomplete store. After configSvc.Update because the reconcile
+	// reads r.Config(); before the event so a subscriber that re-queries sees it.
+	if profileIndexInputsChanged(changedFieldsCopy) {
+		r.reconcileProfileIndexes()
 	}
 
 	// Emit config.reloaded event (after releasing lock)
@@ -2082,6 +2225,22 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		SavedTokens:             savingsMetrics.SavedTokens,
 		SavedTokensPercentage:   savingsMetrics.SavedTokensPercentage,
 		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
+	}
+
+	// Spec 109-k / audit finding F-Token: once a real retrieve_tools call has
+	// completed, report its real observed average size instead of the
+	// synthetic per-topK simulation above, and say so via Estimated.
+	realAvgBytes, haveReal := r.realRetrieveToolsAvgRespBytes()
+	resolvedSize, estimated := resolveAverageQueryResultSize(result.AverageQueryResultSize, realAvgBytes, haveReal)
+	result.AverageQueryResultSize = resolvedSize
+	result.Estimated = estimated
+	if result.TotalServerToolListSize > 0 {
+		saved := result.TotalServerToolListSize - resolvedSize
+		if saved < 0 {
+			saved = 0
+		}
+		result.SavedTokens = saved
+		result.SavedTokensPercentage = float64(saved) / float64(result.TotalServerToolListSize) * 100.0
 	}
 
 	return result, nil
@@ -2287,15 +2446,17 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return r.upstreamManager.GetDockerRecoveryStatus()
 }
 
-// SetManagementService stores the management service instance.
-// This is called after runtime initialization to avoid import cycles.
-func (r *Runtime) SetManagementService(svc interface{}) {
+// SetManagementService stores the management service instance. It is called
+// after runtime initialization because the service is CONSTRUCTED on top of
+// the Runtime (it takes one as its RuntimeOperations), not because of an
+// import cycle — internal/management does not import internal/runtime.
+func (r *Runtime) SetManagementService(svc management.Service) {
 	r.managementService = svc
 }
 
 // GetManagementService returns the management service instance.
 // Returns nil if service hasn't been set yet.
-func (r *Runtime) GetManagementService() interface{} {
+func (r *Runtime) GetManagementService() management.Service {
 	return r.managementService
 }
 
@@ -2344,8 +2505,13 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	// Read the global isolation block ONCE, outside the loop: every server's
 	// projection needs it to resolve the effective isolation state (GH #1142).
 	var globalIsolation *config.DockerIsolationConfig
+	var oauthExpiryWarningHours float64
 	if cfg, err := r.GetConfig(); err == nil && cfg != nil {
 		globalIsolation = cfg.DockerIsolation
+		// Read here rather than via r.cfg in the loop below: the servers.changed
+		// coalescer calls this from its own goroutine, and r.cfg is swapped by
+		// applyConfigLocked under r.mu (data race with a concurrent apply).
+		oauthExpiryWarningHours = cfg.OAuthExpiryWarningHours
 	}
 
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
@@ -2577,6 +2743,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
 
+		// Spec 112: surface the forward_headers allowlist (names only).
+		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
+			serverMap["forward_headers"] = append([]string(nil), serverStatus.Config.ForwardHeaders...)
+		}
+
 		// Spec 086: surface the per-server trust tier so the REST GET payload
 		// (and SSE servers.changed embed) can read back the persisted mode, in
 		// parity with its deprecated predecessor auto_approve_tool_changes.
@@ -2658,8 +2829,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		// Calculate unified health status
 		healthConfig := health.DefaultHealthConfig()
-		if r.cfg != nil && r.cfg.OAuthExpiryWarningHours > 0 {
-			healthConfig.ExpiryWarningDuration = time.Duration(r.cfg.OAuthExpiryWarningHours * float64(time.Hour))
+		if oauthExpiryWarningHours > 0 {
+			healthConfig.ExpiryWarningDuration = time.Duration(oauthExpiryWarningHours * float64(time.Hour))
 		}
 
 		healthInput := health.HealthCalculatorInput{
@@ -2788,6 +2959,11 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+
+		// Spec 112: forward_headers allowlist in parity with the StateView path.
+		if len(srv.ForwardHeaders) > 0 {
+			serverInfo["forward_headers"] = append([]string(nil), srv.ForwardHeaders...)
 		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.
@@ -3835,4 +4011,154 @@ func (r *Runtime) SaveOnboardingState(state *storage.OnboardingState) error {
 		return fmt.Errorf("storage not available")
 	}
 	return r.storageManager.SaveOnboardingState(state)
+}
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b, T035): every writer (the mark handler,
+// the connect success path, the `initialize` hook) goes through this so
+// concurrent writes never drop each other's fields.
+func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	if r.storageManager == nil {
+		return fmt.Errorf("storage not available")
+	}
+	return r.storageManager.UpdateOnboardingState(fn)
+}
+
+// RecordClientSeen persists an initialize observation independently of the
+// telemetry activation funnel. Presence must remain accurate when telemetry is
+// disabled, and UpdateOnboardingState keeps this write from racing connect or
+// onboarding mutations.
+func (r *Runtime) RecordClientSeen(clientName string) {
+	name := sanitizeClientName(clientName)
+	if name == "" || r.storageManager == nil {
+		return
+	}
+	changed := false
+	err := r.storageManager.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if state.ClientLastSeen == nil {
+			state.ClientLastSeen = map[string]time.Time{}
+		}
+		now := time.Now()
+		// An MCP client can initialise repeatedly while reconnecting. Persisting
+		// every identical observation needlessly contends with the onboarding
+		// writers, but must not suppress a fresh generation after reconnect (the
+		// successful connect path clears its aliases).
+		if previous, ok := state.ClientLastSeen[name]; ok && now.Sub(previous) < time.Minute && !clientDisconnectedAfterSeen(state, name, previous) {
+			return nil
+		}
+		state.ClientLastSeen[name] = now
+		changed = true
+		protected := knownClientAliases()
+		for len(state.ClientLastSeen) > 32 {
+			var oldest string
+			var at time.Time
+			for key, value := range state.ClientLastSeen {
+				if protected[key] {
+					continue
+				}
+				if oldest == "" || value.Before(at) {
+					oldest, at = key, value
+				}
+			}
+			if oldest == "" { // the fixed supported-client registry itself fits in the cap
+				break
+			}
+			delete(state.ClientLastSeen, oldest)
+		}
+		return nil
+	})
+	if err != nil && r.logger != nil {
+		r.logger.Debug("presence: unable to record MCP client", zap.Error(err))
+	}
+	if err == nil && changed {
+		r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+	}
+}
+
+// clientDisconnectedAfterSeen lets the first initialize in a new connection
+// generation through the write throttle. A recent observation from the prior
+// generation must not suppress fresh presence after an explicit disconnect.
+func clientDisconnectedAfterSeen(state *storage.OnboardingState, alias string, seenAt time.Time) bool {
+	if state == nil {
+		return false
+	}
+	for _, client := range connect.GetAllClients() {
+		for _, knownAlias := range client.ClientInfoNames {
+			if alias == sanitizeClientName(knownAlias) {
+				if disconnectedAt := state.ClientDisconnectedAt[client.ID]; !disconnectedAt.IsZero() && !disconnectedAt.Before(seenAt) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// AttentionClients returns the minimal client evidence needed by the attention
+// subscriber. It intentionally does not inspect client config files or session
+// rows, keeping attention snapshot construction bounded and privacy-safe.
+func (r *Runtime) AttentionClients() []AttentionClient {
+	state, err := r.GetOnboardingState()
+	if err != nil || state == nil {
+		return nil
+	}
+	clients := make([]AttentionClient, 0, len(state.ClientConnectedAt))
+	for _, client := range connect.GetAllClients() {
+		connectedAt, ok := state.ClientConnectedAt[client.ID]
+		if !ok || connectedAt.IsZero() {
+			continue
+		}
+		at := connectedAt
+		clients = append(clients, AttentionClient{
+			ID: client.ID, DisplayName: client.Name, ConnectedAt: &at,
+			LastSeen: latestSeenForAliases(state.ClientLastSeen, client.ClientInfoNames),
+		})
+	}
+	return clients
+}
+
+// NotifyClientPresenceChanged prompts derived presenters to refresh after a
+// successful connect or disconnect write performed outside Runtime.
+func (r *Runtime) NotifyClientPresenceChanged() {
+	r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+}
+
+func latestSeenForAliases(seen map[string]time.Time, aliases []string) *time.Time {
+	var latest *time.Time
+	for _, alias := range aliases {
+		if at, ok := seen[sanitizeClientName(alias)]; ok && (latest == nil || at.After(*latest)) {
+			copy := at
+			latest = &copy
+		}
+	}
+	return latest
+}
+
+// sanitizeClientName returns the canonical safe key shared with session
+// presence. Supported aliases retain their legacy normalized key because
+// lifecycle timestamps and existing onboarding state already use it; unknown
+// names use the disjoint versioned namespace from clientidentity.
+func sanitizeClientName(raw string) string {
+	identity := clientidentity.FromRaw(raw)
+	if identity.Key == "" {
+		return ""
+	}
+	if isKnownClientAlias(identity.RawNormalized) {
+		return identity.RawNormalized
+	}
+	return identity.Key
+}
+
+func knownClientAliases() map[string]bool {
+	aliases := make(map[string]bool)
+	for _, client := range connect.GetAllClients() {
+		for _, alias := range client.ClientInfoNames {
+			aliases[clientidentity.NormalizeRaw(alias)] = true
+		}
+	}
+	return aliases
+}
+
+func isKnownClientAlias(rawNormalized string) bool {
+	return knownClientAliases()[rawNormalized]
 }

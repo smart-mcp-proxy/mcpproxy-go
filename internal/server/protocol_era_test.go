@@ -44,7 +44,7 @@ func pinnedTestServer(t *testing.T) *httptest.Server {
 		},
 	)
 
-	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions()...)
+	streamable := mcpserver.NewStreamableHTTPServer(srv, clientFacingStreamableOptions(nil)...)
 	httpServer := httptest.NewServer(streamable)
 	t.Cleanup(httpServer.Close)
 	return httpServer

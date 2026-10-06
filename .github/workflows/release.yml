@@ -31,8 +31,11 @@ jobs:
       - name: Get previous tag
         id: prev_tag
         run: |
-          # Get the tag before the current one
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # Get the previous STABLE tag. This job runs for stable tags only,
+          # and after an RC cycle the nearest tag is the last RC, which
+          # would summarize only the final RC delta instead of everything
+          # since the last release (v0.70.0 shipped notes covering rc.4..rc.5).
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' HEAD^ 2>/dev/null || echo "")
           echo "tag=$PREV_TAG" >> $GITHUB_OUTPUT
           if [ -n "$PREV_TAG" ]; then
             echo "Previous tag: $PREV_TAG"
@@ -449,14 +452,21 @@ jobs:
           if [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
             echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
 
-            # Determine tray binary name
+            # Determine tray binary name, and on Windows link it as a GUI
+            # (not console) executable. Without -H windowsgui the tray pops a
+            # console window on every launch; scripts/build-windows-installer.ps1
+            # has always passed it, and the archived copy must match, because a
+            # tray self-update extracts THIS binary and installs it over the
+            # installer's copy (internal/tray applyArchiveUpdate).
+            TRAY_LDFLAGS="${LDFLAGS}"
             if [ "${{ matrix.goos }}" = "windows" ]; then
               TRAY_BINARY="mcpproxy-tray.exe"
+              TRAY_LDFLAGS="${LDFLAGS} -H windowsgui"
             else
               TRAY_BINARY="mcpproxy-tray"
             fi
 
-            go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
+            go build -ldflags "${TRAY_LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
@@ -708,6 +718,15 @@ jobs:
             cp mcpproxy-tray "${TARBALL_STAGE}/"
             FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
             echo "Including mcpproxy-tray in archive"
+          elif [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
+            # The tray self-update extracts the mcpproxy-tray member by exact
+            # name and fails closed without it, so a tray-less archive strands
+            # every tray on this platform. This branch is the one that used to
+            # degrade silently: the conditions above simply did not fire and
+            # the archive shipped core-only. Linux and the server edition fall
+            # through untouched — neither ships a tray.
+            echo "::error::no tray binary to archive for ${{ matrix.goos }}; a core-only archive would strand every tray self-update"
+            exit 1
           fi
 
           ARCHIVE_OUT="$(pwd)"
@@ -1419,7 +1438,7 @@ jobs:
       # fetch-depth: 0 is already set on this job's Checkout step (line ~1065) so
       # git-cliff sees the full tag history without an extra checkout here.
       - name: Generate CHANGELOG (git-cliff)
-        uses: orhun/git-cliff-action@3d96a18cc4ec17e9dc69ddcc424ccafaf1f78ce2 # v4.9.0
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --verbose
@@ -1817,6 +1836,17 @@ jobs:
               FAILED=1
             fi
           done
+          # A fresh feed is useless if its enclosure 404s — Sparkle then fails
+          # every update with "couldn't download the update" (v0.69.0).
+          for f in appcast-out/*.xml; do
+            URL=$(sed -n 's/.*enclosure url="\([^"]*\)".*/\1/p' "$f" | head -1)
+            if [ -z "$URL" ] || ! curl -fsIL -o /dev/null "$URL"; then
+              echo "::error::$(basename "$f") enclosure is not downloadable: ${URL:-<none>}"
+              FAILED=1
+            else
+              echo "✅ $(basename "$f") enclosure downloadable: ${URL}"
+            fi
+          done
           exit "$FAILED"
 
   # Open the PR that deletes .github/RELEASE_NOTICE.md once this release has
@@ -2131,7 +2161,7 @@ jobs:
         run: npm run build
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0  # v4.1.3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

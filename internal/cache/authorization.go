@@ -79,6 +79,13 @@ var ErrUnauthorizedRead = errors.New("cache entry was produced under an authoriz
 // ErrUnauthorizedRead) holds.
 var ErrLegacyProvenance = fmt.Errorf("%w: entry predates provenance stamping and has been invalidated", ErrUnauthorizedRead)
 
+// ErrForwardedMismatch is the ErrUnauthorizedRead the read_cache handler
+// returns when an entry was produced by a call that forwarded client headers
+// (Spec 112 FR-017) and the redeeming request's forwarded set for the same
+// upstream differs or is absent. errors.Is(err, ErrUnauthorizedRead) holds, so
+// scoped callers get the same non-disclosing not-found body.
+var ErrForwardedMismatch = fmt.Errorf("%w: entry was produced for a different set of forwarded client headers", ErrUnauthorizedRead)
+
 // ErrEntryUnreadable is returned by a gated read to a reader the header
 // ADMITTED whose entry then proved unreadable: a body this binary cannot
 // decode, or one that disagrees with the header it sits behind. It is not an
@@ -127,6 +134,23 @@ type Authorization struct {
 	// or narrowing a profile must revoke cached access, and a stale pin keeps
 	// its name while resolving to deny-all.
 	ProfileServers []string `json:"profile_servers,omitempty"`
+	// PolicyFingerprint is the effective profile's Spec 108 tool-policy
+	// fingerprint (profile.CompiledPolicy.Fingerprint, hex-encoded), set only
+	// when ProfileScoped and the profile has a compiled policy. Editing a
+	// profile's policy (tier cap, allow/deny, classify, unannotated handling,
+	// code execution, management tools, switchable_to) changes this without
+	// necessarily changing ProfileServers, so a page cached under the old
+	// policy is refused after the edit even though the server-scope dimension
+	// is unchanged (FR-027).
+	PolicyFingerprint string `json:"policy_fingerprint,omitempty"`
+	// ToolTierGeneration is the Supervisor-wide counter (runtime/supervisor.
+	// Supervisor.ToolTierGeneration) bumped whenever any server's discovered
+	// tool set is republished — and therefore whenever any tool's effective
+	// annotations may have changed, or a tool appeared/disappeared — set only
+	// when ProfileScoped. A page cached while a tool was classified read and
+	// later re-listed with a destructive hint is refused by the next
+	// read_cache once this has moved, with no config edit at all (FR-027).
+	ToolTierGeneration uint64 `json:"tool_tier_generation,omitempty"`
 }
 
 // IsAdministrator reports whether the caller kind is an administrator kind:
@@ -214,13 +238,15 @@ func permissionBits(perms []string) uint8 {
 // the identity the gate requires, and for an agent it makes "digest-equal"
 // mean the same credential.
 type canonicalAuthorization struct {
-	CallerKind     string   `json:"k"`
-	Principal      string   `json:"p,omitempty"`
-	AllowedServers []string `json:"s,omitempty"`
-	Permissions    []string `json:"t,omitempty"`
-	ProfilePin     string   `json:"pin,omitempty"`
-	ProfileScoped  bool     `json:"ps,omitempty"`
-	ProfileServers []string `json:"pss,omitempty"`
+	CallerKind         string   `json:"k"`
+	Principal          string   `json:"p,omitempty"`
+	AllowedServers     []string `json:"s,omitempty"`
+	Permissions        []string `json:"t,omitempty"`
+	ProfilePin         string   `json:"pin,omitempty"`
+	ProfileScoped      bool     `json:"ps,omitempty"`
+	ProfileServers     []string `json:"pss,omitempty"`
+	PolicyFingerprint  string   `json:"pf,omitempty"`
+	ToolTierGeneration uint64   `json:"ttg,omitempty"`
 }
 
 func sortedSet(in []string) []string {
@@ -238,13 +264,15 @@ func sortedSet(in []string) []string {
 // is one 32-byte comparison whatever the snapshot names (research D16).
 func (a Authorization) digest() [sha256.Size]byte {
 	data, err := json.Marshal(canonicalAuthorization{
-		CallerKind:     a.CallerKind,
-		Principal:      a.Principal,
-		AllowedServers: sortedSet(a.AllowedServers),
-		Permissions:    sortedSet(a.Permissions),
-		ProfilePin:     a.ProfilePin,
-		ProfileScoped:  a.ProfileScoped,
-		ProfileServers: sortedSet(a.ProfileServers),
+		CallerKind:         a.CallerKind,
+		Principal:          a.Principal,
+		AllowedServers:     sortedSet(a.AllowedServers),
+		Permissions:        sortedSet(a.Permissions),
+		ProfilePin:         a.ProfilePin,
+		ProfileScoped:      a.ProfileScoped,
+		ProfileServers:     sortedSet(a.ProfileServers),
+		PolicyFingerprint:  a.PolicyFingerprint,
+		ToolTierGeneration: a.ToolTierGeneration,
 	})
 	if err != nil {
 		// Strings, string slices and a bool: json.Marshal cannot fail.

@@ -27,6 +27,9 @@
         </span>
       </div>
       <p v-if="field.help" class="text-xs text-base-content/60 mt-0.5">{{ field.help }}</p>
+      <!-- Spec 109 FR-044a: the effective value is forced from outside the
+           config file (e.g. an environment opt-out); say why and how to unlock. -->
+      <p v-if="lock" class="text-xs text-warning mt-0.5" :data-test="`setting-locked-${field.key}`">{{ lock.reason }}</p>
     </div>
 
     <!-- Control -->
@@ -36,7 +39,8 @@
         v-if="field.control === 'toggle'"
         type="checkbox"
         class="toggle toggle-primary"
-        :checked="!!modelValue"
+        :checked="lock ? !!lock.value : !!modelValue"
+        :disabled="!!lock"
         :data-test="`setting-toggle-${field.key}`"
         @change="emitVal(($event.target as HTMLInputElement).checked)"
       />
@@ -46,6 +50,7 @@
         v-else-if="field.control === 'select'"
         class="select select-bordered select-sm min-w-[12rem]"
         :value="modelValue ?? ''"
+        :disabled="!!lock"
         :data-test="`setting-select-${field.key}`"
         @change="emitVal(($event.target as HTMLSelectElement).value)"
       >
@@ -62,6 +67,7 @@
           :min="field.min"
           :max="field.max"
           :step="field.step"
+          :disabled="!!lock"
           :data-test="`setting-number-${field.key}`"
           @input="onNumber(($event.target as HTMLInputElement).value)"
         />
@@ -129,6 +135,7 @@
           :class="{ 'input-error': validationError }"
           :value="modelValue ?? ''"
           :placeholder="field.placeholder"
+          :disabled="!!lock"
           :data-test="`setting-text-${field.key}`"
           @input="emitText(($event.target as HTMLInputElement).value)"
         />
@@ -178,7 +185,14 @@
 import { ref, computed } from 'vue'
 import { docsUrl, validateField, type SettingField } from '@/views/settings/fields'
 
-const props = defineProps<{ field: SettingField; modelValue: any; dirty?: boolean }>()
+const props = defineProps<{
+  field: SettingField
+  modelValue: any
+  dirty?: boolean
+  // Spec 109 FR-044a: when set the control is disabled, shows `value`, and the
+  // reason is rendered under the help text. emitVal becomes a no-op.
+  lock?: { reason: string; value?: unknown } | null
+}>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: any): void }>()
 
 const showSecret = ref(false)
@@ -221,6 +235,7 @@ function confirmRegenerate() {
 const validationError = computed(() => (props.dirty ? validateField(props.field, props.modelValue) : null))
 
 function emitVal(v: any) {
+  if (props.lock) return
   emit('update:modelValue', v)
 }
 

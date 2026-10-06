@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 )
@@ -59,20 +61,77 @@ type SessionInfo struct {
 	// calls wait on it rather than racing ahead to UpdateSessionStats, which
 	// errors if the row is not there yet.
 	persistDone chan struct{}
+
+	// TokenName and ClientID identify the credential that authenticated this
+	// session (Spec 108-c, data-model.md §6): the agent-token/client-
+	// credential name and, for a client credential, its client id. Both
+	// empty for an admin/anonymous session. Set once at initialize from the
+	// AuthContext (SetSessionIdentity) — never re-derived per call, because
+	// the credential does not change mid-connection.
+	TokenName string
+	ClientID  string
+	// TokenPrefix is the credential's 12-char display prefix (Spec 108-j J15).
+	// It is INTERNAL (never persisted or serialized): the activity funnels with
+	// no request context read it back so an event carries the same ownership
+	// proof the SSE renderer checks (name AND prefix).
+	TokenPrefix string
+
+	// Anonymous marks a session that presented no credential (Spec 108-f F10):
+	// its base is the snapshot's anonymous_profile, read at notify time. Memory
+	// only, stamped once at initialize.
+	Anonymous bool
+
+	// Profile and ProfileSource are the LATEST effective resolution for this
+	// session (data-model.md §6 "latest effective, updated on each call").
+	// The session's BASE (pin, bound profile or anonymous_profile) is
+	// deliberately not stored here — see UpdateSessionProfile.
+	Profile       string
+	ProfileSource string
+
+	// server is the MCP server instance that serves this session (one of the
+	// routing-mode servers), stamped from mcp-go's ServerFromContext at
+	// initialize so a binding change can send tools/list_changed on the right
+	// instance (Spec 108 FR-026, plan D18). Never persisted or serialised.
+	server *mcpserver.MCPServer
+
+	// closed marks a soft-closed session: the transport unregistered it, but the
+	// entry (client name, workspace, persisted flag, work session) is kept so a
+	// client that re-registers on the same id without a new initialize keeps its
+	// attribution (#1205). Cleared by the next activity or register; evicted
+	// after closedSessionTTL.
+	closed   bool
+	closedAt time.Time
 }
+
+// closedSessionTTL is how long a soft-closed session is retained. It matches the
+// storage inactivity timeout (runtime.backgroundSessionCleanup).
+const closedSessionTTL = 30 * time.Minute
 
 // SessionStore manages MCP session information
 type SessionStore struct {
 	sessions map[string]*SessionInfo
 	// activeProfiles holds the per-session active profile slug selected via the
 	// set_profile MCP tool (Profiles v2 T2). Kept orthogonal to sessions so a
-	// re-initialize (SetSession) never clobbers a live selection. Cleared on
-	// session close (RemoveSession) — covering both the OnUnregisterSession hook
-	// and the background inactivity cleanup, which both call RemoveSession.
+	// re-initialize (SetSession) never clobbers a live selection. Kept across
+	// a soft close (RemoveSession) and dropped with the closed entry on eviction.
 	activeProfiles map[string]string
 	mu             sync.RWMutex
 	logger         *zap.Logger
 	storageManager *storage.Manager
+
+	// now is the clock (test seam for closed-entry eviction); nil means time.Now.
+	now func() time.Time
+	// lifecycleMu serializes the storage close/reopen reconciliation so a
+	// concurrent unregister and re-activity cannot leave the stored status
+	// disagreeing with the in-memory one.
+	lifecycleMu sync.Mutex
+
+	// profileWriter, when non-nil, replaces the storage write-through of a
+	// changed profile resolution. Test seam only (counts writes).
+	profileWriter func(sessionID, profile, source string)
+	// writeThroughMu serializes the storage write-throughs of profile
+	// resolutions (see UpdateSessionProfile).
+	writeThroughMu sync.Mutex
 }
 
 // NewSessionStore creates a new session store
@@ -81,6 +140,81 @@ func NewSessionStore(logger *zap.Logger) *SessionStore {
 		sessions:       make(map[string]*SessionInfo),
 		activeProfiles: make(map[string]string),
 		logger:         logger,
+	}
+}
+
+func (s *SessionStore) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// evictClosedLocked drops soft-closed sessions older than closedSessionTTL,
+// along with their set_profile selection. Caller must hold the write lock.
+func (s *SessionStore) evictClosedLocked() {
+	cutoff := s.clock().Add(-closedSessionTTL)
+	for id, info := range s.sessions {
+		if info.closed && info.closedAt.Before(cutoff) {
+			delete(s.sessions, id)
+			delete(s.activeProfiles, id)
+		}
+	}
+}
+
+// reconcileStorage brings the stored status of a persisted session in line with
+// its current in-memory open/closed state. Called only after a transition.
+func (s *SessionStore) reconcileStorage(sessionID string) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	s.mu.RLock()
+	info, ok := s.sessions[sessionID]
+	persisted, closed := ok && info.persisted, ok && info.closed
+	done := (chan struct{})(nil)
+	if ok {
+		done = info.persistDone
+	}
+	mgr := s.storageManager
+	s.mu.RUnlock()
+
+	if !persisted || mgr == nil {
+		return
+	}
+	<-done // the row may still be in flight
+	if closed {
+		if err := mgr.CloseSession(sessionID); err != nil {
+			s.logger.Warn("failed to close session in storage",
+				zap.String("session_id", sessionID), zap.Error(err))
+		}
+		return
+	}
+	if err := mgr.ReopenSession(sessionID); err != nil {
+		s.logger.Debug("failed to reopen session in storage",
+			zap.String("session_id", sessionID), zap.Error(err))
+	}
+}
+
+// reopenLocked clears the soft-close flag. It reports whether the session was
+// closed. Caller must hold the write lock.
+func (s *SessionStore) reopenLocked(info *SessionInfo) bool {
+	if !info.closed {
+		return false
+	}
+	info.closed = false
+	info.closedAt = time.Time{}
+	return true
+}
+
+// Reopen revives a soft-closed session (the transport re-registered the same id
+// without a new initialize). A no-op for unknown or already-open sessions.
+func (s *SessionStore) Reopen(sessionID string) {
+	s.mu.Lock()
+	info, ok := s.sessions[sessionID]
+	revived := ok && s.reopenLocked(info)
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
 	}
 }
 
@@ -121,6 +255,7 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string, h
 		close(info.workspaceReady)
 	}
 	s.sessions[sessionID] = info
+	s.evictClosedLocked()
 
 	s.logger.Debug("session registered (not yet persisted — awaiting first activity)",
 		zap.String("session_id", sessionID),
@@ -185,10 +320,14 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 		return ""
 	}
 
+	revived := s.reopenLocked(info)
 	if info.persisted {
 		workSessionID := info.workSessionID
 		done := info.persistDone
 		s.mu.Unlock()
+		if revived {
+			s.reconcileStorage(sessionID)
+		}
 		<-done // the row may still be in flight; stats callers need it to exist
 		return workSessionID
 	}
@@ -214,6 +353,11 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 		WorkspaceRoot: info.Workspace,
 		WorkspaceName: workspaceDisplayName(info.Workspace),
 		WorkSessionID: info.workSessionID,
+		// Spec 108 FR-033: the credential and the latest resolution so far.
+		TokenName:     info.TokenName,
+		ClientID:      info.ClientID,
+		Profile:       info.Profile,
+		ProfileSource: info.ProfileSource,
 	}
 	workSessionID := info.workSessionID
 	done := info.persistDone
@@ -339,31 +483,38 @@ func (s *SessionStore) AbandonWorkspaceFetch(sessionID string) {
 	}
 }
 
-// RemoveSession removes session information.
+// RemoveSession soft-closes a session (#1205).
+//
+// The entry is KEPT, marked closed: a client that re-registers on the same id
+// (e.g. a GET stream ending and being re-opened) sends no new initialize, so
+// dropping the entry would lose its client name, workspace, persisted flag and
+// work session for good. The next activity or Reopen revives it; otherwise it is
+// evicted after closedSessionTTL.
 //
 // Only sessions that were actually persisted are closed in storage. A session
 // that never did any work has no stored record (Spec 082), and asking storage to
-// close it would return "session not found" on every idle disconnect — trading
-// a flood of junk records for a flood of junk warnings.
+// close it would return "session not found" on every idle disconnect.
 func (s *SessionStore) RemoveSession(sessionID string) {
 	s.mu.Lock()
 	info, ok := s.sessions[sessionID]
 	wasPersisted := ok && info.persisted
-	delete(s.sessions, sessionID)
-	delete(s.activeProfiles, sessionID)
-	mgr := s.storageManager
+	transition := ok && !info.closed
+	if ok {
+		info.closed = true
+		if transition {
+			info.closedAt = s.clock()
+		}
+	} else {
+		delete(s.activeProfiles, sessionID)
+	}
+	s.evictClosedLocked()
 	s.mu.Unlock()
 
-	if wasPersisted && mgr != nil {
-		if err := mgr.CloseSession(sessionID); err != nil {
-			s.logger.Warn("failed to close session in storage",
-				zap.String("session_id", sessionID),
-				zap.Error(err),
-			)
-		}
+	if transition && wasPersisted {
+		s.reconcileStorage(sessionID)
 	}
 
-	s.logger.Debug("session info removed",
+	s.logger.Debug("session soft-closed",
 		zap.String("session_id", sessionID),
 		zap.Bool("was_persisted", wasPersisted),
 	)
@@ -376,13 +527,17 @@ func (s *SessionStore) RemoveSession(sessionID string) {
 // until the session does its first piece of work. We skip the write for a
 // never-persisted session rather than logging a warning for it.
 func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
-	s.mu.RLock()
-	persisted := false
+	s.mu.Lock()
+	persisted, revived := false, false
 	if info, ok := s.sessions[sessionID]; ok {
 		persisted = info.persisted
+		revived = s.reopenLocked(info)
 	}
 	mgr := s.storageManager
-	s.mu.RUnlock()
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
+	}
 
 	if !persisted || mgr == nil {
 		return
@@ -401,13 +556,17 @@ func (s *SessionStore) UpdateSessionStats(sessionID string, tokens int) {
 // not gain one here, since merely exchanging MCP messages is not "work"
 // (Spec 082): that is exactly what the handshake-only agents do.
 func (s *SessionStore) UpdateActivity(sessionID string) {
-	s.mu.RLock()
-	persisted := false
+	s.mu.Lock()
+	persisted, revived := false, false
 	if info, ok := s.sessions[sessionID]; ok {
 		persisted = info.persisted
+		revived = s.reopenLocked(info)
 	}
 	mgr := s.storageManager
-	s.mu.RUnlock()
+	s.mu.Unlock()
+	if revived {
+		s.reconcileStorage(sessionID)
+	}
 
 	if !persisted || mgr == nil {
 		return
@@ -430,6 +589,213 @@ func (s *SessionStore) SetActiveProfile(sessionID, profileSlug string) {
 	s.activeProfiles[sessionID] = profileSlug
 }
 
+// SetSessionIdentity records the credential that authenticated a session
+// (Spec 108-c, data-model.md §6): the agent-token/client-credential name and
+// its client id (empty for a regular agent token or an admin/anonymous
+// session). Called once at initialize, from the request's AuthContext — the
+// credential never changes mid-connection, so this is never called again for
+// the same sessionID.
+func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.TokenName = tokenName
+		info.ClientID = clientID
+	}
+}
+
+// SetSessionTokenPrefix records the display prefix of the credential that
+// authenticated a session (Spec 108-j J15), next to SetSessionIdentity.
+func (s *SessionStore) SetSessionTokenPrefix(sessionID, prefix string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.TokenPrefix = prefix
+	}
+}
+
+// SetSessionAnonymous records whether a session presented no credential.
+func (s *SessionStore) SetSessionAnonymous(sessionID string, anonymous bool) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.Anonymous = anonymous
+	}
+}
+
+// SessionsMatching returns every live session for which pred is true, with its
+// serving instance (the FR-027 fan-out seam). pred runs under the store's read
+// lock and must not call back into the store.
+func (s *SessionStore) SessionsMatching(pred func(*SessionInfo) bool) []sessionTarget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []sessionTarget
+	for id, info := range s.sessions {
+		if !info.closed && pred(info) {
+			out = append(out, sessionTarget{ID: id, Server: info.server})
+		}
+	}
+	return out
+}
+
+// RenameSelection rewrites every stored set_profile selection of profile
+// `from` to `to` (a profile rename must not strand a session on a name that
+// no longer exists).
+func (s *SessionStore) RenameSelection(from, to string) {
+	if from == "" || to == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == from {
+			s.activeProfiles[id] = to
+		}
+	}
+}
+
+// ClearSelection drops every stored set_profile selection of the named
+// profile (it was deleted): those sessions fall back to their base.
+func (s *SessionStore) ClearSelection(name string) {
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == name {
+			delete(s.activeProfiles, id)
+		}
+	}
+}
+
+// SetSessionServer records the MCP server instance serving a session (the
+// session -> server-instance map, data-model.md §6). Called once at initialize.
+func (s *SessionStore) SetSessionServer(sessionID string, srv *mcpserver.MCPServer) {
+	if sessionID == "" || srv == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.server = srv
+	}
+}
+
+// sessionTarget is one live session of a token, with the server instance that
+// serves it (nil when it was not recorded).
+type sessionTarget struct {
+	ID     string
+	Server *mcpserver.MCPServer
+}
+
+// NotifyTargets returns every live session authenticated by tokenName with its
+// serving instance — the FR-026 fan-out seam behind SessionsForToken.
+func (s *SessionStore) NotifyTargets(tokenName string) []sessionTarget {
+	if tokenName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []sessionTarget
+	for id, info := range s.sessions {
+		if !info.closed && info.TokenName == tokenName {
+			out = append(out, sessionTarget{ID: id, Server: info.server})
+		}
+	}
+	return out
+}
+
+// UpdateSessionProfile records the LATEST effective profile resolution for a
+// session (data-model.md §6), called after resolving a request's
+// ProfileResolution. The session's BASE is deliberately not stored: it
+// changes on reassignment and rename, so every consumer derives it at use
+// time from TokenName -> the token's current profile_pin, or, for a session
+// with no TokenName, from the snapshot's anonymous_profile — never from a
+// value cached here.
+//
+// Spec 108 FR-033: a CHANGED resolution of a persisted session is written
+// through to its row (one small write per change, never per call), so
+// /sessions?profile= filters on the latest effective profile. A session that
+// is not persisted yet is copied at EnsurePersisted instead.
+func (s *SessionStore) UpdateSessionProfile(sessionID, profileName, source string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	changed := info.Profile != profileName || info.ProfileSource != source
+	info.Profile = profileName
+	info.ProfileSource = source
+	persisted := info.persisted
+	done := info.persistDone
+	mgr := s.storageManager
+	writer := s.profileWriter
+	s.mu.Unlock()
+
+	if !changed || !persisted {
+		return
+	}
+	// The row may still be in flight (EnsurePersisted flips persisted before
+	// CreateSession returns); wait so the write lands on an existing row.
+	<-done
+
+	// Concurrent updates of one session must not persist an older resolution
+	// after a newer one: serialize the write-throughs and persist the CURRENT
+	// in-memory value at write time, so the last writer always leaves the
+	// latest resolution behind.
+	s.writeThroughMu.Lock()
+	defer s.writeThroughMu.Unlock()
+	s.mu.RLock()
+	if cur, ok := s.sessions[sessionID]; ok {
+		profileName, source = cur.Profile, cur.ProfileSource
+	}
+	s.mu.RUnlock()
+	if writer != nil {
+		writer(sessionID, profileName, source)
+		return
+	}
+	if mgr == nil {
+		return
+	}
+	if err := mgr.SetSessionProfile(sessionID, profileName, source); err != nil {
+		s.logger.Debug("failed to write session profile through to storage",
+			zap.String("session_id", sessionID), zap.Error(err))
+	}
+}
+
+// SessionsForToken returns the ids of every live session currently
+// authenticated by the named token — the FR-026/FR-027 notification
+// fan-out seam ("send notifications/tools/list_changed to every live MCP
+// session authenticated by that credential"). Order is unspecified.
+func (s *SessionStore) SessionsForToken(tokenName string) []string {
+	if tokenName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []string
+	for id, info := range s.sessions {
+		if !info.closed && info.TokenName == tokenName {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // GetActiveProfile returns the active profile slug for a session, or "" when the
 // session has no active profile selection.
 func (s *SessionStore) GetActiveProfile(sessionID string) string {
@@ -441,12 +807,18 @@ func (s *SessionStore) GetActiveProfile(sessionID string) string {
 	return s.activeProfiles[sessionID]
 }
 
-// Count returns the number of active sessions
+// Count returns the number of open (not soft-closed) sessions
 func (s *SessionStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return len(s.sessions)
+	n := 0
+	for _, info := range s.sessions {
+		if !info.closed {
+			n++
+		}
+	}
+	return n
 }
 
 // workspaceDisplayName is the basename of a workspace root. Only the basename is

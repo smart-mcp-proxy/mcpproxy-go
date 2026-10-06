@@ -26,12 +26,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -41,7 +43,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -117,6 +118,8 @@ type ServerController interface {
 	SubscribeEvents() chan internalRuntime.Event
 	// UnsubscribeEvents closes and removes the subscription channel.
 	UnsubscribeEvents(chan internalRuntime.Event)
+	// Attention returns the current needs-attention list (Spec 109 FR-001).
+	Attention() []contracts.AttentionItem
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
@@ -144,7 +147,11 @@ type ServerController interface {
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
-	GetManagementService() interface{} // Returns the management service for unified operations
+	// GetManagementService returns the unified lifecycle/diagnostics service.
+	// Typed, not interface{}: handlers must get a compile-time contract rather
+	// than re-deriving a method set with ad-hoc assertions that fail at
+	// runtime (ARC-04). May be nil before the service is installed.
+	GetManagementService() management.Service
 	DiscoverServerTools(ctx context.Context, serverName string) error
 
 	// Tools and search
@@ -166,7 +173,10 @@ type ServerController interface {
 
 	// Secrets management
 	GetSecretResolver() *secret.Resolver
-	GetCurrentConfig() interface{}
+	// GetCurrentConfig returns the live config snapshot, or nil when none is
+	// installed. Typed so apiKeyAuthMiddleware cannot be handed a value it
+	// fails to recognise and then wave through unauthenticated (SEC-02).
+	GetCurrentConfig() *config.Config
 	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
 	// Tool call history. The ToolCallScope argument is the caller's server
@@ -182,7 +192,7 @@ type ServerController interface {
 
 	// Session management. status filters on session status ("active" /
 	// "closed"); an empty string means no filter.
-	GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error)
+	GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error)
 	GetSessionByID(sessionID string) (*contracts.MCPSession, error)
 
 	// Configuration management
@@ -271,6 +281,11 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+	// UpdateOnboardingState runs fn against the current onboarding state and
+	// persists it atomically (Spec 109-b, T035): every writer of the record
+	// must use this instead of a separate Get+Save pair, so a concurrent
+	// writer's field is never dropped.
+	UpdateOnboardingState(fn func(*storage.OnboardingState) error) error
 
 	// Activation state (Spec 044) — read-only access used by the v2
 	// onboarding wizard's Verify tab to detect whether any MCP client has
@@ -286,11 +301,13 @@ type Server struct {
 	httpLogger         *zap.Logger // Separate logger for HTTP requests
 	router             *chi.Mux
 	observability      *observability.Manager
-	tokenStore         TokenStore         // Agent token CRUD (T022)
-	dataDir            string             // Data directory for HMAC key (T022)
-	feedbackSubmitter  FeedbackSubmitter  // Feedback submission (Spec 036)
-	connectService     *connect.Service   // Client connect/disconnect operations
-	securityController SecurityController // Security scanner operations (Spec 039)
+	tokenStore         TokenStore                      // Agent token CRUD (T022)
+	dataDir            string                          // Data directory for HMAC key (T022)
+	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
+	connectService     *connect.Service                // Client connect/disconnect operations
+	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	profilesService    ProfilesAPI                     // Profiles service (Spec 108-f FR-034)
+	securityController SecurityController              // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
 	// serialised (see maskActivityPayloads, maskEventPayload,
@@ -450,6 +467,28 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+	s.wireClientsService()
+}
+
+// SetClientsService configures the clients service behind the client
+// binding route and the connect credential path (Spec 108).
+func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
+	s.clientsService = svc
+	s.wireClientsService()
+}
+
+// wireClientsService connects the clients service to the REST server's
+// on-demand credential observations and, when the connect service is set, to
+// the connect port behind the admin-key upgrade (Spec 108-f F11, F22). Either
+// setter may run first.
+func (s *Server) wireClientsService() {
+	if s.clientsService == nil {
+		return
+	}
+	s.clientsService.SetObserver(s.recordCredentialObservation)
+	if s.connectService != nil {
+		s.clientsService.SetUpgradePort(s.connectService)
+	}
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of
@@ -471,6 +510,30 @@ func (s *Server) Router() *chi.Mux {
 	return s.router
 }
 
+// currentAdminAPIKey returns the currently-configured admin API key, read
+// fresh from the controller on every call, or "" when config is unavailable
+// (nothing to redact then; apiKeyAuthMiddleware refuses such requests).
+//
+// SEC-01 gap fix (PR #1350, live-verification follow-up): every
+// oauth.LogSafeRequestPath / LogSafeQueryString / LogSafeRequestURL call site
+// below passes this so the admin key is redacted by EXACT VALUE wherever it
+// appears in a path, query or referer — the one rule that catches it with no
+// vendor shape to key on. Reading it fresh (rather than caching it once) means
+// a key rotated between requests is covered immediately, with nothing to keep
+// in sync; the cost is one more RLock through the controller per log line,
+// the same one apiKeyAuthMiddleware already pays for every authenticated
+// request. See oauth.redactKnownSecrets for the full false-positive analysis.
+func (s *Server) currentAdminAPIKey() string {
+	if s.controller == nil {
+		return ""
+	}
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.APIKey
+}
+
 // apiKeyAuthMiddleware creates middleware for API key authentication.
 // Connections from Unix socket/named pipe (tray) are trusted and skip API key validation.
 // Supports both global API key (admin) and agent tokens (mcp_agt_ prefix) with scope enforcement.
@@ -482,7 +545,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			source := transport.GetConnectionSource(r.Context())
 			if source == transport.ConnectionSourceTray {
 				s.logger.Debugw("Tray connection - skipping API key validation",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, s.currentAdminAPIKey())),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
 				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -490,19 +553,17 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Get config from controller
-			configInterface := s.controller.GetCurrentConfig()
-			if configInterface == nil {
-				// No config available (testing scenario) - allow through
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Cast to config type
-			cfg, ok := configInterface.(*config.Config)
-			if !ok {
-				// Config is not the expected type (testing scenario) - allow through
-				next.ServeHTTP(w, r)
+			// SECURITY: no configuration means there is nothing to
+			// authenticate against, so the request cannot be authenticated —
+			// refuse it. This used to forward the request to the handler
+			// ("testing scenario"), which is an unauthenticated REST API for
+			// any controller that returns nil here (SEC-02).
+			cfg := s.controller.GetCurrentConfig()
+			if cfg == nil {
+				s.logger.Errorw("Request rejected - configuration unavailable, cannot authenticate",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				s.writeError(w, r, http.StatusServiceUnavailable, "Configuration not available - cannot authenticate request")
 				return
 			}
 
@@ -510,7 +571,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
 				s.logger.Warnw("TCP connection rejected - API key not configured",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
@@ -556,7 +617,7 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.logger.Warnw("TCP connection with missing API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -566,20 +627,26 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
-	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
+		return
+	}
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -593,13 +660,19 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
-	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
+		return
+	}
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -611,16 +684,34 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
 
+// rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client
+// credential (kind=client, mcp_cli_ secret prefix) authenticates on MCP
+// endpoints only. Recognised by the prefix BEFORE any store lookup — a
+// client credential can never read activity, config or other clients over
+// REST, even one presented with a malformed or since-revoked record.
+func (s *Server) rejectClientCredentialOnREST(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warnw("client credential presented on the REST API; refused",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusForbidden, "client credentials are valid on MCP endpoints only")
+}
+
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
-func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
+//
+// adminAPIKey is the caller's already-resolved cfg.APIKey (zcode review round
+// 1, PR #1350 follow-up): both call sites above already hold cfg, so passing
+// it through avoids a second, redundant s.controller.GetCurrentConfig() read
+// on every agent-token-authenticated request that currentAdminAPIKey() would
+// otherwise perform.
+func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, adminAPIKey, token string) {
 	if s.tokenStore == nil || s.dataDir == "" {
 		s.logger.Warnw("Agent token presented but token store not configured",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
 		return
@@ -636,10 +727,20 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
 	if err != nil {
 		s.logger.Warnw("Agent token validation failed",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// FR-023, second half ("and by kind after it"): a client credential
+	// reached this far only if its secret's prefix went unrecognised above
+	// (defence in depth against a future prefix regression) — refuse by
+	// KIND too, never dispatching a client credential's request as an
+	// ordinary agent token.
+	if agentToken.Kind == auth.KindClient {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
 
@@ -672,7 +773,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	s.logger.Debugw("Agent token authenticated",
 		zap.String("agent_name", agentToken.Name),
 		zap.String("token_prefix", agentToken.TokenPrefix),
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 
 	next.ServeHTTP(w, r.WithContext(ctx))
@@ -768,6 +869,64 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 	}
 }
 
+// trustedHostsProvider yields the LIVE trusted_hosts list through the
+// controller's config, evaluated per request so hot-reload takes effect
+// without a restart. Same shape as trustedProxiesProvider: the nil guards are
+// load-bearing because test controllers return a nil config.
+func (s *Server) trustedHostsProvider() func() []string {
+	return func() []string {
+		if s.controller == nil {
+			return nil
+		}
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			return cfg.TrustedHosts
+		}
+		return nil
+	}
+}
+
+// corsMiddleware replaces the former unconditional
+// "Access-Control-Allow-Origin: *" (SEC-04). It echoes the request Origin only
+// when that origin passes the same allowlist the MCP surface uses
+// (httpx.OriginAllowed: loopback on any port, or a host in config
+// trusted_hosts) and emits nothing at all otherwise - including when there is
+// no Origin header, which is every non-browser client. The embedded Web UI is
+// same-origin under /ui/, so nothing legitimate needs the wildcard.
+//
+// The OPTIONS short-circuit stays ahead of apiKeyAuthMiddleware: browsers
+// never send credentials on a preflight, so gating it behind the API key would
+// break legitimate cross-origin use.
+func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
+	trustedHosts := s.trustedHostsProvider()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Add, never Set: another layer may already have written a Vary
+			// and clobbering it would poison shared caches.
+			w.Header().Add("Vary", "Origin")
+
+			origin := r.Header.Get("Origin")
+			if origin != "" && httpx.OriginAllowed(origin, trustedHosts()) {
+				// Echo the concrete origin rather than "*", even when
+				// trusted_hosts is ["*"]: a reflected origin is what lets a
+				// browser cache the response per origin alongside Vary, and
+				// "*" is illegal on a credentialed response. (Reflecting an
+				// arbitrary origin is NOT itself a substitute for the
+				// allowlist — trusted_hosts ["*"] deliberately disables it.)
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			}
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -787,21 +946,9 @@ func (s *Server) setupRoutes() {
 	s.router.Use(s.correlationIDMiddleware()) // Correlation ID and request source tracking
 	s.logger.Debug("Core middleware configured (request ID, logging, recovery, correlation ID)")
 
-	// CORS headers for browser access
-	s.router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	})
+	// CORS headers for browser access (SEC-04). Registered with Use so it
+	// covers every route on this router, /events included.
+	s.router.Use(s.corsMiddleware())
 
 	// Health and readiness endpoints (Kubernetes-compatible with legacy aliases)
 	// See healthzHandler() and readyzHandler() for swagger documentation
@@ -823,9 +970,22 @@ func (s *Server) setupRoutes() {
 
 	// Observability /metrics endpoint (MCP-32). Independent of the health
 	// endpoints below: enabling metrics must not change readiness semantics.
+	//
+	// SEC-07: the exporter is admin-only. It was registered on the bare router,
+	// outside the /api/v1 group, so it answered any caller that could reach the
+	// listener with fleet-wide tool/server counters and API topology. It now
+	// carries the same credential chain as /events (same With() pattern) plus an
+	// admin gate, because apiKeyAuthMiddleware alone still admits scope-restricted
+	// agent tokens — which must not read fleet-wide aggregates. Scrapers
+	// authenticate with the global API key (X-API-Key, or Prometheus'
+	// `authorization: {credentials: <api key>}`); the tray keeps its Unix-socket
+	// bypass. The health/readiness probes below stay deliberately open.
 	if s.observability != nil {
 		if metrics := s.observability.Metrics(); metrics != nil {
-			s.router.Handle("/metrics", metrics.Handler())
+			tagMetrics := TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider())
+			s.router.
+				With(tagMetrics, s.apiKeyAuthMiddleware(), s.requireAdminReadMiddleware("Admin credentials required to read metrics")).
+				Handle("/metrics", metrics.Handler())
 		}
 	}
 
@@ -872,16 +1032,36 @@ func (s *Server) setupRoutes() {
 
 		// Routing mode endpoint
 		r.Get("/routing", s.handleGetRouting)
+		s.registerClientRoutes(r)
 
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
+		// Spec 108-f: profile CRUD, rename, try, effective tools and the access
+		// explainer, in BOTH editions (profiles are admin-owned config in either).
+		// The static /profiles/active and /profiles/try routes win over {name}.
+		// guarded: BindingGuardDelta (FR-008a) - every write goes through the
+		// profiles service, whose MutateConfig runs the guard over the whole
+		// candidate state before anything is written.
+		r.Post("/profiles", s.requireServerOp(auth.ServerOpConfigWrite, s.handleCreateProfile))
+		// exempt: nothing is written (a draft is searched against the index).
+		r.Post("/profiles/try", s.requireServerOp(auth.ServerOpConfigWrite, s.handleTryProfile))
 		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Get("/profiles/{name}", s.handleGetProfile)
+		r.Put("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUpdateProfile))         // guarded: MutateConfig
+		r.Delete("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDeleteProfile))      // guarded: MutateConfig
+		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
+		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
+		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent
 		// token could reshape the operator's view. Same gate as every other
 		// config-level write.
 		r.Put("/profiles/active", s.requireServerOp(auth.ServerOpConfigWrite, s.handleSetActiveProfile))
+
+		// Needs-attention list (Spec 109 FR-001): filtered per caller class,
+		// same rule as /servers (contracts/rest-api.md#attention).
+		r.Get("/attention", s.handleGetAttention)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -892,7 +1072,8 @@ func (s *Server) setupRoutes() {
 		r.Post("/servers/import", s.requireServerOp(auth.ServerOpAdd, s.handleImportServers))          // Import from file upload
 		r.Post("/servers/import/json", s.requireServerOp(auth.ServerOpAdd, s.handleImportServersJSON)) // Import from JSON/TOML content
 		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)                                // Get canonical config paths
-		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath))    // Import from file path
+		r.Get("/review", s.handleGetReviewQueue)
+		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath)) // Import from file path
 		r.Post("/servers/reconnect", s.requireServerOp(auth.ServerOpRestart, s.handleForceReconnectServers))
 		// T076-T077: Bulk operation routes
 		r.Post("/servers/restart_all", s.requireServerOp(auth.ServerOpRestart, s.handleRestartAll))
@@ -931,6 +1112,7 @@ func (s *Server) setupRoutes() {
 			// operation (issue #873): pure rediscover + reindex, no state change.
 			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
+			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
 			r.Get("/diagnostics", s.handleGetServerDiagnostics)
@@ -1051,6 +1233,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -1076,13 +1263,13 @@ func (s *Server) setupRoutes() {
 		// Feedback submission (Spec 036)
 		r.Post("/feedback", s.handleFeedback)
 
-		// Client connect/disconnect. Connecting/undo/disconnect write, restore,
-		// or delete local MCP client config files and can embed the admin API
-		// key into that config — an agent must not trigger them (issue #878
-		// class). Status/preview reads stay open.
-		r.Get("/connect", s.handleGetConnectStatus)
-		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
-		r.Get("/connect/{client}/preview", s.handleConnectClientPreview)
+		// Client connect/disconnect. Config reads disclose local paths and
+		// connection state; writes can modify user-owned client files or embed
+		// credentials. All reads and writes require administrator access.
+		connectRead := s.requireAdminReadMiddleware("Admin credentials required to read client connection status")
+		r.With(connectRead).Get("/connect", s.handleGetConnectStatus)
+		r.With(connectRead).Get("/connect/{client}", s.handleGetConnectClientStatus)
+		r.With(connectRead).Get("/connect/{client}/preview", s.handleConnectClientPreview)
 		r.Post("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleConnectClient))
 		r.Post("/connect/{client}/undo", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUndoConnectClient))
 		r.Delete("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDisconnectClient))
@@ -1146,16 +1333,33 @@ func (s *Server) httpLoggingMiddleware() func(http.Handler) http.Handler {
 
 			duration := time.Since(start)
 
-			// Log request details to http.log
+			// Log request details to http.log.
+			//
+			// SEC-01: `query` and `referer` both carry `?apikey=` — it is an
+			// accepted credential source (see resolveAuth), the Web UI's SSE
+			// stream and the tray client send the ROOT admin key that way, and
+			// the Web UI is opened as /ui/?apikey=<KEY> so same-origin
+			// subresource requests put it in the Referer too. Unredacted, this
+			// line wrote the admin credential to disk on every request. The
+			// renderers are internal/oauth's — one rule for every log sink.
+			//
+			// SEC-01 follow-up (PR #1350): the admin key has no vendor shape and
+			// is bare hex, so neither the name rule nor the value-shaped detector
+			// those renderers otherwise run can catch it as a raw PATH segment
+			// (`/api/v1/status/<key>`) or a Referer fragment with no `apikey=`
+			// wrapper. currentAdminAPIKey() gives each renderer the live secret so
+			// it is caught by EXACT VALUE wherever it lands, on top of the
+			// existing name/shape rules. One controller read per request line.
+			adminKey := s.currentAdminAPIKey()
 			s.httpLogger.Info("HTTP API Request",
 				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("query", r.URL.RawQuery),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminKey)),
+				zap.String("query", oauth.LogSafeQueryString(r.URL.RawQuery, adminKey)),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user_agent", r.UserAgent()),
 				zap.Int("status", ww.statusCode),
 				zap.Duration("duration", duration),
-				zap.String("referer", r.Referer()),
+				zap.String("referer", oauth.LogSafeRequestURL(r.Referer(), adminKey)),
 				zap.Int64("content_length", r.ContentLength),
 			)
 		})
@@ -1241,6 +1445,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 // handleGetStatus godoc
 // @Summary Get server status
 // @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Description telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
 // @Tags status
 // @Produce json
 // @Security ApiKeyAuth
@@ -1255,7 +1460,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// lives. It is not always ~/.mcpproxy — MCPPROXY_HOME relocates the whole
 	// instance root, tray and core together (GH #936).
 	autostartDataDir := ""
+	var runningCfg *config.Config
 	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		runningCfg = cfg
 		if cfg.RoutingMode != "" {
 			routingMode = cfg.RoutingMode
 		}
@@ -1328,12 +1535,32 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Spec 109 FR-044a (user-test F-03): the EFFECTIVE telemetry state, so the
+	// Web and macOS notices and the Settings toggle can say "off, disabled by
+	// MCPPROXY_TELEMETRY=false" instead of a fixed "sends anonymous usage
+	// statistics". Operator plane like `activation`: withheld from scoped
+	// callers. Resolved from the RUNNING config (telemetry.enabled hot-reloads;
+	// env is process-wide). GET /api/v1/config deliberately stays the stored
+	// value, because it is a GET-then-POST-back document.
+	if !auth.IsScopedCaller(r.Context()) && runningCfg != nil {
+		response["telemetry"] = telemetry.ResolveEffectiveState(runningCfg)
+	}
+
 	// Spec 044 (US3): expose launch_source + autostart_enabled. launch_source
 	// is the cached classifier result (no installer-clearing side-effect here
 	// — this endpoint is read-only). autostart_enabled reads the tray-owned
 	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
 	response["autostart_enabled"] = telemetry.AutostartReaderForDataDir(autostartDataDir).Read()
+
+	// Spec 109-k FR-080a: advertise which scope filters (profile/client/token)
+	// this build accepts, so a build accepts a parameter exactly when it
+	// advertises it. Omitted while the list is empty (Spec 108-e fills it).
+	if features := scopeFiltersFeatureValue(); len(features) > 0 {
+		response["features"] = map[string]interface{}{
+			"scope_filters": features,
+		}
+	}
 
 	s.writeSuccess(w, response)
 }
@@ -1686,16 +1913,34 @@ func getSocketPath() string {
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param profile query string false "Restrict to the profile's effective servers; tool_count becomes the number of that server's tools visible under the profile (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (client/token), or '-' on a server filter"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable profile"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// Spec 108 FR-032: GET /servers honours profile (rows limited to the
+	// profile's effective servers, tool_count = the tools visible under it);
+	// client and token are not server filters, and `status`/`q` stay
+	// client-side.
+	if !rejectUnsupportedScopeFilters(w, r, "profile") {
+		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
+	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
 		// Use new management service path
-		servers, stats, err := mgmtSvc.(interface {
-			ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
-		}).ListServers(r.Context())
+		servers, stats, err := mgmtSvc.ListServers(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to list servers via management service", "error", err)
@@ -1740,6 +1985,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// stays an exact count oracle for what the filter just hid.
 		serverValues = visibleServers(r.Context(), serverValues)
 		statsValue = recomputeServerStats(r.Context(), serverValues, statsValue)
+		if viewAsEval != nil {
+			serverValues = s.limitServersToProfile(r.Context(), serverValues, viewAs, viewAsEval)
+			statsValue = statsForServers(serverValues)
+		}
 
 		response := contracts.GetServersResponse{
 			Servers: serverValues,
@@ -1774,6 +2023,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// correctness: ConvertUpstreamStatsToServerStats derives every counter by
 	// walking stats["servers"], so the counts narrow with it.
 	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
+	if viewAsEval != nil {
+		servers = s.limitServersToProfile(r.Context(), servers, viewAs, viewAsEval)
+		stats = statsForServers(servers)
+	}
 
 	response := contracts.GetServersResponse{
 		Servers: servers,
@@ -1930,6 +2183,12 @@ type AddServerRequest struct {
 	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
 	// aggregate behavior" on create); a present value (including false) is applied.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ForwardHeaders is the per-server allowlist of inbound MCP client header
+	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
+	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
+	// unchanged and an empty array ([]) clears it. Invalid, denied, duplicate
+	// and static-header-colliding names are rejected with 400.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
 	// TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
 	// "manual". Empty means "leave unchanged" on PATCH (and inherit the migrated
 	// default on create). A non-empty value is applied to ServerConfig.TrustMode
@@ -2237,19 +2496,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// separate admission override); the request Quarantined boolean (#370) still
 	// wins after, as a distinct pre-existing escape hatch.
 	quarantined := true
-	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
-		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			// Carry BOTH the explicit trust_mode AND the legacy
-			// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
-			// admission decision it will resolve on the persisted server: a client
-			// that sets auto_approve_tool_changes:true but omits trust_mode must be
-			// admitted as auto (not left quarantined while the saved server reads
-			// auto — a contradictory state). (codex review, spec 086.)
-			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
-				TrustMode:              req.TrustMode,
-				AutoApproveToolChanges: req.AutoApproveToolChanges,
-			})
-		}
+	if cfg := s.controller.GetCurrentConfig(); cfg != nil {
+		// Carry BOTH the explicit trust_mode AND the legacy
+		// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
+		// admission decision it will resolve on the persisted server: a client
+		// that sets auto_approve_tool_changes:true but omits trust_mode must be
+		// admitted as auto (not left quarantined while the saved server reads
+		// auto — a contradictory state). (codex review, spec 086.)
+		quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
+			TrustMode:              req.TrustMode,
+			AutoApproveToolChanges: req.AutoApproveToolChanges,
+		})
 	}
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
@@ -2269,6 +2526,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		Enabled:     enabled,
 		Quarantined: quarantined,
 	}
+	if req.Quarantined != nil {
+		// The caller stated the value: record it as an operator statement so
+		// the admission gate obeys it on later loads (it is written to
+		// mcp_config.json instead of being dropped as a default).
+		serverConfig.MarkQuarantineExplicitlySet(true)
+	}
 	if req.ReconnectOnUse != nil {
 		serverConfig.ReconnectOnUse = *req.ReconnectOnUse
 	}
@@ -2282,6 +2545,15 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// "inherit default aggregation".
 	if req.ExposePrompts != nil {
 		serverConfig.ExposePrompts = req.ExposePrompts
+	}
+	// Spec 112: carry the forward_headers allowlist through on create, after
+	// validating the names (write-time layer of FR-005).
+	if len(req.ForwardHeaders) > 0 {
+		if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, serverConfig.Headers); len(errs) > 0 {
+			s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+			return
+		}
+		serverConfig.ForwardHeaders = append([]string(nil), req.ForwardHeaders...)
 	}
 	// Spec 086: carry the per-server trust_mode through on create. Empty means
 	// "not specified" — leave it for the loader's legacy-flag migration to
@@ -2692,6 +2964,9 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Quarantined != nil {
 		updates.Quarantined = *req.Quarantined
+		// Only a body that carries the field is an operator decision; UpdateServer
+		// and the storage guard lower a recorded quarantine only for this case.
+		updates.MarkQuarantineExplicitlySet(true)
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.Quarantined = existingSrv.Quarantined
@@ -2721,6 +2996,33 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposePrompts = existingSrv.ExposePrompts
+	}
+	// Spec 112: forward_headers preserves the existing allowlist when the
+	// request omits it (nil slice); a non-nil slice replaces it and an empty
+	// one clears it. Validated against the static headers this PATCH will leave
+	// in place, so a header change cannot introduce a collision either.
+	{
+		staticAfter := updates.Headers
+		if req.Headers == nil && existingSrv != nil {
+			staticAfter = existingSrv.Headers
+		}
+		switch {
+		case req.ForwardHeaders != nil:
+			if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
+				s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+				return
+			}
+			updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
+			hasUpdates = true
+		case existingSrv != nil:
+			if req.Headers != nil {
+				if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
+					s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+					return
+				}
+			}
+			updates.ForwardHeaders = existingSrv.ForwardHeaders
+		}
 	}
 	// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
 	// preserve the existing value when the request omits it (a bare PATCH of an
@@ -3186,9 +3488,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, true)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, true)
 
 		if err != nil {
 			s.logger.Errorw("Failed to enable server via management service", "server", serverID, "error", err)
@@ -3253,9 +3553,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, false)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, false)
 
 		if err != nil {
 			s.logger.Errorw("Failed to disable server via management service", "server", serverID, "error", err)
@@ -3342,10 +3640,8 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 // @Router /api/v1/servers/restart_all [post]
 func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		RestartAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3374,10 +3670,8 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/enable_all [post]
 func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		EnableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3406,10 +3700,8 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/disable_all [post]
 func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		DisableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3448,9 +3740,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			RestartServer(context.Context, string) error
-		}).RestartServer(r.Context(), serverID)
+		err := mgmtSvc.RestartServer(r.Context(), serverID)
 
 		if err != nil {
 			// Check if error is OAuth-related (expected state, not a failure)
@@ -3688,11 +3978,9 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLoginQuick (Spec 020 fix: returns actual browser status)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLoginQuick method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3793,11 +4081,9 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLogout
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLogout(ctx context.Context, name string) error
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3920,11 +4206,9 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// NEW: Call management service instead of controller (T016)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing GetServerTools method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3941,6 +4225,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get tools: %v", err))
 		return
 	}
+	tools = filterProfileToolRows(s.controller, r.Context(), serverID, tools)
 
 	// Convert + enrich (shared with the global tools endpoint, spec 050).
 	// Hash pins are operator-tier only (Spec 098 T020).
@@ -4024,10 +4309,31 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param client query string false "View-as (administrator only): the tools this client would see, each with its access verdict {visible, callable, reason} and profile_tier (Spec 108 FR-032)"
+// @Param profile query string false "View-as: the tools this profile would expose. An administrator gets every row with a verdict; any other caller gets only the visible rows plus counts {visible, hidden} (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (token), both client and profile, or '-' on a tools filter"
+// @Failure 403 {object} contracts.ErrorResponse "client= requires administrator credentials"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable client / profile"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
+	// Spec 108 FR-032: GET /tools honours profile and client (view-as); the
+	// other filters (`server`, `tool`, `status` ...) stay client-side per
+	// url-filter-contract.md, and token is not a tools filter.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client") {
+		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
+	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to enumerate servers")
@@ -4051,9 +4357,8 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	// explicit guard in the loop below (#1064). Fall back to the controller
 	// path when the management service is unavailable (keeps unit tests +
 	// minimal deployments working).
-	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
+	mgmtSvc := s.controller.GetManagementService()
+	hasMgmt := mgmtSvc != nil
 	getTools := func(name string) ([]map[string]interface{}, error) {
 		if hasMgmt {
 			return mgmtSvc.GetServerTools(r.Context(), name)
@@ -4101,6 +4406,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			s.logger.Debugw("Global tools: server tools fetch failed", "server", name, "error", terr)
 			continue
 		}
+		generic = filterProfileToolRows(s.controller, r.Context(), name, generic)
 
 		typed := s.enrichServerTools(name, generic, discloseHash)
 		for i := range typed {
@@ -4113,6 +4419,15 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Tools = append(resp.Tools, typed...)
+	}
+
+	// Spec 108 FR-032: view-as stamps each surviving row with the subject's
+	// verdict AFTER the caller's own scope, its own profile and the
+	// quarantine rule have removed rows (so a verdict never re-adds a row the
+	// caller may not see). A non-administrator keeps only the visible rows and
+	// gets counts; the stats below are recomputed over what is returned.
+	if viewAsEval != nil {
+		resp.Tools, resp.Counts = applyViewAs(viewAsEval, viewAs, resp.Tools)
 	}
 
 	for i := range resp.Tools {
@@ -4165,6 +4480,10 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 
 	logEntries, err := s.controller.GetServerLogs(serverID, tail)
 	if err != nil {
+		if errors.Is(err, contracts.ErrServerNotFound) {
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
 		s.logger.Errorw("Failed to get server logs", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
 		return
@@ -4209,7 +4528,19 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 
 	var results []map[string]interface{}
 	var err error
-	if auth.IsScopedCaller(r.Context()) {
+	profileSearchHandled := false
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok {
+		inScope := func(serverName string) bool { return canSeeServer(r.Context(), serverName) }
+		if auth.IsScopedCaller(r.Context()) {
+			if ac := auth.AuthContextFromContext(r.Context()); ac != nil && len(ac.AllowedServers) == 0 {
+				results, profileSearchHandled = []map[string]interface{}{}, true
+			}
+		}
+		if !profileSearchHandled {
+			results, profileSearchHandled, err = profileController.SearchToolsForProfile(r.Context(), query, limit, inScope)
+		}
+	}
+	if !profileSearchHandled && auth.IsScopedCaller(r.Context()) {
 		// #1166 / Spec 107 T075a: the MCP twin of this discovery surface
 		// filters through serverInScope (internal/server/mcp_visibility.go);
 		// this one used to post-filter a GLOBAL top-K, so a hidden server
@@ -4226,7 +4557,7 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 				return canSeeServer(ctx, serverName)
 			})
 		}
-	} else {
+	} else if !profileSearchHandled {
 		results, err = s.controller.SearchTools(query, limit)
 	}
 	if err != nil {
@@ -4275,7 +4606,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// No Access-Control-Allow-Origin here: /events is a chi route on the same
+	// router, so corsMiddleware already decided this response's CORS headers.
+	// A second write would only be a place for the two policies to drift.
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
 	// For HEAD requests, just return headers without body
@@ -4318,6 +4651,14 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"status_channel_nil", statusCh == nil,
 		"events_channel_nil", eventsCh == nil)
 
+	// FR-006: attention.changed is suppressed for THIS subscriber when its
+	// narrowed id set is unchanged since the last frame it received — a
+	// scoped caller's own view is what matters, not the shared event's raw
+	// id set (two scoped subscribers with different scopes must each get
+	// their own suppression decision). nil (not an empty set) so the very
+	// first frame is never suppressed.
+	var lastAttentionIDs map[string]struct{}
+
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
@@ -4334,6 +4675,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
+		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
 		"status":         withLiveUpstreamStats(callerCtx, s.controller.GetStatus(), initialLiveStats),
@@ -4390,6 +4732,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			eventLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
+				"edition":        editionValue,
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
 				"status":         withLiveUpstreamStats(callerCtx, status, eventLiveStats),
@@ -4421,8 +4764,26 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			rendered := s.renderEventPayloadForCaller(callerCtx, evt)
+
+			// FR-006: suppress attention.changed for this subscriber when its
+			// narrowed id set has not changed since the last frame it
+			// received (servers.changed carries no such suppression — every
+			// coalesced change is meaningful to show).
+			if evt.Type == internalRuntime.EventTypeAttentionChanged {
+				ids, _ := rendered["ids"].([]string)
+				current := make(map[string]struct{}, len(ids))
+				for _, id := range ids {
+					current[id] = struct{}{}
+				}
+				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+					continue
+				}
+				lastAttentionIDs = current
+			}
+
 			eventPayload := map[string]interface{}{
-				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(callerCtx, evt)),
+				"payload":   s.maskEventPayload(rendered),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -4470,7 +4831,10 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 //     client re-fetches through the gated REST door. Costs one extra GET per
 //     coalescing window, and only when reveal_secret_headers is on.
 func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
-	payload := evt.Payload
+	payload := renderActivityAttributionForCaller(ctx, evt.Type, evt.Payload)
+	if evt.Type == internalRuntime.EventTypeAttentionChanged {
+		return renderAttentionChangedForCaller(ctx, payload)
+	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
 	}
@@ -4710,6 +5074,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
+
 	s.writeSuccess(w, configSecrets)
 }
 
@@ -4900,9 +5269,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		diag, err := mgmtSvc.(interface {
-			Doctor(context.Context) (*contracts.Diagnostics, error)
-		}).Doctor(r.Context())
+		diag, err := mgmtSvc.Doctor(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to get diagnostics via management service", "error", err)
@@ -5434,6 +5801,15 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	// concurrency slot releases that slot immediately (spec 093 FR-005).
 	newToolCall, err := s.controller.ReplayToolCall(r.Context(), id, request.Arguments)
 	if err != nil {
+		if errors.Is(err, profile.ErrToolOutsideProfile) {
+			s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+			return
+		}
+		var profileRefusal *profile.ToolBlockedError
+		if errors.As(err, &profileRefusal) {
+			s.writeError(w, r, http.StatusForbidden, profileRefusal.Error())
+			return
+		}
 		// Spec 093 FR-011: a replay shed by a concurrency limit is backpressure,
 		// answered like any other shed tool call — 429 + Retry-After, not a 500
 		// and certainly not the 200 success:true it used to produce when the
@@ -5625,6 +6001,8 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the write would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -5651,31 +6029,26 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to read configuration for apply", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
 	// Revert what binds to a key, refuse what does not. Without this the
-	// raw-JSON editor's own GET → edit → POST round trip would write the read
-	// door's masks over the operator's credentials.
-	resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	cfg := *resolved
-
-	// Get config path from controller
-	cfgPath := s.controller.GetConfigPath()
-
-	// Apply configuration
-	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration", result, err)
+	// raw-JSON editor's own GET -> edit -> POST round trip would write the read
+	// door's masks over the operator's credentials. The unmask runs INSIDE the
+	// config funnel, against the desired config it read under the lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration", func(stored *config.Config) error {
+		if err := refuseAmbiguousLockedTelemetryKeys(document); err != nil {
+			return err
+		}
+		resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
+		if err != nil {
+			s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
+			return &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		if err := refuseLockedTelemetryChange(stored, resolved); err != nil {
+			return err
+		}
+		*stored = *resolved
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5706,6 +6079,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth (FR-008a); nothing was written"
 // @Router       /api/v1/config/docker-isolation [patch]
 func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
@@ -5720,32 +6094,22 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch current config, mutate the single field, and push it back through
-	// the existing apply pipeline so we benefit from validation, change
-	// detection, disk persistence, and hot-reload without duplicating any of
-	// that logic here.
-	// Desired, not running: same reason as handlePatchConfig — a read-modify-
-	// write of the running config discards any restart-pending field.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for docker-isolation patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	if cfg.DockerIsolation == nil {
-		cfg.DockerIsolation = config.DefaultDockerIsolationConfig()
-	}
-	cfg.DockerIsolation.Enabled = *payload.Enabled
-
-	cfgPath := s.controller.GetConfigPath()
-	result, err := s.controller.ApplyConfig(cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply docker-isolation toggle", result, err)
+	// Mutate the single field on the desired config (what is on disk, not the
+	// running one: a read-modify-write of the running config discards any
+	// restart-pending field) and push it back through the config funnel, so
+	// validation, change detection, disk persistence, hot-reload and the
+	// FR-008a guard all run under one lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply docker-isolation toggle", func(cfg *config.Config) error {
+		isolation := config.DefaultDockerIsolationConfig()
+		if cfg.DockerIsolation != nil {
+			copied := *cfg.DockerIsolation // never edit a shared pointee in place
+			isolation = &copied
+		}
+		isolation.Enabled = *payload.Enabled
+		cfg.DockerIsolation = isolation
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5774,6 +6138,8 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      422 {object} contracts.ErrorResponse "telemetry.enabled is locked while an environment variable (DO_NOT_TRACK, CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written (FR-044a)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the patch would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	// UseNumber: every number rides through the merge as its decimal text, so
@@ -5796,86 +6162,32 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the REAL config (secrets intact — redaction only happens on the GET
+	// The merge runs INSIDE the config funnel, on the desired config it reads
+	// under the write lock (secrets intact - redaction only happens on the GET
 	// response path). We deep-merge only the client-sent keys so untouched
 	// fields, including masked secrets, are preserved verbatim.
 	//
-	// The merge base is the DESIRED config — what is on disk — not the running
+	// The merge base is the DESIRED config - what is on disk - not the running
 	// one. They differ only while a restart-gated field (routing_mode, listen,
-	// api_key, …) has been saved but not yet adopted, and merging onto the
+	// api_key, ...) has been saved but not yet adopted, and merging onto the
 	// running config there silently reverted it: an operator who switched to
 	// Direct and then changed any other setting lost the routing switch with no
 	// warning, on disk, with a success toast.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	// Round-trip the live config through JSON to get a generic map we can
-	// deep-merge the patch onto without enumerating every field.
-	baseBytes, err := json.Marshal(cfg)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
-	baseDecoder.UseNumber()
-	var baseMap map[string]interface{}
-	if err := baseDecoder.Decode(&baseMap); err != nil {
-		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
-	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
-	// merge. A patch is exactly the shape that used to corrupt — the client
-	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
-	// it back — and the merge would have written the mask straight over the
-	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
-	// renamed server) the write is refused.
-	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, cfg)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	if m, ok := resolvedPatch.(map[string]interface{}); ok {
-		patchMap = m
-	}
-
-	deepMergeJSON(baseMap, patchMap)
-
-	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
-	// modes on the MERGED generic map, before the typed decode drops them
-	// without a trace (json.Unmarshal into config.Config ignores unknown
-	// keys, so Config.Validate can never see them). No-op in the personal
-	// build.
-	if s.refuseRemovedConfigKeys(w, r, baseMap, "Invalid configuration patch") {
-		return
-	}
-
-	mergedBytes, err := json.Marshal(baseMap)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to build configuration")
-		return
-	}
-	var merged config.Config
-	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid configuration patch: %v", err))
-		return
-	}
-
-	result, err := s.controller.ApplyConfig(&merged, s.controller.GetConfigPath())
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration patch", result, err)
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration patch", func(cfg *config.Config) error {
+		if err := refuseAmbiguousLockedTelemetryKeys(patchMap); err != nil {
+			return err
+		}
+		merged, refusal := s.mergeConfigPatch(cfg, patchMap)
+		if refusal != nil {
+			return refusal
+		}
+		if err := refuseLockedTelemetryChange(cfg, merged); err != nil {
+			return err
+		}
+		*cfg = *merged
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5888,6 +6200,68 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 	s.writeSuccess(w, response)
+}
+
+// mergeConfigPatch deep-merges patchMap onto a JSON round trip of base and
+// returns the typed result: the merge PATCH /config performs. A refusal is the
+// response the handler must answer (unbindable mask, removed keys, a patch
+// that does not decode into a config).
+func (s *Server) mergeConfigPatch(base *config.Config, patchMap map[string]interface{}) (*config.Config, *configMutationRefusal) {
+	// Round-trip the live config through JSON to get a generic map we can
+	// deep-merge the patch onto without enumerating every field.
+	baseBytes, err := json.Marshal(base)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
+	baseDecoder.UseNumber()
+	var baseMap map[string]interface{}
+	if err := baseDecoder.Decode(&baseMap); err != nil {
+		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+
+	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
+	// merge. A patch is exactly the shape that used to corrupt - the client
+	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
+	// it back - and the merge would have written the mask straight over the
+	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
+	// renamed server) the write is refused.
+	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, base)
+	if err != nil {
+		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+	}
+	if m, ok := resolvedPatch.(map[string]interface{}); ok {
+		patchMap = m
+	}
+
+	deepMergeJSON(baseMap, patchMap)
+
+	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
+	// modes on the MERGED generic map, before the typed decode drops them
+	// without a trace (json.Unmarshal into config.Config ignores unknown
+	// keys, so Config.Validate can never see them). No-op in the personal
+	// build.
+	if errs := config.ValidateRemovedKeys(baseMap); len(errs) > 0 {
+		return nil, &configMutationRefusal{
+			result:   &internalRuntime.ConfigApplyResult{Success: false, ValidationErrors: errs},
+			applyMsg: "Invalid configuration patch",
+			err:      fmt.Errorf("%s", errs[0].Error()),
+		}
+	}
+
+	mergedBytes, err := json.Marshal(baseMap)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to build configuration"}
+	}
+	var merged config.Config
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: fmt.Sprintf("Invalid configuration patch: %v", err)}
+	}
+	return &merged, nil
 }
 
 // writeApplyConfigError reports an ApplyConfig failure with the right status
@@ -5903,6 +6277,11 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 //
 // Returns the status it wrote, for the callers that log.
 func (s *Server) writeApplyConfigError(w http.ResponseWriter, r *http.Request, msg string, result *internalRuntime.ConfigApplyResult, err error) {
+	// FR-008a: a write that would leave a named client binding bypassable
+	// without auth is refused whole, before anything is persisted.
+	if s.writeIfBindingGuardRefusal(w, r, err) {
+		return
+	}
 	if result != nil && len(result.ValidationErrors) > 0 {
 		// A rejected value is the operator's, not the server's: log it at warn
 		// and answer 400. The structured errors ride in `data` so a client can
@@ -6060,6 +6439,18 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
+		if request.ToolName == "code_execution" && errors.Is(err, profile.ErrCodeExecutionBlocked) {
+			// /tools/call bypasses MCP tools/list filters. Preserve the same
+			// unknown-tool response as the hidden builtin's wire behavior; the
+			// dedicated /code/exec route still maps the typed refusal to 403.
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to call tool: tool call failed: unknown tool: code_execution")
+			return
+		}
+		var profileRefusal *profile.ToolBlockedError
+		if errors.As(err, &profileRefusal) {
+			s.writeError(w, r, http.StatusForbidden, profileRefusal.Error())
+			return
+		}
 		// Spec 093 FR-011: a concurrency-limiter shed is backpressure, not a
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
@@ -6580,8 +6971,12 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Param        limit   query     int                               false  "Maximum number of sessions to return (1-100, default 10)"
 // @Param        offset  query     int                               false  "Number of sessions to skip for pagination (default 0)"
 // @Param        status  query     string                            false  "Filter by session status"  Enums(active, closed)
+// @Param        profile query     string                            false  "Filter by the session's latest effective profile; - selects sessions with none (Spec 108)"
+// @Param        client  query     string                            false  "Filter by the client id the session's credential is bound to; - selects sessions with none (Spec 108)"
+// @Param        token   query     string                            false  "Filter by the token name the session initialized with; - selects sessions with none (Spec 108)"
+// @Param        agent   query     string                            false  "Alias of token"
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
-// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
+// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter, token and agent naming different tokens, or client_name (not supported here; filter by client)"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
 // @Failure      403     {object}  contracts.ErrorResponse           "Agent tokens cannot read MCP session history"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
@@ -6596,6 +6991,15 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
+		return
+	}
+
+	// Spec 108 FR-031: /sessions honours profile, client and token (`agent` is
+	// an alias of token). client_name is advisory and not filterable here.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client", "token") {
+		return
+	}
+	if !s.rejectClientNameParam(w, r) {
 		return
 	}
 
@@ -6626,8 +7030,14 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionFilter, err := sessionFilterFromQuery(r.URL.Query(), limit, status)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Get recent sessions from controller
-	sessions, total, err := s.controller.GetRecentSessions(limit, status)
+	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
 	if err != nil {
 		s.logger.Errorw("Failed to get sessions", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")
@@ -6979,9 +7389,18 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
 	}
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok &&
+		!profileController.ToolAllowedByProfile(r.Context(), serverID, toolName) {
+		s.writeError(w, r, http.StatusNotFound, "Tool approval record not found")
+		return
+	}
 
 	record, err := s.controller.GetToolApproval(serverID, toolName)
 	if err != nil {
+		if errors.Is(err, storage.ErrToolApprovalNotFound) {
+			s.writeError(w, r, http.StatusNotFound, "Tool approval record not found")
+			return
+		}
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Tool approval record not found: %v", err))
 		return
 	}
@@ -7029,6 +7448,15 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
 		return
+	}
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok {
+		visible := records[:0]
+		for _, record := range records {
+			if profileController.ToolAllowedByProfile(r.Context(), record.ServerName, record.ToolName) {
+				visible = append(visible, record)
+			}
+		}
+		records = visible
 	}
 
 	format := r.URL.Query().Get("format")
@@ -7208,4 +7636,14 @@ func toolApprovalPriority(status string) int {
 	default:
 		return 2
 	}
+}
+
+// joinValidationMessages renders config validation errors as one client-facing
+// message. Messages name headers only, never values (Spec 112).
+func joinValidationMessages(errs []config.ValidationError) string {
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Field+": "+e.Message)
+	}
+	return strings.Join(msgs, "; ")
 }

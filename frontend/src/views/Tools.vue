@@ -10,7 +10,7 @@
         <div v-if="stats" class="badge badge-outline badge-lg">
           {{ stats.total }} tools
         </div>
-        <button @click="loadTools" class="btn btn-sm btn-ghost" :disabled="loading">
+        <button @click="loadTools" class="btn btn-sm btn-ghost" :disabled="loading" data-test="tools-refresh">
           <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
@@ -47,17 +47,19 @@
         <div class="stat-title">Disabled</div>
         <div class="stat-value text-2xl text-warning">{{ stats.disabled }}</div>
       </button>
-      <button
-        type="button"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'pending' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+      <!-- Spec 109 FR-027: this card is a link to the review queue, not an
+           in-page filter toggle — "needs review" means something to act on
+           elsewhere, not another way to slice this table. -->
+      <router-link
+        to="/review"
+        class="stat text-left transition-colors hover:bg-base-200/60"
         data-test="stat-pending"
-        @click="selectStatCard('pending')"
       >
-        <div class="stat-title">Pending Approval</div>
+        <div class="stat-title">Needs review</div>
         <div class="stat-value text-2xl" :class="stats.pending_approval > 0 ? 'text-error' : ''">
           {{ stats.pending_approval }}
         </div>
-      </button>
+      </router-link>
     </div>
 
     <!-- Partial-error banner -->
@@ -75,6 +77,33 @@
     <div class="card bg-base-100 shadow-md">
       <div class="card-body py-4">
         <div class="flex flex-wrap gap-4 items-end">
+          <!-- Spec 108-j J6: view the catalogue as a client or a profile. It
+               only looks: it never changes what that subject can access. Both
+               choices write the same URL parameters the header Viewing chip
+               writes (useScopeQuery), and choosing one clears the other
+               because GET /tools takes one subject at a time. -->
+          <div v-if="viewAsAvailable" class="form-control min-w-[160px]">
+            <label class="label py-1" for="tools-view-as">
+              <span class="label-text text-xs">View as</span>
+            </label>
+            <select
+              id="tools-view-as"
+              class="select select-bordered select-sm"
+              :value="viewAsSelectValue"
+              data-test="tools-view-as-select"
+              @change="pickViewAs(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Nobody (all tools)</option>
+              <optgroup v-if="!isTenant && clientOptions.length > 0" label="Clients">
+                <option v-for="client in clientOptions" :key="client.id" :value="`client:${client.id}`">{{ client.display_name }}</option>
+              </optgroup>
+              <optgroup v-if="profilesStore.profiles.length > 0" label="Profiles">
+                <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="`profile:${profile.name}`">{{ profile.title || profile.name }}</option>
+              </optgroup>
+              <option v-if="viewAsSelectOrphan" :value="viewAsSelectValue">{{ viewAsSelectOrphan }}</option>
+            </select>
+          </div>
+
           <!-- Search -->
           <div class="form-control flex-1 min-w-[200px]">
             <label class="label py-1">
@@ -118,16 +147,20 @@
             </select>
           </div>
 
-          <!-- Risk filter -->
+          <!-- Tier filter. Spec 109 FR-028/X11: "Tier" (not "Risk" — risk
+               stays the scan-score term), values from the server-computed
+               `tier` field, never derived locally. `?risk=` stays a query
+               alias for `?tier=` for old bookmarks/links. -->
           <div class="form-control min-w-[120px]">
             <label class="label py-1">
-              <span class="label-text text-xs">Risk</span>
+              <span class="label-text text-xs">Tier</span>
             </label>
-            <select v-model="filterRisk" class="select select-bordered select-sm" aria-label="Filter by risk" data-test="filter-risk">
+            <select v-model="filterTier" class="select select-bordered select-sm" aria-label="Filter by tier" data-test="filter-tier">
               <option value="">All</option>
               <option value="read">Read</option>
               <option value="write">Write</option>
               <option value="destructive">Destructive</option>
+              <option value="unannotated">Unannotated</option>
             </select>
           </div>
 
@@ -136,12 +169,14 @@
             <label class="label py-1">
               <span class="label-text text-xs">Approval</span>
             </label>
+            <!-- Spec 109 FR-027: one review-state vocabulary everywhere
+                 (Web/macOS/CLI/review payload) — no "awaiting" (it duplicated
+                 pending+changed with a different name). -->
             <select v-model="filterApproval" class="select select-bordered select-sm" aria-label="Filter by approval state" data-test="filter-approval">
               <option value="">All</option>
-              <option value="awaiting">Awaiting approval</option>
               <option value="approved">Approved</option>
-              <option value="pending">Pending</option>
-              <option value="changed">Changed</option>
+              <option value="pending">New, needs review</option>
+              <option value="changed">Changed, needs review</option>
             </select>
           </div>
 
@@ -151,15 +186,53 @@
           </button>
         </div>
 
+        <!-- Spec 108-j J4: the profile/client/token chips (removable), with the
+             disabled variants for a value Tools cannot apply. -->
+        <div v-if="scopeQuery" class="mt-2" data-test="tools-scope-chips">
+          <ScopeChips
+            page="tools"
+            :scope-query="scopeQuery"
+            :disabled="disabledScope"
+            :conflicting="scopeConflict ? ['client', 'profile'] : []"
+            :unavailable="scopeUnavailableNames"
+          />
+        </div>
+
         <!-- Active filter chips -->
         <div v-if="hasActiveFilters" class="flex flex-wrap gap-2 mt-2 pt-2 border-t border-base-300">
           <span class="text-xs text-base-content/60">Active filters:</span>
           <span v-if="searchQuery" class="badge badge-sm badge-outline">Search: {{ searchQuery }}</span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
-          <span v-if="filterRisk" class="badge badge-sm badge-outline">Risk: {{ filterRisk }}</span>
-          <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ filterApproval }}</span>
+          <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
+          <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ toolApprovalLabel(filterApproval) }}</span>
         </div>
+      </div>
+    </div>
+
+    <!-- Spec 108-j J6/J14 (FR-032): what the viewed subject can do. A status
+         region, in words: a view must never look like it edits the subject's
+         access. -->
+    <div v-if="viewAsActive && !scopeError" role="status" class="alert flex-wrap items-start shadow-md" data-test="tools-view-as-banner">
+      <div class="flex-1 min-w-0 space-y-1">
+        <div class="font-medium" data-test="tools-view-as-summary">{{ viewAsBannerText }}</div>
+        <div v-if="disabledServerNote" class="text-sm" data-test="tools-view-as-disabled-note">
+          {{ disabledServerNote }}
+          <router-link v-if="disabledServersLink" :to="disabledServersLink" class="link link-primary">See them</router-link>
+        </div>
+        <div class="text-xs opacity-80">This is a view of {{ viewAsSubjectLabel }}'s access. Nothing here changes it.</div>
+      </div>
+      <div v-if="viewAsAdmin" class="join" role="group" aria-label="Show tools" data-test="tools-show-filter">
+        <button
+          v-for="option in SHOW_OPTIONS"
+          :key="option.value"
+          type="button"
+          class="btn btn-xs join-item"
+          :class="showFilter === option.value ? 'btn-primary' : 'btn-ghost'"
+          :aria-pressed="showFilter === option.value"
+          :data-test="`tools-show-${option.value}`"
+          @click="showFilter = option.value"
+        >{{ option.label }}</button>
       </div>
     </div>
 
@@ -169,7 +242,8 @@
         <span class="font-medium">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected</span>
         <button
           @click="batchEnable(true)"
-          :disabled="batchLoading"
+          :disabled="batchLoading || viewAsActive"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-success"
           data-test="batch-enable"
         >
@@ -178,7 +252,8 @@
         </button>
         <button
           @click="batchEnable(false)"
-          :disabled="batchLoading"
+          :disabled="batchLoading || viewAsActive"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-warning"
           data-test="batch-disable"
         >
@@ -187,7 +262,8 @@
         </button>
         <button
           @click="batchApproval('approve')"
-          :disabled="batchLoading || !hasApprovableSelection"
+          :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-primary"
           data-test="batch-approve"
         >
@@ -196,7 +272,8 @@
         </button>
         <button
           @click="batchApproval('reject')"
-          :disabled="batchLoading || !hasApprovableSelection"
+          :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-error"
           data-test="batch-reject"
         >
@@ -226,9 +303,26 @@
     <!-- Table card -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body p-0">
+        <!-- Spec 108-j J18 (rule 8): GET /tools takes one subject at a time, so
+             both applied means no request at all, never one silently dropped. -->
+        <div v-if="scopeConflict" class="text-center py-12 px-4 space-y-3" data-test="tools-view-as-conflict">
+          <h2 class="text-lg font-semibold">Tools can view as a client or a profile, not both</h2>
+          <p class="text-sm text-base-content/70">The address names both. Pick the one to keep.</p>
+          <div class="flex flex-wrap justify-center gap-2">
+            <button type="button" class="btn btn-sm btn-primary" data-test="tools-view-as-keep-client" @click="resolveConflict('client')">View as {{ conflictClientLabel }}</button>
+            <button type="button" class="btn btn-sm btn-primary" data-test="tools-view-as-keep-profile" @click="resolveConflict('profile')">View as {{ conflictProfileLabel }}</button>
+          </div>
+        </div>
+
         <!-- Loading -->
-        <div v-if="loading && allTools.length === 0" class="flex justify-center py-12">
+        <div v-else-if="loading && allTools.length === 0" class="flex justify-center py-12">
           <span class="loading loading-spinner loading-lg"></span>
+        </div>
+
+        <!-- Spec 108-j J19: a refused view-as never blanks the page. -->
+        <div v-else-if="scopeError" role="alert" class="alert alert-warning m-4" data-test="tools-scope-error">
+          <span>{{ scopeError }}</span>
+          <button type="button" class="btn btn-sm btn-ghost" data-test="tools-scope-error-clear" @click="clearViewAs">Clear filter</button>
         </div>
 
         <!-- Error -->
@@ -279,9 +373,13 @@
             <p v-if="quarantinedServerCount > 0" class="text-sm mt-1">
               {{ quarantinedServerCount }} quarantined server{{ quarantinedServerCount === 1 ? '' : 's' }}
               {{ quarantinedServerCount === 1 ? 'is' : 'are' }} not listed here —
-              <router-link to="/servers" class="link">review in Servers</router-link>.
+              <router-link to="/review" class="link">review in the Review queue</router-link>.
             </p>
           </div>
+          <template v-else-if="viewAsActive && allTools.length === 0">
+            <p class="text-lg" data-test="tools-view-as-empty">{{ viewAsEmptyText }}</p>
+            <p class="text-sm mt-1">Clear the filter to see every tool.</p>
+          </template>
           <template v-else>
             <p class="text-lg">
               {{ hasActiveFilters ? 'No matching tools' : 'No tools available' }}
@@ -291,7 +389,8 @@
             </p>
           </template>
           <div class="mt-4 space-x-2">
-            <button v-if="hasActiveFilters" @click="clearFilters" class="btn btn-outline btn-sm">Clear Filters</button>
+            <button v-if="viewAsActive && allTools.length === 0" type="button" class="btn btn-outline btn-sm" @click="clearViewAs">Clear filter</button>
+            <button v-else-if="hasActiveFilters" @click="clearFilters" class="btn btn-outline btn-sm">Clear Filters</button>
             <router-link v-else to="/servers" class="btn btn-primary btn-sm">Manage Servers</router-link>
           </div>
         </div>
@@ -308,6 +407,8 @@
                     aria-label="Select all tools on this page"
                     :checked="allPageSelected"
                     :indeterminate="somePageSelected && !allPageSelected"
+                    :disabled="viewAsActive"
+                    :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
                     @change="toggleSelectAll"
                     data-test="tools-select-all"
                   />
@@ -318,9 +419,10 @@
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
-                <th>Description</th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('risk')">
-                  Risk {{ getSortIndicator('risk') }}
+                <th v-if="viewAsAdmin">Access</th>
+                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">Description</th>
+                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
+                  Tier {{ getSortIndicator('tier') }}
                 </th>
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('approval_status')">
                   Approval {{ getSortIndicator('approval_status') }}
@@ -331,7 +433,7 @@
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('usage')">
                   Usage {{ getSortIndicator('usage') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('last_used')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" @click="sortBy('last_used')">
                   Last Used {{ getSortIndicator('last_used') }}
                 </th>
               </tr>
@@ -341,7 +443,8 @@
                 v-for="tool in paginatedTools"
                 :key="toolKey(tool)"
                 class="hover cursor-pointer"
-                :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)) }"
+                :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)), 'bg-base-200/70': viewAsAdmin && !isCallable(tool) }"
+                :data-not-callable="viewAsAdmin && !isCallable(tool) ? 'true' : undefined"
                 @click="openDetail(tool)"
                 data-test="tool-row"
               >
@@ -351,6 +454,7 @@
                     class="checkbox checkbox-sm"
                     :aria-label="`Select tool ${tool.name}`"
                     :checked="selectedKeys.has(toolKey(tool))"
+                    :disabled="viewAsActive"
                     @change="toggleSelect(tool)"
                   />
                 </td>
@@ -366,7 +470,25 @@
                     {{ tool.server_name }}
                   </router-link>
                 </td>
-                <td>
+                <!-- Spec 108-j J6: the subject's verdict for this tool. The state
+                     and the reason are words (never opacity alone) and are not
+                     dimmed; only the secondary cells of a tool the subject
+                     cannot call are. -->
+                <td v-if="viewAsAdmin" :data-test="`tools-row-access-${rowId(tool)}`">
+                  <div class="flex flex-wrap items-center gap-1">
+                    <span class="badge badge-sm whitespace-nowrap" :class="accessBadgeClass(tool)">{{ accessState(tool) }}</span>
+                    <span v-if="!isCallable(tool)" class="text-xs" data-test="tools-access-reason">{{ accessReasonLabel(tool.access?.reason, tool) }}</span>
+                    <button
+                      v-if="!isCallable(tool)"
+                      type="button"
+                      class="btn btn-ghost btn-xs min-h-6 min-w-6"
+                      :aria-label="`Why is ${tool.name} not callable?`"
+                      :data-test="`tools-why-${rowId(tool)}`"
+                      @click.stop="openWhy(tool)"
+                    >Why?</button>
+                  </div>
+                </td>
+                <td :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
                   <!-- Descriptions are clipped to keep the row height stable;
                        without a title the clipped half was unreadable without
                        opening the tool (audit F36) — expose the full text on
@@ -378,16 +500,27 @@
                     {{ tool.description || '—' }}
                   </div>
                 </td>
-                <td>
-                  <span class="badge badge-sm" :class="getRiskBadgeClass(tool)">
-                    {{ getRiskLabel(tool) }}
+                <td :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
+                  <span class="badge badge-sm" :class="getTierBadgeClass(tool)">
+                    {{ getTierLabel(tool) }}
                   </span>
+                  <span v-if="viewAsAdmin && tool.profile_tier && tool.profile_tier !== tool.tier" class="block text-xs mt-0.5" data-test="tools-profile-tier">as {{ tool.profile_tier }}</span>
                 </td>
                 <td>
-                  <span v-if="tool.approval_status" class="badge badge-sm" :class="getApprovalBadgeClass(tool.approval_status)">
-                    {{ tool.approval_status }}
+                  <span v-if="tool.approval_status" class="badge badge-sm whitespace-nowrap" :class="getApprovalBadgeClass(tool.approval_status)">
+                    {{ toolApprovalLabel(tool.approval_status) }}
                   </span>
                   <span v-else class="text-base-content/30 text-xs">—</span>
+                  <!-- Spec 109 FR-027 (link map "Tools row with pending/changed"):
+                       a plain path, not useScopeQuery.linkTo — /review/:server is
+                       a path-param route with no sticky parameters. -->
+                  <router-link
+                    v-if="isApprovable(tool)"
+                    :to="reviewPath(tool.server_name, tool.approval_status as 'pending' | 'changed')"
+                    class="link link-primary text-xs ml-1"
+                    data-test="tool-review-link"
+                    @click.stop
+                  >Review</router-link>
                   <!-- Compact hold evidence: reason icon + TPA ids + overflow. -->
                   <div
                     v-if="holdEvidenceFor(tool)"
@@ -434,9 +567,18 @@
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
                 <td class="text-sm text-right">
-                  {{ tool.usage || 0 }}
+                  <router-link
+                    v-if="tool.usage && toolCallsLink(tool)"
+                    :to="toolCallsLink(tool)!"
+                    class="link"
+                    data-test="tool-calls-link"
+                    @click.stop
+                  >
+                    {{ tool.usage }}
+                  </router-link>
+                  <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
-                <td class="text-sm text-base-content/60">
+                <td class="text-sm text-base-content/60" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
                   <span v-else class="text-base-content/30">never</span>
                 </td>
@@ -480,7 +622,7 @@
               <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm">
                 {{ selectedTool.server_name }}
               </router-link>
-              <span class="badge badge-sm" :class="getRiskBadgeClass(selectedTool)">{{ getRiskLabel(selectedTool) }}</span>
+              <span class="badge badge-sm" :class="getTierBadgeClass(selectedTool)">{{ getTierLabel(selectedTool) }}</span>
               <span v-if="selectedTool.config_denied" class="badge badge-sm badge-error">config-denied</span>
               <span v-else-if="selectedTool.disabled" class="badge badge-sm badge-warning">disabled</span>
               <span v-else class="badge badge-sm badge-success">enabled</span>
@@ -510,8 +652,8 @@
             </div>
             <div v-if="selectedTool.approval_status">
               <span class="text-base-content/60">Approval:</span>
-              <span class="badge badge-sm ml-1" :class="getApprovalBadgeClass(selectedTool.approval_status)">
-                {{ selectedTool.approval_status }}
+              <span class="badge badge-sm ml-1 whitespace-nowrap" :class="getApprovalBadgeClass(selectedTool.approval_status)">
+                {{ toolApprovalLabel(selectedTool.approval_status) }}
               </span>
             </div>
           </div>
@@ -543,26 +685,47 @@
       </div>
     </div>
 
+    <!-- Spec 108-j J6/J17 (FR-046): "Why?" from a view-as row. -->
+    <AccessExplainer
+      :open="explain !== null"
+      :subject="explain?.subject ?? { kind: 'client', name: '' }"
+      :tool="explain?.tool"
+      @close="explain = null"
+    />
+
     <!-- Hints Panel -->
     <CollapsibleHintsPanel :hints="toolsHints" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { serverDetailPath } from '@/utils/serverRoute'
+import { serverDetailPath, reviewPath } from '@/utils/serverRoute'
+import { tierLabel, toolApprovalLabel } from '@/utils/toolQuarantine'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import AccessExplainer from '@/components/AccessExplainer.vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { GlobalTool, GlobalToolsStats } from '@/types/api'
+import type { GlobalTool, GlobalToolsStats, ViewAsCounts } from '@/types/api'
 import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
+import { accessReasonLabel, accessStateLabel } from '@/utils/accessReason'
+import { tierPhrase } from '@/utils/profiles'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
+import { useClientsStore } from '@/stores/clients'
+import { useProfilesStore } from '@/stores/profiles'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const authStore = useAuthStore()
+const clientsStore = useClientsStore()
+const profilesStore = useProfilesStore()
 
 // Quarantined servers contribute no tools to GET /api/v1/tools (#1064), so they
 // are silently outside every search on this page. App.vue already fetches the
@@ -571,21 +734,212 @@ const quarantinedServerCount = computed(() => serversStore.serverCount.quarantin
 // Undefined when the view is mounted without a router — several unit suites do
 // exactly that, and a query prefill is not worth making them install one.
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
+// Spec 109-k: the row "Calls" link (url-filter-contract.md link map). Guarded
+// the same way as `route` above — several unit suites mount this view with no
+// router installed, and useScopeQuery() itself calls useRoute()/useRouter().
+const scopeQuery = route ? useScopeQuery('tools') : undefined
+
+/** `/activity?view=calls&tool=<server:tool>` for a tool row's "Calls" link
+ * (url-filter-contract.md link map: "Tools row" -> "Calls"). Null when no
+ * router is installed (unit-test harnesses that mount Tools.vue standalone). */
+function toolCallsLink(tool: GlobalTool) {
+  if (!scopeQuery) return null
+  return scopeQuery.linkTo('activity', { view: 'calls', tool: `${tool.server_name}:${tool.name}` })
+}
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
 const stats = ref<GlobalToolsStats | null>(null)
+// Spec 108 FR-032: set only for a non-administrator `profile=` view-as.
+const viewAsCounts = ref<ViewAsCounts | null>(null)
+// Spec 108-j J19: a refused view-as (404 or 403), shown inline with a way out.
+const scopeError = ref<string | null>(null)
 const partial = ref(false)
 const failedServers = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedTool = ref<GlobalTool | null>(null)
 
+// ---- Spec 108-j: view-as (profile / client scope) ----
+//
+// `client` and `profile` are the URL parameters the header Viewing chip and the
+// "View as" select write. GET /tools takes ONE subject, so both applied is a
+// conflict (rule 8: no request, a two-button state), and a value the endpoint
+// cannot take (`-` unattributed, or a client from a non-administrator) is a
+// disabled chip that is never sent (rule 5). The chips come from
+// useScopeQuery, which already hides a parameter the build does not advertise
+// (rule 7); the REST names come from its toRest() through pickScopeParams.
+const LEAVE_VIEW_AS = 'Leave view-as to change tools'
+const UNATTRIBUTED_NOTE = 'Unattributed applies to Activity and Usage only'
+const TENANT_CLIENT_NOTE = 'Viewing as a client requires an administrator'
+
+const isTenant = computed(() => authStore.principalKind === 'tenant')
+const chipValue = (name: string): string => scopeQuery?.chips.value.find(chip => chip.name === name)?.value ?? ''
+
+const disabledScope = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  if (chipValue('client') === '-') out.client = UNATTRIBUTED_NOTE
+  else if (chipValue('client') && isTenant.value) out.client = TENANT_CLIENT_NOTE
+  if (chipValue('profile') === '-') out.profile = UNATTRIBUTED_NOTE
+  return out
+})
+
+/** The subject the request will carry: the values from toRest(), minus the two
+ * Tools cannot apply. */
+const appliedScope = computed<{ client?: string; profile?: string }>(() => {
+  if (!scopeQuery) return {}
+  const rest = pickScopeParams(scopeQuery.toRest())
+  const out: { client?: string; profile?: string } = {}
+  if (rest.client && !disabledScope.value.client) out.client = rest.client
+  if (rest.profile && !disabledScope.value.profile) out.profile = rest.profile
+  return out
+})
+const scopeConflict = computed(() => Boolean(appliedScope.value.client && appliedScope.value.profile))
+const requestScope = computed(() => (scopeConflict.value ? {} : appliedScope.value))
+const viewAsActive = computed(() => Boolean(requestScope.value.client || requestScope.value.profile))
+// An administrator sees every row with its verdict; a tenant's profile view is
+// the visible rows only plus a count (no reason, no "Why?").
+const viewAsAdmin = computed(() => viewAsActive.value && !isTenant.value)
+const requestKey = computed(() => scopeParamsKey(requestScope.value) + (scopeConflict.value ? '!' : ''))
+
+// The server answered /status but the wait timed out first: the filters stay
+// hidden (rule 7) and the page fetches unfiltered, with a disabled chip.
+const scopeWaitTimedOut = ref(false)
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value || !route) return []
+  return (['client', 'profile'] as const).filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
+
+const viewAsAvailable = computed(() => isScopeParamAvailable('profile') || isScopeParamAvailable('client'))
+const clientOptions = computed(() => clientsStore.clients.filter(client => client.credential_state !== 'none'))
+const viewAsSelectValue = computed(() => {
+  if (scopeConflict.value) return ''
+  if (appliedScope.value.client) return `client:${appliedScope.value.client}`
+  if (appliedScope.value.profile) return `profile:${appliedScope.value.profile}`
+  return ''
+})
+// A subject in the URL that is not in the loaded lists still shows in the select.
+const viewAsSelectOrphan = computed(() => {
+  const value = viewAsSelectValue.value
+  if (!value) return ''
+  const [kind, id] = [value.slice(0, value.indexOf(':')), value.slice(value.indexOf(':') + 1)]
+  const known = kind === 'client' ? clientOptions.value.some(client => client.id === id) : profilesStore.profiles.some(profile => profile.name === id)
+  return known ? '' : id
+})
+
+function pickViewAs(value: string) {
+  if (!scopeQuery) return
+  if (value.startsWith('client:')) scopeQuery.set({ client: value.slice(7), profile: undefined })
+  else if (value.startsWith('profile:')) scopeQuery.set({ profile: value.slice(8), client: undefined })
+  else scopeQuery.set({ client: undefined, profile: undefined })
+}
+
+function clearViewAs() {
+  scopeQuery?.clear(['client', 'profile'])
+}
+
+function resolveConflict(keep: 'client' | 'profile') {
+  scopeQuery?.clear([keep === 'client' ? 'profile' : 'client'])
+}
+
+const profileLabelFor = (name: string) => profilesStore.titleFor(name)
+const clientLabelFor = (id: string) => clientsStore.clients.find(client => client.id === id)?.display_name ?? id
+const conflictClientLabel = computed(() => clientLabelFor(appliedScope.value.client ?? ''))
+const conflictProfileLabel = computed(() => profileLabelFor(appliedScope.value.profile ?? ''))
+
+/** "Work · Read-only": a profile's title and what its tier cap means. */
+function profilePhrase(name: string): string {
+  const title = profilesStore.titleFor(name)
+  const tier = tierPhrase(profilesStore.byName.get(name)?.max_tier)
+  return tier ? `${title} · ${tier}` : title
+}
+
+const viewAsSubjectLabel = computed(() => {
+  const { client, profile } = requestScope.value
+  return client ? clientLabelFor(client) : `profile ${profileLabelFor(profile ?? '')}`
+})
+
+// Spec 108-j J6: the numbers are computed from the rows the administrator got.
+const viewAsCountsFromRows = computed(() => {
+  let visible = 0
+  let callable = 0
+  let hidden = 0
+  for (const tool of allTools.value) {
+    const access = tool.access
+    if (!access) { visible++; callable++; continue }
+    if (access.visible) visible++
+    else hidden++
+    if (access.callable) callable++
+  }
+  return { visible, callable, hidden }
+})
+
+const viewAsBannerText = computed(() => {
+  const { client, profile } = requestScope.value
+  if (isTenant.value) {
+    const hidden = viewAsCounts.value?.hidden ?? 0
+    return `${hidden} tool${hidden === 1 ? '' : 's'} hidden by this profile`
+  }
+  const counts = viewAsCountsFromRows.value
+  let who: string
+  if (client) {
+    const profileName = clientsStore.clients.find(row => row.id === client)?.profile
+    who = `Viewing as ${clientLabelFor(client)}${profileName ? ` (${profilePhrase(profileName)})` : ''}`
+  } else {
+    who = `Viewing as profile ${profilePhrase(profile ?? '')}`
+  }
+  return `${who}: ${counts.visible} visible · ${counts.callable} callable · ${counts.hidden} hidden`
+})
+
+const viewAsEmptyText = computed(() => {
+  if (isTenant.value) return 'No tools visible under this profile'
+  return `${viewAsSubjectLabel.value[0].toUpperCase()}${viewAsSubjectLabel.value.slice(1)} can see no tools`
+})
+
+// J14 (#1437 item 2): a disabled server's tools may or may not be in the listing
+// (the last-known set can linger after a disable), so say so instead of implying
+// the list is whole.
+const disabledServerNote = computed(() => {
+  const count = serversStore.serverCount.disabled
+  if (!viewAsActive.value || count === 0) return ''
+  return `${count} disabled server${count === 1 ? '' : 's'}: ${count === 1 ? 'its' : 'their'} tools may not be listed.`
+})
+const disabledServersLink = computed(() => (scopeQuery ? scopeQuery.linkTo('servers', { status: 'disabled' }) : null))
+
+const SHOW_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'callable', label: 'Callable' },
+  { value: 'not_callable', label: 'Not callable' },
+] as const
+// Page-local, never in the URL: it only narrows the rows already loaded.
+const showFilter = ref<'all' | 'callable' | 'not_callable'>('all')
+
+const isCallable = (tool: GlobalTool): boolean => tool.access?.callable !== false
+const accessState = (tool: GlobalTool): string => accessStateLabel(tool.access ?? { visible: true, callable: true })
+const accessBadgeClass = (tool: GlobalTool): string => {
+  if (isCallable(tool)) return 'badge-success'
+  return tool.access?.visible ? 'badge-warning' : 'badge-error'
+}
+// A tool the subject cannot call is marked by a tinted row (`bg-base-200/70`) and,
+// above all, by the state and reason words in its Access cell. Opacity is not used:
+// it multiplies the alpha of every cell and drops the row's text under AA contrast.
+const rowId = (tool: GlobalTool): string => `${tool.server_name}__${tool.name}`
+
+const explain = ref<{ subject: { kind: 'client' | 'profile'; name: string }; tool: string } | null>(null)
+function openWhy(tool: GlobalTool) {
+  const { client, profile } = requestScope.value
+  const subject = client ? { kind: 'client' as const, name: client } : { kind: 'profile' as const, name: profile ?? '' }
+  explain.value = { subject, tool: `${tool.server_name}:${tool.name}` }
+}
+
 // ---- Filters ----
 const searchQuery = ref('')
 const filterServer = ref('')
 const filterStatus = ref('')
-const filterRisk = ref('')
+const filterTier = ref('')
 const filterApproval = ref('')
 
 // Debounce search
@@ -596,7 +950,7 @@ watch(searchQuery, () => {
 })
 
 // ---- Sort ----
-type SortCol = 'name' | 'server_name' | 'risk' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
+type SortCol = 'name' | 'server_name' | 'tier' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
 const sortColumn = ref<SortCol>('name')
 const sortDirection = ref<'asc' | 'desc'>('asc')
 
@@ -767,53 +1121,71 @@ const availableServers = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterRisk.value || !!filterApproval.value
+  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value
 )
 
 // Clickable stat cards (parity with Servers page): each card drives the
-// status/approval filter and toggles off when its active card is clicked again.
-type StatCard = 'total' | 'enabled' | 'disabled' | 'pending'
+// status filter and toggles off when its active card is clicked again. The
+// "Needs review" card (Spec 109 FR-027) is a plain link to /review, not one of
+// these — it never sets filterApproval.
+type StatCard = 'total' | 'enabled' | 'disabled'
 
-const activeStatCard = computed<StatCard>(() => {
-  if (filterApproval.value === 'awaiting' || filterApproval.value === 'pending') return 'pending'
+// Review round 4: Total must only read as active when the table is truly
+// unfiltered. An approval-only filter (filterStatus empty) still narrows the
+// table, so none of Total/Enabled/Disabled correctly describes it — return
+// null rather than defaulting to 'total'.
+// Round-9 fix: that filterApproval guard must only suppress TOTAL, not
+// Enabled/Disabled. It used to run before the filterStatus checks, so it
+// always won whenever an approval filter was set — activeStatCard() was
+// null no matter what filterStatus held. That made selectStatCard's toggle
+// condition (`activeStatCard.value === card`) permanently false for
+// 'enabled'/'disabled': clicking the Enabled/Disabled stat card while an
+// approval filter is active still applied filterStatus (so the table did
+// filter), but the card never rendered as active and a second click ran the
+// same no-op branch again instead of toggling off. filterStatus === 'enabled'
+// / 'disabled' fully describes the row regardless of any additional approval
+// filter, so those checks must run first; only fall through to the
+// filterApproval-only null when filterStatus is empty.
+const activeStatCard = computed<StatCard | null>(() => {
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
-  if (!filterStatus.value && !filterApproval.value) return 'total'
+  if (filterApproval.value) return null
   return 'total'
 })
 
 function selectStatCard(card: StatCard) {
   // Toggle: re-clicking the active card resets to the unfiltered "total" view.
+  // Also clears filterApproval (review round 1): Total is the row's "reset"
+  // gesture (clearFilters clears both too), and leaving an approval filter
+  // in place after Total is clicked filtered the table with no visible way
+  // to tell from the stat row.
   if (card === 'total' || activeStatCard.value === card) {
     filterStatus.value = ''
     filterApproval.value = ''
     return
   }
-  if (card === 'pending') {
-    filterStatus.value = ''
-    filterApproval.value = 'awaiting'
-  } else {
-    filterApproval.value = ''
-    filterStatus.value = card // 'enabled' | 'disabled'
-  }
+  filterStatus.value = card // 'enabled' | 'disabled'
 }
 
-// ---- Computed: risk derivation ----
-function getRisk(tool: GlobalTool): 'read' | 'write' | 'destructive' {
-  if (tool.annotations?.destructiveHint) return 'destructive'
-  if (tool.annotations?.readOnlyHint) return 'read'
-  return 'write'
+// ---- Tier (Spec 109 FR-028/X11): `tool.tier` comes from the backend
+// (contracts.AnnotationTier) — never computed here. An unannotated tool is
+// labelled "Unannotated", never silently shown as "write" (the X11 bug this
+// replaces: the old local getRisk() defaulted anything without hints to
+// "write").
+function getTier(tool: GlobalTool): string {
+  return tool.tier || 'unannotated'
 }
 
-function getRiskLabel(tool: GlobalTool): string {
-  return getRisk(tool)
+function getTierLabel(tool: GlobalTool): string {
+  return tierLabel(getTier(tool))
 }
 
-function getRiskBadgeClass(tool: GlobalTool): string {
-  const r = getRisk(tool)
-  if (r === 'destructive') return 'badge-error'
-  if (r === 'read') return 'badge-success'
-  return 'badge-warning'
+function getTierBadgeClass(tool: GlobalTool): string {
+  const t = getTier(tool)
+  if (t === 'destructive') return 'badge-error'
+  if (t === 'write') return 'badge-warning'
+  if (t === 'read') return 'badge-success'
+  return 'badge-ghost'
 }
 
 function getApprovalBadgeClass(status: string): string {
@@ -922,16 +1294,16 @@ const searchScope = computed(() => {
     tools = tools.filter(t => t.config_denied)
   }
 
-  if (filterRisk.value) {
-    tools = tools.filter(t => getRisk(t) === filterRisk.value)
+  if (filterTier.value) {
+    tools = tools.filter(t => getTier(t) === filterTier.value)
   }
 
-  if (filterApproval.value === 'awaiting') {
-    // "Awaiting approval" mirrors the Pending Approval stat, which counts both
-    // brand-new (pending) and rug-pull (changed) tools.
-    tools = tools.filter(t => t.approval_status === 'pending' || t.approval_status === 'changed')
-  } else if (filterApproval.value) {
+  if (filterApproval.value) {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
+  }
+
+  if (viewAsAdmin.value && showFilter.value !== 'all') {
+    tools = tools.filter(t => (showFilter.value === 'callable' ? isCallable(t) : !isCallable(t)))
   }
 
   return tools
@@ -979,8 +1351,8 @@ const sortedTools = computed(() => {
         av = a.name; bv = b.name; break
       case 'server_name':
         av = a.server_name; bv = b.server_name; break
-      case 'risk':
-        av = getRisk(a); bv = getRisk(b); break
+      case 'tier':
+        av = getTier(a); bv = getTier(b); break
       case 'approval_status':
         av = a.approval_status || ''; bv = b.approval_status || ''; break
       case 'enabled': {
@@ -1025,24 +1397,61 @@ const selectedToolSchema = computed(() => {
 })
 
 // ---- Methods ----
+// Every load takes a ticket and only the latest applies: choosing another
+// subject, removing a chip or a refresh must never let an older answer for the
+// previous subject land afterwards (R1).
+let loadSeq = 0
+
 async function loadTools() {
+  if (!scopeReady) await scopeReadyPromise
+  const seq = ++loadSeq
+  // Rule 8 (J18): two subjects means no request at all.
+  if (scopeConflict.value) {
+    allTools.value = []
+    stats.value = null
+    viewAsCounts.value = null
+    scopeError.value = null
+    error.value = null
+    loading.value = false
+    return
+  }
+
   loading.value = true
   error.value = null
+  scopeError.value = null
+  const scope = requestScope.value
+  const scoped = Boolean(scope.client || scope.profile)
 
   try {
-    const resp = await api.getGlobalTools()
+    const resp = scoped ? await api.getGlobalTools(scope) : await api.getGlobalTools()
+    if (seq !== loadSeq) return
     if (resp.success && resp.data) {
       allTools.value = resp.data.tools || []
       stats.value = resp.data.stats
       partial.value = resp.data.partial || false
       failedServers.value = resp.data.failed_servers || []
+      viewAsCounts.value = resp.data.counts ?? null
     } else {
       error.value = resp.error || 'Failed to load tools'
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Unknown error'
+    if (seq !== loadSeq) return
+    const status = (err as { status?: number } | null)?.status
+    if (scoped && (status === 404 || status === 403)) {
+      // J19: a refused view-as is an inline message with a way out, never a
+      // blanked page. The rows of the previous subject are dropped so they are
+      // not mistaken for this one's.
+      allTools.value = []
+      stats.value = null
+      viewAsCounts.value = null
+      scopeError.value = status === 403
+        ? 'Requires an administrator'
+        : scope.client ? 'Client not found' : 'Profile not found'
+    } else {
+      error.value = err instanceof Error ? err.message : 'Unknown error'
+    }
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -1054,7 +1463,7 @@ function clearFilters() {
   searchQuery.value = ''
   filterServer.value = ''
   filterStatus.value = ''
-  filterRisk.value = ''
+  filterTier.value = ''
   filterApproval.value = ''
   currentPage.value = 1
 }
@@ -1069,8 +1478,41 @@ function formatRelativeTime(ts: string): string {
 }
 
 // Reset page when filters/sort change
-watch([filterServer, filterStatus, filterRisk, filterApproval, sortColumn, sortDirection], () => {
+watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection, showFilter], () => {
   currentPage.value = 1
+})
+
+// A shrinking result (another view-as subject, a refresh) must never strand the
+// table on a page past the end: zero rows and no pager (F2.2).
+watch(() => Math.ceil(sortedTools.value.length / pageSize.value), (pages) => {
+  if (currentPage.value > pages) currentPage.value = Math.max(1, pages)
+})
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the controls
+// above only ever READ the URL (applyQueryParam()) — clearing a filter, or
+// picking a new one, updated the table but left the address bar showing the
+// stale query, so a copied/bookmarked URL silently reapplied it on reload
+// (SC-009's URL round-trip). searchQuery gets its own watcher just below,
+// rather than joining this one: it changes on every keystroke, and the two
+// need to stay independent of each other's timing.
+watch([filterServer, filterStatus, filterTier, filterApproval], () => {
+  if (!scopeQuery) return
+  scopeQuery.set({
+    server: filterServer.value || undefined,
+    status: filterStatus.value || undefined,
+    tier: filterTier.value || undefined,
+    // `risk` is only ever a read-side alias (url-filter-contract.md rule 6);
+    // once resolved into `filterTier` the canonical `tier` param is what gets
+    // written back, so a stale `?risk=` left over from an old link does not
+    // linger next to it.
+    risk: undefined,
+    approval: filterApproval.value || undefined,
+  })
+})
+
+watch(searchQuery, value => {
+  if (!scopeQuery) return
+  scopeQuery.set({ q: value || undefined })
 })
 
 // Also reset when pageSize changes
@@ -1087,7 +1529,7 @@ const toolsHints = computed<Hint[]>(() => [
         title: 'Audit and cleanup',
         list: [
           'Search by tool name, description, or server',
-          'Filter by status, risk level, or approval state',
+          'Filter by status, tier, or approval state',
           'Sort any column to find stale or unused tools',
           'Select multiple tools for batch enable/disable, or batch approve/reject across servers',
         ],
@@ -1107,23 +1549,92 @@ const toolsHints = computed<Hint[]>(() => [
 onMounted(() => {
   // Tools is the canonical search surface (audit F20): the header box and the
   // retired /search route both arrive here with ?q=, so the query has to
-  // prefill the filter rather than being silently dropped.
+  // prefill the filter rather than being silently dropped. Spec 109-k: the
+  // rest of the contract's Tools-page parameters (`server`, `tier`/`risk`,
+  // `status`, `approval` — url-filter-contract.md "Parameters", all
+  // client-side here per the contract) are read the same way, so a deep link
+  // (Home/Server-card links, a Clients row "Tools it sees", ...) actually
+  // narrows the page instead of landing on the unfiltered table.
   applyQueryParam()
-  loadTools()
+  // The Viewing chip and the sidebar normally load these lists; a direct visit
+  // to a view-as URL must not wait for them to name the subject.
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
+  if (!isTenant.value && clientsStore.clients.length === 0) void clientsStore.refreshPresence()
+  void firstLoad()
 })
 
-// A second search from the header while Tools is already open is a route query
-// change, not a remount — without this watch the box would appear to do nothing.
+// Spec 108-j J3 (rule 1): a URL that names a subject must not fetch before
+// GET /status has said whether the build supports it, or the first request goes
+// out unfiltered and every row flashes before the refetch. A URL with no scope
+// parameter does not wait at all.
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
+let scopeWatchArmed = false
+async function firstLoad() {
+  const urlHasScope = Boolean(route && ['profile', 'client', 'token'].some(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== ''
+  }))
+  if (urlHasScope) {
+    await systemStore.waitForScopeFeatures()
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
+  }
+  scopeReady = true
+  releaseScopeReady()
+  scopeWatchArmed = true
+  await loadTools()
+}
+
+// The applied subject changed (a chip removed, the header chip, the select, or
+// the feature list arriving after the first fetch): refetch under it.
+watch(requestKey, () => {
+  if (!scopeWatchArmed) return
+  showFilter.value = 'all'
+  currentPage.value = 1
+  selectedKeys.value.clear()
+  void loadTools()
+})
+
+// A second search/filter from elsewhere while Tools is already open is a
+// route query change, not a remount — without this watch the controls would
+// appear to do nothing (this is exactly the gap the audit found: a URL nav
+// after the initial mount had no effect either).
 watch(
-  () => route?.query.q,
-  () => applyQueryParam()
+  () => route?.query,
+  () => applyQueryParam(),
+  { deep: true }
 )
 
 function applyQueryParam() {
-  const q = route?.query.q
-  if (typeof q === 'string' && q !== searchQuery.value) {
-    searchQuery.value = q
+  const q = route?.query
+  if (!q) return
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  const query = str(q.q)
+  if (query && query !== searchQuery.value) {
+    searchQuery.value = query
     currentPage.value = 1
   }
+
+  // Symmetric by design (zcode review round 1, F3, matching Activity.vue's
+  // applyRouteFilters): set from the query param when present AND cleared
+  // when absent. Vue Router reuses this component across a same-route
+  // navigation (no remount), so a "set only if present" read left a stale
+  // filter in force after a later URL dropped the param — and the write-back
+  // watch below then resurrected it into a URL that had just been cleared.
+  filterServer.value = str(q.server)
+  filterStatus.value = str(q.status)
+  filterApproval.value = str(q.approval)
+
+  // `?risk=` stays a query alias for `?tier=` for old bookmarks/links
+  // (url-filter-contract.md rule 6); an explicit `tier` wins if somehow both
+  // are present.
+  filterTier.value = str(q.tier) || str(q.risk)
 }
 </script>

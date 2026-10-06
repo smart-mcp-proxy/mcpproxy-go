@@ -740,7 +740,7 @@ actor CoreProcessManager {
         do {
             try await connectToCore()
             await transitionState(to: .connected)
-            await refreshState()
+            await refreshStateOnConnect()
             startSSEStream()
             startPeriodicRefresh()
             // Spec 092 FR-001: the #957 case. The core we just attached to may
@@ -778,7 +778,7 @@ actor CoreProcessManager {
 
         await transitionState(to: .connected)
         retryCount = 0
-        await refreshState()
+        await refreshStateOnConnect()
         startSSEStream()
         startPeriodicRefresh()
         // A launch can still land on a core we did not start: `waitForSocket`
@@ -1702,6 +1702,27 @@ actor CoreProcessManager {
                 )
             }
 
+        case "attention.changed":
+            // Spec 109 FR-001/FR-006: the wire payload is narrowed to
+            // `{count, ids}` per subscriber — refetch the full item shape
+            // (summaries, fixes) rather than reconstructing it from ids.
+            await refreshAttention()
+
+        case "review.changed":
+            // The payload is a notification only; ReviewQueueView refetches the
+            // authoritative one-row-per-server queue when it is visible.
+            await refreshReviewQueue()
+            await MainActor.run { NotificationCenter.default.post(name: .reviewChanged, object: nil) }
+
+        case "security.scan_settled":
+            // Scan completion is separate from review changes: a clean scan
+            // can capture definitions without changing approval status.
+            guard let data = event.data.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            let payload = raw["payload"] as? [String: Any] ?? raw
+            guard let serverName = payload["server_name"] as? String else { return }
+            await MainActor.run { NotificationCenter.default.post(name: .scanSettled, object: serverName) }
+
         case "config.reloaded":
             // Configuration reloaded; refresh everything once.
             // A re-init loop re-emits config.reloaded each cycle even when the
@@ -1737,12 +1758,14 @@ actor CoreProcessManager {
             }
             await appState.prependGlanceActivity(entry, generation: generation)
 
-        case "active_profile.changed":
-            // Profiles v2 T5: the server-level default active profile was switched
-            // (possibly by another client). Refetch profiles + active so the tray
-            // submenu reflects it. The payload carries active_profile, but a
-            // refetch also picks up tool-count/profile-set changes uniformly.
-            await refreshProfiles()
+        case "profiles.changed":
+            // Spec 108-f: a profile was created, edited, renamed or deleted (by
+            // any surface). Refetch the list; bursts coalesce (250 ms).
+            scheduleProfilesRefresh()
+
+        case "client.binding_changed":
+            // Spec 108-f: a client's binding, credential or lock changed.
+            scheduleClientsRefresh()
 
         case "ping":
             // Keepalive; no action needed
@@ -1897,6 +1920,16 @@ actor CoreProcessManager {
         await attemptReconnection()
     }
 
+    /// `refreshState()` for a fresh connection (attach, launch, reconnect).
+    /// The server list is SSE-driven (Spec 048), so a core that is already
+    /// settled never sends the `servers.changed` that would fill it; fetch it
+    /// once here so Home, Servers and the Profile editor are not empty until the
+    /// five-minute safety net runs (Spec 108-k live QA).
+    private func refreshStateOnConnect() async {
+        await refreshState()
+        await refreshServers()
+    }
+
     /// Fetch full state from the core and update appState.
     /// Spec 048: dropped the per-tick refreshServers() call. The server list
     /// is now SSE-driven (spec 047 servers.changed payload). MCPProxyApp
@@ -1910,6 +1943,9 @@ actor CoreProcessManager {
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
+        await refreshClients()
+        await refreshAttention()
+        await refreshReviewQueue()
         // Bump activityVersion so ActivityView reloads. Still needed after the
         // glance's SSE work: the bus emits `activity.tool_call.completed` and
         // `activity.internal_tool_call.completed` (internal/runtime/events.go),
@@ -1974,6 +2010,31 @@ actor CoreProcessManager {
         }
     }
 
+    /// Fetch the needs-attention list from `GET /api/v1/attention` and update
+    /// appState (Spec 109 FR-001). Driven on connect, on the periodic
+    /// refresh, and on `attention.changed` SSE events.
+    func refreshAttention() async {
+        guard let apiClient else { return }
+        let (generation, sequence) = await MainActor.run {
+            (appState.connectionGeneration, appState.nextAttentionRequest())
+        }
+        do {
+            let response = try await apiClient.attention()
+            await MainActor.run {
+                appState.updateAttention(response.items, connectionGeneration: generation,
+                                         requestSequence: sequence)
+            }
+        } catch {
+            // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
+    }
+
+    func refreshReviewQueue() async {
+        guard let apiClient else { return }
+        let count = (try? await apiClient.reviewQueue().count) ?? 0
+        await MainActor.run { appState.reviewQueueCount = count }
+    }
+
     /// Spec 048: long-cadence safety-net wrapper around `refreshServers`.
     /// Called by a 5-minute Combine timer in `MCPProxyApp` to guard against
     /// missed `servers.changed` SSE events. Separate name documents intent —
@@ -1982,21 +2043,66 @@ actor CoreProcessManager {
         await refreshServers()
     }
 
-    /// Fetch the configured profiles + active profile and update appState
-    /// (Profiles v2 T5). Driven on connect, on the periodic refresh, and on the
-    /// `active_profile.changed` SSE event so a switch made by another client
-    /// (Web UI, CLI, the Go tray) is reflected in the macOS tray submenu.
+    /// Debounce window for the `profiles.changed` / `client.binding_changed`
+    /// refetches: a bulk move or an admin-key upgrade emits one event per client.
+    static let profileRefreshDebounce: UInt64 = 250_000_000
+
+    private var profilesRefreshTask: Task<Void, Never>?
+    private var clientsRefreshTask: Task<Void, Never>?
+
+    func scheduleProfilesRefresh() {
+        profilesRefreshTask?.cancel()
+        profilesRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.profileRefreshDebounce)
+            guard !Task.isCancelled else { return }
+            await self?.refreshProfiles()
+            // A rename or delete also moves bindings; the rows follow.
+            await self?.refreshClients()
+        }
+    }
+
+    func scheduleClientsRefresh() {
+        clientsRefreshTask?.cancel()
+        clientsRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.profileRefreshDebounce)
+            guard !Task.isCancelled else { return }
+            await self?.refreshClients()
+        }
+    }
+
+    /// Fetch the profile list (Spec 108-k) and update appState. Driven on
+    /// connect, on the periodic refresh and on `profiles.changed`, so an edit
+    /// made in the Web UI, the CLI or by an agent reaches every native picker.
     func refreshProfiles() async {
         guard let apiClient else { return }
+        let generation = await MainActor.run { appState.connectionGeneration }
         do {
-            let profiles = try await apiClient.profiles()
-            let active = try await apiClient.activeProfile()
+            let list = try await apiClient.profilesV3()
             await MainActor.run {
-                if appState.profiles != profiles { appState.profiles = profiles }
-                if appState.activeProfile != active { appState.activeProfile = active }
+                guard appState.isCurrentConnection(generation) else { return }
+                if appState.profiles != list.profiles { appState.profiles = list.profiles }
+                let anonymous = list.anonymousProfile ?? ""
+                if appState.anonymousProfile != anonymous { appState.anonymousProfile = anonymous }
             }
         } catch {
             // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
+    }
+
+    /// Fetch the client rows with their bindings and warnings (Spec 108-k).
+    func refreshClients() async {
+        guard let apiClient else { return }
+        let generation = await MainActor.run { appState.connectionGeneration }
+        do {
+            let response = try await apiClient.clientsV3()
+            await MainActor.run {
+                guard appState.isCurrentConnection(generation) else { return }
+                if appState.clients != response.clients { appState.clients = response.clients }
+                let warnings = response.warnings ?? []
+                if appState.clientWarnings != warnings { appState.clientWarnings = warnings }
+            }
+        } catch {
+            // Non-fatal (a server-edition core has no /clients); retry later.
         }
     }
 
@@ -2053,13 +2159,21 @@ actor CoreProcessManager {
         await appState.refreshUsage(from: apiClient)
     }
 
-    /// Fetch token metrics from the status endpoint and update appState.
+    /// Fetch token metrics and feature flags from the status endpoint and update appState.
     private func refreshTokenMetrics() async {
         guard let apiClient else { return }
         do {
             let status = try await apiClient.status()
             if let metrics = status.upstreamStats?.tokenMetrics {
                 await MainActor.run { appState.tokenMetrics = metrics }
+            }
+            // Spec 109-k FR-080a: rides the same periodic status read, so the
+            // scope filters appear without a restart once the core lists them.
+            let available = status.scopeFiltersAvailable
+            await MainActor.run {
+                if appState.scopeFiltersAvailable != available {
+                    appState.scopeFiltersAvailable = available
+                }
             }
         } catch {
             // Non-fatal; token metrics are optional
@@ -2190,7 +2304,7 @@ actor CoreProcessManager {
                     try await connectToCore()
                     await transitionState(to: .connected)
                     retryCount = 0
-                    await refreshState()
+                    await refreshStateOnConnect()
                     startSSEStream()
                     startPeriodicRefresh()
                     // A reconnect can land on a DIFFERENT core than the one we

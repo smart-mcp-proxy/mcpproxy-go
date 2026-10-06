@@ -29,7 +29,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | Job | Blocking entries | Timeout | Notes |
 |-----|------------------|---------|-------|
 | `build-candidate` | — | 15 min | Frontend build + embed + `go build` of the candidate `mcpproxy`, the fixtures, and the `release-gate` driver; uploaded as one artifact and reused everywhere. |
-| `suite-api-e2e` | `suite/api-e2e` | 15 min | Runs `scripts/test-api-e2e.sh` **unmodified** (FR-003). |
+| `suite-api-e2e` | `suite/api-e2e`, `suite/api-e2e-cleanup-check` | 30 min | Runs `scripts/test-api-e2e.sh` **unmodified** (FR-003), then a second, real invocation of it under `scripts/test-api-e2e-cleanup-check.sh` proving the E2E cleanup trap holds (no blanket `pkill -f "mcpproxy.*serve"`). |
 | `suite-race` | `suite/unit-race`, `suite/server-race` | 25 min | `go test -race ./internal/...` + `go test -tags server -race ./internal/serveredition/...`. |
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
@@ -109,8 +109,34 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-covers the servers list, server detail (+ security tab), tools page and its
-search, activity log, and settings, and fails on uncaught page exceptions.
+runs six spec files (the launcher's `playwright test` line is the list, and
+`TestWebUISweepSpecListIsComplete` fails when it, `e2e/web-ui-sweep` and this
+page disagree):
+
+- `web-ui-sweep.spec.ts`: servers list, server detail (+ security tab), tools
+  page and its search, activity log, and settings; fails on uncaught page
+  exceptions.
+- `visual-a11y-sweep.spec.ts`: WCAG contrast, layouts, accessible names, themes.
+- `navigation-consistency.spec.ts`: Spec 109 sidebar, header, command palette,
+  `+ Add` menu, redirects and filtered deep links.
+- `profiles-clients.spec.ts`: Spec 108 Profiles and Clients screens, the goal
+  flow, the binding-guard refusal, the Viewing chip, dialogs and layout.
+- `profiles-scope.spec.ts`: Spec 108 profile scope on Tools, Activity, Sessions
+  and Usage (audit acceptance check 6: the deep links `/tools?client=`,
+  `/usage?profile=` and `/sessions?client=` load filtered, with a removable
+  chip that survives navigation and Back).
+- `profiles-unhide.spec.ts`: Spec 109-l un-hide of Spec 108 (Profiles in the
+  sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
+  agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
+  needs-attention item, layout and keyboard order).
+- `demo-ux-fixes.spec.ts`: the layout findings of the live Web UI demo, measured
+  at 1440 and 900 px: the token Profile chip is one line inside its cell, and
+  radio labels sit next to their radios in the create-profile, custom-client and
+  bulk-move dialogs.
+- `usertest-web-fixes.spec.ts`: the first-run user test findings, at 1440 and
+  900 px: the header status pill names servers awaiting review, a secret-like
+  Manual-add value is masked with a Show toggle, and profile Try it is readable
+  and labels unsaved edits.
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),

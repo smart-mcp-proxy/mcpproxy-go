@@ -21,6 +21,7 @@ For background on the architecture, scanner images, and storage see:
 - [Security Scanner Plugin System](/features/security-scanner-plugins)
 - [Scanner Images](/features/scanner-images)
 - [Quarantine System](/features/security-quarantine)
+- [Review Commands](/cli/review-commands): `mcpproxy review list|show|approve|reject`, the one CLI for review decisions
 
 ## Overview
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -37,6 +39,14 @@ const (
 	// record). Dispatch refuses such a name for every caller, so describe_tool
 	// withholds its definition with the plain not-found shape (astra r2 C2).
 	visReasonToolUnresolved = "tool_unresolved"
+	// visReasonToolPolicyExcluded is the Spec 108 FR-011 defense-in-depth
+	// reason: indexedToolVisible's own CompiledPolicy.Decide re-check found
+	// the tool excluded, even though SearchToolsAdmitted already filtered it
+	// out before the cut. Treated exactly like visReasonServerNotInScope by
+	// the retrieve_tools loop (invisible, never "locked", never counted) —
+	// FR-013 forbids naming or describing a profile-hidden tool, and a
+	// "locked" entry would do both.
+	visReasonToolPolicyExcluded = "tool_policy_excluded"
 )
 
 // The two resolvers share one set of step helpers (serverInScope,
@@ -74,14 +84,72 @@ const (
 // pending "a:erase" rendered its definition on the approved sibling's gate
 // and an approved one was withheld on the pending sibling's.
 func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, toolName string) (visible bool, reason string) {
-	if !p.toolIndexed(serverName, toolName) {
-		return false, visReasonNotIndexed
-	}
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	if profileResolution.Scope != nil {
+		profileName = profileResolution.Name
+		profileScope = profileResolution.Scope
+	}
 
-	if !p.serverInScope(authCtx, profileScope, serverName) {
-		return false, visReasonServerNotInScope
+	// Spec 105 FR-010 G2: for a SCOPED caller (agent token), scope is
+	// checked BEFORE index presence. An id whose server is outside the
+	// caller's effective scope must answer the same reason whether or not a
+	// hidden document happens to exist under that exact (server, tool) pair
+	// — checking index presence first let the mere existence of a hidden
+	// collision (e.g. a case-different "b:read" on a server outside scope,
+	// alongside an authorized "B:read") swap the answer from not_indexed (no
+	// suggestion attempted below) to server_not_in_scope, silently
+	// suppressing the did-you-mean a token would otherwise get when the
+	// hidden document didn't exist at all. The scope predicate itself only
+	// reads the caller's own auth/profile state, never the index, so
+	// reordering costs nothing for a genuinely visible id.
+	//
+	// Gated to auth.IsScopedCaller (codex round-1 review, MUST-FIX): a
+	// profile-scoped ADMINISTRATOR is not a scoped caller, and reordering
+	// unconditionally changed WHICH reason it gets back even outside any
+	// hidden-collision scenario (e.g. a genuinely nonexistent server: index-
+	// first gave not_indexed pre-fix, scope-first gives server_not_in_scope
+	// post-fix) — which then fed the suggestion gate below and silently
+	// dropped a case-correction suggestion a profile-scoped admin used to
+	// get. FR-010 requires admin resolution unchanged; only the agent-facing
+	// order actually needed to move.
+	if auth.IsScopedCaller(ctx) {
+		if !p.serverInScope(authCtx, profileScope, serverName) {
+			return false, visReasonServerNotInScope
+		}
+		if !p.toolIndexed(serverName, toolName) {
+			return false, visReasonNotIndexed
+		}
+	} else {
+		if !p.toolIndexed(serverName, toolName) {
+			return false, visReasonNotIndexed
+		}
+		if !p.serverInScope(authCtx, profileScope, serverName) {
+			return false, visReasonServerNotInScope
+		}
+	}
+	// Spec 108 FR-011/T023 (zcode review round 1): describe_tool's contract
+	// makes NO shape change for an excluded tool — the caller must see the
+	// SAME uniform not-found response a nonexistent id gets
+	// (contracts/mcp-tools.md "describe_tool"), for EVERY excluded tool,
+	// including one that also happens to be quarantined, pending/changed, or
+	// operator-disabled. Ordered right after the scope gate (before the
+	// identity/lock gates below) precisely so it wins over their more
+	// specific reasons: those gates exist to narrow what an otherwise-
+	// admitted tool reveals, and a policy exclusion must never be
+	// downgraded to a shape that confirms the tool's existence (a lock
+	// reason does exactly that). Safe to run even when profileName is
+	// legacy or "" (policy is then nil, or Decide only ever agrees with the
+	// scope check already passed above).
+	if profileName != "" {
+		if policy := profileIdx.PolicyFor(profileName); policy != nil {
+			annotations, found := p.EffectiveAnnotations(serverName, toolName)
+			intrinsic := profile.IntrinsicTier(annotations, found)
+			if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
+				return false, visReasonToolPolicyExcluded
+			}
+		}
 	}
 	// Spec 105 FR-009 (research D4), astra r2 C2: an index document is not a
 	// registration identity. A name the KNOWN, CONNECTED server's completed
@@ -124,7 +192,18 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 // The pair arrives ALREADY SPLIT (the retrieve loop derives the raw name from
 // the index hit once, config.RawToolName) and is consulted exactly — see
 // toolVisibleToSession for why a second normalization is wrong.
-func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, serverName, toolName string) (visible bool, reason string) {
+//
+// policy is the Spec 108 compiled policy for the caller's effective profile
+// (nil when none is in effect, or the profile is legacy — Decide would only
+// ever agree with serverInScope's own verdict for a legacy profile, so
+// callers may pass nil for it unconditionally without changing behaviour).
+// It is consulted here purely as POST-CUT defense in depth (T022):
+// SearchToolsAdmitted already applies the identical decision before the
+// ranked cut, so this branch should not fire in the steady state; it exists
+// for the narrow window between a config/annotation change and the next
+// search, and for any future caller of this shared step that does not itself
+// go through SearchToolsAdmitted.
+func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, policy *profile.CompiledPolicy, serverName, toolName string) (visible bool, reason string) {
 	// Profile scope (Spec 057) + agent-token server scope (Spec 028) —
 	// applied BEFORE any classification so an agent never learns a tool
 	// exists on a server it cannot access.
@@ -135,6 +214,14 @@ func (p *MCPProxyServer) indexedToolVisible(authCtx *auth.AuthContext, profileSc
 	// Callability: disabled/blocked tools are non-existent for discovery.
 	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
+	}
+
+	if policy != nil {
+		annotations, found := p.EffectiveAnnotations(serverName, toolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
+			return false, visReasonToolPolicyExcluded
+		}
 	}
 
 	return true, ""
@@ -207,6 +294,69 @@ func (p *MCPProxyServer) serverInScope(authCtx *auth.AuthContext, profileScope *
 		return false
 	}
 	return profileScope.Allows(serverName)
+}
+
+// scopedIndexedToolCount returns the number of indexed tools belonging to
+// servers discoverable admits (Spec 105 FR-005 G4): a scoped caller's
+// `debug.total_indexed_tools` must count its own authorized population, not
+// the whole fleet's document count, regardless of whether the search that
+// produced the response ran against the shared index or an already-scoped
+// per-profile one — this always re-derives the count from the shared index's
+// server_name facet, so the two paths can never disagree about the count for
+// the identical effective scope.
+func (p *MCPProxyServer) scopedIndexedToolCount(discoverable func(serverName string) bool) int {
+	count, err := p.index.ScopedDocumentCount(discoverable)
+	if err != nil {
+		p.logger.Warn("Failed to get scoped document count", zap.Error(err))
+		return 0
+	}
+	if count > 0x7FFFFFFF { // Check for potential overflow
+		return 0x7FFFFFFF
+	}
+	return int(count)
+}
+
+// usageStatEligible reports whether a recorded tool-usage stat for
+// (serverName, toolName) belongs to the CURRENT authorized population and is
+// fully approved (Spec 105 FR-005 G2): a scoped caller's usage_summary must
+// exclude a stale record for a tool that was removed, hidden by scope, or is
+// still pending/changed review. Population membership alone would admit a
+// pending tool (it is indexed); approval alone never checks that the tool
+// still exists (mcp_direct_callability.go) — both are required. Deliberately
+// stricter than indexedToolVisible (the SEARCH gate, which stays permissive
+// for pending/changed tools per FR-006 byte-identity): usage ranking is not
+// search, and a still-under-review tool should not be recommended by name.
+//
+// policy is the Spec 108 compiled policy for the caller's effective profile
+// (nil when none is in effect, or the profile is legacy), consulted exactly
+// like indexedToolVisible/toolVisibleToSession's own policy gate (FR-011): a
+// usage record's tool is fleet-wide (IncrementToolUsage keys only on tool
+// name, so ANY earlier caller's calls create it, not necessarily this one's),
+// so without this gate a caller whose profile policy excludes the tool could
+// still see it NAMED in usage_summary.top_tools — a stronger disclosure than
+// tools[] (which already omits it) or hidden_by_profile (which already
+// counts it as hidden) ever intends.
+func (p *MCPProxyServer) usageStatEligible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, policy *profile.CompiledPolicy, serverName, toolName string) bool {
+	if !p.serverInScope(authCtx, profileScope, serverName) {
+		return false
+	}
+	if p.lookupIndexedTool(serverName, toolName) == nil {
+		return false
+	}
+	if !p.isExactToolCallable(serverName, toolName) {
+		return false
+	}
+	if p.describeGateReason(serverName, toolName) != "" {
+		return false
+	}
+	if policy != nil {
+		annotations, found := p.EffectiveAnnotations(serverName, toolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
+			return false
+		}
+	}
+	return true
 }
 
 // toolIndexed reports whether the tool is present in the shared search index
@@ -293,4 +443,33 @@ func (p *MCPProxyServer) suggestCanonicalToolID(ctx context.Context, serverName,
 		}
 	}
 	return "", false
+}
+
+// EffectiveAnnotations returns the (server, tool) pair's effective
+// annotations for Spec 108 profile-policy enforcement (T013): the ONE
+// annotation source for CompiledPolicy.Decide (via profile.IntrinsicTier),
+// SearchToolsAdmitted's predicate, "view as" and the access explainer — the
+// index itself stores no annotation field and gains none (FR-011, no
+// index-schema change, no reindex). It is a thin wrapper over
+// resolveExactToolIdentity, the SAME identity seam every dispatch path
+// already uses (Spec 105 FR-009), so discovery and execution classify a
+// tool from one source and can never disagree; it is also the documented
+// hook for per-server annotation_overrides once open PR #1323 lands (that
+// PR only needs to change what resolveExactToolIdentity resolves, never this
+// call site or any of its callers).
+//
+// found=false (the current snapshot does not list this exact server:tool
+// name at all) tells the caller to fail closed: profile.IntrinsicTier(nil,
+// false) is TierDestructive regardless of the returned annotations, which
+// are nil in that case. found=true does not by itself certify that the
+// annotations are current for the LIVE connection generation (a
+// disconnected server can retain a previous connection's stamp) — dispatch
+// enforces currency separately via the epoch-pinned certified() check
+// (mcp.go); this seam only answers "what does the snapshot say", the same
+// answer every other dispatch-adjacent reader of toolIdentity gets.
+//
+// This delegates to lookupExactToolAnnotations (mcp.go) rather than
+// re-resolving: same identity, same seam, one implementation.
+func (p *MCPProxyServer) EffectiveAnnotations(serverName, toolName string) (annotations *config.ToolAnnotations, found bool) {
+	return p.lookupExactToolAnnotations(serverName, toolName)
 }

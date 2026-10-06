@@ -240,6 +240,181 @@ func TestDisconnectOpencodeCommentedJsoncRefusedWithoutBackup(t *testing.T) {
 	}
 }
 
+// TestGuardJsoncComments_SkipsReadForNonJsoncPath is a regression guard for a
+// defect a cross-model (ZCode) review caught in an earlier version of the
+// shared-read fix: guardJsoncComments must check the ".jsonc" suffix BEFORE
+// reading the file, exactly like it did before this change. guardJsoncComments
+// itself has no production caller as of PR #1352 — preview.go now calls the
+// read-free guardJsoncCommentsBytes(cfgPath, pre.raw) instead, sharing
+// preWriteState's single read rather than opening the file again — but this
+// pins the same suffix-before-read ordering in the reading entry point in case
+// a future caller reaches for it.
+func TestGuardJsoncComments_SkipsReadForNonJsoncPath(t *testing.T) {
+	s := NewServiceWithHome("127.0.0.1:8080", "key", t.TempDir())
+	reads := 0
+	s.setReadFile(func(string) ([]byte, error) {
+		reads++
+		return nil, os.ErrNotExist
+	})
+
+	if err := s.guardJsoncComments("/some/path/config.json"); err != nil {
+		t.Fatalf("guardJsoncComments on a non-.jsonc path: %v", err)
+	}
+	if reads != 0 {
+		t.Fatalf("guardJsoncComments must not read a non-.jsonc path at all, got %d reads", reads)
+	}
+}
+
+// TestConnectJSON_CommentGuardSharesOneReadWithParse proves the TOCTOU
+// flagged in cross-model review of PR #1340: guardJsoncComments used to
+// perform its OWN read of cfgPath, and readOrCreateJSON a few lines later
+// performed a SEPARATE, independent read. If the file were comment-free when
+// the guard read it but gained comments before readOrCreateJSON's later read,
+// the guard passed on stale bytes while the parse/write silently normalized
+// the now-commented file to plain JSON — stripping the comments the guard
+// exists to protect. (Pre-existing; unrelated to PR #1340's actual fix.)
+//
+// PR #1352 folded the guard's read into preWriteState's own single pre-write
+// read (connectJSON itself no longer performs any read — it parses pre.raw,
+// the same bytes ConnectWithPrecondition already resolved), so these subtests
+// now drive the fix through ConnectWithPrecondition rather than calling
+// connectJSON directly with a stubbed `resolved` argument — connectJSON's
+// signature no longer takes one; it takes the shared preWriteResult.
+//
+// The first subtest is the actual regression detector: it counts reads and
+// requires 4 (preWriteState's shared guard+parse read; PR #1340's
+// refuseIfServersSectionRaced pre-backup check; its atomicWriteFile
+// preRename-hook check; then verifyJSONEntry's legitimate post-write read)
+// where the vulnerable pre-#1340, pre-this-fix code needed 5 (a separate
+// guard read, plus the same four) — this is the only externally observable
+// difference between the two implementations, since a silent-strip bug
+// produces byte-identical output to a legitimate comment-free write. The
+// second subtest does NOT by itself distinguish fixed from vulnerable code —
+// the vulnerable guard's own first read would also see the comments and
+// refuse at the same point — but it separately documents that the shared
+// read, when it does see comments, refuses rather than silently stripping
+// them.
+func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	commentFree := []byte(`{"$schema":"https://opencode.ai/config.json"}`)
+	commented := []byte("{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n")
+
+	t.Run("shared guard+parse read is comment-free: writes normally with 4 total reads, not 5", func(t *testing.T) {
+		home := t.TempDir()
+		writeOpencodeFile(t, home, "opencode.jsonc", string(commentFree))
+		s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+		calls := 0
+		s.setReadFile(func(path string) ([]byte, error) {
+			calls++
+			if calls == 1 {
+				// The one read that must back BOTH the comment guard and the
+				// parse — preWriteState's own read. A vulnerable,
+				// two-independent-reads implementation would still be looking
+				// at this same comment-free snapshot on its first (guard)
+				// call too, then race ahead to a second, later call below for
+				// its parse.
+				return commentFree, nil
+			}
+			// PR #1340's refuseIfServersSectionRaced pre-backup and preRename
+			// checks, and verifyJSONEntry's legitimate post-write re-read (and,
+			// in a vulnerable implementation, the parse call the guard's read
+			// should have shared) — all reflect the real file so none of them
+			// spuriously fail.
+			return os.ReadFile(path)
+		})
+
+		if _, err := s.ConnectWithPrecondition("opencode", "mcpproxy", false, ""); err != nil {
+			t.Fatalf("ConnectWithPrecondition: unexpected error: %v", err)
+		}
+		// The fixed code reads once for preWriteState's shared guard+parse
+		// step, twice more for PR #1340's refuseIfServersSectionRaced checks
+		// (pre-backup and the atomicWriteFile preRename hook), and once more
+		// for verifyJSONEntry's post-write check: 4 total. The vulnerable code
+		// needed a separate guard read on top of all of those: 5.
+		if calls != 4 {
+			t.Fatalf("ConnectWithPrecondition should need 4 reads (shared guard+parse, the two #1340 race checks, then verify), got %d — a separate guard read is exactly the TOCTOU window this closes", calls)
+		}
+	})
+
+	t.Run("single read is commented: refuses instead of silently stripping", func(t *testing.T) {
+		home := t.TempDir()
+		p := writeOpencodeFile(t, home, "opencode.jsonc", string(commentFree))
+		s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+		calls := 0
+		s.setReadFile(func(string) ([]byte, error) {
+			calls++
+			if calls == 1 {
+				return commented, nil
+			}
+			return commentFree, nil
+		})
+
+		_, err := s.ConnectWithPrecondition("opencode", "mcpproxy", false, "")
+		if err == nil {
+			t.Fatal("ConnectWithPrecondition must refuse when the shared read sees comments, not silently strip them")
+		}
+		if !strings.Contains(err.Error(), "comment") {
+			t.Fatalf("error should explain the comment refusal, got: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("ConnectWithPrecondition must read cfgPath exactly once before refusing; got %d reads", calls)
+		}
+		after, readErr := os.ReadFile(p)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(after) != string(commentFree) {
+			t.Fatalf("refused write must not touch the on-disk file, got %q", after)
+		}
+		entries, _ := os.ReadDir(opencodeDir(home))
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".bak.") {
+				t.Fatalf("refusal must not leave a backup behind, found %s", e.Name())
+			}
+		}
+	})
+}
+
+// TestDisconnectJSON_CommentGuardSharesOneRead is disconnectJSON's counterpart
+// to TestConnectJSON_CommentGuardSharesOneReadWithParse: disconnectJSON had
+// the identical guard-then-separate-read bug, fixed the identical way (check
+// guardJsoncCommentsBytes against the bytes just read, no second s.read).
+// disconnectJSON has no post-write verify step, so a successful disconnect
+// needs exactly ONE read — the vulnerable code needed 2 (guard, then parse).
+func TestDisconnectJSON_CommentGuardSharesOneRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	client := FindClient("opencode")
+	if client == nil {
+		t.Fatal("opencode client definition not found")
+	}
+	content := `{"mcp":{"mcpproxy":{"type":"remote","url":"http://127.0.0.1:8080/mcp","enabled":true}}}`
+	home := t.TempDir()
+	p := writeOpencodeFile(t, home, "opencode.jsonc", content)
+	s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+	calls := 0
+	s.setReadFile(func(string) ([]byte, error) {
+		calls++
+		return []byte(content), nil
+	})
+
+	if _, err := s.disconnectJSON(client, p, "mcpproxy"); err != nil {
+		t.Fatalf("disconnectJSON: unexpected error: %v", err)
+	}
+	// The fixed code reads once (shared guard+parse); the vulnerable code read
+	// separately for the guard and the parse: 2. disconnectJSON has no
+	// post-write verify step, unlike connectJSON, so 1 is the whole budget.
+	if calls != 1 {
+		t.Fatalf("disconnectJSON should need exactly 1 read (shared guard+parse), got %d — a separate guard read is exactly the TOCTOU window this closes", calls)
+	}
+}
+
 func TestDisconnectOpencodeFindsEntryInOtherCandidate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Setenv("LOCALAPPDATA", "")

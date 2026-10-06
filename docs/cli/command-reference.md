@@ -148,7 +148,7 @@ mcpproxy doctor [flags]
 | `--log-level, -l` | Log level | `warn` |
 | `--config, -c` | Path to config file | auto-detect |
 
-Checks for:
+The first section is the same needs-attention list `mcpproxy attention` prints; the diagnostics follow under `Diagnostics: N findings`. It checks for:
 - Upstream server connection errors
 - OAuth authentication requirements
 - Missing secrets
@@ -156,6 +156,46 @@ Checks for:
 - Docker isolation status
 - Tools pending quarantine approval (pending/changed counts per server)
 - Security features status (routing mode, sensitive data detection)
+
+### attention
+
+Print the one needs-attention list every surface shares. See [Attention Command](/cli/attention-command).
+
+```bash
+mcpproxy attention [-o table|json|yaml]
+```
+
+### review
+
+Review quarantined servers and new or changed tools through the scan gate. See [Review Commands](/cli/review-commands).
+
+```bash
+mcpproxy review list
+mcpproxy review show <server> [--full]
+mcpproxy review approve <server> [--all | --tools a,b] [--except a,b] [--force] [--yes]
+mcpproxy review reject <server> [--tools a,b] [--yes]
+```
+
+### catalog
+
+Search every catalog source, show an entry and add it quarantined. See [Catalog Commands](/cli/catalog-commands).
+
+```bash
+mcpproxy catalog search [query] [--source <id>] [--limit <n>]
+mcpproxy catalog show <source>/<id>
+mcpproxy catalog add <source>/<id> [--name <name>] [--env KEY=VALUE]
+```
+
+`registry search` and `registry add` are deprecated aliases of `catalog search` and `catalog add`; `registry list`, `add-source`, `edit` and `remove` manage the catalog sources.
+
+### client
+
+List the clients MCPProxy knows about (installed, connected, seen), with their connection state and reload hint, and manage their profile bindings. The `client` commands are documented with the profile commands in [Profile Commands](/cli/profile-commands).
+
+```bash
+mcpproxy client list
+mcpproxy client show <client>
+```
 
 ## Upstream Management
 
@@ -170,6 +210,9 @@ mcpproxy upstream list [flags]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--output, -o` | Output format: table, json | `table` |
+| `--status` | Filter by health status; repeatable, a comma-separated value is the same as repeating the flag | all |
+
+The STATUS column is the status label (`Online`, `Connecting`, `Sign-in required`, `Needs review`, `Secret required`, `Needs configuration`, `Error`, `Disabled`). See [Management Commands](/cli/management-commands#list-servers).
 
 ### upstream logs
 
@@ -346,9 +389,17 @@ mcpproxy tools list [flags]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--server` | Filter by server name | - |
+| `--tier` | Filter by tier: `read`, `write`, `destructive`, `unannotated` (`--risk` is an alias) | - |
+| `--approval` | Filter by review state: `approved` (Approved), `pending` (New, needs review), `changed` (Changed, needs review) | - |
 | `--timeout, -t` | Connection timeout | `30s` |
 | `--output, -o` | Output format: table, json, yaml | `table` |
 | `--trace-transport` | Enable detailed HTTP/SSE frame-by-frame tracing | `false` |
+
+The `TIER` column is computed once by the core, so it agrees with the Web UI, macOS and the review payload.
+
+### activity list `--view`
+
+`mcpproxy activity list --view calls|system|all` selects the same views as the Web UI and macOS Activity page: `calls` is tool calls only, `system` is system events, `all` is everything (the default, so scripts keep working). The CLI has no `sessions` view; use `--session <id>` for one session's history. `--from` and `--to` take RFC 3339 or relative times (`-24h`). See [Activity Commands](/cli/activity-commands).
 
 ### call tool
 
@@ -588,3 +639,5 @@ mcpproxy security approve github-server         # unquarantine + index tools
 ```
 
 For the full reference — every flag, every status vocabulary, all output formats (`table` / `json` / `yaml` / `sarif`), workflow recipes, and troubleshooting — see **[Security Commands](/cli/security-commands)**. For the underlying feature architecture see [Security Scanner Plugin System](/features/security-scanner-plugins).
+
+Reviewing quarantined servers and new or changed tools has its own command group, `mcpproxy review list|show|approve|reject`: see **[Review Commands](/cli/review-commands)**.

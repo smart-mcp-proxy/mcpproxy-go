@@ -1,14 +1,19 @@
 package index
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
+	"github.com/blevesearch/bleve/v2/mapping"
 	bquery "github.com/blevesearch/bleve/v2/search/query"
 	"go.uber.org/zap"
 
@@ -31,6 +36,7 @@ const (
 // BleveIndex wraps Bleve index operations
 type BleveIndex struct {
 	index  bleve.Index
+	path   string // on-disk index directory, for RebuildIndex
 	logger *zap.Logger
 	// searchPageSize bounds a single search page during paginated full scans.
 	// Defaults to defaultSearchPageSize; overridable in tests.
@@ -48,6 +54,14 @@ type ToolDocument struct {
 	Hash             string `json:"hash"`
 	Tags             string `json:"tags"`
 	SearchableText   string `json:"searchable_text"` // Combined searchable content
+	// AnnotationsJSON is the tool's MCP behavior-hint annotations
+	// (config.ToolAnnotations), marshaled once at index time. Stored but not
+	// indexed for search, same as Hash — it exists so a search hit's tier
+	// (Spec 109 FR-028) reflects the tool's real annotations instead of
+	// always reading TierUnannotated (review round 1: GET /index/search never
+	// stored annotations at all, so a search hit's tier could not agree with
+	// the same tool's tier on GET /servers/{id}/tools).
+	AnnotationsJSON string `json:"annotations_json,omitempty"`
 }
 
 // NewBleveIndex creates (or opens) the shared default Bleve index at
@@ -59,14 +73,38 @@ func NewBleveIndex(dataDir string, logger *zap.Logger) (*BleveIndex, error) {
 // newBleveIndexAt opens an existing Bleve index at indexPath, or creates one if
 // it does not yet exist. The parent directory is created as needed so callers
 // may nest a per-profile index under the shared index dir
-// (<dataDir>/index.bleve/<slug>/) without pre-creating it.
+// (<dataDir>/index.bleve/profiles/<slug>/, see Manager) without pre-creating
+// it. Nothing else may be nested there: migrating or recovering the shared
+// index removes every entry of its directory except profilesDirName.
+//
+// An existing index whose persisted mapping or schema version is not the
+// current one (see indexStaleReason) is migrated before it is returned, so
+// every caller sees the same field-mapping behavior regardless of which
+// mcpproxy version first created the index.
 func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) {
+	// Rebuild and retired directories only survive an interrupted or
+	// partially cleaned-up migration; the live index at indexPath is
+	// authoritative either way.
+	removeRebuildLeftovers(indexPath, logger)
+
 	// Try to open existing index
 	index, err := bleve.Open(indexPath)
 	if err != nil {
 		// If index doesn't exist, create a new one
 		if mkErr := os.MkdirAll(filepath.Dir(indexPath), 0o755); mkErr != nil {
 			return nil, fmt.Errorf("failed to create index parent dir: %w", mkErr)
+		}
+		if errors.Is(err, bleve.ErrorIndexMetaMissing) {
+			// The directory exists but holds no openable index: a migration
+			// swap was interrupted after the old index_meta.json was removed
+			// (swapIndexDir removes it first and restores it last). Clear the
+			// leftovers so bleve.New can create the store again. A live index
+			// always has index_meta.json, so this never touches one.
+			logger.Warn("Bleve index directory has no index metadata; recreating it empty",
+				zap.String("path", indexPath))
+			if clearErr := retireIndexEntries(indexPath); clearErr != nil {
+				return nil, clearErr
+			}
 		}
 		logger.Info("Creating new Bleve index", zap.String("path", indexPath))
 		index, err = createBleveIndex(indexPath)
@@ -77,20 +115,422 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		logger.Info("Opened existing Bleve index", zap.String("path", indexPath))
 	}
 
-	return &BleveIndex{
+	b := &BleveIndex{
 		index:          index,
+		path:           indexPath,
 		logger:         logger,
 		searchPageSize: defaultSearchPageSize,
-	}, nil
+	}
+
+	reason, err := indexStaleReason(index)
+	if err != nil {
+		_ = index.Close()
+		return nil, err
+	}
+	if reason != "" {
+		logger.Warn("Bleve index mapping is stale; migrating to the current mapping",
+			zap.String("path", indexPath), zap.String("reason", reason))
+		if err := b.RebuildIndex(); err != nil {
+			if b.index == nil {
+				return nil, fmt.Errorf("failed to migrate Bleve index at %s: %w", indexPath, err)
+			}
+			// The index is a derived search cache: serving the stale-mapping
+			// index (failure before the swap) or an empty one the discovery
+			// path re-populates (failure after it) beats failing startup.
+			// The next open retries the migration.
+			logger.Error("Bleve index migration failed; continuing with the current index",
+				zap.String("path", indexPath), zap.Error(err))
+		}
+	}
+
+	return b, nil
 }
 
-// createBleveIndex creates a new Bleve index with proper mapping
+// indexSchemaVersion versions how ToolDocument is DERIVED from tool metadata
+// (e.g. what goes into searchable_text), which the persisted mapping cannot
+// reveal. Bump it when toolDocument or documentFromStoredFields changes in a
+// way that alters an indexed field; every index is then rebuilt once on open.
+// Mapping changes need no bump: they are detected by comparing the persisted
+// mapping itself (indexStaleReason).
+//
+// Version history:
+//
+//	(absent) indexes created before versioning existed (dynamic mapping on;
+//	         annotations_json and output_schema_json unmapped and full-text
+//	         indexed into _all)
+//	"2"      explicit mapping for every field, Dynamic=false
+const indexSchemaVersion = "2"
+
+// indexSchemaVersionKey stores indexSchemaVersion in the index's internal
+// key-value space, next to bleve's own persisted mapping.
+var indexSchemaVersionKey = []byte("mcpproxy_index_schema_version")
+
+// bleveMappingInternalKey is where bleve.New persists the index mapping
+// (bleve/v2/util.MappingInternalKey); bleve.Open loads the mapping from it.
+var bleveMappingInternalKey = []byte("_mapping")
+
+// rebuildDirSuffix names the sibling directory a rebuild populates before it
+// is swapped into place.
+const rebuildDirSuffix = ".rebuild"
+
+// retiredDirSuffix names the sibling directory a replaced index directory is
+// renamed to (<indexPath>.retired-<n>) before it is deleted. The dot keeps a
+// per-profile leftover (profiles/<slug>.retired-<n>) out of ExistingProfileDirs.
+const retiredDirSuffix = ".retired-"
+
+// removeRebuildLeftovers best-effort removes the rebuild directory and retired
+// directories a previous migration left behind. A retired directory that still
+// holds profiles/ (a crash between retiring and moving it back) returns it
+// first, unless indexPath already has one.
+func removeRebuildLeftovers(indexPath string, logger *zap.Logger) {
+	leftovers, _ := filepath.Glob(indexPath + retiredDirSuffix + "*")
+	for _, p := range leftovers {
+		restoreProfilesDir(p, indexPath)
+	}
+	leftovers = append(leftovers, indexPath+rebuildDirSuffix)
+	for _, p := range leftovers {
+		if err := os.RemoveAll(p); err != nil {
+			logger.Warn("Failed to remove leftover Bleve rebuild directory",
+				zap.String("path", p), zap.Error(err))
+		}
+	}
+}
+
+// restoreProfilesDir moves from/profiles to to/profiles when from has one and
+// to does not, creating to if needed.
+func restoreProfilesDir(from, to string) {
+	src := filepath.Join(from, profilesDirName)
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dst := filepath.Join(to, profilesDirName)
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	if err := os.MkdirAll(to, 0o755); err != nil {
+		return
+	}
+	_ = os.Rename(src, dst)
+}
+
+// indexStaleReason reports why idx must be rebuilt before use, or "" when it
+// already has the current mapping and schema version.
+//
+// bleve.Open never re-applies createBleveIndex's mapping to an index that
+// already exists on disk: the mapping is persisted at creation time and
+// bleve v2 has no way to change it afterwards. An index created before a field
+// mapping existed therefore keeps the old behavior forever — for indexes
+// created before annotations_json/output_schema_json were mapped explicitly,
+// bleve's dynamic defaults full-text index both into the `_all` field that
+// SearchTools' field-less MatchQuery searches, so identical corpora ranked
+// differently depending only on when the index was created. Comparing the
+// persisted mapping byte-for-byte with the current one catches that and every
+// future mapping change without anyone having to remember a version bump.
+func indexStaleReason(idx bleve.Index) (string, error) {
+	want, err := currentMappingJSON()
+	if err != nil {
+		return "", err
+	}
+	got, err := idx.GetInternal(bleveMappingInternalKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to read persisted Bleve index mapping: %w", err)
+	}
+	if !bytes.Equal(got, want) {
+		return "persisted field mapping differs from the current mapping", nil
+	}
+	ver, err := idx.GetInternal(indexSchemaVersionKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Bleve index schema version: %w", err)
+	}
+	if string(ver) != indexSchemaVersion {
+		return fmt.Sprintf("schema version %q, want %q", ver, indexSchemaVersion), nil
+	}
+	return "", nil
+}
+
+// currentMappingJSON is the mapping createBleveIndex persists, serialized the
+// way bleve.New serializes it (encoding/json; map keys sorted, so stable).
+func currentMappingJSON() ([]byte, error) {
+	b, err := json.Marshal(currentIndexMapping())
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize Bleve index mapping: %w", err)
+	}
+	return b, nil
+}
+
+// RebuildIndex re-creates the index with the current mapping and re-indexes
+// every document it holds.
+//
+// The source is the index's own stored fields, not BBolt storage: every
+// ToolDocument field except searchable_text is stored (and searchable_text is
+// derived from stored fields), whereas storage keeps no annotations or index
+// hash. Copying the stored fields also keeps full_tool_name byte-for-byte —
+// round-tripping through config.ToolMetadata would rewrite it to the
+// canonical id and move scores (see toolDocument).
+//
+// The new index is built completely in a sibling directory and only then
+// swapped in (swapIndexDir), so a failure before the swap leaves the current
+// index untouched and open. The caller must hold exclusive access
+// (Manager.RebuildIndex takes its write lock).
+func (b *BleveIndex) RebuildIndex() error {
+	docs, err := b.readAllStoredDocuments()
+	if err != nil {
+		return err
+	}
+	b.logger.Info("Rebuilding Bleve index", zap.String("path", b.path), zap.Int("documents", len(docs)))
+
+	tmpPath := b.path + rebuildDirSuffix
+	if err := os.RemoveAll(tmpPath); err != nil {
+		return fmt.Errorf("failed to clear rebuild directory: %w", err)
+	}
+	if err := b.populateIndexAt(tmpPath, docs); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return err
+	}
+
+	// Point of no return: the old index is closed and replaced. Close may
+	// itself return an error (e.g. the underlying store's final close
+	// failing), but the index is torn down internally the moment Close is
+	// called regardless of what it returns (scorch closes its internal
+	// channel and drains async tasks before the error-prone part of its own
+	// Close runs), so the old handle is unusable either way. Only log the
+	// close error and proceed with the swap: bailing out here would leave
+	// b.index pointing at that dead handle (serving it, or Close-ing it
+	// again later, panics) while discarding the replacement this func just
+	// finished building.
+	if err := b.index.Close(); err != nil {
+		b.logger.Warn("Closing the old Bleve index during rebuild returned an error; it is torn down regardless, proceeding with the swap",
+			zap.String("path", b.path), zap.Error(err))
+	}
+	idx, err := b.swapInRebuilt(tmpPath)
+	if err != nil {
+		return b.recoverEmpty(tmpPath, err)
+	}
+	b.index = idx
+	if err := os.RemoveAll(tmpPath); err != nil {
+		// The swap is complete; the next open removes the leftover.
+		b.logger.Warn("Failed to remove Bleve rebuild directory",
+			zap.String("path", tmpPath), zap.Error(err))
+	}
+
+	b.logger.Info("Migrated Bleve index to the current mapping",
+		zap.String("path", b.path), zap.Int("documents", len(docs)),
+		zap.String("schema_version", indexSchemaVersion))
+	return nil
+}
+
+// swapIndexDirFn is swapIndexDir, replaceable in tests to simulate a failed swap.
+var swapIndexDirFn = swapIndexDir
+
+func (b *BleveIndex) swapInRebuilt(tmpPath string) (bleve.Index, error) {
+	if err := swapIndexDirFn(tmpPath, b.path); err != nil {
+		return nil, err
+	}
+	idx, err := bleve.Open(b.path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open rebuilt Bleve index: %w", err)
+	}
+	return idx, nil
+}
+
+// recoverEmpty handles a failure after the old index was closed: the on-disk
+// index may be half-swapped, and b.index must never be left closed or nil (every
+// later call, Close included, would fail or panic). It recreates an empty
+// current-mapping index in place, which the discovery path re-populates as
+// servers reconnect, and returns cause either way.
+func (b *BleveIndex) recoverEmpty(tmpPath string, cause error) error {
+	b.index = nil
+	_ = os.RemoveAll(tmpPath)
+	b.logger.Error("Bleve index rebuild failed after the old index was closed; recreating it empty",
+		zap.String("path", b.path), zap.Error(cause))
+	if err := retireIndexEntries(b.path); err != nil {
+		return fmt.Errorf("%w (recovery failed: %w)", cause, err)
+	}
+	idx, err := createBleveIndex(b.path)
+	if err != nil {
+		return fmt.Errorf("%w (recovery failed: %w)", cause, err)
+	}
+	b.index = idx
+	return cause
+}
+
+// storedDocument is one document read back for a rebuild.
+type storedDocument struct {
+	id  string
+	doc *ToolDocument
+}
+
+// readAllStoredDocuments pages through every document with all stored fields.
+// Sorting by _id keeps From-based pagination stable.
+func (b *BleveIndex) readAllStoredDocuments() ([]storedDocument, error) {
+	var docs []storedDocument
+	for from := 0; ; from += b.searchPageSize {
+		req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), b.searchPageSize, from, false)
+		req.Fields = []string{"*"}
+		req.SortBy([]string{"_id"})
+		res, err := b.index.Search(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Bleve index documents for rebuild: %w", err)
+		}
+		for _, hit := range res.Hits {
+			docs = append(docs, storedDocument{id: hit.ID, doc: documentFromStoredFields(hit.Fields)})
+		}
+		if len(res.Hits) < b.searchPageSize {
+			return docs, nil
+		}
+	}
+}
+
+// documentFromStoredFields rebuilds a ToolDocument from its stored fields.
+// searchable_text is not stored; it is re-derived exactly as toolDocument
+// derives it, from the stored tool_name and full_tool_name.
+func documentFromStoredFields(fields map[string]interface{}) *ToolDocument {
+	doc := &ToolDocument{
+		ToolName:         getStringField(fields, "tool_name"),
+		FullToolName:     getStringField(fields, "full_tool_name"),
+		ServerName:       getStringField(fields, "server_name"),
+		Description:      getStringField(fields, "description"),
+		ParamsJSON:       getStringField(fields, "params_json"),
+		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
+		Hash:             getStringField(fields, "hash"),
+		Tags:             getStringField(fields, "tags"),
+		AnnotationsJSON:  getStringField(fields, "annotations_json"),
+	}
+	doc.SearchableText = searchableText(doc.ToolName, doc.FullToolName, doc.Description, doc.ParamsJSON)
+	return doc
+}
+
+// populateIndexAt creates a current-mapping index at path holding docs, and
+// stamps the schema version only after every document is written, so an
+// interrupted rebuild never looks complete.
+func (b *BleveIndex) populateIndexAt(path string, docs []storedDocument) error {
+	idx, err := bleve.New(path, currentIndexMapping())
+	if err != nil {
+		return fmt.Errorf("failed to create rebuild index: %w", err)
+	}
+	for start := 0; start < len(docs); start += b.searchPageSize {
+		end := min(start+b.searchPageSize, len(docs))
+		batch := idx.NewBatch()
+		for _, d := range docs[start:end] {
+			if err := batch.Index(d.id, d.doc); err != nil {
+				_ = idx.Close()
+				return fmt.Errorf("failed to re-index document %q: %w", d.id, err)
+			}
+		}
+		if err := idx.Batch(batch); err != nil {
+			_ = idx.Close()
+			return fmt.Errorf("failed to write rebuild batch: %w", err)
+		}
+	}
+	if err := idx.SetInternal(indexSchemaVersionKey, []byte(indexSchemaVersion)); err != nil {
+		_ = idx.Close()
+		return fmt.Errorf("failed to stamp rebuild index schema version: %w", err)
+	}
+	if err := idx.Close(); err != nil {
+		return fmt.Errorf("failed to close rebuild index: %w", err)
+	}
+	return nil
+}
+
+// indexMetaFile is the file bleve.Open reads first; without it a directory is
+// not an openable index.
+const indexMetaFile = "index_meta.json"
+
+// swapIndexDir replaces the closed index at dst with the complete index at src.
+// retireIndexEntries takes the old index out atomically and index_meta.json is
+// moved in last,
+// so a crash at any point leaves dst either the old index, or no openable
+// index (which newBleveIndexAt recreates empty) — never a mix of old metadata
+// and new store. The discovery path re-populates an empty index as servers
+// connect.
+func swapIndexDir(src, dst string) error {
+	if err := retireIndexEntries(dst); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("failed to read rebuild directory: %w", err)
+	}
+	for _, e := range entries {
+		if e.Name() == indexMetaFile {
+			continue
+		}
+		if err := os.Rename(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return fmt.Errorf("failed to move rebuilt index entry %q: %w", e.Name(), err)
+		}
+	}
+	if err := os.Rename(filepath.Join(src, indexMetaFile), filepath.Join(dst, indexMetaFile)); err != nil {
+		return fmt.Errorf("failed to move rebuilt index metadata: %w", err)
+	}
+	return nil
+}
+
+// retireIndexEntries empties an index directory of bleve's own entries: it
+// renames the whole directory to a <dir>.retired-<n> sibling, recreates dir,
+// moves profiles/ back, and then best-effort deletes the retired directory.
+//
+// Renaming the directory as a whole is atomic (dir is either the complete old
+// index or absent, never a half-deleted index whose index_meta.json survived)
+// and needs write access to dir's parent only. Deleting or renaming entries
+// inside dir would not work for a permission-impaired or locked leftover in
+// store/: RemoveAll stops partway, and some platforms (macOS 15) also refuse to
+// rename a non-writable directory within its own parent. Whatever the final
+// delete leaves is retried on the next open (removeRebuildLeftovers).
+//
+// The shared index directory also holds the per-profile indexes under
+// profilesDirName (see Manager), which are separate indexes and are kept.
+func retireIndexEntries(dir string) error {
+	retired := fmt.Sprintf("%s%s%d", dir, retiredDirSuffix, time.Now().UnixNano())
+	if err := os.Rename(dir, retired); err != nil {
+		return fmt.Errorf("failed to move aside index directory: %w", err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		_ = os.Rename(retired, dir)
+		return fmt.Errorf("failed to recreate index directory: %w", err)
+	}
+	profiles := filepath.Join(retired, profilesDirName)
+	if _, err := os.Stat(profiles); err == nil {
+		if err := os.Rename(profiles, filepath.Join(dir, profilesDirName)); err != nil {
+			// Put everything back rather than delete the profile indexes.
+			_ = os.Remove(dir)
+			_ = os.Rename(retired, dir)
+			return fmt.Errorf("failed to keep per-profile indexes while replacing the index: %w", err)
+		}
+	}
+	_ = os.RemoveAll(retired)
+	return nil
+}
+
+// createBleveIndex creates a new, empty Bleve index with the current mapping
+// and schema version.
 func createBleveIndex(indexPath string) (bleve.Index, error) {
-	// Create index mapping
+	idx, err := bleve.New(indexPath, currentIndexMapping())
+	if err != nil {
+		return nil, err
+	}
+	if err := idx.SetInternal(indexSchemaVersionKey, []byte(indexSchemaVersion)); err != nil {
+		_ = idx.Close()
+		return nil, fmt.Errorf("failed to stamp index schema version: %w", err)
+	}
+	return idx, nil
+}
+
+// currentIndexMapping is the field mapping every index is created or migrated
+// to. Any change here is detected on the next open of an existing index and
+// migrates it (indexStaleReason), so there is no version to bump.
+func currentIndexMapping() *mapping.IndexMappingImpl {
 	indexMapping := bleve.NewIndexMapping()
 
 	// Create document mapping for tools
 	toolMapping := bleve.NewDocumentMapping()
+	// Disable dynamic field mapping: every field this index ever writes is
+	// declared explicitly below. Without this, adding a new ToolDocument
+	// field in the future (as annotations_json itself was added, review
+	// round 6 finding 1) would silently fall back to bleve's dynamic-field
+	// defaults — full-text-indexed and included in `_all` — on any FRESH
+	// index too, not just ones migrating forward. Existing indexes created
+	// before this line are migrated on open (indexStaleReason).
+	toolMapping.Dynamic = false
 
 	// Tool name field (both keyword and standard analyzers for different search types)
 	toolNameFieldKeyword := bleve.NewTextFieldMapping()
@@ -127,12 +567,35 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	paramsField.Index = true
 	toolMapping.AddFieldMappingsAt("params_json", paramsField)
 
+	// Output schema JSON field: stored only, never searched (it is JSON, not
+	// prose) — same shape as hash and annotations_json below. Previously had
+	// no explicit mapping at all and relied entirely on bleve's dynamic-field
+	// defaults to be stored for retrieval, which also meant it was
+	// full-text-indexed and folded into `_all` on every index, the same class
+	// of bug fixed for annotations_json by this mapping (review round 6,
+	// finding 1). Made explicit here, and required now that toolMapping.Dynamic
+	// is false above — Dynamic=false without this would stop
+	// GetToolsByServer/SearchTools from ever retrieving output_schema_json
+	// again, since Store also came from the dynamic fallback.
+	outputSchemaField := bleve.NewTextFieldMapping()
+	outputSchemaField.Analyzer = keyword.Name
+	outputSchemaField.Store = true
+	outputSchemaField.Index = false
+	toolMapping.AddFieldMappingsAt("output_schema_json", outputSchemaField)
+
 	// Hash field (keyword analyzer)
 	hashField := bleve.NewTextFieldMapping()
 	hashField.Analyzer = keyword.Name
 	hashField.Store = true
 	hashField.Index = false // Don't index hash for search
 	toolMapping.AddFieldMappingsAt("hash", hashField)
+
+	// Annotations field: stored only, never searched (it is JSON, not prose).
+	annotationsField := bleve.NewTextFieldMapping()
+	annotationsField.Analyzer = keyword.Name
+	annotationsField.Store = true
+	annotationsField.Index = false
+	toolMapping.AddFieldMappingsAt("annotations_json", annotationsField)
 
 	// Tags field (standard analyzer)
 	tagsField := bleve.NewTextFieldMapping()
@@ -152,12 +615,14 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	indexMapping.AddDocumentMapping("tool", toolMapping)
 	indexMapping.DefaultMapping = toolMapping
 
-	// Create the index
-	return bleve.New(indexPath, indexMapping)
+	return indexMapping
 }
 
 // Close closes the index
 func (b *BleveIndex) Close() error {
+	if b.index == nil {
+		return nil // only after a rebuild whose recovery also failed
+	}
 	return b.index.Close()
 }
 
@@ -188,12 +653,17 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 	toolName := config.RawToolName(toolMeta)
 	docID := toolDocID(toolMeta.ServerName, toolName)
 
-	// Create combined searchable text for better full-text search
-	searchableText := fmt.Sprintf("%s %s %s %s",
-		toolName,
-		toolMeta.Name,
-		toolMeta.Description,
-		toolMeta.ParamsJSON)
+	var annotationsJSON string
+	if toolMeta.Annotations != nil {
+		if b, err := json.Marshal(toolMeta.Annotations); err == nil {
+			annotationsJSON = string(b)
+		}
+		// A marshal error here is unreachable for config.ToolAnnotations (plain
+		// strings/bools/pointers, no cyclic or unsupported types) — silently
+		// falling back to "no annotations stored" rather than failing the whole
+		// index write matches how the rest of this function tolerates partial
+		// metadata (e.g. an empty OutputSchemaJSON).
+	}
 
 	doc := &ToolDocument{
 		ToolName:         toolName,
@@ -204,10 +674,19 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		OutputSchemaJSON: toolMeta.OutputSchemaJSON,
 		Hash:             toolMeta.Hash,
 		Tags:             "", // Can be extended later
-		SearchableText:   searchableText,
+		SearchableText:   searchableText(toolName, toolMeta.Name, toolMeta.Description, toolMeta.ParamsJSON),
+		AnnotationsJSON:  annotationsJSON,
 	}
 
 	return docID, doc
+}
+
+// searchableText is the combined full-text field. It is the one derived field
+// that is not stored, so documentFromStoredFields re-derives it through this
+// same function during a rebuild; changing it requires an indexSchemaVersion
+// bump.
+func searchableText(toolName, fullToolName, description, paramsJSON string) string {
+	return fmt.Sprintf("%s %s %s %s", toolName, fullToolName, description, paramsJSON)
 }
 
 // toolDocID is the single place the "<server>:<raw name>" docID is spelled, so
@@ -235,6 +714,17 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		// name so a malformed hit still renders rather than vanishing.
 		canonical = CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
 	}
+	var annotations *config.ToolAnnotations
+	if raw := getStringField(fields, "annotations_json"); raw != "" {
+		var parsed config.ToolAnnotations
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			annotations = &parsed
+		}
+		// A malformed stored value (should not happen; toolDocument only ever
+		// writes what json.Marshal produced) falls back to nil — TierUnannotated
+		// — rather than surfacing a decode error through every search result.
+	}
+
 	return &config.ToolMetadata{
 		Name:             canonical,
 		RawName:          strings.TrimPrefix(canonical, serverName+":"),
@@ -243,6 +733,7 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		ParamsJSON:       getStringField(fields, "params_json"),
 		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
 		Hash:             getStringField(fields, "hash"),
+		Annotations:      annotations,
 	}
 }
 
@@ -346,7 +837,7 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 	searchReq := bleve.NewSearchRequest(q)
 	searchReq.From = from
 	searchReq.Size = size
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 	searchReq.Highlight = bleve.NewHighlight()
 
 	// Deterministic tie-break: primary sort by score descending (bleve's
@@ -360,43 +851,56 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 	return searchReq
 }
 
+// augmentedToolSearchQuery is buildToolSearchQuery, augmented with the
+// underscore-segment enhancement using the identical adaptive rule SearchTools
+// has always applied: identifier queries often include only the meaningful
+// segments of a longer tool name, so when the plain query's top `probeSize`
+// hits contain no canonical exact match, an additional segment-aware clause
+// is added to reward boundary matches over substring hits. Extracted so
+// SearchToolsScoped (Spec 105 FR-005 G1 review finding) makes the SAME
+// decision an unscoped SearchTools(queryStr, probeSize) call would — the
+// decision is a function of the query text and the corpus alone, never of
+// scope, so a scoped caller's ranking for an underscore-style query (e.g.
+// "create_issue") can no longer silently diverge from what an equal-limit
+// unscoped call would have used.
+func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*bquery.BooleanQuery, error) {
+	boolQuery := buildToolSearchQuery(queryStr)
+
+	segmentQuery := underscoreSegmentQuery(queryStr)
+	if segmentQuery == nil {
+		return boolQuery, nil
+	}
+
+	probe, err := b.index.Search(newToolSearchRequest(boolQuery, 0, probeSize))
+	if err != nil {
+		return nil, fmt.Errorf("underscore segment probe failed: %w", err)
+	}
+	for _, hit := range probe.Hits {
+		if fieldsContainExactToolName(hit.Fields, queryStr) {
+			return boolQuery, nil // exact match already at the top: no boost needed
+		}
+	}
+
+	boolQuery.AddShould(segmentQuery)
+	return boolQuery, nil
+}
+
 // SearchTools searches for tools using multiple query strategies for better results
 func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
 	if queryStr == "" {
 		return nil, fmt.Errorf("search query cannot be empty")
 	}
 
-	boolQuery := buildToolSearchQuery(queryStr)
-	searchReq := newToolSearchRequest(boolQuery, 0, limit)
+	boolQuery, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, err
+	}
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
-	searchResult, err := b.index.Search(searchReq)
+	searchResult, err := b.index.Search(newToolSearchRequest(boolQuery, 0, limit))
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
-	}
-
-	// Identifier queries often include only the meaningful segments of a
-	// longer tool name. If the legacy query did not find a canonical exact
-	// match, repeat it with an additional segment-aware signal. This preserves
-	// exact-name scores while letting boundary matches outrank substring hits.
-	segmentQuery := underscoreSegmentQuery(queryStr)
-	if segmentQuery != nil {
-		hasExactToolName := false
-		for _, hit := range searchResult.Hits {
-			if fieldsContainExactToolName(hit.Fields, queryStr) {
-				hasExactToolName = true
-				break
-			}
-		}
-
-		if !hasExactToolName {
-			boolQuery.AddShould(segmentQuery)
-			searchResult, err = b.index.Search(searchReq)
-			if err != nil {
-				return nil, fmt.Errorf("underscore segment search failed: %w", err)
-			}
-		}
 	}
 
 	// Convert results
@@ -420,8 +924,13 @@ const scopedSearchMinPage = 256
 // (Spec 107 T075a; Spec 105 "Ranking under scope"): the result is the top-
 // `limit` of the SAME ranked search, filtered to servers `inScope` admits
 // BEFORE the cut, with the unfiltered scores. It runs the identical boolean
-// query (no extra clause — a Must term on server_name would change scores)
-// and the identical score-then-id sort, and pages through the ranked result
+// query — including the underscore-segment enhancement SearchTools(queryStr,
+// limit) would apply for the same query and limit (augmentedToolSearchQuery;
+// Spec 105 FR-005 G1 review finding — a scoped caller's ranking for an
+// identifier-style query must not silently miss the boost an equal-limit
+// unscoped call would have used), and never a Must term on server_name
+// (that would change scores) — and the identical score-then-id sort, and
+// pages through the ranked result
 // EXHAUSTIVELY with From/Size: each page is filtered through inScope, and
 // paging stops only when `limit` in-scope hits have been collected or the
 // window has passed searchResult.Total. There is deliberately NO result cap:
@@ -438,7 +947,10 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 		return []*config.SearchResult{}, nil
 	}
 
-	q := buildToolSearchQuery(queryStr)
+	q, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, err
+	}
 	pageSize := limit
 	if pageSize < scopedSearchMinPage {
 		pageSize = scopedSearchMinPage
@@ -469,6 +981,117 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 
 	b.logger.Debug("Found scoped tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
+}
+
+// Hit is the canonical registration identity SearchToolsAdmitted hands to its
+// predicate (Spec 108 FR-011, data-model.md §2): the exact (server, raw tool)
+// pair a hit resolves to, NEVER a stored annotation — the index carries no
+// annotation field and gains none (ToolDocument/readToolMetadata are
+// unchanged; research.md "Annotation source for SearchToolsAdmitted"). A
+// caller that needs the tool's effective annotations resolves them itself,
+// through the same identity seam every dispatch path already uses
+// (profile.EffectiveAnnotations = resolveExactToolIdentity), keeping
+// discovery and execution classifying from one source.
+type Hit struct {
+	Server string
+	Tool   string
+}
+
+// Admission is admit's per-hit verdict for SearchToolsAdmitted.
+type Admission int
+
+const (
+	// Admit means the hit is visible to this caller and counts toward limit.
+	Admit Admission = iota
+	// RejectScope means the hit's server is outside the caller's effective
+	// scope (agent-token allowed_servers, profile server set). Never counted
+	// in hiddenByPolicy — an out-of-scope tool must stay invisible, not merely
+	// "hidden by profile" (FR-011).
+	RejectScope
+	// RejectPolicy means the hit's server was in scope but the tool policy
+	// (Spec 108 CompiledPolicy.Decide) excluded it. Counted in hiddenByPolicy.
+	RejectPolicy
+)
+
+// SearchToolsAdmitted is SearchToolsScoped's hit-level counterpart (Spec 108
+// FR-011, data-model.md §2): the pre-limit predicate sees the hit's canonical
+// (server, tool) identity — never a stored annotation, the index carries
+// none — and returns one of three verdicts instead of a bool, so the caller
+// can tell an out-of-scope rejection (never counted, stays invisible) from a
+// policy-only one (counted in hiddenByPolicy, the FR-011 `hidden_by_profile`
+// figure) over the SAME exhaustive pre-limit scan SearchToolsScoped already
+// runs. limit is applied to ADMITTED hits only — a rejected top hit, whatever
+// its reason, never shortens the page — and hiddenByPolicy accumulates over
+// the full match set, not merely the hits collected before the cut, so a
+// caller whose page filled up before scanning every match still gets an
+// accurate count.
+//
+// Identical to SearchToolsScoped in query construction (incl. the
+// underscore-segment enhancement) and score-then-id sort. It differs in ONE
+// respect, precisely because of the counting requirement above:
+// SearchToolsScoped returns as soon as its page fills, while this method
+// keeps paging to the end of the exhaustive match set regardless (zcode
+// review round 1 — an early return there silently undercounted
+// hiddenByPolicy for any RejectPolicy hit ranked below the cut). A predicate
+// that only ever returns Admit/RejectScope (never RejectPolicy) still makes
+// this method's RESULT SET equal SearchToolsScoped(query, limit, func(s
+// string) bool { admit still sees the server only })'s exactly (T016a) —
+// the extra scanning costs work, never a different admitted page.
+func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(Hit) Admission) (results []*config.SearchResult, hiddenByPolicy int, err error) {
+	if queryStr == "" {
+		return nil, 0, fmt.Errorf("search query cannot be empty")
+	}
+	if admit == nil || limit <= 0 {
+		return []*config.SearchResult{}, 0, nil
+	}
+
+	q, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	pageSize := limit
+	if pageSize < scopedSearchMinPage {
+		pageSize = scopedSearchMinPage
+	}
+
+	b.logger.Debug("Searching tools with admitted query", zap.String("query", queryStr), zap.Int("limit", limit))
+
+	// Not preallocated from limit: no caller-supplied value may size an
+	// allocation, and result lists are small (callers clamp limit, e.g.
+	// ProfilesService.Try caps it at 50), so append growth is negligible.
+	results = []*config.SearchResult{}
+	for from := 0; ; from += pageSize {
+		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
+		if err != nil {
+			return nil, 0, fmt.Errorf("search failed: %w", err)
+		}
+		for _, hit := range searchResult.Hits {
+			tool := readToolMetadata(hit.ID, hit.Fields)
+			switch admit(Hit{Server: tool.ServerName, Tool: config.RawToolName(tool)}) {
+			case Admit:
+				// The page itself stops growing once it holds `limit`
+				// admitted hits, but the SCAN does not stop here: a
+				// RejectPolicy hit ranked below the cut must still be
+				// counted (FR-011 "over the full match set" — codex/zcode
+				// review round 1). Returning as soon as the page filled
+				// silently undercounted hiddenByPolicy for every match
+				// ranked after the limit-th admitted one.
+				if len(results) < limit {
+					results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
+				}
+			case RejectPolicy:
+				hiddenByPolicy++
+			case RejectScope:
+				// Invisible: never counted, never collected.
+			}
+		}
+		if len(searchResult.Hits) == 0 || uint64(from+pageSize) >= searchResult.Total {
+			break
+		}
+	}
+
+	b.logger.Debug("Found admitted tools matching query", zap.Int("count", len(results)), zap.Int("hidden_by_policy", hiddenByPolicy), zap.String("query", queryStr))
+	return results, hiddenByPolicy, nil
 }
 
 func fieldsContainExactToolName(fields map[string]interface{}, queryStr string) bool {
@@ -579,28 +1202,13 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 	return b.index.Batch(batch)
 }
 
-// RebuildIndex rebuilds the entire index
-func (b *BleveIndex) RebuildIndex() error {
-	// Get index stats before rebuild
-	count, _ := b.index.DocCount()
-	b.logger.Info("Rebuilding index", zap.Uint64("current_docs", count))
-
-	// For now, we'll just log the operation
-	// In a full implementation, this would:
-	// 1. Create a new index
-	// 2. Re-index all tools from storage
-	// 3. Atomically swap indices
-
-	return nil
-}
-
 // GetToolsByServer retrieves all tools from a specific server
 func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata, error) {
 	// Create a term query for the server name
 	query := bleve.NewTermQuery(serverName)
 	query.SetField("server_name")
 
-	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 
@@ -633,6 +1241,60 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 		zap.Int("count", len(tools)))
 
 	return tools, nil
+}
+
+// ScopedDocumentCount returns the number of indexed documents belonging to
+// servers inScope admits (Spec 105 FR-005 G4): a `server_name` facet term
+// count, summed over only the terms inScope admits, so a scoped caller's
+// `debug.total_indexed_tools` counts its own authorized population rather
+// than the whole index regardless of which physical index (shared or
+// per-profile) backs the search that produced the response. A nil inScope
+// admits nothing (fail closed, matching SearchToolsScoped).
+//
+// The facet's term size is the document count itself, never a fixed
+// constant: a `server_name` facet returns at most that many distinct terms
+// (one document contributes to exactly one term), so this is a PROVEN exact
+// upper bound rather than a "should be big enough" guess — a fixed cap (the
+// pattern GetAllIndexedServerNames uses) can silently spill excess servers
+// into Bleve's "Other" bucket and undercount an authorized population once
+// the fleet exceeds it (Spec 105 PR C review finding).
+func (b *BleveIndex) ScopedDocumentCount(inScope func(serverName string) bool) (uint64, error) {
+	if inScope == nil {
+		return 0, nil
+	}
+
+	docCount, err := b.index.DocCount()
+	if err != nil {
+		return 0, fmt.Errorf("failed to read document count for scoped facet sizing: %w", err)
+	}
+	if docCount == 0 {
+		return 0, nil
+	}
+
+	query := bleve.NewMatchAllQuery()
+	searchReq := bleve.NewSearchRequest(query)
+	searchReq.Size = 0 // facet-only, like GetAllIndexedServerNames
+
+	facet := bleve.NewFacetRequest("server_name", int(docCount))
+	searchReq.AddFacet("servers", facet)
+
+	searchResult, err := b.index.Search(searchReq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query scoped document count: %w", err)
+	}
+
+	facetResult, ok := searchResult.Facets["servers"]
+	if !ok {
+		return 0, nil // no facet result means no documents
+	}
+
+	var total uint64
+	for _, term := range facetResult.Terms.Terms() {
+		if inScope(term.Term) {
+			total += uint64(term.Count)
+		}
+	}
+	return total, nil
 }
 
 // GetAllIndexedServerNames returns the unique set of server names present in the index.

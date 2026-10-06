@@ -64,11 +64,13 @@ func MapToServerConfig(parsed *ParsedServer, now time.Time) (*config.ServerConfi
 		}
 	case FormatGemini:
 		if oauth := mapGeminiOAuth(parsed.Fields); oauth != nil {
-			// Gemini's redirect_uri uses its own callback path (typically
-			// http://localhost:7777/oauth2callback), which mcpproxy's loopback
-			// callback server cannot serve. Copying it verbatim turned an
-			// importable server into a permanent connect failure, so drop the
-			// value and let mcpproxy allocate its own callback instead.
+			// oauth.redirect_uri PINS the callback URL, so a genuinely malformed
+			// value (non-loopback host, no explicit port, wrong scheme) copied
+			// verbatim turns an importable server into a permanent connect
+			// failure. A custom callback path alone (e.g. Gemini's typical
+			// http://localhost:7777/oauth2callback) is fine - mcpproxy's own
+			// callback server can serve whatever path the pin specifies (issue
+			// #1304) - so only a value Validate() actually rejects gets dropped.
 			if oauth.RedirectURI != "" {
 				if err := oauth.Validate(); err != nil {
 					warnings = append(warnings, fmt.Sprintf("oauth.redirect_uri %q is not usable by mcpproxy and was dropped (%v); mcpproxy will allocate its own callback URL", oauth.RedirectURI, err))

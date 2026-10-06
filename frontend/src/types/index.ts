@@ -1,5 +1,5 @@
 export * from './api'
-export type { ImportResponse, ImportSummary, ImportedServer, SkippedServer, FailedServer, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, ToolApproval, ConnectStatusResponse, ClientStatus, ConnectResult, SecurityScanSummary, SecurityScanStatus, SecurityScanFindingCounts, SecurityScanFinding, SecurityScanReport, ThreatType, ThreatLevel, Diagnostic, DiagnosticFixStep, DiagnosticFixStepType, DiagnosticSeverity, DiagnosticFixResponse } from './api'
+export type { ImportResponse, ImportSummary, ImportedServer, SkippedServer, FailedServer, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, ToolApproval, ConnectStatusResponse, ClientStatus, ConnectResult, SecurityScanSummary, SecurityScanStatus, SecurityScanFindingCounts, SecurityScanFinding, SecurityScanReport, ThreatType, ThreatLevel, Diagnostic, DiagnosticFixStep, DiagnosticFixStepType, DiagnosticSeverity, DiagnosticFixResponse, ReviewQueueResponse, ReviewQueueRow, ServerReviewResponse, ReviewTool } from './api'
 // Selectively export types from contracts.ts that don't conflict with api.ts
 export type {
   UpdateInfo,
@@ -29,6 +29,26 @@ export type {
   APIError,
   APISuccess,
   APIResult,
+  AttentionKind,
+  AttentionSubject,
+  AttentionFix,
+  AttentionItem,
+  AttentionResponse,
+} from './contracts'
+export {
+  AttentionKindAnonymousDeniedByBindingGuard,
+  AttentionKindClientHoldsAdminKey,
+  AttentionKindClientTokenNameConflict,
+  AttentionKindProfileMissing,
+  AttentionKindClientRotationPending,
+  AttentionKindClientCredentialExpiring,
+  AttentionKindSignInRequired,
+  AttentionKindMissingSecret,
+  AttentionKindConfigError,
+  AttentionKindServerError,
+  AttentionKindServerReview,
+  AttentionKindToolReview,
+  AttentionKindClientNeverSeen,
 } from './contracts'
 export { isAPIError, isAPISuccess } from './contracts'
 

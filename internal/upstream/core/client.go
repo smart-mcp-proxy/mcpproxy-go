@@ -16,8 +16,10 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -51,9 +53,9 @@ type Client struct {
 	// managed.Client's cfg pointer swap. The stored map is a deep copy owned
 	// by this client — callers must not mutate the map they pass in.
 	annotationOverrides atomic.Pointer[map[string]*config.ToolAnnotations]
-	globalConfig  *config.Config
-	storage       *storage.BoltDB
-	logger        *zap.Logger
+	globalConfig        *config.Config
+	storage             *storage.BoltDB
+	logger              *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
@@ -111,6 +113,13 @@ type Client struct {
 	// current attempt's slate — and the current attempt starts empty by
 	// construction rather than by racing a Clear.
 	retryAfter atomic.Pointer[proxytransport.RetryAfterRecorder]
+
+	// forwardPolicy supplies the LIVE client-header forwarding policy (Spec 112
+	// R6). The managed client installs a closure over its atomically swapped
+	// config, so allowlist edits and the global switch apply without a
+	// reconnect. Only the provider function is stored here: no header names or
+	// values live on the client (FR-011). Unset means nothing is forwarded.
+	forwardPolicy atomic.Pointer[func() headerfwd.Policy]
 
 	// Transport type and stderr access (for stdio)
 	transportType string
@@ -408,8 +417,11 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			OutputSchemaJSON: outputSchemaJSON,
 		}
 
-		// Copy tool annotations if any are set
-		// ToolAnnotation is a value type with pointer fields, check if any hints are present
+		// ToolAnnotation is a value type in mcp-go. Preserve even its zero value:
+		// a fresh tools/list response has captured annotation metadata, while a
+		// nil record is reserved for legacy records written before capture existed.
+		// This makes an upstream annotations:{} record tier "unannotated", not
+		// "unknown", in the informed review payload.
 		hasAnnotations := tool.Annotations.Title != "" ||
 			tool.Annotations.ReadOnlyHint != nil ||
 			tool.Annotations.DestructiveHint != nil ||
@@ -424,15 +436,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 				zap.String("title", tool.Annotations.Title))
 		}
 
-		if hasAnnotations {
-			toolMeta.Annotations = &config.ToolAnnotations{
-				Title:           tool.Annotations.Title,
-				ReadOnlyHint:    tool.Annotations.ReadOnlyHint,
-				DestructiveHint: tool.Annotations.DestructiveHint,
-				IdempotentHint:  tool.Annotations.IdempotentHint,
-				OpenWorldHint:   tool.Annotations.OpenWorldHint,
-			}
-		}
+		toolMeta.Annotations = toolAnnotationsFromWire(tool.Annotations)
 
 		// Apply per-server operator overrides (admin-only, persisted in ServerConfig).
 		// Read from the hot-reloadable atomic snapshot (see SetAnnotationOverrides),
@@ -461,7 +465,22 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	return tools, nil
 }
 
+func toolAnnotationsFromWire(annotation mcp.ToolAnnotation) *config.ToolAnnotations {
+	return &config.ToolAnnotations{
+		Title:           annotation.Title,
+		ReadOnlyHint:    annotation.ReadOnlyHint,
+		DestructiveHint: annotation.DestructiveHint,
+		IdempotentHint:  annotation.IdempotentHint,
+		OpenWorldHint:   annotation.OpenWorldHint,
+	}
+}
+
 // CallTool executes a tool on the upstream server
+//
+// Spec 112: this is the ONLY place that derives the per-server outbound set of
+// forwarded client headers (from the edge snapshot in ctx, key A) and puts it
+// on the context handed to mcp-go (key B). Every other request (initialize,
+// list, reconnect) never sets key B and so cannot forward.
 func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	c.mu.RLock()
 	client := c.client
@@ -524,6 +543,31 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		defer cancel()
 	}
 
+	// Spec 112: derive the outbound set from the edge snapshot and this
+	// server's live policy. The resolved transport type is authoritative here
+	// ("auto" is already resolved), so SSE and stdio never forward (FR-014).
+	var (
+		outbound     headerfwd.Snapshot
+		forwardAllow []string
+	)
+	if snap, ok := headerfwd.SnapshotFrom(ctx); ok && !snap.IsEmpty() {
+		if pp := c.forwardPolicy.Load(); pp != nil {
+			policy := (*pp)()
+			policy.Transport = transportType
+			forwardAllow = policy.Allow
+			outbound = headerfwd.Outbound(snap, policy)
+		}
+	}
+	callCtx = headerfwd.WithOutbound(callCtx, outbound)
+	headerfwd.RecordOutbound(ctx, outbound)
+	if !outbound.IsEmpty() {
+		// Names and count only (FR-015a).
+		c.logger.Debug("Forwarding client headers on tools/call",
+			zap.String("server", c.config.Name),
+			zap.Strings("headers", outbound.Names()),
+			zap.Int("count", outbound.Len()))
+	}
+
 	// Extra debug before sending request through transport
 	c.logger.Debug("Starting upstream CallTool",
 		zap.String("server", c.config.Name),
@@ -531,6 +575,10 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
+		// Spec 112 FR-016.1: scrub echoed forwarded values before this error
+		// reaches any sink (managed classification, health, activity, logs).
+		err = headerfwd.ScrubError(err, outbound, forwardAllow)
+
 		// Log CallTool failure to server-specific log
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Error("CallTool operation failed",
@@ -540,7 +588,11 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 		// Provide more specific error context
 		if callCtx.Err() == context.DeadlineExceeded {
+			c.logCallInterrupted(ctx, callCtx, toolName)
 			return nil, fmt.Errorf("CallTool '%s' timed out after %v", toolName, timeout)
+		}
+		if callCtx.Err() != nil {
+			c.logCallInterrupted(ctx, callCtx, toolName)
 		}
 
 		// Extra diagnostics for broken pipe/closed pipe
@@ -567,7 +619,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			c.upstreamLogger.Debug("JSON-RPC CallTool Response",
 				zap.String("method", "tools/call"),
 				zap.String("tool", toolName),
-				zap.String("formatted_json", string(respBytes)))
+				zap.String("formatted_json", headerfwd.Scrub(string(respBytes), outbound, forwardAllow)))
 		}
 	}
 
@@ -602,7 +654,25 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// with — which is exactly what keeps generations from bleeding into each
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
+	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
+	cfg.ForwardNames = func() []string {
+		if pp := c.forwardPolicy.Load(); pp != nil {
+			return (*pp)().Allow
+		}
+		return nil
+	}
 	return cfg
+}
+
+// SetForwardPolicyProvider installs the live forwarding policy provider
+// (Spec 112). It is read on every CallTool, so it takes effect immediately and
+// never forces a reconnect. Passing nil removes forwarding.
+func (c *Client) SetForwardPolicyProvider(p func() headerfwd.Policy) {
+	if p == nil {
+		c.forwardPolicy.Store(nil)
+		return
+	}
+	c.forwardPolicy.Store(&p)
 }
 
 // beginRetryAfterGeneration retires the current recorder and installs a fresh
@@ -995,4 +1065,60 @@ func cappedScrub(s string, limit int) string {
 		cut--
 	}
 	return scrubbed[:cut] + "… (truncated)"
+}
+
+type connectionGenerationKey struct{}
+
+// WithConnectionGeneration records the managed client's connection epoch on
+// ctx so core can attach it to structured tool-call timeout/cancel logs.
+func WithConnectionGeneration(ctx context.Context, epoch int64) context.Context {
+	return context.WithValue(ctx, connectionGenerationKey{}, epoch)
+}
+
+// Cancellation sources reported in the tool-call interruption log.
+const (
+	cancelSourceCallTimeout  = "call_timeout"
+	cancelSourceCallerCancel = "caller_cancel"
+)
+
+// logCallInterrupted emits one structured Warn when a tools/call ends because
+// its context expired or was canceled (#1321 item 4). parent is the context the
+// caller passed in; callCtx is the one (possibly with the call timeout) handed
+// to the transport. Log-only: it never alters the returned error.
+func (c *Client) logCallInterrupted(parent, callCtx context.Context, toolName string) {
+	source := cancelSourceCallerCancel
+	// The call timeout fired on our wrapper while the caller's context is
+	// still live; a caller deadline/cancel shows up on parent itself.
+	if parent.Err() == nil && callCtx.Err() == context.DeadlineExceeded {
+		source = cancelSourceCallTimeout
+	}
+
+	c.mu.RLock()
+	pid := 0
+	if c.processCmd != nil && c.processCmd.Process != nil {
+		pid = c.processCmd.Process.Pid
+	}
+	connected := c.connected
+	c.mu.RUnlock()
+
+	state := "connected"
+	if !connected {
+		state = "disconnected"
+	}
+
+	var generation int64
+	if g, ok := parent.Value(connectionGenerationKey{}).(int64); ok {
+		generation = g
+	}
+
+	c.logger.Warn("Upstream tools/call interrupted",
+		zap.String("server", c.config.Name),
+		zap.String("tool", toolName),
+		zap.String("transport", c.transportType),
+		zap.Int("pid", pid),
+		zap.Int64("connection_generation", generation),
+		zap.String("request_id", reqcontext.GetRequestID(parent)),
+		zap.String("cancellation_source", source),
+		zap.String("resulting_state", state),
+	)
 }

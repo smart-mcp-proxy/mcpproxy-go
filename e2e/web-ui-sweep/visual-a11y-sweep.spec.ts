@@ -1,6 +1,7 @@
 // Visual / accessibility sweep — the regression net for the 2026-08 UX audit
 // findings F9 (WCAG AA contrast), F14 (390px layout), F30 (accessible names,
-// aria-live, table caption), F29 (system theme) and F32 (header search).
+// aria-live, table caption) and F29 (system theme). F32 (header search) is
+// now covered by navigation-consistency.spec.ts.
 //
 // It runs against the Web UI served by a REAL mcpproxy binary, exactly like
 // web-ui-sweep.spec.ts, and it MEASURES rather than eyeballs: every visible
@@ -10,6 +11,7 @@
 //
 // Launcher: scripts/run-web-smoke.sh (see docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
+import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -235,6 +237,29 @@ for (const theme of THEMES) {
   }
 }
 
+// The Home dashboard lists every live MCP session under "Connected" with a relative
+// "Xs ago" timestamp. The loop above only sees that line when some earlier spec happens
+// to leave a session open, which made this gate depend on spec order (Spec 108-j QA.1,
+// follow-up #1433 item 1), so the session is opened here on purpose.
+for (const theme of THEMES) {
+  test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
+    const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
+    try {
+      await goto(page, '/', theme)
+      const age = page.locator('[data-test="dashboard-live-client-age"]').first()
+      await expect(age).toBeVisible()
+      const failures = await contrastFailures(page)
+      expect(
+        failures,
+        `WCAG AA contrast failures on / with a live client (${theme}):\n` +
+          failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+      ).toEqual([])
+    } finally {
+      await session.close()
+    }
+  })
+}
+
 test('contrast AA: filled primary buttons in both themes', async ({ page }) => {
   // Measured on the BUTTON elements directly. Filtering the generic walker's
   // output by class would silently match nothing, because a button's label
@@ -434,6 +459,62 @@ test('the footer never overlaps the page content', async ({ page }) => {
   expect(overlap, 'main content bleeds under the footer').toBeLessThanOrEqual(1)
 })
 
+// Spec 109 PR-a review round 1 (H4) / round 3 finding 2, T007's Playwright
+// half: proves the --z-header/--z-sidebar fix (frontend/src/assets/z-index.css,
+// frontend/tests/unit/z-index-scale.spec.ts) holds under REAL layout and
+// paint, not just token ordering in jsdom. Round 1 shipped these tokens
+// inverted, which put the sticky TopHeader back on top of the open mobile
+// drawer instead of the other way around — the exact class of stacking bug
+// this z-index scale exists to prevent (see z-index.css's own header
+// comment). `elementFromPoint` at a coordinate the sticky header and the open
+// drawer both occupy is the only way to prove which one the browser actually
+// painted on top; a bounding-box/CSS-value assertion would pass even if a
+// third ancestor's stacking context silently swallowed the token.
+test('mobile drawer sidebar paints above the sticky header, not under it (H4)', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await goto(page, '/')
+
+  const header = page.locator('header')
+  await expect(header).toBeVisible()
+  const headerBox = await header.boundingBox()
+  expect(headerBox, 'header has no box').not.toBeNull()
+  // A point inside the sticky header's own bounding box — this is exactly
+  // where the header used to win when the tokens were inverted.
+  const point = { x: headerBox!.x + headerBox!.width / 2, y: headerBox!.y + headerBox!.height / 2 }
+
+  // Sanity check: before the drawer opens, that point IS the header (proves
+  // the point is meaningful, not e.g. sitting over a hole in the header).
+  const beforeOpen = await page.evaluate(
+    (p) => !!document.elementFromPoint(p.x, p.y)?.closest('header'),
+    point,
+  )
+  expect(beforeOpen, 'test point does not land on the header before the drawer opens').toBe(true)
+
+  await page.locator('label[for="sidebar-drawer"][aria-label="Open navigation menu"]').click()
+  await expect(page.locator('#sidebar-drawer')).toBeChecked()
+
+  // daisyUI's drawer opens via a `visibility`/`opacity` CSS transition
+  // (`allow-discrete`, ~0.2-0.3s), not instantly when the checkbox flips —
+  // during that brief window the drawer is not yet paintable/hit-testable
+  // and elementFromPoint legitimately still returns the header underneath,
+  // exactly like a real user would see for a couple of frames. That is
+  // normal opening animation, not the H4 regression (a permanently wrong
+  // SETTLED z-index, not a transient mid-transition frame), so poll for the
+  // settled state instead of asserting on the very next frame.
+  const elementAtPoint = () =>
+    page.evaluate((p) => {
+      const el = document.elementFromPoint(p.x, p.y)
+      return {
+        insideHeader: !!el?.closest('header'),
+        insideDrawer: !!el?.closest('.drawer-side'),
+      }
+    }, point)
+
+  await expect
+    .poll(elementAtPoint, { message: 'drawer never settled above the header at the shared point' })
+    .toEqual({ insideHeader: false, insideDrawer: true })
+})
+
 // ---------------------------------------------------------------------------
 // F30 — accessible names, live region, table caption.
 // ---------------------------------------------------------------------------
@@ -510,83 +591,142 @@ test('activity rows open their details from the keyboard, at every width', async
 })
 
 // ---------------------------------------------------------------------------
-// F32 — the header search must not read as disabled at rest.
+// F32 (the header search button) and the header Add Server action moved to
+// navigation-consistency.spec.ts with Spec 109-i: the header search is now a
+// launcher that opens the command palette (no separate button), and the Add
+// Server action is the "+ Add" menu. Browser-level modal focus coverage stays
+// on the still-reachable Add Secret dialog below.
 // ---------------------------------------------------------------------------
-test('header search button is enabled with an empty box', async ({ page }) => {
-  await goto(page, '/')
-  const button = page.locator('[data-test="header-search-button"]')
-  await expect(button).toBeEnabled()
-  await expect(page.locator('[data-test="header-search-input"]')).toHaveValue('')
-  // Clicking with an empty query is a no-op, not a navigation.
-  await button.click()
-  await page.waitForTimeout(250)
-  expect(page.url()).not.toContain('/search')
-})
+test('the Add Secret modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
+  await goto(page, '/secrets')
 
-// ---------------------------------------------------------------------------
-// F6 — the Add Server modal must take focus, trap Tab, close on Escape and
-// hand focus back to its trigger.
-//
-// These five `<dialog :open>` modals are opened by the `open` ATTRIBUTE rather
-// than showModal(), so the browser supplies none of the modal affordances;
-// every one of them comes from `useModalA11y`. Its own comment delegates the
-// real-browser half of its coverage to "the Playwright sweep" — this is that
-// test. Without it, deleting the document keydown listener or the nextTick
-// focusInitial() passes the whole sweep.
-//
-// Escape is dispatched IN-PAGE, never with page.keyboard.press(). Re-checking
-// F6 during the audit produced a FALSE NEGATIVE for exactly that reason: a key
-// sent through the automation layer never reached the document listener under
-// test, so the assertion measured the harness instead of the app.
-//
-// Assert on the `[open]` ATTRIBUTE, not on DOM presence — the modal box is not
-// behind a v-if, so it stays in the DOM when closed. Checking "is it in the
-// DOM" is how the original audit mis-measured this.
-// ---------------------------------------------------------------------------
-test('the Add Server modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
-  // /activity mounts exactly one AddServerModal (TopHeader's). `/` and
-  // /servers mount a second copy of the same component, which makes the
-  // data-test locator strict-mode ambiguous there.
-  await goto(page, '/activity')
+  const trigger = page.locator('[data-test="secrets-add-button"]')
+  await trigger.click()
+  const dialog = page.locator('dialog[data-test="add-secret-modal"]')
+  await expect(dialog).toHaveAttribute('open', '')
 
-  await page.locator('[data-test="header-add-server"]').click()
-  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(1)
-
+  const box = dialog.locator('[role="dialog"]')
   const focus = await page.evaluate(() => {
-    const box = document.querySelector('[data-test="add-server-modal-box"]')
+    const box = document.querySelector('[data-test="add-secret-modal"] [role="dialog"]')
     const active = document.activeElement as HTMLElement | null
     return {
       inside: !!box && !!active && box.contains(active),
       onCloseButton: !!active && active.hasAttribute('data-modal-close-button'),
     }
   })
-  expect(focus.inside, 'focus never entered the Add Server dialog').toBe(true)
-  expect(focus.onCloseButton, 'focus landed on the header ✕ instead of the form').toBe(false)
+  expect(focus.inside, 'focus never entered the Add Secret dialog').toBe(true)
+  expect(focus.onCloseButton, 'focus landed on the close button instead of the form').toBe(false)
 
-  // Tab from the last focusable wraps to the first instead of walking out into
-  // the page behind the modal.
-  const wrapped = await page.evaluate(() => {
-    const box = document.querySelector('[data-test="add-server-modal-box"]')
-    if (!box) return null
+  const wrapped = await box.evaluate((element) => {
     const focusables = Array.from(
-      box.querySelectorAll<HTMLElement>(
+      element.querySelectorAll<HTMLElement>(
         'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
       ),
     ).filter((el) => el.checkVisibility({ checkVisibilityCSS: true }))
-    if (focusables.length < 2) return null
+    if (focusables.length < 2) return false
     focusables[focusables.length - 1].focus()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
     return document.activeElement === focusables[0]
   })
   expect(wrapped, 'Tab escaped the dialog instead of wrapping to the first control').toBe(true)
 
-  await page.evaluate(() =>
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
-  )
-  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(0)
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  await expect(dialog).not.toHaveAttribute('open', '')
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null)).toBe('secrets-add-button')
+})
 
-  // Focus restoration is deferred a tick, so poll rather than read once.
-  await expect
-    .poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null))
-    .toBe('header-add-server')
+// ---------------------------------------------------------------------------
+// Spec 108-i — the Profiles v3 screens: the Profiles page, the policy editor
+// and the Clients page with the profile chip. The editor and the chip need the
+// seeded profile and client (profiles-seed.ts), so they are skipped on an
+// instance with no fixture upstream.
+// ---------------------------------------------------------------------------
+// Spec 108-j adds the scoped Tools (view-as: greyed rows, banner, reason words) and
+// Activity (scope chips) pages: the greyed rows must still pass AA contrast.
+const PROFILE_ROUTES = ['/profiles', '/clients', `/profiles/${RO_PROFILE}`, `/tools?client=${CLIENT_ID}`, `/activity?client=${CLIENT_ID}&status=blocked`] as const
+
+test.describe('Profiles v3 screens (Spec 108-i)', () => {
+  test.beforeAll(async () => {
+    if (!SERVER) return
+    await cleanupProfiles()
+    await seedProfiles()
+    // A dangling pin: the danger-styled `profile_missing` chip and its warning banner.
+    await seedMissingProfile()
+  })
+  test.afterAll(async () => {
+    if (!SERVER) return
+    await cleanupProfiles()
+  })
+
+  for (const theme of THEMES) {
+    for (const route of PROFILE_ROUTES) {
+      test(`contrast AA: ${route} (${theme})`, async ({ page }) => {
+        test.skip(!SERVER && route !== '/profiles', 'needs the seeded profile and client (no fixture upstream)')
+        await goto(page, route, theme)
+        // The chip, the credential badges and the danger text must be on screen when measured.
+        if (route === '/clients') {
+          await expect(page.locator('[data-test^="client-profile-chip-"]').first()).toBeVisible()
+          await expect(page.locator('[data-test="client-profile-chip-e2e-orphan"]')).toContainText('missing')
+          await expect(page.locator('[data-test="clients-warnings-banner"]')).toBeVisible()
+        }
+        if (route.startsWith('/profiles/')) await expect(page.locator('[data-test="profile-editor"]')).toBeVisible()
+        if (route.startsWith('/tools?client=')) {
+          await expect(page.locator('[data-test="tools-view-as-banner"]')).toBeVisible()
+          await expect(page.locator('[data-test="tool-row"][data-not-callable="true"]').first()).toBeVisible()
+        }
+        if (route.startsWith('/activity?client=')) await expect(page.locator('[data-test="scope-chip-client"]')).toBeVisible()
+        const failures = await contrastFailures(page)
+        expect(
+          failures,
+          `WCAG AA contrast failures on ${route} (${theme}):\n` +
+            failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+        ).toEqual([])
+      })
+    }
+  }
+
+  for (const vp of VIEWPORTS) {
+    test(`layout holds at ${vp.width}px (${vp.name}): profiles and clients`, async ({ page }) => {
+      test.skip(!SERVER, 'needs the seeded profile and client (no fixture upstream)')
+      await page.setViewportSize({ width: vp.width, height: vp.height })
+      for (const route of PROFILE_ROUTES) {
+        await goto(page, route)
+        const overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        )
+        expect(overflow, `horizontal page overflow on ${route} at ${vp.width}px`).toBeLessThanOrEqual(1)
+      }
+    })
+  }
+
+  test('every form control on the Profiles screens has an accessible name', async ({ page }) => {
+    test.skip(!SERVER, 'needs the seeded profile and client (no fixture upstream)')
+    for (const route of PROFILE_ROUTES) {
+      await goto(page, route)
+      const unnamed = await page.evaluate(() => {
+        const out: string[] = []
+        document.querySelectorAll('input, select, textarea').forEach((el) => {
+          const c = el as HTMLInputElement
+          if (c.type === 'hidden') return
+          const rect = c.getBoundingClientRect()
+          if (rect.width < 2 || rect.height < 2) return
+          const labelledBy = (c.getAttribute('aria-labelledby') || '')
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((id) => document.getElementById(id))
+            .filter((n): n is HTMLElement => !!n && !!(n.textContent || '').trim())
+          const labelled =
+            (c.getAttribute('aria-label') || '').trim() ||
+            labelledBy.length > 0 ||
+            (c.getAttribute('placeholder') || '').trim() ||
+            (c.getAttribute('title') || '').trim() ||
+            (c.id && document.querySelector(`label[for="${CSS.escape(c.id)}"]`)) ||
+            c.closest('label')
+          if (!labelled) out.push(`${c.tagName.toLowerCase()}[type=${c.type}] .${c.className}`)
+        })
+        return out
+      })
+      expect(unnamed, `unnamed form controls on ${route}`).toEqual([])
+    }
+  })
 })

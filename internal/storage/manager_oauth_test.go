@@ -123,7 +123,8 @@ func TestManager_ClearOAuthState_RemovesEveryPrefixedToken(t *testing.T) {
 }
 
 // TestBoltDB_UpdateOAuthClientCredentials_WithCallbackPort verifies that UpdateOAuthClientCredentials
-// stores and retrieves the callback port alongside client credentials (Spec 022).
+// stores and retrieves the callback port and redirect URI alongside client credentials (Spec 022,
+// issue #1304).
 func TestBoltDB_UpdateOAuthClientCredentials_WithCallbackPort(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "storage-oauth-port-*")
 	require.NoError(t, err)
@@ -137,17 +138,19 @@ func TestBoltDB_UpdateOAuthClientCredentials_WithCallbackPort(t *testing.T) {
 	clientID := "dcr-client-id"
 	clientSecret := "dcr-client-secret"
 	callbackPort := 54321
+	redirectURI := "http://127.0.0.1:54321/oauth/callback"
 
-	// Store credentials with callback port
-	err = mgr.GetBoltDB().UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort)
+	// Store credentials with callback port and redirect URI
+	err = mgr.GetBoltDB().UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 	require.NoError(t, err)
 
 	// Retrieve and verify
-	gotClientID, gotClientSecret, gotPort, err := mgr.GetBoltDB().GetOAuthClientCredentials(serverKey)
+	gotClientID, gotClientSecret, gotPort, gotRedirectURI, err := mgr.GetBoltDB().GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	require.Equal(t, clientID, gotClientID)
 	require.Equal(t, clientSecret, gotClientSecret)
 	require.Equal(t, callbackPort, gotPort)
+	require.Equal(t, redirectURI, gotRedirectURI)
 }
 
 // TestBoltDB_GetOAuthClientCredentials_LegacyRecord verifies that GetOAuthClientCredentials
@@ -173,12 +176,13 @@ func TestBoltDB_GetOAuthClientCredentials_LegacyRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Retrieve credentials - port should be 0
-	gotClientID, gotClientSecret, gotPort, err := mgr.GetBoltDB().GetOAuthClientCredentials(serverKey)
+	// Retrieve credentials - port should be 0, redirect URI should be empty
+	gotClientID, gotClientSecret, gotPort, gotRedirectURI, err := mgr.GetBoltDB().GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	require.Equal(t, "legacy-client-id", gotClientID)
 	require.Equal(t, "legacy-client-secret", gotClientSecret)
 	require.Equal(t, 0, gotPort, "Legacy records should return port 0")
+	require.Empty(t, gotRedirectURI, "Legacy records should return an empty redirect URI")
 }
 
 // TestManager_CleanupOrphanedOAuthTokens verifies that orphaned tokens are removed

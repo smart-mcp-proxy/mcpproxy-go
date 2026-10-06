@@ -56,7 +56,10 @@ type surfaceHeaderTransport struct {
 func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	needClientHeader := req.Header.Get("X-MCPProxy-Client") == ""
 	needAPIKey := t.apiKey != "" && req.Header.Get("X-API-Key") == ""
-	if needClientHeader || needAPIKey {
+	// Spec 108 FR-030: profile_change records attribute the surface. The
+	// header is attribution only (never authorization).
+	needSurface := req.Header.Get("X-MCPProxy-Surface") == ""
+	if needClientHeader || needAPIKey || needSurface {
 		// Clone the header map so we don't mutate caller-owned state.
 		newHeaders := req.Header.Clone()
 		if newHeaders == nil {
@@ -67,6 +70,9 @@ func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, e
 		}
 		if needAPIKey {
 			newHeaders.Set("X-API-Key", t.apiKey)
+		}
+		if needSurface {
+			newHeaders.Set("X-MCPProxy-Surface", "cli")
 		}
 		reqCopy := req.Clone(req.Context())
 		reqCopy.Header = newHeaders
@@ -480,7 +486,16 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // GetServers retrieves list of servers from daemon.
 func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, error) {
+	return c.GetServersWithQuery(ctx, nil)
+}
+
+// GetServersWithQuery is GetServers with query parameters (Spec 108 FR-032:
+// `profile` restricts the rows to that profile's effective servers).
+func (c *Client) GetServersWithQuery(ctx context.Context, query url.Values) ([]map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/servers"
+	if encoded := query.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -624,6 +639,54 @@ func (c *Client) ServerAction(ctx context.Context, serverName, action string) er
 }
 
 // GetDiagnostics retrieves diagnostics information from daemon.
+// AttentionResponse is the GET /api/v1/attention success `data` payload
+// (contracts/rest-api.md#attention, Spec 109 FR-001).
+type AttentionResponse struct {
+	Count       int                       `json:"count"`
+	GeneratedAt string                    `json:"generated_at"`
+	Items       []contracts.AttentionItem `json:"items"`
+}
+
+// GetAttention fetches the one needs-attention list every surface reads
+// from — `mcpproxy attention`, the first line of `status`, and the first
+// section of `doctor` (Spec 109 FR-003/FR-004) all call this.
+func (c *Client) GetAttention(ctx context.Context) (*AttentionResponse, error) {
+	url := c.baseURL + "/api/v1/attention"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call attention API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool              `json:"success"`
+		Data      AttentionResponse `json:"data"`
+		Error     string            `json:"error"`
+		RequestID string            `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return &apiResp.Data, nil
+}
+
 func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/diagnostics"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -821,6 +884,53 @@ func (c *Client) GetInfo(ctx context.Context) (map[string]interface{}, error) {
 	return c.GetInfoWithRefresh(ctx, false)
 }
 
+// GetTokenStats retrieves token savings statistics (GET /api/v1/stats/tokens,
+// contracts.ServerTokenMetrics). Spec 109-k: 'mcpproxy status' uses this for
+// its "Token savings:" summary line. Administrator-only — a non-admin caller
+// (e.g. an agent token) gets a 403, which the caller treats like "unavailable"
+// rather than a hard failure.
+func (c *Client) GetTokenStats(ctx context.Context) (map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/stats/tokens"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call token stats API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data, nil
+}
+
 // GetInfoWithRefresh retrieves server info with optional update check refresh.
 // When refresh is true, forces an immediate update check against GitHub.
 func (c *Client) GetInfoWithRefresh(ctx context.Context, refresh bool) (map[string]interface{}, error) {
@@ -1014,46 +1124,65 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 // consolidated GET /api/v1/tools endpoint (Spec 050). The returned slice
 // contains one map per tool with the same fields as the web page's data source.
 func (c *Client) GetGlobalTools(ctx context.Context) ([]map[string]interface{}, error) {
+	return c.GetGlobalToolsWithQuery(ctx, nil)
+}
+
+// GetGlobalToolsWithQuery is GetGlobalTools with query parameters (Spec 108
+// FR-032: `client` or `profile` turn the listing into a view-as, adding an
+// access verdict and profile_tier to every row).
+func (c *Client) GetGlobalToolsWithQuery(ctx context.Context, query url.Values) ([]map[string]interface{}, error) {
+	tools, _, err := c.GetGlobalToolsView(ctx, query)
+	return tools, err
+}
+
+// GetGlobalToolsView is GetGlobalToolsWithQuery that also returns the
+// response's `counts` ({visible, hidden}), present only for a non-administrator
+// profile view-as (nil otherwise).
+func (c *Client) GetGlobalToolsView(ctx context.Context, query url.Values) ([]map[string]interface{}, map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/tools"
+	if encoded := query.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to call global tools API: %w", err)
+		return nil, nil, fmt.Errorf("failed to call global tools API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Tools []map[string]interface{} `json:"tools"`
+			Tools  []map[string]interface{} `json:"tools"`
+			Counts map[string]interface{}   `json:"counts"`
 		} `json:"data"`
 		Error     string `json:"error"`
 		RequestID string `json:"request_id"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if !apiResp.Success {
-		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+		return nil, nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
-	return apiResp.Data.Tools, nil
+	return apiResp.Data.Tools, apiResp.Data.Counts, nil
 }
 
 // GetServerTools retrieves tools for a specific server from daemon.
@@ -1645,10 +1774,14 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 }
 
 // GetActivitySummary retrieves activity summary statistics.
-func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string) (map[string]interface{}, error) {
+func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string, scope url.Values) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/activity/summary?period=" + period
 	if groupBy != "" {
 		url += "&group_by=" + groupBy
+	}
+	// Spec 108 FR-031: profile / client / token scope filters.
+	if encoded := scope.Encode(); encoded != "" {
+		url += "&" + encoded
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
