@@ -314,7 +314,7 @@
         >
           Tools ({{ serverTools.length }})
         </button>
-        <button :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
+        <button data-test="review-tab" :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
         <button
           :class="['tab tab-lg', activeTab === 'logs' ? 'tab-active' : '']"
           @click="activeTab = 'logs'"
@@ -388,8 +388,8 @@
               type="button"
               data-test="server-tools-empty-security"
               class="btn btn-sm btn-outline mt-4"
-              @click="openSecurityTab"
-            >View security findings</button>
+              @click="activeTab = 'review'"
+            >Open Review</button>
           </div>
 
           <div v-else class="space-y-4">
@@ -1752,9 +1752,9 @@ const toolsEmptyBody = computed(() => {
   // Configuration is the right pointer because it renders `last_error` verbatim
   // and unconditionally, which is exactly where the suppressed fault is legible.
   if (server.value?.last_error) {
-    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. The error is shown above; review the findings on the Security tab as well."
+    return "This server's tools are withheld while it is quarantined, and it last reported a connection error — so approving it may not be enough on its own. The error is shown above; open the Review tab as well."
   }
-  return "This server's tools are withheld while the server is quarantined. Review the findings on the Security tab, then approve the server to list them."
+  return "This server's tools are withheld while the server is quarantined. Open the Review tab to inspect the pending tools, then approve the server to list them."
 })
 
 // Tool quarantine (Spec 032)
@@ -2868,6 +2868,14 @@ function loadLogs() {
 
 async function _loadLogsWithGen(gen: number) {
   if (!server.value) return
+  // A disabled server has no running process and may have no log file: skip the
+  // request rather than surfacing a console error (#1466).
+  if (server.value.enabled === false) {
+    serverLogs.value = []
+    logsError.value = null
+    logsLoading.value = false
+    return
+  }
 
   logsLoading.value = true
   logsError.value = null
@@ -2877,6 +2885,9 @@ async function _loadLogsWithGen(gen: number) {
     if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverLogs.value = response.data.logs || []
+    } else if (/\b404\b|not found/i.test(response.error || '')) {
+      // No log file yet: an empty state, not a fault.
+      serverLogs.value = []
     } else {
       logsError.value = response.error || 'Failed to load logs'
     }

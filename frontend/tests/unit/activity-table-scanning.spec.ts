@@ -161,6 +161,8 @@ describe('Activity table — only failures are marked (F5)', () => {
     expect(successCell.text()).toBe('Success')
     // sr-only: present in the accessibility tree, absent from the scan.
     expect(successCell.classes()).toContain('sr-only')
+    // I8a: a visible check icon with a Success title accompanies it.
+    expect(rows(wrapper)[0].find('[data-test="activity-status-icon"] title').text()).toBe('Success')
 
     const errorCell = rows(wrapper)
       .find(r => r.text().includes('Error'))!

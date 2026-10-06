@@ -93,7 +93,7 @@ Using the wrong flag for the state fails with exit code 1 instead of doing somet
 - `--tools` or `--except` while no tool definitions are captured: `no tool definitions captured for server 's'; fetch them first ...`; nothing is written
 - `--except` on a trusted server: `--except applies only while approving a quarantined server`
 
-The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`. JSON and YAML output stay the REST data object.
+The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`; with `--all` it reads `Allowing all pending or changed tools; previously blocked tools stay blocked`. JSON and YAML output stay the REST data object.
 
 `mcpproxy review approve <server> --yes` used to allow every tool. It now allows the default selection, so it matches the review screens; add `--all` to approve every tool.
 

@@ -151,7 +151,7 @@ One call per request returns it with the `(index, snapshot)` pair (Spec 105 pair
 | `ClientID` | `client_id,omitempty` | `AuthContext.ClientID` |
 | `ClientName` | `client_name,omitempty` | session `clientInfo.name` (was `metadata.client_name`) |
 | `TokenName` | `token_name,omitempty` | `AuthContext.AgentName` for agent/client tokens |
-| `BlockReason` | `block_reason,omitempty` | `profile_tier`, `profile_rule`, `profile_unannotated`, `profile_code_execution`, `profile_management` (new); existing block causes keep their current metadata and are not renamed; set on `policy_decision` records and on blocked `tool_call` children of `code_execution` (a nested profile refusal; other nested refusals carry none) |
+| `BlockReason` | `block_reason,omitempty` | `profile_tier`, `profile_rule`, `profile_unannotated`, `profile_code_execution`, `profile_management`, `profile_server_scope` (new); existing block causes keep their current metadata and are not renamed; set on `policy_decision` records and on blocked `tool_call` children of `code_execution` (a nested profile refusal; a nested call to a server outside the profile carries `profile_server_scope`; a legacy token refused only by its own server list carries none) |
 
 An internal `token_prefix` (`storage.ActivityRecord.TokenPrefix`, the calling token's 12-char display prefix) is persisted with every attributed record as the ownership proof behind FR-031's scoped views; it is never projected to any API shape, export or SSE frame, and a record written before it existed falls back to the `_auth_token_prefix` argument, else reads as foreign to a scoped caller.
 

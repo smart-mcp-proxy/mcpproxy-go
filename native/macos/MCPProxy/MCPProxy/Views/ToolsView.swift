@@ -157,7 +157,7 @@ struct ToolsView: View {
             .accessibilityIdentifier("tools-view-as-client")
         case .profile(let current):
             Picker("Profile", selection: Binding(get: { current }, set: { viewAs = .profile($0) })) {
-                ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                 if !appState.profiles.contains(where: { $0.name == current }) { Text(current).tag(current) }
             }
             .labelsHidden().frame(maxWidth: 160)

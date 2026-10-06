@@ -87,7 +87,7 @@ One predicate computes the decision, and everything uses it: discovery, executio
 5. The tool's tier is above `max_tier`: **`above_tier_cap`**.
 6. Otherwise admitted.
 
-Patterns are `server:tool` with `*` as the only wildcard, matched case-sensitively. A pattern naming a server outside `servers` is saved with a warning and ignored.
+Patterns are `server:tool` with `*` as the only wildcard, matched case-sensitively. A pattern naming a server outside `servers` is saved with a warning and ignored. Saving a profile (create or replace) also returns one warning per `tools.classify` entry that no longer applies (`classify entry "server:tool" is stale: annotated|missing`), the same entries the effective-tools view reports as stale.
 
 ## What a caller sees
 
@@ -98,7 +98,7 @@ Patterns are `server:tool` with `*` as the only wildcard, matched case-sensitive
 | `call_tool_read`, `call_tool_write`, `call_tool_destructive`, `/mcp/all`, REST `/tools/call` | Refused before any upstream call with `blocked by profile: <server>:<tool> is a <tier> tool; profile "<title>" (<slug>) allows <cap> tools only`, or `... is denied by a rule in profile "<title>" (<slug>)`, or `... has no tier annotation; an operator can classify it in profile "<title>" (<slug>) to allow it` |
 | `code_execution` | Absent and refused when the profile turns it off; every nested `call_tool` goes through the same gate and is recorded with the same `block_reason` |
 
-A refusal names the profile only to a caller whose effective profile is its own: one that came from the caller's pin, its client binding, the URL or `set_profile`, so an agent can tell the operator which profile to change. A caller that connects without a credential and falls under `anonymous_profile` gets the same refusal without the profile name (`... this profile allows <cap> tools only`, `... is denied by a profile rule`, `... in the profile to allow it`), and so does a caller whose profile no longer exists, so the operator's anonymous confinement is never handed out. The title is quoted and escaped, so it cannot add a line to the refusal. The operator sees the profile in the activity record and in the explainer. A blocked call is recorded with `status=blocked` and `block_reason` `profile_tier`, `profile_rule` or `profile_unannotated` (`profile_code_execution` and `profile_management` for the tools above).
+A refusal names the profile only to a caller whose effective profile is its own: one that came from the caller's pin, its client binding, the URL or `set_profile`, so an agent can tell the operator which profile to change. A caller that connects without a credential and falls under `anonymous_profile` gets the same refusal without the profile name (`... this profile allows <cap> tools only`, `... is denied by a profile rule`, `... in the profile to allow it`), and so does a caller whose profile no longer exists, so the operator's anonymous confinement is never handed out. The title is quoted and escaped, so it cannot add a line to the refusal. The operator sees the profile in the activity record and in the explainer. A blocked call is recorded with `status=blocked` and `block_reason` `profile_tier`, `profile_rule` or `profile_unannotated` (`profile_code_execution` and `profile_management` for the tools above). A nested `call_tool` in `code_execution` to a server outside the profile is recorded with `block_reason` `profile_server_scope`; the text the script receives stays the non-disclosing out-of-scope refusal.
 
 A profile does not change prompts: tier and rules apply to tools only.
 

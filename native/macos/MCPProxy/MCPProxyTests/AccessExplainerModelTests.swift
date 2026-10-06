@@ -132,6 +132,18 @@ final class AccessExplainerModelTests: XCTestCase {
         }
     }
 
+    /// #1451-5: editing the tool field after an explanation must not retarget
+    /// the fix to a tool that was never explained.
+    func testAFixRoutesToTheExplainedToolNotTheEditedField() async throws {
+        let source = StubSource()
+        source.result = .success(try blockedExplanation())
+        let model = AccessExplainerModel(source: source, subject: .client("cursor"), tool: "github:create_issue")
+        await model.explain()
+        model.tool = "notion:search"
+        XCTAssertEqual(model.route(for: fix("allow_in_profile", target: "work-ro")),
+                       .profileEditor(name: "work-ro", focusTool: "github:create_issue"))
+    }
+
     func testAnUnknownFixActionHasNoButton() {
         XCTAssertNil(AccessExplainerModel.route(for: fix("future_action"), tool: "a:b"))
     }

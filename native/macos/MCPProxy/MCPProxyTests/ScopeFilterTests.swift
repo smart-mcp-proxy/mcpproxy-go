@@ -566,3 +566,27 @@ final class ScopeFilterSessionRowTests: XCTestCase {
         XCTAssertFalse(ScopeFilter.forSession("S2").highlights(row))
     }
 }
+
+
+/// Sticky `from`/`to` survive a link hop (the doc contract on `from`).
+final class ScopeFilterLinkedTests: XCTestCase {
+    func testLinkedCarriesStickyWindow() {
+        var current = ScopeFilter()
+        current.from = "-7d"
+        current.to = "2026-10-01T00:00:00Z"
+        current.status = "blocked"
+        let next = current.linked(.forToken("ci-bot"))
+        XCTAssertEqual(next.token, "ci-bot")
+        XCTAssertEqual(next.from, "-7d")
+        XCTAssertEqual(next.to, "2026-10-01T00:00:00Z")
+        XCTAssertNil(next.status, "status is never sticky")
+    }
+
+    func testLinkedKeepsTheLinksOwnWindow() {
+        var current = ScopeFilter()
+        current.from = "-7d"
+        var link = ScopeFilter.forClient("cursor")
+        link.from = "-1h"
+        XCTAssertEqual(current.linked(link).from, "-1h")
+    }
+}

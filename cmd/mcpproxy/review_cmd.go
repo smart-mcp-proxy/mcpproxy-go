@@ -72,7 +72,7 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 			if len(block) > 0 {
 				body["block"] = block
 			}
-			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block)
+			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block, all)
 		} else if len(tools) > 0 || len(except) > 0 {
 			// Nothing to select from: dropping --tools/--except would approve blind.
 			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
@@ -277,12 +277,18 @@ func reviewApproveSelection(tools []reviewToolState, all bool, only, except []st
 
 // reviewApproveWording builds the confirmation prompt and the table-mode
 // summary line, both naming the exact count.
-func reviewApproveWording(server string, total, allowed int, block []string) (prompt, summary string) {
+func reviewApproveWording(server string, total, allowed int, block []string, all bool) (prompt, summary string) {
 	noun := func(n int) string {
 		if n == 1 {
 			return "tool"
 		}
 		return "tools"
+	}
+	if len(block) == 0 && all {
+		// --all approves pending or changed tools only; tools blocked earlier
+		// stay blocked, so "N of N; blocking none" would overstate it.
+		return fmt.Sprintf("Approve server '%s' with all %d %s?", server, total, noun(total)),
+			"Allowing all pending or changed tools; previously blocked tools stay blocked"
 	}
 	if len(block) == 0 {
 		return fmt.Sprintf("Approve server '%s' with all %d %s?", server, total, noun(total)),
@@ -371,10 +377,14 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 // as the Web and macOS review screens. It returns "" when the payload carries
 // no scan or predates coverage.
 func reviewScanLine(server map[string]interface{}) string {
-	scan, _ := server["scan"].(map[string]interface{})
+	scan, hasScan := server["scan"].(map[string]interface{})
+	if !hasScan {
+		return ""
+	}
 	coverage, _ := scan["coverage"].(string)
 	if coverage == "" {
-		return ""
+		// An older core sends no coverage: say "none" like the Web and macOS screens.
+		return "Scan: none"
 	}
 	rescan := "run: mcpproxy security rescan " + fmt.Sprint(server["name"])
 	switch coverage {

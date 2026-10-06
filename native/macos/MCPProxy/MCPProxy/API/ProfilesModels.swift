@@ -496,6 +496,13 @@ struct ProfileView: Codable, Identifiable, Equatable {
         return name
     }
 
+    /// The title a picker shows. Two profiles may share a title, which would
+    /// make their entries indistinguishable, so a shared title carries the slug.
+    func pickerTitle(in profiles: [ProfileView]) -> String {
+        let clashes = profiles.filter { $0.displayTitle == displayTitle }.count > 1
+        return clashes && displayTitle != name ? "\(displayTitle) (\(name))" : displayTitle
+    }
+
     /// "Work · Read-only" style label used on rows and in the tray.
     var menuLabel: String { displayTitle }
 
@@ -864,10 +871,14 @@ struct EffectiveToolsResponse: Decodable, Equatable {
     let tools: [EffectiveTool]
     let counts: EffectiveCounts?
     let staleClassifications: [String]?
+    /// Why each stale entry no longer applies ("annotated" or "missing").
+    /// Administrators only; absent from an older daemon.
+    let staleClassificationReasons: [String: String]?
 
     enum CodingKeys: String, CodingKey {
         case profile, tools, counts
         case staleClassifications = "stale_classifications"
+        case staleClassificationReasons = "stale_classification_reasons"
     }
 
     init(from decoder: Decoder) throws {
@@ -876,6 +887,8 @@ struct EffectiveToolsResponse: Decodable, Equatable {
         tools = try c.decodeIfPresent([EffectiveTool].self, forKey: .tools) ?? []
         counts = try c.decodeIfPresent(EffectiveCounts.self, forKey: .counts)
         staleClassifications = try c.decodeIfPresent([String].self, forKey: .staleClassifications)
+        // Tolerant: a malformed map must not fail the whole table.
+        staleClassificationReasons = (try? c.decodeIfPresent([String: String].self, forKey: .staleClassificationReasons)) ?? nil
     }
 }
 

@@ -72,7 +72,7 @@ func scopeFilterListContains(list []string, name string) bool {
 func rejectUnsupportedScopeFilters(w http.ResponseWriter, r *http.Request, honoured ...string) bool {
 	q := r.URL.Query()
 	for _, name := range []string{"profile", "client", "token", "agent"} {
-		if q.Get(name) == "" {
+		if !q.Has(name) {
 			continue
 		}
 

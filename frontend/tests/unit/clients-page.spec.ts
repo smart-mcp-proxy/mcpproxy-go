@@ -87,6 +87,27 @@ describe('Clients page', () => {
     expect(wrapper.find('a[href="/usage?client=cursor"]').exists()).toBe(true)
   })
 
+  it('exposes a keyboard-operable expander button whose aria-expanded flips (I7)', async () => {
+    const router = makeRouter()
+    await router.push('/clients')
+    await router.isReady()
+    const wrapper = mount(Clients, {
+      global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } },
+    })
+    await flushPromises()
+    const btn = wrapper.find('[data-test="client-expand-cursor"]')
+    expect(btn.element.tagName).toBe('BUTTON')
+    expect(btn.attributes('aria-expanded')).toBe('false')
+    expect(btn.attributes('aria-label')).toContain('Show details for')
+    await btn.trigger('click')
+    await flushPromises()
+    expect(btn.attributes('aria-expanded')).toBe('true')
+    expect(api.getClient).toHaveBeenCalledTimes(1)
+    await btn.trigger('click')
+    await flushPromises()
+    expect(btn.attributes('aria-expanded')).toBe('false')
+  })
+
   it('reads the tab from the URL and preserves unrelated query parameters when changing tabs', async () => {
     const router = makeRouter()
     await router.push('/clients?tab=endpoint&token=agent-1')

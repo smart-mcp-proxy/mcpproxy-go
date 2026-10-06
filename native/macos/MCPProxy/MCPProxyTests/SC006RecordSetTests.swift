@@ -74,7 +74,10 @@ final class SC006RecordSetTests: XCTestCase {
 
     func testEveryCombinationSendsItsQueryAndShowsItsIds() throws {
         let now = Date(timeIntervalSince1970: 1_790_000_000)
-        for set in try golden().recordsets {
+        let recordsets = try golden().recordsets
+        var seen = Set<String>()
+        let allIds = recordsets.flatMap(\.ids).filter { seen.insert($0).inserted }
+        for set in recordsets {
             let filter = ScopeFilter(query: parameters(set.urlQuery))
             let request = filter.restRequest(for: .activity, scopeFiltersAvailable: true, now: now)
             XCTAssertEqual(request?.path, "/api/v1/activity", set.urlQuery)
@@ -90,8 +93,17 @@ final class SC006RecordSetTests: XCTestCase {
             // The list the view builds from the server's answer: exactly the ids,
             // in the server's order, whatever the folding does to the rows.
             let status = parameters(set.restQuery)["status"] ?? "success"
-            let list = try entries(set.ids, status: status)
-            let shown = ActivityFolding.fold(list).flatMap { $0.members.map(\.id) }
+            // The input is a SUPERSET (this combination's ids interleaved with the
+            // ids of every other combination as decoys), so the assertion cannot
+            // pass just because the input was built from the expected output.
+            let decoys = allIds.filter { !set.ids.contains($0) }.map { "decoy-\($0)" }
+            var mixed: [String] = []
+            for (index, id) in set.ids.enumerated() { mixed.append(id); if index < decoys.count { mixed.append(decoys[index]) } }
+            mixed.append(contentsOf: decoys.dropFirst(set.ids.count))
+            let list = try entries(mixed, status: status)
+            let folded = ActivityFolding.fold(list).flatMap { $0.members.map(\.id) }
+            XCTAssertEqual(folded, mixed, "folding must neither drop nor reorder a record (\(set.urlQuery))")
+            let shown = folded.filter { !$0.hasPrefix("decoy-") }
             XCTAssertEqual(shown, set.ids, "macOS must show exactly the ids of \(set.urlQuery)")
         }
     }
