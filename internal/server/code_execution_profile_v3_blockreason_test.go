@@ -71,7 +71,7 @@ func codeExecProfileFixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime, *c
 
 // TestCodeExecution_ProfileV3NestedRefusalReasons pins the block_reason of the
 // child record for every profile refusal cause, for both script APIs, and its
-// absence for a refusal that is not a profile tool-policy one (data-model.md).
+// profile_server_scope for a server outside the profile (data-model.md).
 func TestCodeExecution_ProfileV3NestedRefusalReasons(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -84,7 +84,7 @@ func TestCodeExecution_ProfileV3NestedRefusalReasons(t *testing.T) {
 		{"deny rule", `call_tool("github", "list_secrets", {})`, "github", "list_secrets", "profile_rule"},
 		{"unannotated", `call_tool("github", "search_code", {})`, "github", "search_code", "profile_unannotated"},
 		{"call_tools batch element", `call_tools([{server: "github", tool: "create_issue", args: {}}])`, "github", "create_issue", "profile_tier"},
-		{"server outside profile", `call_tool("filesystem", "read_text_file", {})`, "filesystem", "read_text_file", ""},
+		{"server outside profile", `call_tool("filesystem", "read_text_file", {})`, "filesystem", "read_text_file", "profile_server_scope"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
