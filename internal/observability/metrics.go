@@ -493,13 +493,13 @@ func (mm *MetricsManager) RecordActorFailure(server, errorType string) {
 // OAuth refresh metrics (Spec 023)
 
 // RecordOAuthRefresh records an OAuth token refresh attempt.
-// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+// Result is one of: "success", "failed_network", "failed_invalid_grant", "failed_invalid_client", "failed_server_error", "failed_server_gone", "failed_other".
 func (mm *MetricsManager) RecordOAuthRefresh(server, result string) {
 	mm.oauthRefreshTotal.WithLabelValues(server, result).Inc()
 }
 
 // RecordOAuthRefreshDuration records the duration of an OAuth token refresh attempt.
-// Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
+// Result is one of: "success", "failed_network", "failed_invalid_grant", "failed_invalid_client", "failed_server_error", "failed_server_gone", "failed_other".
 func (mm *MetricsManager) RecordOAuthRefreshDuration(server, result string, duration time.Duration) {
 	mm.oauthRefreshDuration.WithLabelValues(server, result).Observe(duration.Seconds())
 }
