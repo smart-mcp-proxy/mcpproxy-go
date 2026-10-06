@@ -67,12 +67,21 @@
 
     <!-- Step 3: what happened, and the step the dialog never does itself. -->
     <div v-else-if="step === 'done'" class="space-y-3" data-test="upgrade-done-step" role="status" aria-live="polite">
-      <p v-if="applied" class="text-sm"><strong>{{ applied.upgraded.length }}</strong> upgraded<template v-if="applied.upgraded.length">: {{ applied.upgraded.join(', ') }}</template>.</p>
+      <p v-if="applied" class="text-sm" data-test="upgrade-summary"><strong>{{ applied.upgraded.length }}</strong> client{{ applied.upgraded.length === 1 ? '' : 's' }} upgraded<template v-if="applied.upgraded.length">: {{ applied.upgraded.join(', ') }}</template>.</p>
       <p v-else class="text-sm">No client holds the admin key.</p>
-      <ul v-if="applied?.failed.length" class="text-sm text-error list-disc list-inside" data-test="upgrade-failed">
-        <li v-for="item in applied.failed" :key="item.client_id">{{ item.client_id }}: {{ item.error }}</li>
-      </ul>
-      <section class="rounded-box border border-warning/50 p-3 space-y-2" data-test="rotate-admin-key-panel">
+      <template v-if="hasFailures">
+        <p class="text-sm text-error" data-test="upgrade-failed-heading">{{ applied!.failed.length }} could not be upgraded:</p>
+        <ul class="text-sm text-error list-disc list-inside" data-test="upgrade-failed">
+          <li v-for="item in applied!.failed" :key="item.client_id">{{ item.client_id }}: {{ item.error }}</li>
+        </ul>
+        <!-- FR-025: rotating invalidates every copy that was not upgraded, so a
+             partial failure must not offer the rotate step. -->
+        <section class="rounded-box border border-warning/50 p-3 space-y-2" data-test="upgrade-retry">
+          <p class="text-sm">Fix the problem shown for each client, then run Upgrade admin-key clients again. Only the clients that still hold the admin key are changed. Do not rotate the admin API key yet: the clients above would stop working.</p>
+          <button type="button" class="btn btn-outline btn-sm" data-test="upgrade-try-again" @click="step = 'choose'">Try again</button>
+        </section>
+      </template>
+      <section v-else-if="rotateReady" class="rounded-box border border-warning/50 p-3 space-y-2" data-test="rotate-admin-key-panel">
         <h4 class="font-semibold">Rotate the admin API key</h4>
         <p class="text-sm">Upgraded clients no longer need the admin key, but every other copy of it still works until you replace it.</p>
         <ol class="list-decimal list-inside text-sm space-y-1">
@@ -81,13 +90,14 @@
         </ol>
         <a class="link link-primary text-sm" :href="docsHref" target="_blank" rel="noopener noreferrer" data-test="rotate-admin-key-docs">How to rotate the admin API key</a>
       </section>
+      <p v-else-if="applied" class="text-sm" data-test="upgrade-holders-remain">Some clients still hold the admin key, so do not rotate it yet. Review them in the <RouterLink class="link link-primary" :to="{ name: 'clients' }" @click="emit('close')">Clients list</RouterLink>.</p>
       <div class="modal-action"><button type="button" class="btn btn-primary btn-sm" data-test="upgrade-close" @click="emit('close')">Close</button></div>
     </div>
   </BaseDialog>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import BaseDialog from '@/components/BaseDialog.vue'
 import GuardRefusal from '@/components/GuardRefusal.vue'
 import api, { type ApiError } from '@/services/api'
@@ -110,6 +120,10 @@ const error = ref('')
 const stale = ref(false)
 const previewData = ref<UpgradePreview | null>(null)
 const applied = ref<UpgradeApplyResult | null>(null)
+const hasFailures = computed(() => (applied.value?.failed?.length ?? 0) > 0)
+// The backend sets next_step only once no admin-key holder remains, so it is the
+// single signal that rotating is safe (on the apply path and the empty-preview path).
+const rotateReady = computed(() => (applied.value ? !!applied.value.next_step : !!previewData.value?.next_step))
 const docsHref = docsUrl('/configuration/config-file/')
 const guardText = 'Binding every upgraded client to this profile would leave it reachable without authentication.'
 

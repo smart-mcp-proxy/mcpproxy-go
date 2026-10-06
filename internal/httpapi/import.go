@@ -371,9 +371,20 @@ func (s *Server) handleImportServers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An empty "{}" file previews as "nothing to import" (as handleImportFromPath
+	// does), not as a 400 about an undetectable format.
+	if preview && isEmptyJSONObject(content) {
+		s.writeSuccess(w, emptyImportPreview(formatHint))
+		return
+	}
+
 	// Run import (rename not supported via multipart upload — leave nil)
 	result, err := s.runImport(r, content, formatHint, serverNames, preview, nil, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			s.writeSuccess(w, emptyImportPreview(formatHint))
+			return
+		}
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -416,6 +427,14 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 	var fieldOverrides *ImportFieldOverrides
 	if len(req.EnvOverride) > 0 || len(req.HeaderOverride) > 0 {
 		fieldOverrides = &ImportFieldOverrides{Env: req.EnvOverride, Headers: req.HeaderOverride}
+	}
+
+	// A pasted empty "{}" previews as "nothing to import", not a 400 about an
+	// undetectable format. Other empty configs (e.g. {"mcpServers":{}}) keep
+	// telling the user they hold no servers.
+	if preview && isEmptyJSONObject([]byte(req.Content)) {
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
 	}
 
 	// Run import
@@ -487,9 +506,6 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	// Run import
 	result, err := configimport.Import(content, opts)
 	if err != nil {
-		if preview && bytes.Equal(bytes.TrimSpace(content), []byte("{}")) {
-			return emptyImportPreview(formatHint), nil
-		}
 		return nil, err
 	}
 
@@ -640,6 +656,12 @@ func (s *Server) selfListenAddrs() []string {
 		addrs = append(addrs, cfg.Listen)
 	}
 	return addrs
+}
+
+// isEmptyJSONObject reports whether content is exactly an empty JSON object.
+func isEmptyJSONObject(content []byte) bool {
+	var m map[string]json.RawMessage
+	return json.Unmarshal(bytes.TrimSpace(content), &m) == nil && m != nil && len(m) == 0
 }
 
 // emptyImportPreview is the preview answer for a client config that holds no

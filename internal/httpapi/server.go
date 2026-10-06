@@ -4159,6 +4159,10 @@ func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
 
 	logEntries, err := s.controller.GetServerLogs(serverID, tail)
 	if err != nil {
+		if errors.Is(err, contracts.ErrServerNotFound) {
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
 		s.logger.Errorw("Failed to get server logs", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get logs: %v", err))
 		return
@@ -5709,6 +5713,9 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	// door's masks over the operator's credentials. The unmask runs INSIDE the
 	// config funnel, against the desired config it read under the lock.
 	result, ok := s.mutateConfig(w, r, "Failed to apply configuration", func(stored *config.Config) error {
+		if err := refuseAmbiguousLockedTelemetryKeys(document); err != nil {
+			return err
+		}
 		resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
 		if err != nil {
 			s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
@@ -5846,6 +5853,9 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	// Direct and then changed any other setting lost the routing switch with no
 	// warning, on disk, with a success toast.
 	result, ok := s.mutateConfig(w, r, "Failed to apply configuration patch", func(cfg *config.Config) error {
+		if err := refuseAmbiguousLockedTelemetryKeys(patchMap); err != nil {
+			return err
+		}
 		merged, refusal := s.mergeConfigPatch(cfg, patchMap)
 		if refusal != nil {
 			return refusal

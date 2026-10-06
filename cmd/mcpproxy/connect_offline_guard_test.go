@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -102,4 +105,41 @@ func TestDescribeConnectFailure_InFlightAndSuperseded(t *testing.T) {
 		require.Equal(t, tc.want, got.Error())
 		require.Equal(t, ExitCodeGeneralError, classifyError(got))
 	}
+}
+
+// 1451-2: an offline connect reconciles a rotation an earlier interrupted
+// connect left staged (its new secret already in the client config) BEFORE it
+// does anything else. The connect here is refused by the guard, so the only
+// way the staged rotation can resolve is the reconcile.
+func TestConnectOffline_ReconcilesStagedRotationFirst(t *testing.T) {
+	_, cfg, path := seedBoundCursor(t)
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	secretRe := regexp.MustCompile(`mcp_cli_[0-9a-f]{64}`)
+	oldSecret := string(secretRe.Find(raw))
+	require.NotEmpty(t, oldSecret)
+
+	key, err := auth.GetOrCreateHMACKey(cfg.DataDir)
+	require.NoError(t, err)
+	newSecret, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	sm, err := storage.NewManager(cfg.DataDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	_, err = sm.StageClientCredentialRotation("cursor", newSecret, key)
+	require.NoError(t, err)
+	require.NoError(t, sm.Close())
+	// The interrupted connect had already written the new secret to the file.
+	require.NoError(t, os.WriteFile(path, []byte(strings.ReplaceAll(string(raw), oldSecret, newSecret)), 0o644))
+
+	_, err = runConnectArgs(t, "cursor", "--force", "--profile", "work", "--lock")
+	require.Error(t, err, "the re-point is refused by the offline guard")
+
+	pin, mode, pending := cursorRecord(t, cfg)
+	require.Equal(t, "ro", pin)
+	require.Equal(t, "locked", mode)
+	require.Empty(t, pending, "the staged rotation was reconciled from the file")
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(after), newSecret, "the secret already in the file is not overwritten")
 }

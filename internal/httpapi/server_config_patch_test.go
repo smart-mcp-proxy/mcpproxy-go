@@ -383,5 +383,5 @@ func TestHandlePatchConfig_RequireMCPAuthChangeDetected(t *testing.T) {
 	assert.Equal(t, true, res["applied_immediately"])
 	changed, ok := res["changed_fields"].([]interface{})
 	require.True(t, ok)
-	assert.Contains(t, changed, "require_mcp_auth")
+	assert.ElementsMatch(t, []interface{}{"require_mcp_auth"}, changed)
 }

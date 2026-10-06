@@ -129,6 +129,12 @@ struct ClientsView: View {
             tab = 0
             focusedClientID = id
             pendingExpandID = id
+            // Clear the clients filter only when it would hide the target;
+            // the `.onChange` reload keeps `pendingExpandID`, so the row expands.
+            if Self.filterHidesTarget(filter: clientsFilter, targetID: id,
+                                      filteredIDs: nil, roster: appState.clients) {
+                clientsFilter = ScopeFilter()
+            }
             expandPendingClient(dropIfAbsent: false)
         case .connect(let id)?:
             tab = 0
@@ -140,6 +146,21 @@ struct ClientsView: View {
         case nil:
             break
         }
+    }
+
+    /// Whether the active clients filter hides the client a `.clientDetail`
+    /// route targets (a pure decision, so it is unit-testable without a view).
+    /// `filteredIDs` is the filtered list once loaded (nil before); `roster` is
+    /// the unfiltered app-wide client list. An unknown target is never "hidden":
+    /// the request is dropped as before and the filter is left alone.
+    static func filterHidesTarget(filter: ScopeFilter, targetID: String,
+                                  filteredIDs: [String]?, roster: [ClientPresenceRecord]) -> Bool {
+        guard filter.profile != nil || filter.client != nil else { return false }
+        guard let target = roster.first(where: { $0.id == targetID }) else { return false }
+        if let client = filter.client, client != targetID { return true }
+        if let filteredIDs { return !filteredIDs.contains(targetID) }
+        if let profile = filter.profile { return target.profile != profile }
+        return false
     }
 
     /// Expand the row a `.clientDetail` route asked for, once it is loaded.
@@ -488,7 +509,14 @@ struct ClientsView: View {
             let response = try await loadedClients
             clients = response.clients
             warnings = response.warnings ?? []
-            expandPendingClient(dropIfAbsent: true)
+            if let id = pendingExpandID,
+               Self.filterHidesTarget(filter: clientsFilter, targetID: id,
+                                      filteredIDs: clients.map(\.id), roster: appState.clients) {
+                // Filtered out but known: widen the view (the reload re-expands it).
+                clientsFilter = ScopeFilter()
+            } else {
+                expandPendingClient(dropIfAbsent: true)
+            }
             if profile == nil && client == nil {
                 appState.clients = response.clients
                 appState.clientWarnings = warnings
@@ -563,6 +591,7 @@ struct ClientsView: View {
 /// "Loading clients…" (its `.task` runs once). `@StateObject` keeps one.
 private struct ConnectClientSheetHost: View {
     @StateObject private var model: ConnectClientModel
+    @ObservedObject private var appState: AppState
     let preselect: String?
     let presetProfile: String?
     let onClose: () -> Void
@@ -577,9 +606,11 @@ private struct ConnectClientSheetHost: View {
         self.presetProfile = presetProfile
         self.onClose = onClose
         self.onRoute = onRoute
+        self.appState = appState
     }
 
     var body: some View {
         ConnectClientView(model: model, onClose: onClose, preselect: preselect, presetProfile: presetProfile, onRoute: onRoute)
+            .onChange(of: appState.profiles) { model.refreshProfiles($0) }
     }
 }

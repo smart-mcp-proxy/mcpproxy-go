@@ -553,7 +553,7 @@
               type="button"
               class="btn btn-sm btn-outline mt-2"
               data-test="activity-empty-show-blocked"
-              @click="filterStatus = 'blocked'"
+              @click="showBlockedAttempts"
             >
               Show {{ blockedAttemptCount }} blocked attempt{{ blockedAttemptCount === 1 ? '' : 's' }}
             </button>
@@ -585,9 +585,9 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <!-- Spec 108-j J10: who made the call and under which profile.
-                     Folded away below md; the detail drawer carries the same
+                     Folded away below lg (1024px); the detail drawer carries the same
                      chips in an "Attribution" section. -->
-                <th v-if="hasScopeColumn" class="hidden xl:table-cell" data-test="activity-scope-col">Scope</th>
+                <th v-if="hasScopeColumn" class="hidden lg:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
@@ -698,7 +698,7 @@
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td v-if="hasScopeColumn" class="hidden xl:table-cell max-w-[11rem]">
+                <td v-if="hasScopeColumn" class="hidden lg:table-cell max-w-[11rem]">
                   <AttributionChips :record="row.activity" :test-id="row.activity.id" stacked />
                 </td>
                 <td>
@@ -862,7 +862,18 @@
                   >
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
-                  <span v-else data-test="activity-status" class="sr-only">
+                  <svg
+                    v-else
+                    data-test="activity-status-icon"
+                    class="inline-block h-4 w-4 text-success"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <title>Success</title>
+                    <path fill-rule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 111.4-1.4l3.8 3.8 6.8-6.8a1 1 0 011.4 0z" clip-rule="evenodd" />
+                  </svg>
+                  <span v-if="!statusPresentation(row.activity.status).pill" data-test="activity-status" class="sr-only">
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
                   <!-- Inline "Why?" only from xl: with the sidebar open the card is ~700px at 1024px and the
@@ -2058,6 +2069,18 @@ const summaryParts = computed(() => compactSummaryParts(summary.value))
 const BLOCKED_CALLS_TITLE =
   'Blocked call attempts in the last 24 h, including calls a profile or token refused. Click to list them.'
 const blockedAttemptCount = computed(() => summary.value?.blocked_count ?? 0)
+// An explicit `type` filter overrides the view's types, so a filter that excludes
+// `policy_decision` would leave the blocked status filter matching nothing.
+function showBlockedAttempts() {
+  if (selectedTypes.value.length > 0 && !selectedTypes.value.includes('policy_decision')) {
+    // One URL write for both params: two back-to-back router.replace calls each
+    // start from the stale route.query and the second would drop the first.
+    // The route watcher hydrates both refs from the URL.
+    scopeQuery.set({ type: [...selectedTypes.value, 'policy_decision'].join(','), status: 'blocked' })
+    return
+  }
+  filterStatus.value = 'blocked'
+}
 const showBlockedOffer = computed(
   () => activeView.value === 'calls' && !filterStatus.value && blockedAttemptCount.value > 0
 )

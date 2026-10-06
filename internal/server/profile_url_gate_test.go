@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -299,7 +301,17 @@ func settleBackgroundGoroutines(t *testing.T) {
 // settleBackgroundGoroutines above, which handles the OTHER, independent
 // noise source (a goroutine leftover from an earlier test in this package's
 // shared binary) with a single settle pass before measurement starts.
-func retryUntilAllocsMatch(attempts, runs int, baseline string, cases map[string]func()) map[string]float64 {
+//
+// tol is the largest absolute allocation-count difference from the baseline
+// still treated as agreement (see allocsMismatch). The -race artifact above
+// moves one allocation between measurement windows in either direction (33 vs
+// 34) and no amount of retrying can guarantee the counts converge exactly, so
+// the check is bounded rather than exact. It is deliberately an absolute
+// count, not a percentage: a fleet-proportional gate differs by ~4 096
+// allocations (the fleets hold 4 096 profiles/servers), so a tolerance of a
+// couple of allocations still catches any O(n) regression, whereas a
+// percentage would scale with the fleet.
+func retryUntilAllocsMatch(attempts, runs int, tol float64, baseline string, cases map[string]func()) map[string]float64 {
 	restore := goruntime.GOMAXPROCS(1)
 	defer goruntime.GOMAXPROCS(restore)
 
@@ -311,15 +323,52 @@ func retryUntilAllocsMatch(attempts, runs int, baseline string, cases map[string
 		for name, fn := range cases {
 			allocs[name] = testing.AllocsPerRun(runs, fn)
 		}
-		same := true
-		for name := range cases {
-			same = same && allocs[name] == allocs[baseline]
-		}
-		if same {
+		if allocsMismatch(allocs, baseline, tol) == "" {
 			break
 		}
 	}
 	return allocs
+}
+
+// allocsParityTolerance is the absolute allocation-count slack the fleet-
+// independence witnesses allow around the baseline case. See
+// retryUntilAllocsMatch for why it is a small constant and not a percentage.
+const allocsParityTolerance = 2
+
+// allocsMismatch returns "" when every case is within tol allocations of the
+// baseline case, otherwise a description of the first offending case.
+func allocsMismatch(allocs map[string]float64, baseline string, tol float64) string {
+	base := allocs[baseline]
+	for _, name := range slices.Sorted(maps.Keys(allocs)) {
+		if math.Abs(allocs[name]-base) > tol {
+			return fmt.Sprintf("%q allocates %v vs baseline %q %v (tolerance %v)", name, allocs[name], baseline, base, tol)
+		}
+	}
+	return ""
+}
+
+// TestAllocsMismatch_CatchesFleetProportionalWork proves the bounded
+// tolerance still bites: a closure doing one allocation per fleet item (the
+// regression the witnesses guard against) is rejected, while the +/-1 drift
+// of the -race allocator artifact is accepted.
+func TestAllocsMismatch_CatchesFleetProportionalWork(t *testing.T) {
+	var sink []*int
+	perItem := func(n int) func() {
+		return func() {
+			sink = sink[:0]
+			for i := 0; i < n; i++ {
+				sink = append(sink, new(int))
+			}
+		}
+	}
+	allocs := retryUntilAllocsMatch(2, 5, allocsParityTolerance, "small", map[string]func(){
+		"small": perItem(1),
+		"large": perItem(4097),
+	})
+	require.NotEmpty(t, allocsMismatch(allocs, "small", allocsParityTolerance), "O(n) work must exceed the tolerance: %v", allocs)
+
+	require.Empty(t, allocsMismatch(map[string]float64{"a": 33, "b": 34, "c": 35}, "b", allocsParityTolerance))
+	require.NotEmpty(t, allocsMismatch(map[string]float64{"a": 33, "b": 36}, "a", allocsParityTolerance))
 }
 
 // TestProfileMiddleware_RefusalWorkIndependentOfFleet (Spec 105 PR D codex
@@ -364,10 +413,9 @@ func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 				handler := f.handler(next)
 				cases[fleet] = func() { profileGateRefusal(t, handler, c.agent, c.path) }
 			}
-			allocs := retryUntilAllocsMatch(15, 20, "no profiles", cases)
-			for _, got := range allocs {
-				require.Equal(t, allocs["no profiles"], got, "%s must allocate exactly like the empty fleet on every fleet: %v", name, allocs)
-			}
+			allocs := retryUntilAllocsMatch(15, 20, allocsParityTolerance, "no profiles", cases)
+			require.Empty(t, allocsMismatch(allocs, "no profiles", allocsParityTolerance),
+				"%s must allocate like the empty fleet on every fleet (within %d): %v", name, allocsParityTolerance, allocs)
 		})
 	}
 }

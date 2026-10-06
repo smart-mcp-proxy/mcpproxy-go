@@ -150,3 +150,18 @@ func TestStatus_FeaturesScopeFiltersEqualsList(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, scopeFilterSupportedFilters, body.Data.Features.ScopeFilters)
 }
+
+// #1394: a present-but-empty scope parameter (?token=) on a handler that does
+// not honour it is rejected like a valued one, not silently served unfiltered.
+func TestRejectUnsupportedScopeFilters_EmptyValueStillRejected(t *testing.T) {
+	for _, name := range []string{"profile", "client", "token", "agent"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/activity/summary?"+name+"=", nil)
+		rec := httptest.NewRecorder()
+		assert.Falsef(t, rejectUnsupportedScopeFilters(rec, req), "?%s= must be rejected", name)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unsupported_scope_filter")
+	}
+	// Honoured parameters stay accepted when empty.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity?token=", nil)
+	assert.True(t, rejectUnsupportedScopeFilters(httptest.NewRecorder(), req, "token"))
+}

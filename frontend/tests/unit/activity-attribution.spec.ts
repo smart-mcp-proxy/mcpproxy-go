@@ -182,8 +182,8 @@ describe('Activity attribution chips (Spec 108-j)', () => {
       expect(explainAccessMock).toHaveBeenCalledWith({ tool: 'github:create_issue', client: 'cursor' })
     })
 
-    it('profile_code_execution and profile_management read "Open profile…" with no focus', async () => {
-      for (const reason of ['profile_code_execution', 'profile_management']) {
+    it('profile_code_execution, profile_management and profile_server_scope read "Open profile…" with no focus', async () => {
+      for (const reason of ['profile_code_execution', 'profile_management', 'profile_server_scope']) {
         const { wrapper } = await mountActivity([blocked({ block_reason: reason })])
         await openDrawer(wrapper)
         const open = wrapper.get('[data-test="activity-allow-in-profile-b1"]')

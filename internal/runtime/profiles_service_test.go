@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,10 +22,12 @@ type fakeEvaluator struct {
 	tried    int
 	explains int
 	counts   ToolCounts
+	// stale is the StaleClassificationReasons the evaluator reports.
+	stale map[string]string
 }
 
 func (f *fakeEvaluator) EffectiveTools(_ context.Context, name string, _ EffectiveToolsOptions) (*EffectiveToolsResult, error) {
-	return &EffectiveToolsResult{Profile: name}, nil
+	return &EffectiveToolsResult{Profile: name, StaleClassificationReasons: f.stale}, nil
 }
 func (f *fakeEvaluator) TryProfile(context.Context, config.ProfileConfig, string, int) (*TryResult, error) {
 	f.tried++
@@ -546,4 +549,34 @@ func TestProfilesService_Stats24hCountsByProfileAndClient(t *testing.T) {
 	assert.Equal(t, Counter{Calls: 2, Blocked: 2}, stats.ByProfile["ro"])
 	assert.Equal(t, Counter{Calls: 1}, stats.ByProfile["full"])
 	assert.Equal(t, Counter{Calls: 2, Blocked: 2}, stats.ByClient["cursor"])
+}
+
+// A save surfaces one warning per stale tools.classify entry, with its reason
+// (#1446): the editors previously only learned of staleness from a later
+// effective-tools read.
+func TestProfilesService_SaveWarnsAboutStaleClassifications(t *testing.T) {
+	h := newProfilesHarness(t)
+	ctx := context.Background()
+	h.ev.stale = map[string]string{
+		"a:gone":  profile.StaleClassificationMissing,
+		"a:typed": profile.StaleClassificationAnnotated,
+	}
+
+	p := config.ProfileConfig{Name: "tmp", Servers: []string{"a"}, MaxTier: "read"}
+	res, err := h.svc.Create(ctx, h.actor(), p)
+	require.NoError(t, err)
+	require.Len(t, res.Warnings, 2)
+	joined := strings.Join(res.Warnings, "\n")
+	assert.Contains(t, joined, `classify entry "a:gone" is stale: missing`)
+	assert.Contains(t, joined, `classify entry "a:typed" is stale: annotated`)
+
+	res, err = h.svc.Update(ctx, h.actor(), "tmp", p)
+	require.NoError(t, err)
+	assert.Contains(t, strings.Join(res.Warnings, "\n"), `classify entry "a:gone" is stale: missing`)
+
+	// No stale entries -> no extra warnings.
+	h.ev.stale = nil
+	res, err = h.svc.Update(ctx, h.actor(), "tmp", p)
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(res.Warnings, "\n"), "stale")
 }

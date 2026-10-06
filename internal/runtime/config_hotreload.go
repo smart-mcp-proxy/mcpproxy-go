@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -232,9 +233,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if oldCfg.CallToolTimeout != newCfg.CallToolTimeout {
 		result.ChangedFields = append(result.ChangedFields, "call_tool_timeout")
 	}
-	if !reflect.DeepEqual(oldCfg.MaxResultSizeChars, newCfg.MaxResultSizeChars) {
-		result.ChangedFields = append(result.ChangedFields, "max_result_size_chars")
-	}
 
 	// TOON output (spec 084, FR-001 — hot-reloadable). The call_tool_* encoder
 	// seam reads ToonOutput/ToonMinSavingsPct fresh on every call (same pattern
@@ -329,9 +327,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if !reflect.DeepEqual(oldCfg.ToolDiscoveryInterval, newCfg.ToolDiscoveryInterval) {
 		result.ChangedFields = append(result.ChangedFields, "tool_discovery_interval")
 	}
-	if !reflect.DeepEqual(oldCfg.InitTimeout, newCfg.InitTimeout) {
-		result.ChangedFields = append(result.ChangedFields, "init_timeout")
-	}
 
 	// Concurrency limits (spec 093 / GH #955 — hot-reloadable, FR-021). The
 	// limiter registry re-publishes one generation from the new snapshot on
@@ -391,9 +386,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")
 	}
-	if oldCfg.DebugSearch != newCfg.DebugSearch {
-		result.ChangedFields = append(result.ChangedFields, "debug_search")
-	}
 
 	// Docker isolation configuration (can be hot-reloaded for new servers).
 	// Compared via jsonEqual, not reflect.DeepEqual: the PATCH /api/v1/config
@@ -421,12 +413,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if oldCfg.AllowServerRemove != newCfg.AllowServerRemove {
 		result.ChangedFields = append(result.ChangedFields, "allow_server_remove")
 	}
-	if oldCfg.RequireMCPAuth != newCfg.RequireMCPAuth {
-		result.ChangedFields = append(result.ChangedFields, "require_mcp_auth")
-	}
-	if oldCfg.IsQuarantineEnabled() != newCfg.IsQuarantineEnabled() {
-		result.ChangedFields = append(result.ChangedFields, "quarantine_enabled")
-	}
 	// trusted_hosts (GH #898 — hot-reloadable). hostValidationMiddleware reads
 	// the live snapshot per request, so reporting the change is all the
 	// propagation needed. slices.Equal, not DeepEqual: the PATCH round-trip
@@ -446,9 +432,6 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// Environment configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Environment, newCfg.Environment) {
 		result.ChangedFields = append(result.ChangedFields, "environment")
-	}
-	if oldCfg.ForwardProxyEnv != newCfg.ForwardProxyEnv {
-		result.ChangedFields = append(result.ChangedFields, "forward_proxy_env")
 	}
 
 	// Observability cadence (Spec 069 A2 — can be hot-reloaded; the usage flush
@@ -537,6 +520,36 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		}
 	}
 
+	// Remaining top-level fields (#1435). Each of these used to be edited,
+	// saved and adopted into the live config but computed an empty
+	// ChangedFields, so the apply answered "No configuration changes detected"
+	// (applied_immediately:false) for a change that had in fact been made. The
+	// list is checked by TestDetectConfigChanges_EveryTopLevelFieldIsDiffed:
+	// adding a config.Config field there forces a clause here (or an entry in
+	// that test's documented exclusion list). jsonEqual, not DeepEqual, for the
+	// PATCH round-trip reason documented on it.
+	for _, name := range undiffedHotConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			result.ChangedFields = append(result.ChangedFields, configFieldJSONName(name))
+		}
+	}
+	// These are bound once at startup (the unix-socket listener, the tray
+	// endpoint, the search index debug flag, the tokenizer, and the MCP
+	// prompts capability / server instructions read at server construction): an edit is saved
+	// and takes effect on the next start. They are pinned to the live value by
+	// pinRestartGated, like the other restart-gated fields.
+	for _, name := range restartGatedConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			field := configFieldJSONName(name)
+			result.ChangedFields = append(result.ChangedFields, field)
+			result.RequiresRestart = true
+			result.AppliedImmediately = false
+			if result.RestartReason == "" {
+				result.RestartReason = field + " is bound at startup - requires restart"
+			}
+		}
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false
@@ -576,4 +589,36 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 	}
 	// For 3+ fields, show "field1, field2, and N others"
 	return fmt.Sprintf("%s, %s, and %d others", r.ChangedFields[0], r.ChangedFields[1], len(r.ChangedFields)-2)
+}
+
+// undiffedHotConfigFields are the top-level config.Config fields (Go names)
+// with no dedicated clause in DetectConfigChanges: a change is saved and
+// adopted into the live config, and reported by its JSON key.
+var undiffedHotConfigFields = []string{
+	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
+	"RequireMCPAuth", "CheckServerRepo", "DockerRecovery",
+	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
+	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
+	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
+	"ActivityMaxResponseSize", "ActivityCleanupIntervalMin",
+	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
+	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
+	"OutputSanitisation", "Telemetry",
+	"QuarantineEnabled", "RevealSecretHeaders",
+}
+
+// restartGatedConfigFields are bound once at startup; see pinRestartGated.
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
+
+func configFieldValue(cfg *config.Config, goName string) interface{} {
+	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()
+}
+
+func configFieldJSONName(goName string) string {
+	f, _ := reflect.TypeOf(config.Config{}).FieldByName(goName)
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	if name == "" {
+		return goName
+	}
+	return name
 }

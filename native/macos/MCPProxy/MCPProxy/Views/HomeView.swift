@@ -126,6 +126,13 @@ struct HomeView: View {
         .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
         .onChange(of: homeFilter) { _ in Task { await reloadScoped() } }
         .onChange(of: appState.scopeFiltersAvailable) { _ in Task { await reloadScoped() } }
+        // Live: an activity/session SSE event refreshes the scoped sessions and
+        // usage (debounced; reloadScoped's generation guard drops stale results).
+        .task(id: appState.activityVersion) {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled, hasScope else { return }
+            await reloadScoped()
+        }
     }
 
     // MARK: - Scoped usage and sessions (Spec 108-k K18)

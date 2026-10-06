@@ -105,6 +105,7 @@ func TestPrintConnectResult_FailureHasNoNextLine(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
+		// already_exists stays a result (exit 0); other failures exit 1 (#1435).
 		if err := printConnectResult(result, formatter, "table"); err != nil {
 			t.Errorf("printConnectResult: %v", err)
 		}

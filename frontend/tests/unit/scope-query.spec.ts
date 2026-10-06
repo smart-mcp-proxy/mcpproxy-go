@@ -315,3 +315,15 @@ describe('pure helpers', () => {
     expect(sessionRestParam('raw-id')).toBe('session_id')
   })
 })
+
+describe('pageIdForRouteName tab split (#1446)', () => {
+  it('maps the Clients route by tab: tokens -> tokens, endpoint -> out of contract', async () => {
+    const { pageIdForRouteName } = await import('@/composables/useScopeQuery')
+    expect(pageIdForRouteName('clients')).toBe('clients')
+    expect(pageIdForRouteName('clients', 'clients')).toBe('clients')
+    expect(pageIdForRouteName('clients', 'tokens')).toBe('tokens')
+    expect(pageIdForRouteName('clients', ['tokens'])).toBe('tokens')
+    expect(pageIdForRouteName('clients', 'endpoint')).toBeUndefined()
+    expect(pageIdForRouteName('servers', 'endpoint')).toBe('servers')
+  })
+})

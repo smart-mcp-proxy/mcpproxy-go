@@ -80,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onBeforeUnmount } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { telemetryNoticeMode, telemetryOffLine } from '@/utils/telemetryState'
@@ -113,7 +113,22 @@ function dismiss() {
   onboarding.dismissTelemetryNotice()
 }
 
+// The state is read on mount and again whenever the tab regains focus, so a
+// change made elsewhere (config edit, Settings in another tab) is picked up
+// without a full reload.
+function refreshOnVisible() {
+  if (document.visibilityState === 'hidden') return
+  void onboarding.loadTelemetryState()
+}
+
 onMounted(() => {
   void onboarding.loadTelemetryState()
+  document.addEventListener('visibilitychange', refreshOnVisible)
+  window.addEventListener('focus', refreshOnVisible)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', refreshOnVisible)
+  window.removeEventListener('focus', refreshOnVisible)
 })
 </script>

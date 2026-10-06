@@ -525,20 +525,74 @@ final class ClientBindingModelTests: XCTestCase {
     }
 
     /// The secret never reaches `AppState` (and so never a UserDefaults, a
-    /// keychain item or a log line: the sheet model is the only holder).
+    /// keychain item or a log line: the sheet model is the only holder). The
+    /// model is built exactly as the sheet builds it: from the AppState's own
+    /// deferred source, over an API client the AppState holds, so the POST
+    /// really travels through the app wiring and its response is what we scan.
     func testTheCredentialNeverLandsInAppState() async throws {
-        let source = StubSource()
-        source.customResult = .success(customResponse(credential: "mcp_cli_SECRETSECRET"))
+        ConnectStubURLProtocol.reset()
+        defer { ConnectStubURLProtocol.reset() }
+        ConnectStubURLProtocol.responseBody = ConnectStubURLProtocol.envelope("""
+        {"client":{"id":"dev-laptop","display_name":"Dev Laptop","kind":"other","state":"other",
+        "installed":false,"connected":false,"active_sessions":0,"calls_24h":0},
+        "credential":"mcp_cli_SECRETSECRET",
+        "snippet":{"generic_http":"Authorization: Bearer mcp_cli_SECRETSECRET","header_name":"Authorization"}}
+        """)
         let appState = AppState()
-        let model = CustomClientModel(source: source)
+        appState.apiClient = ConnectStubURLProtocol.makeClient()
+        let model = CustomClientModel(source: appState.deferredClientSource)
         model.id = "dev-laptop"
         await model.create()
-        XCTAssertNotNil(model.credential)
 
-        let mirror = String(reflecting: appState)
-        XCTAssertFalse(mirror.contains("mcp_cli_"))
-        XCTAssertFalse(appState.clients.contains { $0.tokenName?.hasPrefix("mcp_cli_") == true })
-        XCTAssertNil(UserDefaults.standard.dictionaryRepresentation().values.first { "\($0)".contains("mcp_cli_SECRET") })
+        XCTAssertEqual(ConnectStubURLProtocol.recorded.last?.method, "POST", "the create went through the app wiring")
+        XCTAssertEqual(model.credential, "mcp_cli_SECRETSECRET")
+        XCTAssertNotNil(model.createdClient)
+
+        func assertClean(_ phase: String) {
+            // String(reflecting:) on a plain class prints only the type name, so walk the
+            // stored properties (including @Published storage) with Mirror instead.
+            XCTAssertFalse(Self.mirrorDump(appState).contains("mcp_cli_"), "\(phase): AppState stored values")
+            XCTAssertFalse(appState.clients.contains { "\($0)".contains("mcp_cli_") }, "\(phase): appState.clients")
+            XCTAssertNil(UserDefaults.standard.dictionaryRepresentation().values.first { "\($0)".contains("mcp_cli_SECRET") },
+                         "\(phase): UserDefaults")
+        }
+        assertClean("after create")
+        model.dismiss()
+        XCTAssertNil(model.credential)
+        assertClean("after dismiss")
+    }
+
+    /// Recursively renders every stored value reachable from `value` via Mirror.
+    static func mirrorDump(_ value: Any, depth: Int = 0, seen: inout Set<ObjectIdentifier>) -> String {
+        if depth > 8 { return "" }
+        let m = Mirror(reflecting: value)
+        if m.displayStyle == .class, let o = value as AnyObject? {
+            if !seen.insert(ObjectIdentifier(o)).inserted { return "" }
+        }
+        var out = m.children.isEmpty ? "\(value)" : ""
+        var cur: Mirror? = m
+        while let mm = cur {
+            for c in mm.children {
+                out += "\(c.label ?? ""):" + mirrorDump(c.value, depth: depth + 1, seen: &seen) + "\n"
+            }
+            cur = mm.superclassMirror
+        }
+        return out
+    }
+
+    static func mirrorDump(_ value: Any) -> String {
+        var seen = Set<ObjectIdentifier>()
+        return mirrorDump(value, seen: &seen)
+    }
+
+    func testACustomClientCreateWithoutACoreConnectionShowsNoCredential() async {
+        let appState = AppState()
+        appState.apiClient = nil
+        let model = CustomClientModel(source: appState.deferredClientSource)
+        model.id = "dev-laptop"
+        await model.create()
+        XCTAssertNil(model.credential)
+        XCTAssertNotNil(model.errorMessage)
     }
 
     func testAWeakReferenceSeesTheModelReleasedAfterDismiss() async {

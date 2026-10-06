@@ -187,6 +187,32 @@ final class ProfileEditorModelTests: XCTestCase {
         XCTAssertNil(model.draft.tools.classify["github:list_issues"])
     }
 
+    /// #1451: the server's stale_classification_reasons words each orphan note
+    /// like the CLI; an older daemon (no map) stays neutral; a bad map decodes.
+    func testStaleOrphanNotesComeFromTheServerReasons() async throws {
+        let (model, source) = editor()
+        source.effectiveResult = .success(try JSONDecoder().decode(EffectiveToolsResponse.self, from: Data(#"""
+        {"profile":"p","tools":[{"server":"github","tool":"list_issues","intrinsic_tier":"read","profile_tier":"read","access":{"visible":true,"callable":true},"classification_stale":true}],
+         "stale_classifications":["github:list_issues","github:gone_tool","github:other"],
+         "stale_classification_reasons":{"github:list_issues":"annotated","github:gone_tool":"missing"}}
+        """#.utf8)))
+        await model.loadEffectiveTools()
+        let orphans = model.staleOrphans
+        XCTAssertEqual(orphans.map(\.id), ["github:gone_tool", "github:other"], "a listed row is not an orphan")
+        XCTAssertEqual(orphans.map(\.note), ["classification ignored — tool not found", "classification ignored"])
+        model.draft.tools.classify["github:gone_tool"] = "write"
+        model.removeClassification(id: "github:gone_tool")
+        XCTAssertNil(model.draft.tools.classify["github:gone_tool"])
+        XCTAssertEqual(ProfileEditorModel.staleNote(reason: "missing"), "classification ignored — tool not found")
+        XCTAssertEqual(ProfileEditorModel.staleNote(reason: "annotated"), "classification ignored — tool is now annotated")
+        XCTAssertEqual(ProfileEditorModel.staleNote(reason: nil), "classification ignored")
+
+        let old = try JSONDecoder().decode(EffectiveToolsResponse.self, from: Data(#"{"profile":"p","tools":[],"stale_classifications":["a:b"]}"#.utf8))
+        XCTAssertNil(old.staleClassificationReasons)
+        let bad = try JSONDecoder().decode(EffectiveToolsResponse.self, from: Data(#"{"profile":"p","tools":[],"stale_classification_reasons":["x"]}"#.utf8))
+        XCTAssertNil(bad.staleClassificationReasons)
+    }
+
     // MARK: Try it
 
     func testTrySendsTheUnsavedDraft() async {

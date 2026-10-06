@@ -360,7 +360,7 @@ export const GENERAL_FIELDS: SettingField[] = [
 // `teams` -> `server_edition` on load, and Settings.vue aliases it defensively
 // so old configs hydrate the form while edits always save under `server_edition`.
 export const SERVER_EDITION_TAB_LABEL = 'Server Edition'
-export const SERVER_EDITION_SECTION_TITLE = '👥 Server Edition'
+export const SERVER_EDITION_SECTION_TITLE = 'Server Edition'
 //
 // Spec 107 PR-B (T054): this row set is asserted EXACTLY by
 // `tests/unit/settings-server-edition-wording.spec.ts`. The `Settings`

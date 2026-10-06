@@ -761,3 +761,43 @@ func TestRunImport_RenameToInvalidNameIsRejected(t *testing.T) {
 		t.Fatalf("expected one invalid_server failure, got %+v", resp.Failed)
 	}
 }
+
+// #1446: an empty "{}" previews as "nothing to import" on the upload and
+// paste endpoints too, with no format hint; apply is unchanged.
+func TestImportServers_PreviewEmptyObjectIsEmptyNot400(t *testing.T) {
+	server := NewServer(&mockImportController{apiKey: "test-key"}, zap.NewNop().Sugar(), nil)
+
+	// paste
+	body, _ := json.Marshal(ImportRequest{Content: `{}`})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"imported":[]`) {
+		t.Fatalf("paste: want 200 empty preview, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// upload
+	buf := &bytes.Buffer{}
+	w := multipart.NewWriter(buf)
+	part, _ := w.CreateFormFile("file", "c.json")
+	io.WriteString(part, `{}`)
+	w.Close()
+	req = httptest.NewRequest("POST", "/api/v1/servers/import?preview=true", buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("X-API-Key", "test-key")
+	rr = httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"imported":[]`) {
+		t.Fatalf("upload: want 200 empty preview, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// apply stays 400
+	req = httptest.NewRequest("POST", "/api/v1/servers/import/json", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "test-key")
+	rr = httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("apply: want 400, got %d", rr.Code)
+	}
+}

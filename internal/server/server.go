@@ -3916,7 +3916,7 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 	// Check if server exists
 	_, exists := s.runtime.UpstreamManager().GetClient(serverName)
 	if !exists {
-		return nil, fmt.Errorf("server not found: %s", serverName)
+		return nil, fmt.Errorf("%w: %s", contracts.ErrServerNotFound, serverName)
 	}
 
 	// Read from server-specific log file

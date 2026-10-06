@@ -487,7 +487,34 @@ func (s *ProfilesService) written(ctx context.Context, name string, warnings []s
 	if warnings == nil {
 		warnings = []string{}
 	}
+	warnings = append(warnings, s.staleClassificationWarnings(ctx, name)...)
 	return &WriteResult{Profile: *v, Warnings: warnings}, nil
+}
+
+// staleClassificationWarnings reuses the evaluator's stale-classification
+// computation (the one effective-tools reports) so a save tells the editor
+// about tools.classify entries that no longer apply. Best effort: without an
+// evaluator, or when it fails, the save simply carries no extra warnings -
+// the profile is already written.
+func (s *ProfilesService) staleClassificationWarnings(ctx context.Context, name string) []string {
+	ev := s.evaluator()
+	if ev == nil {
+		return nil
+	}
+	res, err := ev.EffectiveTools(ctx, name, EffectiveToolsOptions{})
+	if err != nil || res == nil || len(res.StaleClassificationReasons) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(res.StaleClassificationReasons))
+	for k := range res.StaleClassificationReasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, fmt.Sprintf("profile %q classify entry %q is stale: %s", name, k, res.StaleClassificationReasons[k]))
+	}
+	return out
 }
 
 // Update replaces the named profile with p. The body's name must equal name

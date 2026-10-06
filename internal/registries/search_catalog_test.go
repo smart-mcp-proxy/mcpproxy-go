@@ -111,3 +111,23 @@ func TestSearchServers_PerRegistryContractUnchanged(t *testing.T) {
 		t.Fatalf("limit is still capped at 50, got %d", len(got))
 	}
 }
+
+func TestMatchCachedEntry_TokensAndSeparators(t *testing.T) {
+	e := &ServerEntry{ID: "io.github.acme/github-actions", Name: "github-actions", Description: "Run CI_jobs"}
+	cases := []struct {
+		q    string
+		want bool
+	}{
+		{"github actions", true},
+		{"github-actions", true},
+		{"Actions GITHUB", true},
+		{"ci jobs", true},
+		{"github gitlab", false},
+		{"  ", true},
+	}
+	for _, c := range cases {
+		if got := matchCachedEntry(e, c.q); got != c.want {
+			t.Errorf("matchCachedEntry(%q) = %v want %v", c.q, got, c.want)
+		}
+	}
+}

@@ -7,11 +7,31 @@
 # fix actually holds against a real invocation of the script, not just a
 # code read.
 #
-# Run from the repo root: ./scripts/test-api-e2e-cleanup-check.sh
+# Run from the repo root: ./scripts/test-api-e2e-cleanup-check.sh [--abort [WAIT_SECS]]
+#
+# --abort (issue #1388): instead of letting the suite run to completion, start
+# it in the background in its own process group, wait up to WAIT_SECS (default
+# 120) for the suite to touch $E2E_ABORT_MARKER (it does so mid-run, from
+# test_launcher_lifecycle, once the core, launcher fixture and npx child are
+# up), snapshot every descendant PID of the suite, SIGTERM the suite, and
+# assert: the decoy survives, no new launcher-server --port 39933 process
+# remains, and none of the snapshotted descendants survive. Exits non-zero
+# listing the leaked PIDs. This exercises test-api-e2e.sh's INT/TERM trap
+# mid-run, which a run-to-completion check never does.
 # Requires a built ./mcpproxy binary (the same prerequisite test-api-e2e.sh
 # itself has).
 
 set -uo pipefail
+
+ABORT_MODE=0
+ABORT_WAIT=120
+if [ "${1:-}" = "--abort" ]; then
+    ABORT_MODE=1
+    ABORT_WAIT="${2:-120}"
+elif [ -n "${1:-}" ]; then
+    echo "usage: $0 [--abort [WAIT_SECS]]" >&2
+    exit 2
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,6 +52,7 @@ DECOY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy-e2e-cleanup-check.XXXXXX")"
 DECOY_CONFIG="$DECOY_DIR/config.json"
 DECOY_LOG="$DECOY_DIR/decoy.log"
 DECOY_PID=""
+SUITE_PID=""
 CLEANUP_DECOY_DONE=0
 
 cleanup_decoy() {
@@ -39,6 +60,9 @@ cleanup_decoy() {
         return
     fi
     CLEANUP_DECOY_DONE=1
+    if [ -n "${SUITE_PID:-}" ] && kill -0 "$SUITE_PID" 2>/dev/null; then
+        kill -TERM "$SUITE_PID" 2>/dev/null || true
+    fi
     if [ -n "$DECOY_PID" ] && kill -0 "$DECOY_PID" 2>/dev/null; then
         kill "$DECOY_PID" 2>/dev/null || true
         sleep 1
@@ -110,6 +134,108 @@ echo -e "${GREEN}Decoy running (pid=$DECOY_PID).${NC}"
 # run's cleanup behaved perfectly, and keeps failing until someone manually
 # reaps the stale process.
 baseline_launcher_pids="$(pgrep -f 'launcher-server.*--port 39933' 2>/dev/null | sort)"
+
+# descendants PID: print every recursive child PID of PID.
+# shellcheck source=scripts/descendant-pids.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/descendant-pids.sh"
+descendants() { descendant_pids "$@"; }
+
+run_abort_mode() {
+    local marker="$DECOY_DIR/abort.marker"
+    local suite_log="$DECOY_DIR/suite.log"
+    local suite_port
+    suite_port="$(find_free_port)"
+
+    echo -e "${YELLOW}--abort: starting scripts/test-api-e2e.sh in its own process group (LISTEN_PORT=${suite_port})...${NC}"
+    # set -m gives the background job its own process group, so the SIGTERM
+    # below (sent to the suite PID only) cannot reach this script.
+    set -m
+    E2E_ABORT_MARKER="$marker" LISTEN_PORT="$suite_port" ./scripts/test-api-e2e.sh > "$suite_log" 2>&1 &
+    SUITE_PID=$!
+    set +m
+
+    local waited=0
+    while [ ! -e "$marker" ]; do
+        if ! kill -0 "$SUITE_PID" 2>/dev/null; then
+            echo -e "${RED}FAIL: suite exited before reaching the abort marker. Log tail:${NC}" >&2
+            tail -30 "$suite_log" >&2
+            return 1
+        fi
+        if [ "$waited" -ge "$ABORT_WAIT" ]; then
+            echo -e "${RED}FAIL: abort marker not seen within ${ABORT_WAIT}s.${NC}" >&2
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    local snap_pids
+    snap_pids="$(descendants "$SUITE_PID" | sort -u | sed '/^$/d')"
+    # Record "pid:comm" so a recycled PID is not misreported as a leak.
+    local snap="" pid
+    for pid in $snap_pids; do
+        snap="$snap $pid:$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+    done
+    echo "Marker seen after ${waited}s; snapshotted descendants:${snap:- (none)}"
+    if [ -z "$snap_pids" ]; then
+        echo -e "${RED}FAIL: no descendants snapshotted — the proof would be vacuous.${NC}" >&2
+        return 1
+    fi
+
+    echo -e "${YELLOW}Sending SIGTERM to suite pid=$SUITE_PID...${NC}"
+    kill -TERM "$SUITE_PID" 2>/dev/null || true
+    waited=0
+    while kill -0 "$SUITE_PID" 2>/dev/null && [ "$waited" -lt 90 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    local ok=1
+    if kill -0 "$SUITE_PID" 2>/dev/null; then
+        echo -e "${RED}FAIL: suite still alive 90s after SIGTERM.${NC}" >&2
+        kill -9 "$SUITE_PID" 2>/dev/null || true
+        ok=0
+    fi
+    sleep 2
+
+    local leaked="" entry comm cur
+    for entry in $snap; do
+        pid="${entry%%:*}"; comm="${entry#*:}"
+        if kill -0 "$pid" 2>/dev/null; then
+            cur="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')"
+            if [ "$cur" = "$comm" ]; then
+                leaked="$leaked $pid($comm)"
+            fi
+        fi
+    done
+    local new_launcher
+    new_launcher="$(comm -13 <(printf '%s\n' "$baseline_launcher_pids") <(pgrep -f 'launcher-server.*--port 39933' 2>/dev/null | sort) | sed '/^$/d' | tr '\n' ' ')"
+
+    if [ -n "$leaked" ]; then
+        echo -e "${RED}FAIL: descendants survived SIGTERM:${leaked}${NC}" >&2
+        ok=0
+    fi
+    if [ -n "$new_launcher" ]; then
+        echo -e "${RED}FAIL: launcher-server --port 39933 still alive (pid(s): ${new_launcher})${NC}" >&2
+        ok=0
+    fi
+    if kill -0 "$DECOY_PID" 2>/dev/null && curl -s --max-time 5 -o /dev/null "http://127.0.0.1:${DECOY_PORT}/api/v1/status"; then
+        echo -e "${GREEN}PASS: decoy survived the aborted run.${NC}"
+    else
+        echo -e "${RED}FAIL: decoy did not survive the aborted run.${NC}" >&2
+        ok=0
+    fi
+    if [ "$ok" -ne 1 ]; then
+        echo "--- suite log tail ---" >&2
+        tail -25 "$suite_log" >&2
+    fi
+    [ "$ok" -eq 1 ] && echo -e "${GREEN}PASS: SIGTERM mid-run left no leaked descendants.${NC}"
+    [ "$ok" -eq 1 ]
+}
+
+if [ "$ABORT_MODE" -eq 1 ]; then
+    run_abort_mode
+    exit $?
+fi
 
 echo -e "${YELLOW}Running scripts/test-api-e2e.sh (its own cleanup trap must not touch the decoy)...${NC}"
 ./scripts/test-api-e2e.sh

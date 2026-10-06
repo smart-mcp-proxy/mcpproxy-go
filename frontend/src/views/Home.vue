@@ -44,7 +44,7 @@
     <!-- Usage summary strip: normally sits below the topology, but moves
          above it when the attention list is empty (FR-051) so an otherwise-
          calm landing page still opens on something live. -->
-    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count === 0 && !showGettingStarted" data-test="home-usage-strip-top" />
+    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && serversStore.loaded && attentionStore.count === 0 && !showGettingStarted" data-test="home-usage-strip-top" />
 
     <!-- Topology (moved from Dashboard.vue's Overview panel). Always shown —
          Home no longer switches between an Overview and a Usage panel;
@@ -305,7 +305,7 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
-            Browse Registry
+            Browse catalog
           </router-link>
           <router-link to="/security" class="btn btn-ghost btn-sm w-full gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -398,7 +398,7 @@
     </div>
     <!-- /Topology -->
 
-    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
+    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && serversStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
 
     <!-- Modals -->
     <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />

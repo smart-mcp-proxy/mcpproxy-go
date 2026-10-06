@@ -5,6 +5,7 @@ import {
   MAX_TIER_OPTIONS,
   STEP_LABELS,
   UNANNOTATED_OPTIONS,
+  blockedProfileAction,
   credentialCta,
   credentialLabel,
   modeLabel,
@@ -133,5 +134,11 @@ describe('the Web UI words equal labels.json (L6, US3-3)', () => {
   it('tier cap: the editor options are the table (plus "No cap")', () => {
     const capped = MAX_TIER_OPTIONS.filter(option => option.value !== '')
     expect(Object.fromEntries(capped.map(option => [option.value, option.label]))).toEqual(labels.max_tier)
+  })
+
+  it('blocked-row action: a server outside the profile opens the profile editor', () => {
+    expect(blockedProfileAction('profile_server_scope')).toBe('open')
+    expect(blockedProfileAction('profile_tier')).toBe('allow')
+    expect(blockedProfileAction(undefined)).toBeNull()
   })
 })

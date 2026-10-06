@@ -1194,13 +1194,33 @@ actor APIClient {
     @discardableResult
     func patchConfig(_ partial: [String: Any]) async throws -> [String: Any] {
         let bodyData = try JSONSerialization.data(withJSONObject: partial)
-        let (data, response) = try await performRequest(path: "/api/v1/config", method: "PATCH", body: bodyData)
+        let (data, response) = try await rawRequest(path: "/api/v1/config", method: "PATCH", body: bodyData)
+        guard (200...299).contains(response.statusCode) else {
+            throw Self.patchConfigError(status: response.statusCode, data: data)
+        }
         let root = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         if let success = root["success"] as? Bool, !success {
             let msg = (root["error"] as? String) ?? "Failed to apply configuration"
             throw APIClientError.httpError(statusCode: response.statusCode, message: msg)
         }
         return (root["data"] as? [String: Any]) ?? [:]
+    }
+
+    /// The error for a non-2xx `PATCH /config`. A guard refusal (409
+    /// `binding_bypassable_without_auth`) keeps its structured body so Settings
+    /// can render the fixes; everything else is the plain HTTP error.
+    nonisolated static func patchConfigError(status: Int, data: Data) -> APIClientError {
+        if status == 409,
+           let body = try? JSONDecoder().decode(ServiceErrorBody.self, from: data),
+           body.isGuardRefusal {
+            return .service(status: status, body: body)
+        }
+        var message = HTTPURLResponse.localizedString(forStatusCode: status)
+        if let errorBody = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           let apiError = errorBody.error {
+            message = apiError
+        }
+        return .httpError(statusCode: status, message: message)
     }
 
     // MARK: - Private Helpers

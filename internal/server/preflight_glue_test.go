@@ -73,13 +73,18 @@ func newPreflightFixture(t *testing.T, mutate func(cfg *config.Config)) *preflig
 	tr := truncate.NewTruncator(0)
 	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, nil, false, cfg, nil)
 
-	// Register the instrumented upstream so a stray connect/ListTools would be
-	// visible in the hit counter rather than silently unreachable.
+	// Register the instrumented upstream so a stray ListTools through the proxy
+	// would be visible in the hit counter rather than silently unreachable. It is
+	// registered DISABLED: an enabled upstream starts the manager's own async
+	// connect, which dials the server and bumps the counter at an arbitrary point
+	// under shuffle/CPU load, making the zero-hit assertions flaky. A preflight
+	// never dials an upstream (FR-006) and a disabled one is never dialled by the
+	// manager either, so any hit is attributable to the code under test.
 	require.NoError(t, um.AddServerConfig("gh", &config.ServerConfig{
 		Name:     "gh",
 		URL:      upstreamSrv.URL,
 		Protocol: "http",
-		Enabled:  true,
+		Enabled:  false,
 	}))
 
 	return &preflightFixture{proxy: proxy, storage: sm, index: idx, cfg: cfg, upstreamHits: &hits}

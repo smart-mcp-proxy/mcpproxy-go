@@ -20,6 +20,9 @@ const doctorRedactionMask = "REDACTED"
 // in doctor output even outside a URL. runDoctor sets it for the run.
 var doctorSecretLiterals []string
 
+// An apostrophe is legal inside a URL (`?label=Bob's`), so the body only stops
+// at whitespace, double quote or angle brackets; a trailing apostrophe that
+// merely closes a single-quoted URL is trimmed in redactDoctorString.
 var doctorURLPattern = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"<>]+`)
 
 func doctorMask(string) string { return doctorRedactionMask }
@@ -32,12 +35,11 @@ func redactDoctorString(s string) string {
 	}
 	if strings.Contains(s, "://") {
 		s = doctorURLPattern.ReplaceAllStringFunc(s, func(u string) string {
-			trailing := ""
-			for strings.HasSuffix(u, "'") {
-				trailing = "'" + trailing
-				u = u[:len(u)-1]
+			trail := ""
+			if strings.HasSuffix(u, "'") {
+				u, trail = strings.TrimSuffix(u, "'"), "'"
 			}
-			return oauth.RedactURLQueryParamsWith(u, doctorMask) + trailing
+			return oauth.RedactURLQueryParamsWith(u, doctorMask) + trail
 		})
 	}
 	for _, lit := range doctorSecretLiterals {

@@ -627,12 +627,13 @@ func loadRegistryConfig() (*config.Config, error) {
 	// $HOME/.mcpproxy/mcp_config.json.
 	cfg, err := loadCLIConfig(registryConfigPath)
 	if err != nil {
+		// An explicitly named config that cannot be loaded is an error, not a
+		// reason to silently use defaults.
 		if resolveCLIConfigPath(registryConfigPath) != "" {
 			return nil, err
 		}
 		// Discovery should still work with defaults if no config is present.
 		cfg = config.DefaultConfig()
-		config.ApplyTLSEnvOverrides(cfg)
 		if dataDir != "" {
 			cfg.DataDir = dataDir
 		}

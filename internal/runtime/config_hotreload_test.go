@@ -1219,7 +1219,7 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "require_mcp_auth")
+		assert.Equal(t, []string{"require_mcp_auth"}, result.ChangedFields)
 		assert.False(t, result.RequiresRestart)
 		assert.True(t, result.AppliedImmediately)
 	})
@@ -1232,7 +1232,7 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "quarantine_enabled")
+		assert.Equal(t, []string{"quarantine_enabled"}, result.ChangedFields)
 		assert.False(t, result.RequiresRestart)
 	})
 
@@ -1244,7 +1244,7 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "init_timeout")
+		assert.Equal(t, []string{"init_timeout"}, result.ChangedFields)
 		assert.False(t, result.RequiresRestart)
 	})
 
@@ -1256,7 +1256,7 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "max_result_size_chars")
+		assert.Equal(t, []string{"max_result_size_chars"}, result.ChangedFields)
 		assert.False(t, result.RequiresRestart)
 	})
 
@@ -1268,11 +1268,11 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "forward_proxy_env")
+		assert.Equal(t, []string{"forward_proxy_env"}, result.ChangedFields)
 		assert.False(t, result.RequiresRestart)
 	})
 
-	t.Run("debug_search change detected hot-reloadable", func(t *testing.T) {
+	t.Run("debug_search change detected restart-gated", func(t *testing.T) {
 		oldCfg := base()
 		oldCfg.DebugSearch = false
 		newCfg := base()
@@ -1280,8 +1280,7 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 
 		result := DetectConfigChanges(oldCfg, newCfg)
 		require.True(t, result.Success)
-		assert.Contains(t, result.ChangedFields, "debug_search")
-		assert.False(t, result.RequiresRestart)
+		assert.Equal(t, []string{"debug_search"}, result.ChangedFields)
+		assert.True(t, result.RequiresRestart)
 	})
 }
-

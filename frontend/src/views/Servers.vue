@@ -242,7 +242,7 @@
           class="btn btn-outline"
           data-test="servers-empty-registry"
         >
-          Browse Registry
+          Browse catalog
         </router-link>
       </div>
       <p class="mt-4 text-sm">
@@ -361,7 +361,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
-import { useProfilesStore } from '@/stores/profiles'
+import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
 import type { Server } from '@/types'
@@ -533,7 +533,7 @@ watch(appliedProfile, () => { void loadScoped(false) })
 // The shared list refreshes on SSE; keep a scoped view live (debounced).
 let scopedRefreshTimer: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => serversStore.servers.map(s => `${s.name}|${s.connected}|${s.enabled}|${s.quarantined}|${s.tool_count}|${s.health?.status ?? ''}`).join(','),
+  () => serversStore.servers.map(s => `${s.name}|${s.connected}|${s.enabled}|${s.quarantined}|${s.tool_count}|${s.health?.status ?? ''}|${s.security_scan?.status ?? ''}|${s.security_scan?.finding_counts?.warning ?? ''}`).join(','),
   () => {
     if (!profileActive.value) return
     if (scopedRefreshTimer) clearTimeout(scopedRefreshTimer)
@@ -541,6 +541,15 @@ watch(
   },
 )
 onBeforeUnmount(() => { if (scopedRefreshTimer) clearTimeout(scopedRefreshTimer) })
+
+// A profile edited elsewhere (the editor, the Profiles page) changes which
+// servers a scoped view lists; the server list itself did not change, so the
+// fingerprint above would never notice.
+function onProfilesChanged() {
+  if (profileActive.value) void loadScoped(true)
+}
+onMounted(() => window.addEventListener(PROFILES_CHANGED_EVENT, onProfilesChanged))
+onBeforeUnmount(() => window.removeEventListener(PROFILES_CHANGED_EVENT, onProfilesChanged))
 
 // What the page displays: the profile's list when one is applied, otherwise the
 // shared store. Every tile, pill and card below reads these, never the store.

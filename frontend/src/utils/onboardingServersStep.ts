@@ -32,6 +32,21 @@ export function serversStepView(input: ServersStepInput): ServersStepView {
   return 'empty'
 }
 
+/**
+ * How many of the servers imported this wizard session are still waiting in
+ * quarantine. An import that was not quarantined (or has since been approved)
+ * must not be reported as "including the N you just imported" (#1466).
+ */
+export function countImportedStillQuarantined(
+  importedNames: Iterable<string>,
+  quarantinedNames: Iterable<string>,
+): number {
+  const quarantined = new Set(quarantinedNames)
+  let n = 0
+  for (const name of new Set(importedNames)) if (quarantined.has(name)) n++
+  return n
+}
+
 /** The one-sentence status under "Approve a server to finish this step.". */
 export function awaitingReviewSentence(awaiting: number, justImported: number): string {
   const plural = awaiting !== 1

@@ -265,4 +265,11 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     })
     expect(wrapper.find('[data-test="server-admin-state-desc"]').text()).toBe('set by you')
   })
+
+  it('does not request logs for a disabled server (#1466)', async () => {
+    const api = (await import('@/services/api')).default as unknown as { getServerLogs: ReturnType<typeof vi.fn> }
+    api.getServerLogs.mockClear()
+    await mountDetail({ ...base, enabled: false, connected: false })
+    expect(api.getServerLogs).not.toHaveBeenCalled()
+  })
 })
