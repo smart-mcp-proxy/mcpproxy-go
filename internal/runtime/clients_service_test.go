@@ -465,7 +465,7 @@ func TestConnectMinter_ReconnectIsStagedRotation(t *testing.T) {
 	require.Equal(t, "rotate", last["change"])
 	require.Equal(t, "rolled_back", last["diff"].(map[string]interface{})["outcome"])
 
-	// success with a binding change applied after finalize
+	// success with a binding change applied before finalize
 	intent = connect.CredentialIntent{Profile: strp("full"), Mode: strp("locked"), ActorKind: "api_key", Surface: "api"}
 	issued, err = m.Issue("cursor", intent)
 	require.NoError(t, err)
@@ -477,9 +477,10 @@ func TestConnectMinter_ReconnectIsStagedRotation(t *testing.T) {
 	view, _ = h.svc.Get("cursor")
 	require.Equal(t, "full", view.Profile)
 	cs := h.changes()
-	require.Equal(t, "rotate", cs[len(cs)-2]["change"])
-	require.Equal(t, "finalized", cs[len(cs)-2]["diff"].(map[string]interface{})["outcome"])
-	require.Equal(t, "assign", cs[len(cs)-1]["change"])
+	// The binding is applied BEFORE the new secret is finalized (plan D12).
+	require.Equal(t, "assign", cs[len(cs)-2]["change"])
+	require.Equal(t, "rotate", cs[len(cs)-1]["change"])
+	require.Equal(t, "finalized", cs[len(cs)-1]["diff"].(map[string]interface{})["outcome"])
 	require.Equal(t, []string{"client-cursor"}, h.notified)
 }
 

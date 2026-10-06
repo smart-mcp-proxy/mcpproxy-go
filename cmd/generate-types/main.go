@@ -809,12 +809,14 @@ export const BlockReasonProfileRule = 'profile_rule' as const;
 export const BlockReasonProfileUnannotated = 'profile_unannotated' as const;
 export const BlockReasonProfileCodeExecution = 'profile_code_execution' as const;
 export const BlockReasonProfileManagement = 'profile_management' as const;
+export const BlockReasonProfileServerScope = 'profile_server_scope' as const;
 export type ProfileBlockReason =
   | typeof BlockReasonProfileTier
   | typeof BlockReasonProfileRule
   | typeof BlockReasonProfileUnannotated
   | typeof BlockReasonProfileCodeExecution
-  | typeof BlockReasonProfileManagement;
+  | typeof BlockReasonProfileManagement
+  | typeof BlockReasonProfileServerScope;
 
 export const ExplainStepCredential = 'credential' as const;
 export const ExplainStepProfile = 'profile' as const;
@@ -1046,6 +1048,8 @@ export interface EffectiveToolsResult {
   counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
   // Administrators only: classify entries for annotated or missing tools.
   stale_classifications?: string[];
+  // Administrators only: why each stale entry no longer applies ("annotated" or "missing").
+  stale_classification_reasons?: Record<string, string>;
 }
 
 // GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.

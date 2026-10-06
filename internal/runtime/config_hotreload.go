@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -519,6 +520,36 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		}
 	}
 
+	// Remaining top-level fields (#1435). Each of these used to be edited,
+	// saved and adopted into the live config but computed an empty
+	// ChangedFields, so the apply answered "No configuration changes detected"
+	// (applied_immediately:false) for a change that had in fact been made. The
+	// list is checked by TestDetectConfigChanges_EveryTopLevelFieldIsDiffed:
+	// adding a config.Config field there forces a clause here (or an entry in
+	// that test's documented exclusion list). jsonEqual, not DeepEqual, for the
+	// PATCH round-trip reason documented on it.
+	for _, name := range undiffedHotConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			result.ChangedFields = append(result.ChangedFields, configFieldJSONName(name))
+		}
+	}
+	// These are bound once at startup (the unix-socket listener, the tray
+	// endpoint, the search index debug flag, the tokenizer, and the MCP
+	// prompts capability / server instructions read at server construction): an edit is saved
+	// and takes effect on the next start. They are pinned to the live value by
+	// pinRestartGated, like the other restart-gated fields.
+	for _, name := range restartGatedConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			field := configFieldJSONName(name)
+			result.ChangedFields = append(result.ChangedFields, field)
+			result.RequiresRestart = true
+			result.AppliedImmediately = false
+			if result.RestartReason == "" {
+				result.RestartReason = field + " is bound at startup - requires restart"
+			}
+		}
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false
@@ -558,4 +589,36 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 	}
 	// For 3+ fields, show "field1, field2, and N others"
 	return fmt.Sprintf("%s, %s, and %d others", r.ChangedFields[0], r.ChangedFields[1], len(r.ChangedFields)-2)
+}
+
+// undiffedHotConfigFields are the top-level config.Config fields (Go names)
+// with no dedicated clause in DetectConfigChanges: a change is saved and
+// adopted into the live config, and reported by its JSON key.
+var undiffedHotConfigFields = []string{
+	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
+	"RequireMCPAuth", "CheckServerRepo", "DockerRecovery",
+	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
+	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
+	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
+	"ActivityMaxResponseSize", "ActivityCleanupIntervalMin",
+	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
+	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
+	"OutputSanitisation", "Telemetry",
+	"QuarantineEnabled", "RevealSecretHeaders",
+}
+
+// restartGatedConfigFields are bound once at startup; see pinRestartGated.
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
+
+func configFieldValue(cfg *config.Config, goName string) interface{} {
+	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()
+}
+
+func configFieldJSONName(goName string) string {
+	f, _ := reflect.TypeOf(config.Config{}).FieldByName(goName)
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	if name == "" {
+		return goName
+	}
+	return name
 }

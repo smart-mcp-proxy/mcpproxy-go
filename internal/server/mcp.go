@@ -494,8 +494,11 @@ func NewMCPProxyServer(
 	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
 		sessionID := sess.SessionID()
 
-		// Just log the registration - client info and capabilities will be set by OnAfterInitialize
-		// This hook is primarily for persistent connections (SSE) to track when the session is registered
+		// Client info and capabilities are set by OnAfterInitialize. A transport
+		// can re-register an id that was unregistered without a new initialize
+		// (a GET stream ending and being re-opened), so revive the soft-closed
+		// entry to keep its attribution (#1205).
+		sessionStore.Reopen(sessionID)
 		logger.Info("MCP session registered",
 			zap.String("session_id", sessionID),
 		)
@@ -569,9 +572,12 @@ func NewMCPProxyServer(
 	installCallerInstructionsHooks(hooks, proxyRef.Load)
 
 	// Add hook to clean up session on disconnect
-	// NOTE: This hook may NOT be called for Streamable HTTP transport because HTTP is stateless
-	// and has no persistent connection. For HTTP transport, we rely on inactivity timeout
-	// cleanup (see runtime.backgroundSessionCleanup).
+	// NOTE: for Streamable HTTP this hook fires whenever a GET stream ends, not
+	// only on a real disconnect, and the client may keep using the same session id
+	// afterwards. So it only soft-closes (SessionStore.RemoveSession): attribution
+	// is kept and revived by the next activity or register, and closed entries are
+	// evicted after a TTL. Persisted records are also closed by inactivity timeout
+	// (see runtime.backgroundSessionCleanup).
 	hooks.AddOnUnregisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
 		sessionID := sess.SessionID()
 
@@ -579,7 +585,7 @@ func NewMCPProxyServer(
 			zap.String("session_id", sessionID),
 		)
 
-		// Remove session information (closes in storage)
+		// Soft-close the session (closes in storage, keeps attribution)
 		sessionStore.RemoveSession(sessionID)
 
 		logger.Info("MCP session unregistered",

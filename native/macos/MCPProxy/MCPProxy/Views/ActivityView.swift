@@ -416,6 +416,8 @@ struct ActivityView: View {
         if isLoading && sessions.isEmpty {
             ProgressView("Loading...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if sessions.isEmpty && appState.coreState != .connected {
+            coreNotRunningView(hint: "Start the core to see sessions")
         } else if sessions.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "person.2")
@@ -442,7 +444,7 @@ struct ActivityView: View {
     private func sessionRow(_ session: APIClient.MCPSession) -> some View {
         Button {
             // Link map: the session's calls, by work session id when it has one.
-            scope = ScopeFilter.forSessionRow(session)
+            scope = scope.linked(ScopeFilter.forSessionRow(session))
         } label: {
             HStack(spacing: 8) {
                 Circle()
@@ -842,21 +844,26 @@ struct ActivityView: View {
         .accessibilityIdentifier("activity-conflict-state")
     }
 
+    /// Shared "core is stopped / not running" placeholder (Calls and Sessions).
+    private func coreNotRunningView(hint: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
+                .font(.system(size: 48 * fontScale))
+                .foregroundStyle(.tertiary)
+            Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
+                .font(.scaled(.title3, scale: fontScale))
+                .foregroundStyle(.secondary)
+            Text(hint)
+                .font(.scaled(.caption, scale: fontScale))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         if appState.coreState != .connected {
-            VStack(spacing: 12) {
-                Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
-                    .font(.system(size: 48 * fontScale))
-                    .foregroundStyle(.tertiary)
-                Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
-                    .font(.scaled(.title3, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                Text("Start the core to see activity")
-                    .font(.scaled(.caption, scale: fontScale))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            coreNotRunningView(hint: "Start the core to see activity")
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "clock.arrow.circlepath")

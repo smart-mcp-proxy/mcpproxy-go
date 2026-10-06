@@ -694,7 +694,7 @@ import ReviewQueueList from '@/components/ReviewQueueList.vue'
 import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
-import { serversStepView, awaitingReviewSentence } from '@/utils/onboardingServersStep'
+import { serversStepView, awaitingReviewSentence, countImportedStillQuarantined } from '@/utils/onboardingServersStep'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
 
 interface Props {
@@ -873,6 +873,9 @@ const hasUsableServer = computed(() => onboarding.hasUsableServer)
 // Servers brought in by an import during THIS wizard open (reset in
 // onOpened). Manual add is not an import and does not count here.
 const importedThisSession = ref(0)
+// Names of the servers an import of THIS session put into quarantine, so the
+// "including the N you just imported" sentence counts only those still waiting.
+const importedQuarantinedNames = ref<Set<string>>(new Set())
 // Which body the Servers step shows: choose / review / imported / empty
 // (fix-usertest-web T200). Pure rules live in utils/onboardingServersStep.ts.
 const serversView = computed(() => serversStepView({
@@ -883,7 +886,10 @@ const serversView = computed(() => serversStepView({
 }))
 const awaitingReviewText = computed(() => awaitingReviewSentence(
   quarantinedServersAwaitingReview.value.length,
-  Math.min(importedThisSession.value, quarantinedServersAwaitingReview.value.length),
+  countImportedStillQuarantined(
+    importedQuarantinedNames.value,
+    quarantinedServersAwaitingReview.value.map(server => server.name),
+  ),
 ))
 
 function selectionKey(path: string, name: string) {
@@ -1069,6 +1075,7 @@ async function onOpened() {
   const requested = onboarding.consumeWizardInitialTab()
   importSession.value++
   importedThisSession.value = 0
+  importedQuarantinedNames.value = new Set()
   serverAddedJustNow.value = false
   connectMessage.value = ''
   // Backup lines are session-scoped (Spec 078 US2): don't replay backup
@@ -1753,11 +1760,19 @@ async function onServerAdded() {
   })
 }
 
-async function onSharedImport(count: number) {
+async function onSharedImport(count: number, names: string[] = []) {
   if (count === 0) return
   importedThisSession.value += count
   serverAddedJustNow.value = true
+  const quarantinedBefore = new Set(quarantinedServersAwaitingReview.value.map(server => server.name))
   await Promise.all([fetchImportSources(), serversStore.fetchServers(), onboarding.fetchState()])
+  // Whatever newly entered quarantine because of this import is "just imported".
+  const next = new Set(importedQuarantinedNames.value)
+  for (const name of names) next.add(name)
+  for (const server of quarantinedServersAwaitingReview.value) {
+    if (!quarantinedBefore.has(server.name)) next.add(server.name)
+  }
+  importedQuarantinedNames.value = next
 }
 
 // `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close

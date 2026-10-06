@@ -24,12 +24,17 @@
         <label class="label cursor-pointer justify-start gap-2"><input v-model="mode" type="radio" class="radio radio-sm" value="switchable" data-test="bulk-mode-switchable" /><span class="label-text">Switchable</span></label>
       </fieldset>
       <p class="text-sm" data-test="bulk-preview-line" aria-live="polite">{{ previewLine }}</p>
+      <div v-if="loadFailed" class="flex items-center gap-2 text-sm text-error" data-test="bulk-count-failed">
+        <span>Could not count every client.</span>
+        <button type="button" class="btn btn-ghost btn-xs" data-test="bulk-count-retry" @click="loadAllClients">Retry</button>
+      </div>
       <div v-if="error" role="alert" class="alert alert-error text-sm" data-test="bulk-error">{{ error }}</div>
       <div class="modal-action">
         <button type="button" class="btn btn-ghost btn-sm" @click="emit('close')">Cancel</button>
-        <button type="submit" class="btn btn-primary btn-sm" :disabled="busy || from === to || affected.length === 0" data-test="bulk-submit">
+        <button type="submit" class="btn btn-primary btn-sm" :disabled="busy || countPending || from === to || affected.length === 0" data-test="bulk-submit">
           <span v-if="busy" class="loading loading-spinner loading-xs" />
-          Move {{ affected.length }} client{{ affected.length === 1 ? '' : 's' }}
+          <template v-if="countPending">Counting...</template>
+          <template v-else>Move {{ affected.length }} client{{ affected.length === 1 ? '' : 's' }}</template>
         </button>
       </div>
     </form>
@@ -75,8 +80,11 @@ const error = ref('')
 const result = ref<BulkAssignResponse | null>(null)
 // POST /clients/bulk-assign moves every client on the from-profile instance-wide,
 // while props.clients is the page's ?profile=/?client= filtered list. The preview
-// counts the unscoped list (props.clients until it arrives or if it fails).
+// counts the unscoped list only: while it is pending or failed there is no
+// count, and Move stays disabled (the filtered rows would undercount).
 const allClients = ref<ClientPresence[] | null>(null)
+const loadFailed = ref(false)
+let openTicket = 0
 
 watch(() => props.open, open => {
   if (!open) return
@@ -87,6 +95,7 @@ watch(() => props.open, open => {
   error.value = ''
   result.value = null
   allClients.value = null
+  loadFailed.value = false
   void loadAllClients()
   if (!profiles.loaded) void profiles.fetchProfiles()
 })
@@ -95,17 +104,24 @@ watch(() => props.open, open => {
 watch(to, value => { if (!value && mode.value === 'locked') mode.value = '' })
 
 async function loadAllClients() {
+  // A per-load ticket: a slow response of an earlier open (or retry) is ignored.
+  const ticket = ++openTicket
+  loadFailed.value = false
   try {
     const response = await api.getClients()
-    if (response.success && Array.isArray(response.data?.clients) && props.open) allClients.value = response.data.clients
+    if (ticket !== openTicket || !props.open) return
+    if (response.success && Array.isArray(response.data?.clients)) allClients.value = response.data.clients
+    else loadFailed.value = true
   } catch {
-    // The page's rows stay the fallback.
+    if (ticket === openTicket) loadFailed.value = true
   }
 }
 
-const affected = computed(() => (allClients.value ?? props.clients).filter(client => client.credential_state === 'client' && (client.profile ?? '') === from.value))
+const countPending = computed(() => allClients.value === null)
+const affected = computed(() => (allClients.value ?? []).filter(client => client.credential_state === 'client' && (client.profile ?? '') === from.value))
 const previewLine = computed(() => {
   const name = from.value ? profiles.titleFor(from.value) : 'All servers'
+  if (countPending.value) return loadFailed.value ? `Count unavailable for ${name}` : `Counting clients that use ${name}...`
   const n = affected.value.length
   return `${n} client${n === 1 ? ' uses' : 's use'} ${name}`
 })

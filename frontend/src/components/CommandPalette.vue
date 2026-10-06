@@ -46,11 +46,11 @@
             :id="rowId(row.index)"
             :key="row.key"
             role="option"
-            :aria-selected="row.index === active ? 'true' : 'false'"
+            :aria-selected="row.index === activeIndex ? 'true' : 'false'"
             class="flex items-center justify-between gap-3 px-4 py-2 cursor-pointer text-sm"
-            :class="row.index === active ? 'bg-primary/10' : 'hover:bg-base-200'"
+            :class="row.index === activeIndex ? 'bg-primary/10' : 'hover:bg-base-200'"
             :data-test="`palette-row-${section.id}-${n}`"
-            @mousemove="active = row.index"
+            @mousemove="activeKey = row.key"
             @click="activate(row)"
           >
             <span class="truncate">{{ row.label }}</span>
@@ -122,7 +122,10 @@ const serversStore = useServersStore()
 const profilesStore = useProfilesStore()
 
 const query = ref('')
-const active = ref(0)
+// The highlighted row is tracked by its stable key, not its position: tool
+// results land asynchronously and insert rows before later sections, which
+// would shift a numeric index under the user. null means the first row.
+const activeKey = ref<string | null>(null)
 const toolRows = ref<ToolRow[]>([])
 const clientRows = ref<ClientRow[]>([])
 const tokenNames = ref<string[]>([])
@@ -261,13 +264,12 @@ const sections = computed<Section[]>(() => {
 
 const flatRows = computed(() => sections.value.flatMap((s) => s.rows))
 const rowId = (index: number) => `${listboxId}-opt-${index}`
-const activeId = computed(() => (flatRows.value[active.value] ? rowId(active.value) : undefined))
-
-// Keep the active row in range as results come and go, without moving it
-// under the user when tool results land after typing.
-watch(flatRows, (rows) => {
-  if (active.value >= rows.length) active.value = Math.max(0, rows.length - 1)
+const activeIndex = computed(() => {
+  if (activeKey.value === null) return 0
+  const found = flatRows.value.findIndex((r) => r.key === activeKey.value)
+  return found === -1 ? 0 : found
 })
+const activeId = computed(() => (flatRows.value[activeIndex.value] ? rowId(activeIndex.value) : undefined))
 
 // --- tool search: debounced, sequenced, never on empty text ---------------
 
@@ -323,14 +325,14 @@ async function loadDirectory() {
 }
 
 watch(query, (raw) => {
-  active.value = 0
+  activeKey.value = null
   const value = raw.trim()
   cancelSearch()
+  // Tool rows belong to the query that produced them: drop them at once so a
+  // stale row cannot be clicked during the debounce.
+  toolRows.value = []
   if (value) void loadDirectory()
-  if (!value || isTenant.value) {
-    toolRows.value = []
-    return
-  }
+  if (!value || isTenant.value) return
   timer = setTimeout(() => {
     timer = null
     void runSearch(value)
@@ -354,7 +356,7 @@ watch(open, async (isOpen) => {
   tokenNames.value = []
   directoryState = 'idle'
   directoryEpoch++
-  active.value = 0
+  activeKey.value = null
   // Hand focus back to whatever opened the palette; with no opener, just let go
   // of the (now hidden) input so a later "/" is not mistaken for typing.
   if (opener && opener !== document.body && opener.isConnected) opener.focus()
@@ -383,22 +385,22 @@ function onInputKeydown(event: KeyboardEvent) {
   switch (event.key) {
     case 'ArrowDown':
       event.preventDefault()
-      if (count) active.value = (active.value + 1) % count
+      if (count) activeKey.value = flatRows.value[(activeIndex.value + 1) % count].key
       break
     case 'ArrowUp':
       event.preventDefault()
-      if (count) active.value = (active.value - 1 + count) % count
+      if (count) activeKey.value = flatRows.value[(activeIndex.value - 1 + count) % count].key
       break
     case 'Home':
     case 'End':
       // With text in the field these keys move the caret, as in any combobox.
       if (query.value) break
       event.preventDefault()
-      if (count) active.value = event.key === 'Home' ? 0 : count - 1
+      if (count) activeKey.value = flatRows.value[event.key === 'Home' ? 0 : count - 1].key
       break
     case 'Enter': {
       event.preventDefault()
-      const row = flatRows.value[active.value]
+      const row = flatRows.value[activeIndex.value]
       if (row) activate(row)
       break
     }

@@ -86,15 +86,6 @@ func TestScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 	const warmup = 20
 	const timed = 200
 
-	measure := func(ctx context.Context) []time.Duration {
-		req := mcp.CallToolRequest{}
-		req.Params.Arguments = map[string]interface{}{"query": query, "limit": float64(limit)}
-		return measureLatency(t, ctx, warmup, timed, func(ctx context.Context) error {
-			_, err := proxy.handleRetrieveTools(ctx, req)
-			return err
-		})
-	}
-
 	legacyCtx := profile.WithProfileScope(context.Background(), proxy.profileScopeForSlug("legacy-samescope"))
 	v3Ctx := profile.WithProfileScope(context.Background(), proxy.profileScopeForSlug("v3-cap-read"))
 
@@ -118,8 +109,15 @@ func TestScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 			"%s: per-profile index must hold real matching documents, not an empty ForProfile index never populated by RebuildProfileFromShared", slug)
 	}
 
-	legacyDurations := measure(legacyCtx)
-	v3Durations := measure(v3Ctx)
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]interface{}{"query": query, "limit": float64(limit)}
+	// Arms interleaved (measureInterleaved) so a runner noise burst cannot land
+	// on one arm alone.
+	legacyDurations, v3Durations := measureInterleaved(t, legacyCtx, v3Ctx, warmup, timed,
+		func(ctx context.Context) error {
+			_, err := proxy.handleRetrieveTools(ctx, req)
+			return err
+		})
 
 	pLegacy, pV3 := p95(legacyDurations), p95(v3Durations)
 	gap := pV3 - pLegacy

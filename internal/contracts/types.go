@@ -2,10 +2,15 @@
 package contracts
 
 import (
+	"errors"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
+
+// ErrServerNotFound is returned (wrapped) by controllers when a named upstream
+// server does not exist, so the REST layer can answer 404 via errors.Is.
+var ErrServerNotFound = errors.New("server not found")
 
 // APIResponse is the standard wrapper for all API responses
 type APIResponse struct {

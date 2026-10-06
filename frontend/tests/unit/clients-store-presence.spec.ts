@@ -31,15 +31,48 @@ describe('clients store refreshPresence', () => {
     })
     await store.loadDetail('cursor')
 
-    ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [{ ...listRow, active_sessions: 2, calls_24h: 9 }] } })
+    // Same presence (active_sessions/last_seen): the detail fields survive.
+    ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [{ ...listRow, calls_24h: 9 }] } })
     await store.refreshPresence()
 
     const row = store.clients[0]
     expect(row.sessions).toEqual([{ id: 's1' }])
     expect(row.connected).toBe(true)
     expect(row.connection_unverified).toBe(true)
-    expect(row.active_sessions).toBe(2)
+    expect(row.active_sessions).toBe(1)
     expect(row.calls_24h).toBe(9)
+  })
+
+  it('takes presence from the poll and reloads the detail when it changed (#1451-10)', async () => {
+    const store = useClientsStore()
+    ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [listRow] } })
+    await store.refreshPresence()
+    ;(api.getClient as any).mockResolvedValue({
+      success: true,
+      data: { ...listRow, connected: true, sessions: [{ id: 's1' }] },
+    })
+    await store.loadDetail('cursor')
+    ;(api.getClient as any).mockClear()
+    // The reload answers with the converged detail.
+    let release: (v: unknown) => void = () => {}
+    ;(api.getClient as any).mockReturnValue(new Promise(resolve => { release = resolve }))
+
+    ;(api.getClients as any).mockResolvedValue({
+      success: true,
+      data: { clients: [{ ...listRow, active_sessions: 2, last_seen: '2026-10-05T10:00:00Z' }] },
+    })
+    await store.refreshPresence()
+
+    // Immediately after the poll: presence from the poll, stale detail dropped.
+    expect(store.clients[0].active_sessions).toBe(2)
+    expect(store.clients[0].last_seen).toBe('2026-10-05T10:00:00Z')
+    expect(store.clients[0].sessions).toBeUndefined()
+    expect(api.getClient).toHaveBeenCalledWith('cursor')
+    release({
+      success: true,
+      data: { ...listRow, active_sessions: 2, last_seen: '2026-10-05T10:00:00Z', sessions: [{ id: 's1' }, { id: 's2' }] },
+    })
+    await vi.waitFor(() => expect(store.clients[0].sessions).toEqual([{ id: 's1' }, { id: 's2' }]))
   })
 
   it('drops rows the core no longer lists and adds new ones', async () => {
@@ -67,7 +100,7 @@ describe('clients store refreshPresence', () => {
     })
     await store.loadDetail('cursor')
 
-    ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [{ ...listRow, state: 'available', installed: false, connected: false, active_sessions: 0, calls_24h: 11 }] } })
+    ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [{ ...listRow, state: 'available', installed: false, connected: false, calls_24h: 11 }] } })
     await store.refreshPresence()
 
     const row = store.clients[0]
@@ -77,7 +110,7 @@ describe('clients store refreshPresence', () => {
     expect(row.connection_unverified).toBe(true)
     expect(row.config_path).toBe('/home/u/.cursor/mcp.json')
     expect(row.display_path).toBe('~/.cursor/mcp.json')
-    expect(row.active_sessions).toBe(0)
+    expect(row.active_sessions).toBe(1)
     expect(row.calls_24h).toBe(11)
   })
 

@@ -79,7 +79,7 @@ struct ClientBindingDetail: View {
                             Task { if let row = await model.chooseProfile(client, profile: chosen) { onUpdate(row) } }
                         })) {
                         Text("All servers").tag("")
-                        ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                        ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                         if client.profileMissing == true {
                             Text("\(client.boundProfile) (missing)").tag(client.boundProfile)
                         }

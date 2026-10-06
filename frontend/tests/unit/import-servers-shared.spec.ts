@@ -45,7 +45,7 @@ describe('ImportServers', () => {
     await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
     expect(api.importServersFromPath).toHaveBeenCalledWith(expect.objectContaining({ server_names: ['github'], skip_quarantine: false }))
-    expect(wrapper.emitted('imported')?.[0]).toEqual([1])
+    expect(wrapper.emitted('imported')?.[0]).toEqual([1, ['github']])
   })
 
   it('renames duplicate selected names and can bypass quarantine explicitly', async () => {
