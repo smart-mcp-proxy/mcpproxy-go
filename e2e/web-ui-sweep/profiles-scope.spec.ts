@@ -226,7 +226,7 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   await expect(page.locator('[data-test^="activity-why-"]')).toBeFocused()
 })
 
-// 1280 is the first width that shows the Scope column; 768-1100 is where it used to clip Status and Duration.
+// 1024 (lg) is the first width that shows the Scope column; the inline Why? needs 1280 (xl); 768-1100 is where it used to clip Status and Duration.
 for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
   test(`6. layout at ${width}px: no horizontal scroll, chips not clipped`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
@@ -301,8 +301,8 @@ for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
     const target = await why.boundingBox()
     expect(target!.width).toBeGreaterThanOrEqual(24)
     expect(target!.height).toBeGreaterThanOrEqual(24)
-    if (width < 1280) {
-      // Below xl the Scope column folds away (it widened the table past its card); the drawer carries the chips.
+    if (width < 1024) {
+      // Below lg the Scope column folds away (it widened the table past its card); the drawer carries the chips.
       await expect(page.locator('[data-test="activity-scope-col"]')).toBeHidden()
       await expect(page.locator('[data-test="activity-drawer-attribution"]')).toBeVisible()
       await expect(page.locator('[data-test="activity-drawer-attribution"] [data-test="attribution-client"]')).toBeVisible()
