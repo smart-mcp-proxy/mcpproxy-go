@@ -31,6 +31,7 @@ MCPProxy uses **BM25** (Best Matching 25) ranking:
 - Considers term frequency in tool descriptions
 - Accounts for document length
 - Ranks results by relevance score
+- Matches underscore-delimited tool-name segments: a bare query like `issue` finds `create_issue` (3+ letters/digits, added only when no exact tool-name match exists)
 
 ## Using Search
 
