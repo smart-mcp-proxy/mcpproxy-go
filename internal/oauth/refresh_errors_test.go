@@ -140,10 +140,10 @@ func TestScrubRefreshError_SentValuesAndLongBodies(t *testing.T) {
 func TestScrubRefreshError_JSONSpellings(t *testing.T) {
 	const secret = `opaque&value"08/15`
 	for _, echoed := range []string{
-		`opaque&value\"08/15`,   // plain JSON encoder
-		`opaque&value\"08\/15`,  // PHP json_encode
-		`opaque&value\"08/15`,   // Go encoding/json
-		url.QueryEscape(secret), // form-encoded
+		`opaque&value\"08/15`,      // plain JSON encoder
+		`opaque&value\"08\/15`,     // PHP json_encode
+		`opaque\u0026value\"08/15`, // Go encoding/json (HTML-escaping)
+		url.QueryEscape(secret),    // form-encoded
 	} {
 		err := ScrubRefreshError(errors.New("refresh failed with status 400: "+echoed), secret)
 		assert.NotContains(t, err.Error(), "08", echoed)
