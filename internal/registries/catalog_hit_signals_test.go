@@ -153,3 +153,14 @@ func TestBuildCatalogHit_StarsIgnoredWhenPublisherDoesNotOwnRepo(t *testing.T) {
 		t.Fatalf("source-native installs stay, stars do not, got %+v", native.Popularity)
 	}
 }
+
+func TestDomainLabelMatchesOwner_RejectsTLDWords(t *testing.T) {
+	for _, l := range []string{"org", "com", "net", "gov", "edu", "io"} {
+		if domainLabelMatchesOwner(l, "acme-"+l) {
+			t.Errorf("tld word %q must not match owner acme-%s", l, l)
+		}
+	}
+	if !domainLabelMatchesOwner("acme", "acme-org") {
+		t.Error("real brand token must still match")
+	}
+}
