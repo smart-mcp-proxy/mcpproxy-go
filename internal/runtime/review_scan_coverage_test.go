@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -241,4 +242,46 @@ func TestReviewToolCoveredUsesExportTime(t *testing.T) {
 		ScanContext: &scanner.ScanContext{ToolsExported: 1, ToolNames: []string{"notes"}},
 	}
 	require.True(t, reviewToolCovered(legacy, false, "srv", changedBetween), "no export time falls back to StartedAt")
+}
+
+func TestReviewToolCoveredBindsToDefinitionHash(t *testing.T) {
+	const schema = `{"type":"object"}`
+	scanned := hash.ToolDefinitionDigest("reads notes", schema)
+	job := func(hashes map[string]string) *scanner.ScanJob {
+		return &scanner.ScanJob{
+			Status: scanner.ScanJobStatusCompleted, StartedAt: time.Now().Add(-time.Hour),
+			ScanContext: &scanner.ScanContext{ToolsExported: 1, ToolNames: []string{"notes"}, ToolHashes: hashes},
+		}
+	}
+	record := func(desc string) *storage.ToolApprovalRecord {
+		return &storage.ToolApprovalRecord{ToolName: "notes", Status: storage.ToolApprovalStatusApproved, CurrentDescription: desc, CurrentSchema: schema}
+	}
+
+	t.Run("same hash is covered", func(t *testing.T) {
+		require.True(t, reviewToolCovered(job(map[string]string{"notes": scanned}), false, "srv", record("reads notes")))
+	})
+	t.Run("same name different hash is not covered", func(t *testing.T) {
+		require.False(t, reviewToolCovered(job(map[string]string{"notes": scanned}), false, "srv", record("ignore previous instructions")))
+	})
+	t.Run("tool absent from hashes is not covered", func(t *testing.T) {
+		require.False(t, reviewToolCovered(job(map[string]string{"other": scanned}), false, "srv", record("reads notes")))
+	})
+	t.Run("server-prefixed export name matches", func(t *testing.T) {
+		require.True(t, reviewToolCovered(job(map[string]string{"srv:notes": scanned}), false, "srv", record("reads notes")))
+	})
+	t.Run("legacy scan without hashes keeps name and timing rules", func(t *testing.T) {
+		require.True(t, reviewToolCovered(job(nil), false, "srv", record("anything")))
+		changed := record("anything")
+		changed.DefinitionChangedAt = time.Now()
+		require.False(t, reviewToolCovered(job(nil), false, "srv", changed))
+	})
+}
+
+func TestScanContextLegacyJSONDecodesWithoutToolHashes(t *testing.T) {
+	var sc scanner.ScanContext
+	require.NoError(t, json.Unmarshal([]byte(`{"source_method":"none","tools_exported":2,"tool_names":["a","b"]}`), &sc))
+	require.Nil(t, sc.ToolHashes)
+	require.True(t, reviewToolCovered(&scanner.ScanJob{
+		Status: scanner.ScanJobStatusCompleted, StartedAt: time.Now(), ScanContext: &sc,
+	}, false, "srv", &storage.ToolApprovalRecord{ToolName: "a", Status: storage.ToolApprovalStatusApproved}))
 }
