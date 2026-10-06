@@ -105,6 +105,18 @@ final class SettingsEffectiveStateTests: XCTestCase {
                        "a field the user emptied stays empty")
     }
 
+    func testDiscardingAClearedListenReadoptsTheRunningAddress() async throws {
+        let store = makeStore(
+            configJSON: #"{"quarantine_enabled":true}"#,
+            statusJSON: #"{"running":true,"listen_addr":"127.0.0.1:18666"}"#)
+        await store.load()
+        store.setValue("listen", "")
+        store.revert(["listen"])
+        store.applyStatus(try status(#"{"running":true,"listen_addr":"127.0.0.1:19777"}"#))
+        XCTAssertEqual(store.stringBinding("listen").wrappedValue, "127.0.0.1:19777")
+        XCTAssertFalse(store.isDirty("listen"))
+    }
+
     func testTypedListenIsNotMarkedCleanWhenTheCoreRestartsOntoIt() async {
         let store = makeStore(
             configJSON: #"{"quarantine_enabled":true}"#,

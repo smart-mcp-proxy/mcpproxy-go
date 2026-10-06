@@ -178,6 +178,8 @@ type scopeController struct {
 	cfg            *config.Config
 	servers        []contracts.Server
 	withManagement bool
+	// listen, when non-empty, overrides the embedded mock's listen address.
+	listen string
 
 	// listErr, when non-nil, makes both server-listing seams (management
 	// ListServers and legacy GetAllServers) fail with it.
@@ -500,4 +502,11 @@ func scopeServerEntry(t *testing.T, data map[string]interface{}, name string) ma
 	}
 	t.Fatalf("server %q not present in response: %#v", name, data)
 	return nil
+}
+
+func (c *scopeController) GetListenAddress() string {
+	if c.listen != "" {
+		return c.listen
+	}
+	return c.MockServerController.GetListenAddress()
 }

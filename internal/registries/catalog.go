@@ -474,7 +474,8 @@ func catalogHitTitle(reg *RegistryEntry, entry ServerEntry) string {
 // owns the GitHub repository it names as its source (Spec 109 D37.5): an
 // `io.github.<x>` namespace needs repo owner x; a domain namespace needs its
 // owner label (≥ 3 characters, e.g. "notion" of com.notion) to equal the repo
-// owner, be a whole token of it, or be a ≥ 5 character brand with a ≤ 4
+// owner (a generic label from genericOwnerLabels verifies ONLY on that exact
+// equality), be a whole token of it, or be a ≥ 5 character brand with a ≤ 4
 // character prefix/suffix on it (e.g. "makenotion"). A re-publisher of someone else's server, a
 // borrowed repo URL or a missing repository never verifies.
 func publisherOwnsRepo(id, sourceCodeURL string) bool {
@@ -496,18 +497,34 @@ func publisherOwnsRepo(id, sourceCodeURL string) bool {
 	return ok && domainLabelMatchesOwner(label, repoOwner)
 }
 
+// tldWords are TLD / second-level suffix words that are never a publisher
+// identity: "com.org.evil/x" must not verify as owner "org" against acme-org.
+var tldWords = map[string]bool{"com": true, "org": true, "net": true, "gov": true, "edu": true, "co": true, "ac": true, "io": true}
+
+// genericOwnerLabels are domain labels any publisher can register, so they
+// never verify through the token or affix rules (#1466).
+var genericOwnerLabels = map[string]bool{
+	"labs": true, "tools": true, "mcp": true, "dev": true, "app": true, "ai": true,
+}
+
 // domainLabelMatchesOwner is the domain-namespace half of publisherOwnsRepo.
 // A bare substring test let any short label verify against an unrelated owner
 // ("hub" inside "github"), so the label must be the owner itself, a whole
 // "-"/"_"-separated token of it ("acme" of acme-corp), or a brand of at least
 // 5 characters with a short (at most 4 characters) prefix or suffix on the
-// owner ("notion" of makenotion).
+// owner ("notion" of makenotion). Generic labels (genericOwnerLabels: labs,
+// tools, mcp, dev, app, ai) are anyone's: they verify only on exact equality
+// with the owner, so com.tools cannot borrow acme-tools. The deny-list applies
+// to the namespace label, not to the repo owner's tokens.
 func domainLabelMatchesOwner(label, repoOwner string) bool {
-	if len(label) < 3 {
+	if len(label) < 3 || tldWords[label] {
 		return false
 	}
 	if label == repoOwner {
 		return true
+	}
+	if genericOwnerLabels[label] {
+		return false
 	}
 	for _, tok := range strings.FieldsFunc(repoOwner, func(r rune) bool { return r == '-' || r == '_' }) {
 		if tok == label {

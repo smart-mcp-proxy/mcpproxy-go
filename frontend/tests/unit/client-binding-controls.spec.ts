@@ -479,10 +479,10 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
       expect(holderPage.wrapper.find('[data-test="clients-upgrade-admin-key"]').exists()).toBe(true)
     })
 
-    it('previews, applies with the precondition token, then shows the Rotate the admin API key panel', async () => {
+    it('previews, applies with the precondition token, then shows the Rotate the admin API key panel on full success', async () => {
       ;(api.upgradeAdminKeyHolders as any)
         .mockResolvedValueOnce({ preview: [row], precondition_token: 'combined-1' })
-        .mockResolvedValueOnce({ upgraded: ['codex'], failed: [{ client_id: 'zed', error: 'read-only' }], next_step: 'rotate_admin_api_key' })
+        .mockResolvedValueOnce({ upgraded: ['codex'], failed: [], next_step: 'rotate_admin_api_key' })
       const { wrapper } = await mountClients([holder], warning)
       await wrapper.get('[data-test="clients-upgrade-admin-key"]').trigger('click')
       await wrapper.get('[data-test="upgrade-profile"]').setValue('work-ro')
@@ -497,10 +497,40 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
       await wrapper.get('[data-test="upgrade-apply"]').trigger('click')
       await flushPromises()
       expect(api.upgradeAdminKeyHolders).toHaveBeenNthCalledWith(2, { profile: 'work-ro', mode: 'locked', apply: true, precondition_token: 'combined-1' })
-      expect(wrapper.get('[data-test="upgrade-failed"]').text()).toContain('zed: read-only')
+      expect(wrapper.find('[data-test="upgrade-failed"]').exists()).toBe(false)
       const panel = wrapper.get('[data-test="rotate-admin-key-panel"]')
       expect(panel.text()).toContain('Rotate the admin API key')
       expect(panel.get('[data-test="rotate-admin-key-docs"]').attributes('href')).toBe('https://docs.mcpproxy.app/configuration/config-file/')
+    })
+
+    async function applyWith(result: unknown) {
+      ;(api.upgradeAdminKeyHolders as any)
+        .mockResolvedValueOnce({ preview: [row], precondition_token: 'combined-1' })
+        .mockResolvedValueOnce(result)
+      const { wrapper } = await mountClients([holder], warning)
+      await wrapper.get('[data-test="clients-upgrade-admin-key"]').trigger('click')
+      await wrapper.get('[data-test="upgrade-preview"]').trigger('submit')
+      await flushPromises()
+      await wrapper.get('[data-test="upgrade-apply"]').trigger('click')
+      await flushPromises()
+      return wrapper
+    }
+
+    it('a partial failure states what worked and failed, withholds the rotate panel and offers Try again (#1446-1)', async () => {
+      const wrapper = await applyWith({ upgraded: ['codex'], failed: [{ client_id: 'zed', error: 'read-only' }] })
+      expect(wrapper.get('[data-test="upgrade-summary"]').text()).toBe('1 client upgraded: codex.')
+      expect(wrapper.get('[data-test="upgrade-failed-heading"]').text()).toBe('1 could not be upgraded:')
+      expect(wrapper.get('[data-test="upgrade-failed"]').text()).toContain('zed: read-only')
+      expect(wrapper.get('[data-test="upgrade-retry"]').text()).toContain('Do not rotate the admin API key yet')
+      expect(wrapper.find('[data-test="rotate-admin-key-panel"]').exists()).toBe(false)
+      await wrapper.get('[data-test="upgrade-try-again"]').trigger('click')
+      expect(wrapper.find('[data-test="upgrade-profile"]').exists()).toBe(true)
+    })
+
+    it('success without next_step shows no rotate panel but notes the remaining holders', async () => {
+      const wrapper = await applyWith({ upgraded: ['codex'], failed: [] })
+      expect(wrapper.find('[data-test="rotate-admin-key-panel"]').exists()).toBe(false)
+      expect(wrapper.get('[data-test="upgrade-holders-remain"]').text()).toContain('still hold the admin key')
     })
 
     it('a guard disables Apply and shows the refusal with its fixes', async () => {

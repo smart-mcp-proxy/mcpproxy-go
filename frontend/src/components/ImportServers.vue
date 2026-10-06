@@ -171,6 +171,15 @@ async function loadDetectedSources(clearMessage = true) {
   finally { detectedLoading.value = false }
 }
 
+// The names the core actually imported, so a server skipped as already_exists
+// (possibly still quarantined from an earlier run) is never reported as
+// "just imported". An old core that returns no list falls back to the request.
+function actuallyImported(data: ImportResponse | undefined, requested: string[], rename: Record<string, string> = {}): string[] {
+  if (Array.isArray(data?.imported) && data.imported.length > 0) return data.imported.map(server => server.name)
+  const skipped = new Set([...(data?.skipped ?? []), ...(data?.failed ?? [])].map(item => item.name))
+  return requested.map(name => rename[name] ?? name).filter((name, i) => !skipped.has(name) && !skipped.has(requested[i]))
+}
+
 async function importDetected() {
   detectedImporting.value = true
   detectedError.value = null
@@ -190,7 +199,7 @@ async function importDetected() {
       const response = await api.importServersFromPath({ path: source.path, format: source.format, server_names, rename: Object.keys(rename).length ? rename : undefined, skip_quarantine: !detectedQuarantine.value })
       if (!response.success) throw new Error(response.error || `Could not import ${source.name}`)
       imported += response.data?.summary?.imported ?? server_names.length
-      importedNames.push(...server_names.map(name => (rename as Record<string, string>)[name] ?? name))
+      importedNames.push(...actuallyImported(response.data, server_names, rename as Record<string, string>))
       skipped.push(...(response.data?.skipped ?? []))
     }
     detectedMessage.value = importSummary({ imported, renamed, skipped })
@@ -266,7 +275,7 @@ async function handleImport() {
       addError.value = resp.error || 'Import failed'
       return
     }
-    emit('imported', resp.data?.summary?.imported ?? resp.data?.imported?.length ?? names.length, names)
+    emit('imported', resp.data?.summary?.imported ?? resp.data?.imported?.length ?? names.length, actuallyImported(resp.data, names))
   } catch (e) {
     addError.value = e instanceof Error ? e.message : 'Import failed'
   } finally {

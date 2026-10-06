@@ -113,6 +113,28 @@ describe('ImportServers paste import count (#1466)', () => {
     await flushPromises()
     await wrapper.find('[data-test="import-confirm-button"]').trigger('click')
     await flushPromises()
-    expect(wrapper.emitted('imported')?.[0]).toEqual([1, ['a', 'b']])
+    // Only the imported name: b was skipped as already_exists (#1506 review).
+    expect(wrapper.emitted('imported')?.[0]).toEqual([1, ['a']])
+  })
+})
+
+describe('ImportServers detected path emits only imported names (#1506 review)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('leaves out a server skipped as already_exists, and maps a rename', async () => {
+    ;(api.getCanonicalConfigPaths as any).mockResolvedValue({ success: true, data: { paths: [cursorPath] } })
+    ;(api.importServersFromPath as any)
+      .mockResolvedValueOnce({ success: true, data: { imported: [{ name: 'fetchy', summary: 'a' }, { name: 'thinker', summary: 'b' }] } })
+      // apply: the core lists nothing imported (old core) and skips thinker
+      .mockResolvedValueOnce({ success: true, data: { summary: { imported: 1 }, imported: [], skipped: [{ name: 'thinker', reason: 'already_exists' }] } })
+      .mockResolvedValueOnce({ success: true, data: { imported: [], skipped: [] } })
+    const wrapper = mount(ImportServers, { props: { detected: true } })
+    await flushPromises()
+    await wrapper.find('[data-test="select-all-cursor"]').setValue(true)
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('imported')?.[0]).toEqual([1, ['fetchy']])
   })
 })
