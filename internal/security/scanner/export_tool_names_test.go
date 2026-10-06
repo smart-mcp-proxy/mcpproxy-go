@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 )
 
 // namesProvider reports a fixed tool list (duplicates and unsorted on
@@ -99,4 +101,24 @@ func TestStartScanRecordsToolsExportedAt(t *testing.T) {
 	require.NotNil(t, final.ScanContext)
 	assert.False(t, final.ScanContext.ToolsExportedAt.IsZero())
 	assert.True(t, final.ScanContext.ToolsExportedAt.After(before))
+}
+
+func TestExportToolDefinitionsRecordsDefinitionHashes(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	svc := NewService(newMockStorage(), NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	svc.SetServerInfoProvider(&namesProvider{tools: []map[string]interface{}{
+		{"name": "a", "description": "d", "inputSchema": map[string]interface{}{"type": "object"}},
+		{"name": "b", "description": "x"},
+	}})
+
+	e := svc.exportToolDefinitionsStamped("srv", t.TempDir())
+	assert.Equal(t, map[string]string{
+		"a": hash.ToolDefinitionDigest("d", `{"type":"object"}`),
+		"b": hash.ToolDefinitionDigest("x", ""),
+	}, e.Hashes)
+	var sc ScanContext
+	e.applyTo(&sc)
+	assert.Equal(t, e.Hashes, sc.ToolHashes)
+	assert.False(t, sc.ToolsExportedAt.IsZero())
 }

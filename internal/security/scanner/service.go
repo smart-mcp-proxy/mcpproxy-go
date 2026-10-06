@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 )
 
 // errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
@@ -1112,7 +1113,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+			s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
 
 			// If export failed, retry once. Reconnect ONLY when the server is
 			// actually disconnected (that path handles quarantined servers
@@ -1125,7 +1126,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				if s.serverInfo.IsConnected(serverName) {
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
-					scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+					s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))
@@ -1134,7 +1135,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 							zap.String("server", serverName), zap.Error(err))
 					} else {
 						s.waitForConnection(serverName, 30*time.Second)
-						scanCtx.ToolsExported, scanCtx.ToolNames, scanCtx.ToolsExportedAt = s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+						s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
 					}
 				}
 			}
@@ -2349,13 +2350,27 @@ func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
 		zap.Duration("timeout", timeout))
 }
 
-// exportToolDefinitionsStamped runs exportToolDefinitions and also returns the
+// toolExport is the outcome of one tool-definition export.
+type toolExport struct {
+	Count  int
+	Names  []string
+	Hashes map[string]string
+	At     time.Time
+}
+
+// applyTo records the export on the scan context.
+func (e toolExport) applyTo(sc *ScanContext) {
+	sc.ToolsExported, sc.ToolNames, sc.ToolHashes, sc.ToolsExportedAt = e.Count, e.Names, e.Hashes, e.At
+}
+
+// exportToolDefinitionsStamped runs exportToolDefinitions and also records the
 // instant just before the definitions were read. Taking the stamp first means a
 // definition change racing the read is judged not covered rather than covered.
-func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) (int, []string, time.Time) {
+func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) toolExport {
 	at := time.Now().UTC()
-	count, names := s.exportToolDefinitions(serverName, sourceDir)
-	return count, names, at
+	e := s.exportToolDefinitionsFull(serverName, sourceDir)
+	e.At = at
+	return e
 }
 
 // exportToolDefinitions writes a tools.json file to the source directory
@@ -2363,14 +2378,22 @@ func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) (in
 // Returns the number of tools exported and their sorted, de-duplicated names,
 // so a scan records which definitions it actually saw.
 func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []string) {
+	e := s.exportToolDefinitionsFull(serverName, sourceDir)
+	return e.Count, e.Names
+}
+
+// exportToolDefinitionsFull is exportToolDefinitions plus the per-tool
+// definition digests of what was written, so a scan can later be matched to
+// the exact definitions it analysed.
+func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolExport {
 	tools, err := s.serverInfo.GetServerTools(serverName)
 	if err != nil {
 		s.logger.Warn("Could not export tool definitions for scanning",
 			zap.String("server", serverName), zap.Error(err))
-		return 0, nil
+		return toolExport{}
 	}
 	if len(tools) == 0 {
-		return 0, nil
+		return toolExport{}
 	}
 
 	// Format as MCP tools/list output
@@ -2379,20 +2402,48 @@ func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []st
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return 0, nil
+		return toolExport{}
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
 		s.logger.Debug("Failed to write tools.json", zap.Error(err))
-		return 0, nil
+		return toolExport{}
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
 		zap.Int("tools", len(tools)),
 		zap.String("path", toolsPath),
 	)
-	return len(tools), toolDefinitionNames(tools)
+	return toolExport{Count: len(tools), Names: toolDefinitionNames(tools), Hashes: toolDefinitionHashes(tools)}
+}
+
+// toolDefinitionHashes maps each exported tool name to the digest of its
+// description and input schema (hash.ToolDefinitionDigest). A duplicate name
+// keeps the first definition, matching what the scan reads first.
+func toolDefinitionHashes(tools []map[string]interface{}) map[string]string {
+	hashes := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		if _, dup := hashes[name]; dup {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		schemaJSON := ""
+		if schema := tool["inputSchema"]; schema != nil {
+			if raw, err := json.Marshal(schema); err == nil {
+				schemaJSON = string(raw)
+			}
+		}
+		hashes[name] = hash.ToolDefinitionDigest(description, schemaJSON)
+	}
+	if len(hashes) == 0 {
+		return nil
+	}
+	return hashes
 }
 
 // toolDefinitionNames returns the sorted, de-duplicated non-empty "name"
