@@ -100,6 +100,46 @@ final class ServersViewRoutingTests: XCTestCase {
                       "or a prior .showServerDetail notification's tab (e.g. .config) leaks into the next manual open")
     }
 
+    /// The observers must be attached exactly once (in `body`): a second copy on
+    /// `serverListView` fires the handler twice whenever the list is mounted.
+    func testNotificationObserversAreAttachedExactlyOnce() throws {
+        let source = try serversViewSource()
+        for name in [".showServerDetail", ".showAddServer"] {
+            let needle = ".onReceive(NotificationCenter.default.publisher(for: \(name)))"
+            XCTAssertEqual(source.components(separatedBy: needle).count - 1, 1, "\(name) observer count")
+        }
+    }
+
+    private func server(_ name: String) throws -> ServerStatus {
+        try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"id":"\#(name)","name":"\#(name)","protocol":"http","enabled":true,"connected":true,"quarantined":false,"tool_count":1}"#.utf8))
+    }
+
+    func testReducerSelectsAnExistingServerFromAStringPayload() throws {
+        let a = try server("a")
+        let r = ServersRouteReducer.detailRoute(for: "a", servers: [a], fallback: [])
+        XCTAssertEqual(r?.server.name, "a")
+        XCTAssertEqual(r?.tab, .tools)
+        XCTAssertNil(r?.focusField)
+    }
+
+    func testReducerCarriesTabAndFallsBackToAppStateList() throws {
+        let b = try server("b")
+        let r = ServersRouteReducer.detailRoute(for: ServerDetailTarget(serverName: "b", tab: .config), servers: [], fallback: [b])
+        XCTAssertEqual(r?.server.name, "b")
+        XCTAssertEqual(r?.tab, .config)
+    }
+
+    func testReducerDropsAnUnknownServerAndBadPayload() throws {
+        let a = try server("a")
+        XCTAssertNil(ServersRouteReducer.detailRoute(for: "zzz", servers: [a], fallback: [a]))
+        XCTAssertNil(ServersRouteReducer.detailRoute(for: 42, servers: [a], fallback: [a]))
+    }
+
+    func testReducerAddServerTabDefaultsToCatalog() {
+        XCTAssertEqual(ServersRouteReducer.addServerTab(for: nil), .catalog)
+        XCTAssertEqual(ServersRouteReducer.addServerTab(for: AddServerTab.allCases.last!), AddServerTab.allCases.last!)
+    }
+
     // MARK: - Helpers
 
     /// Isolates `body`'s own text — from `var body: some View {` up to the

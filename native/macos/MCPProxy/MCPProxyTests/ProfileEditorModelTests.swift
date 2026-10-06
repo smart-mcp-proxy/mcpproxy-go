@@ -438,6 +438,13 @@ final class ProfileEditorModelTests: XCTestCase {
         XCTAssertFalse(targets.contains { $0.name.isEmpty }, "there is no All servers target")
     }
 
+    func testReassignPickerLabelsDisambiguateSharedTitlesAgainstTheFullList() {
+        let all = [ProfileView(name: "work", title: "Team"), ProfileView(name: "work2", title: "Team"), ProfileView(name: "solo", title: "Solo")]
+        let labels = ProfileEditorModel.reassignPickerLabels(excluding: "work", in: all)
+        XCTAssertEqual(labels.map(\.name), ["work2", "solo"])
+        XCTAssertEqual(labels.map(\.label), ["Team (work2)", "Solo"], "clash with the profile being deleted must still be slugged")
+    }
+
     func testARenameMovesTheModelToTheNewName() async {
         let source = StubSource()
         let renamed = try! JSONDecoder().decode(ProfileRenameResponse.self, from: Data(

@@ -111,6 +111,10 @@ struct DeleteProfileSheet: View {
         ProfileEditorModel.reassignTargets(excluding: profile.name, in: appState.profiles)
     }
 
+    private var pickerLabels: [(name: String, label: String)] {
+        ProfileEditorModel.reassignPickerLabels(excluding: profile.name, in: appState.profiles)
+    }
+
     var body: some View {
         let impact = impact
         VStack(alignment: .leading, spacing: 12) {
@@ -124,7 +128,7 @@ struct DeleteProfileSheet: View {
             if impact.requiresTarget {
                 Picker("Move them to", selection: $target) {
                     Text("Choose a profile…").tag("")
-                    ForEach(targets) { Text($0.displayTitle).tag($0.name) }
+                    ForEach(pickerLabels, id: \.name) { Text($0.label).tag($0.name) }
                 }
                 .accessibilityIdentifier("profile-delete-target")
                 if targets.isEmpty {

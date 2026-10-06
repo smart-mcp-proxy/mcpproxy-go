@@ -79,34 +79,14 @@ struct ServersView: View {
         // which branch is currently shown, so a later notification can always
         // switch straight to a different server's detail.
         .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
-            if let tab = notification.object as? AddServerTab {
-                addServerInitialTab = tab
-            } else {
-                addServerInitialTab = .catalog
-            }
+            addServerInitialTab = ServersRouteReducer.addServerTab(for: notification.object)
             showAddServer = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
-            let serverName: String
-            let tab: ServerDetailTab
-            let focusField: TrayConfigFocusField?
-            if let target = notification.object as? ServerDetailTarget {
-                serverName = target.serverName
-                tab = target.tab
-                focusField = target.focusField
-            } else if let name = notification.object as? String {
-                serverName = name
-                tab = .tools
-                focusField = nil
-            } else {
-                return
-            }
-            // Find the server by name in the current list or appState
-            if let server = servers.first(where: { $0.name == serverName })
-                ?? appState.servers.first(where: { $0.name == serverName }) {
-                selectedServerInitialTab = tab
-                selectedServerInitialFocusField = focusField
-                selectedServer = server
+            if let route = ServersRouteReducer.detailRoute(for: notification.object, servers: servers, fallback: appState.servers) {
+                selectedServerInitialTab = route.tab
+                selectedServerInitialFocusField = route.focusField
+                selectedServer = route.server
             }
         }
     }
@@ -285,22 +265,6 @@ struct ServersView: View {
             triggerLoad()
         }
         .onChange(of: profileFilter) { _ in triggerLoad() }
-        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
-            if let tab = notification.object as? AddServerTab {
-                addServerInitialTab = tab
-            } else {
-                addServerInitialTab = .catalog
-            }
-            showAddServer = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
-            guard let serverName = notification.object as? String else { return }
-            // Find the server by name in the current list or appState
-            if let server = servers.first(where: { $0.name == serverName })
-                ?? appState.servers.first(where: { $0.name == serverName }) {
-                selectedServer = server
-            }
-        }
     }
 
     /// Open the Add Server sheet on the Catalog tab for a pending toolbar
@@ -1213,5 +1177,36 @@ struct ServerTableView: NSViewRepresentable {
         private func healthColor(for server: ServerStatus) -> NSColor {
             server.statusNSColor
         }
+    }
+}
+
+/// Pure routing logic for the `.showAddServer` / `.showServerDetail`
+/// notifications, extracted so it is unit-testable without a SwiftUI harness.
+enum ServersRouteReducer {
+    struct DetailRoute: Equatable {
+        let server: ServerStatus
+        let tab: ServerDetailTab
+        let focusField: TrayConfigFocusField?
+    }
+
+    static func addServerTab(for payload: Any?) -> AddServerTab {
+        (payload as? AddServerTab) ?? .catalog
+    }
+
+    /// nil when the payload is unrecognised or the server is not (yet) in either
+    /// list; the notification is then dropped, as before.
+    static func detailRoute(for payload: Any?, servers: [ServerStatus], fallback: [ServerStatus]) -> DetailRoute? {
+        let name: String
+        var tab: ServerDetailTab = .tools
+        var focus: TrayConfigFocusField?
+        if let target = payload as? ServerDetailTarget {
+            name = target.serverName; tab = target.tab; focus = target.focusField
+        } else if let n = payload as? String {
+            name = n
+        } else {
+            return nil
+        }
+        guard let server = servers.first(where: { $0.name == name }) ?? fallback.first(where: { $0.name == name }) else { return nil }
+        return DetailRoute(server: server, tab: tab, focusField: focus)
     }
 }
