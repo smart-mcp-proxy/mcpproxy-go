@@ -59,11 +59,22 @@ Base `/api/v1`, envelope `{success, data}` / `{success:false, error}` as today. 
 
 Conditions key on `health.status` (and `admin_state` for review), never on `actions` membership: `actions` also carries proactive nudges on usable servers (health-vocabulary.md), so it cannot tell a blocking state from a hint. Never items: disabled servers; `server_error` for a quarantined server (it is a `server_review` item); `ready` servers whatever their `actions`; servers `connecting` for < 60 s; update availability; scan findings on an already approved server (they appear in the review screen and scan history). Ordering: rank ascending, then `subject.name`. `id` is stable (`kind:type:subject`) so surfaces can diff lists.
 
-SSE: `attention.changed` `{count, ids}` emitted when the set of `id`s changes. The runtime event carries the structured item list (`items: [{id, subject_type, subject_id}]`), and `/events` renders the wire payload **per subscriber** (FR-006): an administrator gets the full `{count, ids}`; a scoped caller (agent token, session principal) gets only the ids whose subject is a server it can see (`canSeeServer`), never a client item, with `count` recomputed from that narrowed list, and the frame is suppressed when that subscriber's narrowed id set is unchanged since the last frame it received. The type is classified with `servers.changed` as a per-subscriber-rendered type in `internal/httpapi/sse_scope.go`, never as a no-server-identity type (the existing scalar-field classifier cannot see into `ids`).
+SSE: `attention.changed` `{count, ids}` emitted when the set of `id`s changes. The runtime event carries the structured item list (`items: [{id, subject_type, subject_id}]`), and `/events` renders the wire payload **per subscriber** (FR-006): an administrator gets the full `{count, ids}`; a scoped caller (agent token, session principal) gets only the ids whose subject is a server it can see (`canSeeServer`), never a client or setting item (an allow-list: any other subject type is withheld), with `count` recomputed from that narrowed list, and the frame is suppressed when that subscriber's narrowed id set is unchanged since the last frame it received. The type is classified with `servers.changed` as a per-subscriber-rendered type in `internal/httpapi/sse_scope.go`, never as a no-server-identity type (the existing scalar-field classifier cannot see into `ids`).
 
 **Interim fix targets**: `/review` and `/review/<n>` render real views from 109-g. Until then the Web router (109-a, T026a, the first PR to link to `/review`) redirects `/review/:server` → `/servers/:server?tab=tools` and `/review` → `/servers?status=needs_review`, and macOS opens the server's detail view, so a `fix.target` is never a dead link. Before 109-k, `/servers` ignores `?status=` and shows the unfiltered list (the right page, not yet narrowed). `/clients?focus=<id>` exists from 109-h, which is also the PR that feeds client items (data-model §4).
 
-Spec 108 kinds added in 109-l (rank 4–9, above sign-in (10) because they are security-relevant), named exactly as the Spec 108 clients `warnings[]` codes they come from (its data-model §7): `anonymous_denied_by_binding_guard` (4; Spec 108's binding guard is denying every uncredentialed caller — fix: turn on `require_mcp_auth` or narrow `anonymous_profile`), `client_holds_admin_key` (5; fix: Spec 108's bulk upgrade, then admin-key rotation), `client_token_name_conflict` (6), `profile_missing` (7), `client_rotation_pending` (8), `client_credential_expiring` (9). The older name `lock_bypassable_without_auth` is withdrawn in both specs.
+Spec 108 kinds added in 109-l (rank 4–9, above sign-in (10) because they are security-relevant), named exactly as the Spec 108 clients `warnings[]` codes they come from (its data-model §7). The subject types are `server|tool|client|setting`. Every one is administrator-only: a scoped caller sees only server items it can enumerate (an allow-list, FR-007), so these never reach an agent token or a tenant on REST or SSE. `summary` and `detail` are English UI text and never contain a secret, a path or a token prefix.
+
+| kind | rank | condition (the Spec 108 warning with this code is present) | `id` | subject | `fix.verb` | `fix.label` | `fix.target` |
+|---|---|---|---|---|---|---|---|
+| `anonymous_denied_by_binding_guard` | 4 | Spec 108's binding guard denies every uncredentialed caller (a binding could be bypassed without auth) | `anonymous_denied_by_binding_guard:setting:require_mcp_auth` | `{setting, require_mcp_auth, "Anonymous callers"}` | `change_setting` | `Require authentication…` | `/settings?tab=security&focus=require_mcp_auth` |
+| `client_holds_admin_key` | 5 | a client's observed credential state is `admin_key` | `client_holds_admin_key:client:<id>` | `{client, <id>, <display>}` | `upgrade_admin_key_holders` | `Upgrade…` | `/clients?focus=<id>` |
+| `client_token_name_conflict` | 6 | a regular agent token holds `client-<id>` | `client_token_name_conflict:client:<id>` | client | `edit_token` | `Open token` | `/clients?tab=tokens&token=client-<id>` |
+| `profile_missing` | 7 | a client bound to a profile that no longer exists (denied everything) | `profile_missing:client:<id>` | client | `move_client` | `Move client…` | `/clients?focus=<id>` |
+| `client_rotation_pending` | 8 | a staged credential rotation has not finished | `client_rotation_pending:client:<id>` | client | `reconnect_client` | `Reconnect…` | `/clients?focus=<id>` |
+| `client_credential_expiring` | 9 | an active client credential expires within 14 days | `client_credential_expiring:client:<id>` | client | `reconnect_client` | `Reconnect…` | `/clients?focus=<id>` |
+
+`since` is `ExpiresAt − 14 d` for the expiring kind and the first time the subscriber saw the item for the others. The guard `detail` lists the bound clients (up to three names, then "+N more"). Query values are escaped with `url.QueryEscape`. `client_holds_admin_key` appears only once the credential state has been observed (an on-demand read persists it; no background config read). The older name `lock_bypassable_without_auth` is withdrawn in both specs.
 
 ## Health (all server payloads)
 
@@ -100,7 +111,8 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
     "command": "npx -y @modelcontextprotocol/server-filesystem /tmp", "url": "",
     "quarantined": true, "trust_mode": "manual",
     "source_registry_id": "official", "source_registry_provenance": "…",
-    "scan": {"verdict": "clean", "risk_score": 0, "report_id": "…", "scanned_at": "…"},
+    "scan": {"verdict": "clean", "risk_score": 0, "report_id": "…", "scanned_at": "…",
+             "coverage": "current", "tools_scanned": 14},
     "definitions_captured": true
   },
   "tools": [
@@ -115,6 +127,7 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
       "disabled": false,
       "scan_verdict": "clean",
       "held_reason": "", "held_signals": [],
+      "default_allowed": false,
       "previous": null
     },
     {
@@ -124,6 +137,7 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
       "tier": "unknown",
       "approval_status": "changed",
       "scan_verdict": "warnings",
+      "default_allowed": false,
       "previous": {"description": "…", "input_schema": {}, "annotations": null},
       "diff": {"description": "@@ -1 +1 @@\n-…\n+…", "input_schema": "", "annotations": ""}
     }
@@ -135,8 +149,10 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
 - `annotations`/`tier` pairs: `annotations: null` → `tier: "unknown"` (nothing captured — a record from before this spec, as in the `search_code` example above); `annotations: {}` → `tier: "unannotated"` (captured, no hints); otherwise `contracts.AnnotationTier`. For instance `{"name": "list_dir", "annotations": {}, "tier": "unannotated", …}`.
 - `source_registry_id`, `source_registry_provenance`: the existing MCP-866 origin fields of the server config, `omitempty` (absent for a manually added server).
 - `tier`: `unknown` when the record carries no stored annotations (captured before this spec).
-- `scan_verdict` per tool: `dangerous|warnings|clean|not_scanned`, from the latest baseline report's findings for that tool, else the record's `held_verdict`.
-- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/discover-tools`; the explicit inspection-only capture obtains a bounded supervisor exemption, stores approval records, emits `review.changed`, and never indexes the quarantined definitions. Baseline scanning remains a separate security operation.
+- `default_allowed` (always present, fix-review-defaults, D43.2): the review screens' fail-closed default selection. `false` for a disabled tool; `true` for an `approved` tool; for `pending` or `changed` it is `true` only when `tier` is `read`, `scan_verdict` is `clean` and `held_reason` is empty. Write, destructive, unannotated, unknown, not-scanned, warnings, dangerous and held tools are `false`. A payload from an older core has no field, which surfaces read as `false` (fail closed).
+- `scan.coverage` (always present): `current` = the latest completed scan analysed every captured definition as it is now; `stale` = at least one captured definition was added or changed after that scan (`scan.unscanned_tools` lists them, sorted); `not_captured` = no definitions captured (`definitions_captured: false`); `tools_not_scanned` = the scan completed but exported 0 tool definitions (source-only or URL scan); `scanning` = the newest baseline job is pending or running; `none` = no completed scan (never scanned, or the newest job failed or was cancelled). Precedence: `not_captured` > `scanning` > `none` > `tools_not_scanned` > `stale` > `current`. `scan.tools_scanned` is the number of definitions that scan exported (omitted when 0). Surfaces show `risk_score` only for `current`. A tool is covered when the scan's recorded tool names (`ScanContext.tool_names`) include it and its definition did not change after the scan started (`definition_changed_at`); for a scan recorded without names, approved records are covered, pending records are covered on a quarantined server only, and a changed record with no change time is not covered. A payload from an older core has no `coverage`; surfaces read that as `none`.
+- `scan_verdict` per tool: `dangerous|warnings|clean|not_scanned`. A **covered** tool gets the verdict of the latest baseline report's findings for that tool, else the record's `held_verdict`, else `clean`. A tool the scan did **not** cover gets its `held_verdict` (the Spec 086 in-process check of the current definition) or `not_scanned`; findings of an older scan describe an older definition and are not applied.
+- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/discover-tools`; the explicit inspection-only capture obtains a bounded supervisor exemption, stores approval records, emits `review.changed`, and never indexes the quarantined definitions. Baseline scanning remains a separate security operation, except that after a baseline scan completes having exported tool definitions for a still-quarantined server with no records, MCPProxy runs the same capture itself (the upstream was already started and listed for that scan, so no new process is started). With `security.auto_baseline_scan: false` and no manual scan, nothing is captured automatically.
 - Descriptions are returned verbatim. Surfaces render them as inert text (research D19).
 
 Review verbs (existing routes; one change):
@@ -218,6 +234,8 @@ These field names are the base of Spec 108's `ClientView`, which extends them wi
 
 `tags` ⊆ `local process`, `remote`, `needs secret`, `oauth`. Preview never executes a command and never contacts a URL.
 
+`POST /servers/import/path?preview=true` of a canonical client file with no servers (0 bytes, whitespace, `{}`, no or an empty server map) answers `200` with `imported: []`, `summary.total: 0` and `format` from the hint, so the wizard and `ImportServers` can auto-preview detected client files without a 400 for each empty one. An apply (`preview=false`) of such a file, a malformed file, and `POST /servers/import/json` with empty content stay `400`.
+
 ## Secrets at add time
 
 No new route: the Web UI and macOS write each secret with the existing `POST /secrets` (keyring) and then add the server with `${keyring:<ref>}` in `env`/`headers`, where `<ref>` is `<server>-env-<name>` or `<server>-header-<name>` (lowercase, runs outside `[a-z0-9-]` → `-`, ≤ 64 characters; FR-065), so an env var and a header with the same name never share an entry. `POST /secrets` and the keyring provider's `Store` overwrite an existing name silently, so before writing the surface reads the existing names (`GET /secrets`) and appends `-2`, `-3`, … to a computed name that is taken — an add never overwrites a secret it did not create. If the add fails after secrets were written, the surface deletes only the secrets it wrote (`DELETE /secrets/{name}`). The naming rule is one function per language, pinned by the shared fixture `internal/secret/testdata/ref_names.json` (incl. the env/header same-name pair and a taken name). Keyring availability: `GET /secrets/config` gains `keyring_available` (bool) and `keyring_reason` from the provider's existing `IsAvailable()` probe (`internal/secret/types.go:32`). `false` → the toggle is disabled with the reason.
@@ -236,13 +254,16 @@ No new route: the Web UI and macOS write each secret with the existing `POST /se
      "required_inputs": [{"name": "GITHUB_TOKEN", "secret_like": true}], "added": false}   // secret_like = the registry's isSecret OR the research D13 secret-like-name rule (data-model §9)
   ],
   "sections": null,
-  "unavailable": [{"source": "smithery", "reason": "timeout after 5s"}]
+  "unavailable": [{"source": "smithery", "reason": "timeout after 5s", "fallback": "cached_listing", "cached_at": "2026-10-02T10:00:00Z"}]
 }
 ```
 
 - Result objects are the `CatalogResult` **DTO** (data-model §9), built from the internal `CatalogHit` by `toCatalogResult`; the Spec 070 `registries.ServerEntry` JSON (`url`, `installCmd`, `registry`, `required_inputs[].secret`) is not renamed and keeps serving `GET /registries/{id}/servers` and MCP `search_servers` unchanged (codex round 3: embedding `ServerEntry` could not produce this example). Golden test T101a.
-- Empty `q` → `results: []`, `sections: {"official": [...], "popular": [...]}` (≤ 12 each).
-- Ranking (pure `registries.Rank`): `official` desc, `verified` desc, popularity desc (missing = 0), relevance desc, `title` asc, `id` asc.
+- Empty `q` → `results: []`, `sections: {"official": [...], "popular": [...]}` (≤ 12 each). The keys are not ordered; every surface renders Popular first when it is non-empty, then Official (curated reference servers first, then round-robin across sources, never popularity-ordered; research D35 A9).
+- **Cached fallback (D35).** A source whose live fetch fails (timeout or any error except a missing API key) is answered from its per-source listing cache when that holds a listing refreshed within 24 h: the hits match the trimmed query as a case-insensitive substring of name, description or id, carry `from_cache: true`, and rank like any other hit. The source stays in `unavailable[]` with `fallback: "cached_listing"` and `cached_at`, so a consumer that only reads `unavailable[]` is unchanged. A source with nothing cached has neither field. The cache is in memory, so a daemon restart empties it.
+- Ranking (pure `registries.Rank`, research D37.1): match tier desc (5 the publisher equals the query, 4 the name segment or title equals it, 3 a name starts with it, 2 a whole word of the name equals it, 1 substring or description, 0 namespace-only or no match), then `official` desc, `verified` desc, popularity desc (missing = 0), `title` asc, `id` asc. An empty `q` is tier 0 for every hit. A typed query is fetched wide (one page per source plus, for the official protocol, an owner and a name-prefix query) and ranked before it is cut to `limit`, so a namespace-only match (`io.github.*`) never displaces a name match.
+- `verified` is true when a built-in official-protocol entry's namespace owns its source repository (`io.github.<x>` with repo owner `x`, or a domain label that equals the repo owner, is a whole token of it, or is a 5+ character brand with a short prefix/suffix on it); built-in reference and Docker entries stay verified as trusted sources; a custom source is never verified. `official` still means "from a built-in source" and is shown as the Official section, not as a per-card badge; Web and macOS cards show Verified, the publisher and popularity.
+- `title` is the source's own title when it has one (server.json `title`), else the name segment after the namespace. `description` is `""` when the source only had a placeholder. GitHub stars count only when the publisher owns the repository the entry names.
 - `added: true` when a configured server has `source_registry_id == source` **and** the same install target (`install.url`, or the command + args) as this result → surfaces render "Added ✓ · Open". The config does not store the registry's own server `id`, so `id` is not part of the join (data-model.md §9). A manually added server matches on the install target alone. When exactly one matching server is visible to the caller, the optional `added_server_name` identifies it; clients use that authoritative name before any comparison with redacted `GET /servers` URL/argv fields. It is omitted for ambiguous matches.
 - Adding stays `POST /registries/{id}/servers/{serverId}/add` (Spec 070), always quarantined.
 

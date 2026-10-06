@@ -56,7 +56,13 @@ enum HomeAttentionAction {
             // observes `pendingReloadHint` and presents it.
             appState.pendingReloadHint = item
         default:
-            break
+            // Spec 109-l: the Spec 108 warning verbs (`change_setting`,
+            // `upgrade_admin_key_holders`, `edit_token`, `move_client`,
+            // `reconnect_client`) navigate through the same dispatcher as the
+            // Clients banner. They open a screen or a sheet and never mutate.
+            if let route = AttentionWarningAction.route(for: item) {
+                appState.navigate(route)
+            }
         }
     }
 

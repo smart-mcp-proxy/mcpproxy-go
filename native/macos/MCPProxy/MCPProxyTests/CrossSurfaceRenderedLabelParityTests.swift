@@ -80,6 +80,53 @@ final class CrossSurfaceRenderedLabelParityTests: XCTestCase {
         }
     }
 
+    // MARK: - SC-003 on the tray (Spec 109-m, T146/M7)
+
+    /// For every health status that is not `ready` (usable=false), the first
+    /// line of the REAL tray server submenu never reads healthy, online or
+    /// connected, even when the legacy `level` says healthy and the transport
+    /// is up. `status_fixtures.json` is the status list Go, Web and macOS share.
+    func testTrayFirstLineNeverReadsHealthyForUnusableStatuses() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        url.appendPathComponent("internal/health/testdata/status_fixtures.json")
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let statuses = try XCTUnwrap(object["status_order"] as? [String]).filter { $0 != "ready" }
+        XCTAssertEqual(statuses.count, 7)
+
+        let forbidden = try NSRegularExpression(pattern: "\\b(healthy|online|connected)\\b",
+                                                options: [.caseInsensitive])
+        for status in statuses {
+            let json = """
+            {"id": "srv", "name": "srv", "protocol": "http", "enabled": true,
+             "connected": true, "quarantined": false, "tool_count": 3,
+             "health": {"level": "healthy", "admin_state": "enabled", "summary": "",
+                        "status": "\(status)", "usable": false, "actions": []}}
+            """
+            let server = try JSONDecoder().decode(ServerStatus.self, from: Data(json.utf8))
+            let first = try XCTUnwrap(try renderedTraySubmenuTitles(for: server).first)
+            let range = NSRange(first.startIndex..., in: first)
+            XCTAssertNil(forbidden.firstMatch(in: first, range: range),
+                         "\(status): tray first line '\(first)' must not read healthy/online/connected")
+        }
+    }
+
+    /// The last-resort wording (a payload with a `health` object but neither
+    /// status nor summary) must not say Connected for a usable=false server.
+    func testTrayFallbackDoesNotSayConnectedForUnusableServer() throws {
+        let json = """
+        {"id": "srv", "name": "srv", "protocol": "http", "enabled": true,
+         "connected": true, "quarantined": false, "tool_count": 3,
+         "health": {"level": "healthy", "admin_state": "enabled", "summary": "",
+                    "usable": false}}
+        """
+        let server = try JSONDecoder().decode(ServerStatus.self, from: Data(json.utf8))
+        let first = try XCTUnwrap(try renderedTraySubmenuTitles(for: server).first)
+        XCTAssertFalse(first.lowercased().contains("connected"), "tray first line '\(first)'")
+        XCTAssertFalse(first.lowercased().contains("online"), "tray first line '\(first)'")
+    }
+
     // MARK: - Helpers
 
     private static func server(quarantined: Bool = false,

@@ -19,7 +19,7 @@ export {
 
 // Import HealthStatus/Tier for use in this file
 import type {
-  CredentialState, HealthStatus, Tier,
+  CredentialState, HealthStatus, Tier, ProfileSource, ProfileBlockReason,
   ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
   EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
   ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState,
@@ -33,6 +33,7 @@ export type {
   ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
   EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
   ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState, CredentialState,
+  ProfileSource, ProfileBlockReason,
 }
 
 // Quarantine stats for tool-level quarantine (Spec 032)
@@ -365,7 +366,27 @@ export interface GlobalTool {
   held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
   held_verdict?: string    // "dangerous" | "warnings" | "clean"
   held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
+  // Spec 108 FR-032: present only in a view-as listing (`GET /tools?client=|profile=`).
+  // `tier` stays the intrinsic tier; `profile_tier` is the tier under the viewed
+  // subject's profile and `access` is the subject's verdict for the tool.
+  profile_tier?: Tier
+  access?: ToolAccess
   // derived locally: enabled = !disabled && !config_denied
+}
+
+// Spec 108 FR-032: a view-as verdict for one tool. `reason` is empty when the
+// tool is callable, otherwise one of profile.AccessReasons (see
+// utils/profiles.ts reasonText for the words).
+export interface ToolAccess {
+  visible: boolean
+  callable: boolean
+  reason?: string
+}
+
+// Spec 108 FR-032: the row accounting of a NON-administrator profile view-as.
+export interface ViewAsCounts {
+  visible: number
+  hidden: number
 }
 
 export interface GlobalToolsStats {
@@ -380,6 +401,9 @@ export interface GlobalToolsResponse {
   stats: GlobalToolsStats
   partial: boolean
   failed_servers: string[]
+  // Only for a non-administrator `profile=` view-as: the response lists the
+  // visible rows and this is the only trace of the rest.
+  counts?: ViewAsCounts
 }
 
 // Tool Annotation types
@@ -411,6 +435,12 @@ export interface MCPSession {
   // belongs to.
   workspace_name?: string
   work_session_id?: string
+  // Spec 108 FR-033: the credential the session initialized with and the latest
+  // profile resolution. Absent on sessions recorded before Spec 108.
+  client_id?: string
+  token_name?: string
+  profile?: string
+  profile_source?: ProfileSource
 }
 
 // Tool types
@@ -610,12 +640,25 @@ export interface TokenMetrics {
 // parameters. Absent (or `scope_filters` absent/empty) means none yet — the
 // Spec 108 rows of useScopeQuery's parameter table stay hidden until this
 // lists them.
+/**
+ * Effective telemetry state served on GET /api/v1/status (Spec 109 FR-044a).
+ * `source` is where the state came from: an environment variable, the config
+ * file, or the unset default (on). `disabled_by` is present only for `env`.
+ */
+export interface TelemetryState {
+  enabled: boolean
+  source: 'env' | 'config' | 'default'
+  disabled_by?: string
+}
+
 export interface StatusResponse {
   edition: string
   running: boolean
   routing_mode: string
   default_instructions?: string
   activation?: { first_real_tool_call_ever?: boolean }
+  // Spec 109 FR-044a: omitted for scoped callers and by cores that predate it.
+  telemetry?: TelemetryState
   features?: { scope_filters?: string[] }
 }
 
@@ -896,11 +939,20 @@ export interface CatalogResult {
   added: boolean
   /** Unique visible installed server selected by the backend before redaction. */
   added_server_name?: string
+  /**
+   * True when this hit came from the source's cached listing because its live
+   * search failed (Spec 109 D35). The source is then also in `unavailable`.
+   */
+  from_cache?: boolean
 }
 
 export interface CatalogSourceError {
   source: string
   reason: string
+  /** "cached_listing" when the hits for this source came from its cached listing. */
+  fallback?: 'cached_listing'
+  /** RFC 3339: when that cached listing was last refreshed. */
+  cached_at?: string
 }
 
 export interface CatalogSections {
@@ -996,6 +1048,16 @@ export interface ActivityRecord {
   auth_type?: 'admin' | 'agent' | 'user' | 'admin_user'
   /** Spec 028: agent token name when auth_type is "agent". */
   agent_name?: string
+  // Spec 108 FR-029: the profile, client and token IN EFFECT when the call ran,
+  // stamped at emit time. All absent on records that predate Spec 108.
+  profile?: string
+  profile_source?: ProfileSource
+  client_id?: string
+  /** The self-reported clientInfo.name: advisory, never authoritative. */
+  client_name?: string
+  token_name?: string
+  /** Why a profile refused the call (activity of status "blocked"). */
+  block_reason?: ProfileBlockReason
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean
   detection_types?: string[]
@@ -1334,6 +1396,11 @@ export interface ReviewScan {
   risk_score?: number
   report_id?: string
   scanned_at?: string
+  /** Whether the verdict describes the definitions on screen (Spec 109 fix-review-screen). */
+  coverage?: 'current' | 'stale' | 'not_captured' | 'tools_not_scanned' | 'scanning' | 'none' | string
+  tools_scanned?: number
+  /** Captured tools whose current definition the scan did not cover (coverage `stale`). */
+  unscanned_tools?: string[]
 }
 
 export interface ReviewQueueRow {
@@ -1376,6 +1443,8 @@ export interface ReviewTool {
   scan_verdict: string
   held_reason?: string
   held_signals?: string[]
+  /** Fail-closed default selection computed by the core (D43); absent on an older core, which reads as false. */
+  default_allowed?: boolean
   previous?: ReviewToolPrevious | null
   diff?: ReviewToolDiff | null
 }
@@ -1411,8 +1480,15 @@ export type ProfileMoved = { clients: string[]; tokens: string[] }
 export interface ProfileRenameResult { profile: ProfileView; moved: ProfileMoved }
 export interface ProfileDeleteResult { deleted: string; moved: ProfileMoved; anonymous_profile_moved_to?: string }
 
+/** One retrieve_tools hit as POST /profiles/try returns it (consumers read the nested `tool`). */
+export interface TryProfileHit {
+  score?: number
+  tool?: { name?: string; server_name?: string; description?: string; annotations?: unknown } | string
+  [key: string]: unknown
+}
+
 export interface TryProfileResponse {
-  results: Array<Record<string, unknown>>
+  results: Array<TryProfileHit>
   hidden_by_profile: number
   hidden: Array<{ server: string; tool: string; reason: string }>
   hidden_truncated?: boolean

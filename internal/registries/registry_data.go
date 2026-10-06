@@ -59,6 +59,8 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 	}
 
 	registryList = merged
+	// A removed or re-pointed source must not keep its cached listing alive.
+	pruneListingCache(merged)
 
 	// Propagate the SSRF allow-policy (MCP-1076): off by default, opt-in via the
 	// user's allow_private_registry_fetch flag. Done here so every config load /

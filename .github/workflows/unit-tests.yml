@@ -73,6 +73,22 @@ jobs:
       - name: Run descendant_pids unit test
         run: make test-descendant-pids
 
+  # Spec 109 SC-005 (T147): no first-party surface calls POST
+  # /servers/{id}/unquarantine, and the one-click approvals 109-f removed stay
+  # removed. Hermetic grep; the self-test proves the check can fail.
+  check-no-unquarantine-callers:
+    name: No Unquarantine Callers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the checker
+        run: bash scripts/check-no-unquarantine-callers.test.sh
+
+      - name: Check the repository
+        run: bash scripts/check-no-unquarantine-callers.sh
+
   test:
     name: Unit Tests
     needs: [build-frontend, verify-oas]

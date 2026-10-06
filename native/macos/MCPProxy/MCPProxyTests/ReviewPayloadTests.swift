@@ -25,6 +25,15 @@ final class ReviewPayloadTests: XCTestCase {
 		XCTAssertEqual(review.server.command, "node fixture.js")
 		XCTAssertEqual(review.server.trustMode, "manual")
 		XCTAssertEqual(review.server.sourceRegistryID, "official")
+        // A payload from an older core has no default_allowed and still decodes.
+        XCTAssertNil(review.tools.first?.defaultAllowed)
+    }
+
+    func testReviewToolDecodesDefaultAllowed() throws {
+        let review = try JSONDecoder().decode(ServerReviewResponse.self, from: Data("""
+        {"server":{"name":"fixture","quarantined":true,"definitions_captured":true},"tools":[{"name":"read_file","description":"d","tier":"read","approval_status":"pending","disabled":false,"scan_verdict":"clean","default_allowed":true},{"name":"write_file","description":"d","tier":"write","approval_status":"pending","disabled":false,"scan_verdict":"clean","default_allowed":false}]}
+        """.utf8))
+        XCTAssertEqual(review.tools.map(\.defaultAllowed), [true, false])
     }
 
     func testReviewQueueUsesDedicatedSidebarAndSheet() throws {
@@ -48,6 +57,7 @@ final class ReviewPayloadTests: XCTestCase {
             "NotificationCenter.default.publisher(for: .scanSettled)",
 			"prettyString", "diff.description", "input schema:\\n",
 			"server.command", "server.trustMode", "server.sourceRegistryID",
+			"startSecurityScan(serverName)", "quarantineServer(serverName)",
         ] {
             XCTAssertTrue(source.contains(expected), "Review sheet is missing \(expected)")
         }

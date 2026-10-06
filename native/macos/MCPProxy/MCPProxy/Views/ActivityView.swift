@@ -49,6 +49,8 @@ struct ActivityView: View {
     /// cancels the previous before it has issued its request, so they
     /// coalesce into a single fetch.
     @State private var reloadTask: Task<Void, Never>?
+    /// Token names for the Token filter (Spec 108-k).
+    @State private var tokenNames: [String] = []
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -236,6 +238,11 @@ struct ActivityView: View {
     private let colIntent: CGFloat = 52
     private let colStatus: CGFloat = 64
     private let colDuration: CGFloat = 56
+    /// Spec 108-k K18: who called, under which profile (client, profile,
+    /// token and, for a blocked call, why). Shown once the core attributes
+    /// calls (`features.scope_filters`).
+    private let colCaller: CGFloat = 132
+    private var callerWidth: CGFloat { appState.scopeFiltersAvailable ? colCaller : 0 }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -354,6 +361,7 @@ struct ActivityView: View {
             colIntent: colIntent,
             colStatus: colStatus,
             colDuration: colDuration,
+            colCaller: callerWidth,
             fontScale: fontScale
         )
         .padding(.leading, indent ? 16 : 0)
@@ -408,6 +416,8 @@ struct ActivityView: View {
         if isLoading && sessions.isEmpty {
             ProgressView("Loading...")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if sessions.isEmpty && appState.coreState != .connected {
+            coreNotRunningView(hint: "Start the core to see sessions")
         } else if sessions.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "person.2")
@@ -434,7 +444,7 @@ struct ActivityView: View {
     private func sessionRow(_ session: APIClient.MCPSession) -> some View {
         Button {
             // Link map: the session's calls, by work session id when it has one.
-            scope = ScopeFilter.forSessionRow(session)
+            scope = scope.linked(ScopeFilter.forSessionRow(session))
         } label: {
             HStack(spacing: 8) {
                 Circle()
@@ -481,6 +491,11 @@ struct ActivityView: View {
             Text("Details")
                 .lineLimit(1)
                 .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
+            if callerWidth > 0 {
+                Text("Caller")
+                    .frame(width: callerWidth, alignment: .leading)
+                    .accessibilityIdentifier("activity-caller-header")
+            }
             Text("Intent")
                 .frame(width: colIntent, alignment: .center)
             Text("Status")
@@ -664,6 +679,10 @@ struct ActivityView: View {
                 )
             }
 
+            // Spec 108-k K18: Profile, Client and Token pickers (109-k's hidden
+            // fields, un-hidden once the core lists `features.scope_filters`).
+            if appState.scopeFiltersAvailable { scopePickers }
+
             // Session filter chip (F10): says which client's calls are on
             // screen, and how to get back to everything. In the Sessions view
             // it only highlights that row.
@@ -708,6 +727,49 @@ struct ActivityView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
+    }
+
+    /// The values the scope pickers offer come from the profiles, clients and
+    /// tokens lists (plus whatever a link already selected).
+    @ViewBuilder
+    private var scopePickers: some View {
+        HStack(spacing: 12) {
+            Picker("Profile", selection: optionBinding(\.profile)) {
+                Text("Any Profile").tag("all")
+                Text("Unattributed").tag("-")
+                ForEach(scopeChoices(appState.profiles.map(\.name), current: scope.profile), id: \.self) { Text($0).tag($0) }
+            }
+            .frame(maxWidth: 200)
+            .accessibilityIdentifier("activity-filter-profile")
+
+            Picker("Client", selection: optionBinding(\.client)) {
+                Text("Any Client").tag("all")
+                Text("Unattributed").tag("-")
+                ForEach(scopeChoices(appState.clients.map(\.id), current: scope.client), id: \.self) { Text($0).tag($0) }
+            }
+            .frame(maxWidth: 200)
+            .accessibilityIdentifier("activity-filter-client")
+
+            Picker("Token", selection: optionBinding(\.token)) {
+                Text("Any Token").tag("all")
+                Text("Unattributed").tag("-")
+                ForEach(scopeChoices(tokenNames, current: scope.token), id: \.self) { Text($0).tag($0) }
+            }
+            .frame(maxWidth: 200)
+            .accessibilityIdentifier("activity-filter-token")
+        }
+        .task { await loadTokenNames() }
+    }
+
+    private func scopeChoices(_ names: [String], current: String?) -> [String] {
+        var all = Set(names)
+        if let current, !current.isEmpty, current != "-" { all.insert(current) }
+        return all.sorted()
+    }
+
+    private func loadTokenNames() async {
+        guard tokenNames.isEmpty, let client = apiClient else { return }
+        tokenNames = ((try? await client.tokens()) ?? []).filter { $0.kind != "client" }.map(\.name)
     }
 
     private func scopeValue(_ name: String) -> String {
@@ -782,21 +844,26 @@ struct ActivityView: View {
         .accessibilityIdentifier("activity-conflict-state")
     }
 
+    /// Shared "core is stopped / not running" placeholder (Calls and Sessions).
+    private func coreNotRunningView(hint: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
+                .font(.system(size: 48 * fontScale))
+                .foregroundStyle(.tertiary)
+            Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
+                .font(.scaled(.title3, scale: fontScale))
+                .foregroundStyle(.secondary)
+            Text(hint)
+                .font(.scaled(.caption, scale: fontScale))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         if appState.coreState != .connected {
-            VStack(spacing: 12) {
-                Image(systemName: appState.isStopped ? "stop.circle.fill" : "clock.arrow.circlepath")
-                    .font(.system(size: 48 * fontScale))
-                    .foregroundStyle(.tertiary)
-                Text(appState.isStopped ? "MCPProxy Core is Stopped" : "MCPProxy Core is Not Running")
-                    .font(.scaled(.title3, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                Text("Start the core to see activity")
-                    .font(.scaled(.caption, scale: fontScale))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            coreNotRunningView(hint: "Start the core to see activity")
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "clock.arrow.circlepath")
@@ -949,6 +1016,8 @@ struct ActivityTableRow: View {
     let colIntent: CGFloat
     let colStatus: CGFloat
     let colDuration: CGFloat
+    /// 0 hides the Caller column (a core that does not attribute calls).
+    var colCaller: CGFloat = 0
     var fontScale: CGFloat = 1.0
 
     var body: some View {
@@ -1004,6 +1073,36 @@ struct ActivityTableRow: View {
             }
             .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
 
+            // Caller column (Spec 108-k K18): client (id, else ~advisory name),
+            // profile with how it was resolved, token, and — for a blocked call
+            // — why. Text, never colour alone.
+            if colCaller > 0 {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(entry.callerClientLabel ?? "-")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .lineLimit(1)
+                    if let profile = entry.callerProfileLabel {
+                        Text(profile + ((entry.tokenName ?? "").isEmpty ? "" : " · \(entry.tokenName!)"))
+                            .font(.scaled(.caption2, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else if let token = entry.tokenName, !token.isEmpty {
+                        Text(token).font(.scaled(.caption2, scale: fontScale)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if let reason = entry.profileBlockReason, !reason.isEmpty {
+                        Text("Blocked: \(reason)")
+                            .font(.scaled(.caption2, scale: fontScale))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(width: colCaller, alignment: .leading)
+                .help(callerHelp)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(callerHelp)
+                .accessibilityIdentifier("activity-caller-cell")
+            }
+
             // Intent column
             if let op = entry.intentOperationType {
                 IntentBadge(operationType: op, fontScale: fontScale)
@@ -1038,6 +1137,15 @@ struct ActivityTableRow: View {
     }
 
     // MARK: - Helpers
+
+    private var callerHelp: String {
+        var parts: [String] = []
+        if let client = entry.callerClientLabel { parts.append("Client \(client)") }
+        if let profile = entry.callerProfileLabel { parts.append("Profile \(profile)") }
+        if let token = entry.tokenName, !token.isEmpty { parts.append("Token \(token)") }
+        if let reason = entry.profileBlockReason, !reason.isEmpty { parts.append("Blocked: \(reason)") }
+        return parts.isEmpty ? "No attribution recorded" : parts.joined(separator: ", ")
+    }
 
     private var typeIcon: String {
         switch entry.type {
@@ -1430,6 +1538,22 @@ struct ActivityDetailView: View {
             }
             if let client = clientName {
                 metadataRow(label: "Client", value: client)
+            }
+            // Spec 108-k K18: the attribution of the call (present once the core
+            // records it).
+            if let clientId = entry.clientId, !clientId.isEmpty {
+                metadataRow(label: "Client id", value: clientId)
+            } else if let name = entry.clientName, !name.isEmpty {
+                metadataRow(label: "Client (advisory)", value: name)
+            }
+            if let profile = entry.callerProfileLabel {
+                metadataRow(label: "Profile", value: profile)
+            }
+            if let token = entry.tokenName, !token.isEmpty {
+                metadataRow(label: "Token", value: token)
+            }
+            if let reason = entry.profileBlockReason, !reason.isEmpty {
+                metadataRow(label: "Block reason", value: reason)
             }
         }
     }

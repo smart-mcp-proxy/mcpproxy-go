@@ -576,6 +576,14 @@ type Config struct {
 	// When empty, a built-in default is used that explains retrieve_tools workflow.
 	Instructions string `json:"instructions,omitempty" mapstructure:"instructions"`
 
+	// AdvertiseUpstreamServers controls whether MCP clients are told the
+	// names of the upstream servers they can reach — in the initialize
+	// instructions and the retrieve_tools description — so agents use the
+	// proxied tools instead of falling back to shell CLIs. Names are always
+	// filtered to the caller's profile and agent-token scope. Default true;
+	// set false to keep server names out of client context. Read live.
+	AdvertiseUpstreamServers *bool `json:"advertise_upstream_servers,omitempty" mapstructure:"advertise-upstream-servers"`
+
 	// QuarantineEnabled controls whether quarantine is active. It gates two
 	// things together:
 	//   1. Server-level auto-quarantine for newly added servers (issue #370).
@@ -2327,6 +2335,25 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	return errors
 }
 
+// ValidateServerForLoad runs the per-server checks config.Load applies at boot
+// (the stdio command-required check, url-required for HTTP protocols, protocol
+// and name validity, ...) against a single server and returns only the errors
+// attributable to it. Write surfaces that persist a server built outside the
+// config loader (e.g. imports) use it so they can never save an entry the next
+// startup would refuse to load.
+func ValidateServerForLoad(server *ServerConfig) []ValidationError {
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{server}
+	const prefix = "mcpServers[0]"
+	var out []ValidationError
+	for _, e := range cfg.validateDetailedCore() {
+		if strings.HasPrefix(e.Field, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
 // loopback callback listener cannot honor.
 //
@@ -3337,4 +3364,10 @@ func migrateDeepScanConfig(cfg *Config) {
 	// Clear the legacy keys so the migrated config serializes only deep_scan.*.
 	sc.ScannerFetchPackageSource = nil
 	sc.ScannerDisableNoNewPrivileges = false
+}
+
+// AdvertiseUpstreamServersEnabled reports the effective
+// advertise_upstream_servers value (default true when unset).
+func (c *Config) AdvertiseUpstreamServersEnabled() bool {
+	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
 }

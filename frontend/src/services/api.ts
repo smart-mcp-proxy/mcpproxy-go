@@ -396,8 +396,14 @@ class APIService {
   }
 
   // Server endpoints
-  async getServers(): Promise<APIResponse<{ servers: Server[] }>> {
-    return this.request<{ servers: Server[] }>('/api/v1/servers')
+  // Spec 109-l: `scope.profile` asks for the servers (and tool counts) a profile
+  // admits (GET /servers?profile=, Spec 108-e). An unscoped call is the plain
+  // request; a scoped one throws an ApiError that carries the status, so the
+  // page can say "Profile not found" instead of a generic failure.
+  async getServers(scope?: { profile?: string }): Promise<APIResponse<{ servers: Server[] }>> {
+    const query = queryString({ profile: scope?.profile })
+    if (!query) return this.request<{ servers: Server[] }>('/api/v1/servers')
+    return this.requestRaw<{ servers: Server[] }>(`/api/v1/servers${query}`)
   }
 
   async enableServer(serverName: string): Promise<APIResponse> {
@@ -499,8 +505,15 @@ class APIService {
   }
 
   // Global tools listing (Spec 050) — all tools across all servers from a single consolidated endpoint.
-  async getGlobalTools(): Promise<APIResponse<GlobalToolsResponse>> {
-    return this.request<GlobalToolsResponse>('/api/v1/tools')
+  //
+  // Spec 108-j (FR-032): with a `client` or `profile` the listing is a view-as
+  // (rows gain `access`/`profile_tier`). That goes through requestRaw so a
+  // 400/403/404 keeps its status and body: the page shows "Client not found"
+  // inline instead of a blank table. Without a scope the call is unchanged.
+  async getGlobalTools(scope?: { client?: string; profile?: string }): Promise<APIResponse<GlobalToolsResponse>> {
+    const query = queryString({ client: scope?.client, profile: scope?.profile })
+    if (!query) return this.request<GlobalToolsResponse>('/api/v1/tools')
+    return this.requestRaw<GlobalToolsResponse>(`/api/v1/tools${query}`)
   }
 
   // Tool-level quarantine (Spec 032) + scan-gate hold evidence (Spec 088).
@@ -1103,6 +1116,10 @@ class APIService {
     end_time?: string
     limit?: number
     offset?: number
+    /** Spec 108 FR-031: `-` means unattributed. Sent only once available. */
+    profile?: string
+    client?: string
+    token?: string
   }): Promise<APIResponse<ActivityListResponse>> {
     const searchParams = new URLSearchParams()
     if (params) {
@@ -1137,8 +1154,11 @@ class APIService {
     return this.request<ActivityDetailResponse>(`/api/v1/activity/${encodeURIComponent(id)}`)
   }
 
-  async getActivitySummary(period: string = '24h'): Promise<APIResponse<ActivitySummaryResponse>> {
-    return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary?period=${period}`)
+  async getActivitySummary(
+    period: string = '24h',
+    scope?: { profile?: string; client?: string; token?: string },
+  ): Promise<APIResponse<ActivitySummaryResponse>> {
+    return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary${queryString({ period, ...scope })}`)
   }
 
   // Usage statistics aggregate for the Web UI usage graphs (Spec 069).
@@ -1149,6 +1169,10 @@ class APIService {
     status?: UsageStatus
     top?: number
     sort?: UsageSort
+    /** Spec 108 FR-031: `-` means unattributed. Sent only once available. */
+    profile?: string
+    client?: string
+    token?: string
   }): Promise<APIResponse<UsageAggregateResponse>> {
     const searchParams = new URLSearchParams()
     if (params) {
@@ -1177,6 +1201,10 @@ class APIService {
     start_time?: string
     end_time?: string
     include_bodies?: boolean
+    /** Spec 108 FR-031: the export matches the filtered table. */
+    profile?: string
+    client?: string
+    token?: string
   }): string {
     const searchParams = new URLSearchParams()
     searchParams.append('format', params.format)

@@ -733,6 +733,13 @@ func (h *credentialHandle) markWritten() { h.wrote = true }
 // the freshly issued `mcp_cli_` secret (minted on first use).
 func (h *credentialHandle) secret() (string, error) {
 	if !h.mint {
+		// A keyless write mints nothing but still rewrites the client's config:
+		// refuse while another connect holds the in-flight claim (FR-021a).
+		if h.intent.Keyless && h.svc.minter != nil {
+			if err := h.svc.minter.CheckIdle(h.clientID); err != nil {
+				return "", err
+			}
+		}
 		return "", nil
 	}
 	if h.issued == nil {
@@ -754,7 +761,10 @@ func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
 	}
 	if writeErr != nil || res == nil || !res.Success {
 		if h.wrote {
-			return nil // ambiguous outcome: leave it to the reconciler
+			// Ambiguous outcome: leave it to the reconciler, which must be free
+			// to resolve it from the file (FR-021a).
+			h.svc.minter.Release(h.clientID, h.issued)
+			return nil
 		}
 		_ = h.svc.minter.Abort(h.clientID, h.intent, h.issued)
 		h.issued = nil

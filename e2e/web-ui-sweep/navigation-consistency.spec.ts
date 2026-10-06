@@ -10,6 +10,7 @@
 // Launcher: scripts/run-web-smoke.sh (boots a real mcpproxy instance with its
 // embedded frontend, never a dev server).
 import { test, expect, Page } from '@playwright/test'
+import { RO_PROFILE, SERVER, cleanupProfiles, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -211,7 +212,7 @@ for (const width of WIDTHS) {
         expect(visible.includes('header-drawer-toggle'), `drawer toggle visibility on ${where}`).toBe(width < 1024)
 
         const pill = (await header.locator('[data-test="header-status-pill"]').innerText()).trim()
-        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ of \d+ online/)
+        if (wide) expect(pill, `status pill on ${where}`).toMatch(/\d+ (of \d+ )?online/)
         else expect(pill, `status pill on ${where}`).toMatch(/^\s*●?\s*\d+\/\d+\s*$/)
 
         const add = (await header.locator('[data-test="header-add-menu"]').innerText()).trim()
@@ -440,6 +441,20 @@ test('Activity sessions rows open their calls (SC-009)', async ({ page }) => {
   await page.waitForTimeout(500)
   const row = page.locator('[data-test="sessions-row"]').first()
   test.skip((await row.count()) === 0, 'no MCP sessions recorded on this instance')
+
+  // The row's "View Activity" link must land on the calls view scoped to that
+  // session, and the page's own REST request must carry the session filter.
+  const seen = collect(page, /^\/api\/v1\/activity$/)
+  await row.locator('[data-test="session-view-activity"]').click()
+  await expect(page).toHaveURL(/\/ui\/activity\?(?:[^#]*&)?session=[^&]+/)
+  const session = new URL(page.url()).searchParams.get('session')!
+  await page.waitForTimeout(1000)
+  expect(seen.length, 'sessions row: no activity REST request was issued').toBeGreaterThan(0)
+  // toRest() routes a `ws-` work session to work_session_id, a transport id to session_id.
+  const param = session.startsWith('ws-') ? 'work_session_id' : 'session_id'
+  for (const req of seen) {
+    expect(new URL(req).searchParams.get(param), `sessions row: ${req}`).toBe(session)
+  }
 })
 
 test('the status pill opens Servers and attention "See all" opens Home (Spec 109 FR-053)', async ({ page }) => {
@@ -474,5 +489,42 @@ test('client, profile and token scope links stay hidden without scope_filters (S
       page.locator(`[data-test="clients-page"] a[href*="${key}="]`),
       `a ${key}= link must stay hidden until features.scope_filters lists it`,
     ).toHaveCount(0)
+  }
+})
+
+// Spec 109 D35 (T163): the palette also finds profiles, clients and agent
+// tokens. The three lists load on the first non-empty input, never on open.
+test('the command palette finds a profile and opens its editor (Spec 109 T163)', async ({ page }) => {
+  test.skip(!SERVER, 'needs a fixture upstream (SWEEP_SERVER_NAME) to seed the profile')
+  await seedProfiles()
+  try {
+    const listRequests: string[] = []
+    page.on('request', (request) => {
+      const u = new URL(request.url())
+      if (/^\/api\/v1\/(profiles|clients|tokens)$/.test(u.pathname)) listRequests.push(u.pathname)
+    })
+    await goto(page, '/', 'main')
+    const palette = page.locator('dialog[data-test="command-palette"]')
+    await page.keyboard.press('ControlOrMeta+K')
+    await expect(palette).toHaveAttribute('open', '')
+    const before = listRequests.length
+    await palette.locator('input').fill('e2e')
+    const row = palette.locator('[data-test^="palette-row-profiles-"]').first()
+    await expect(row).toContainText(RO_PROFILE)
+    const during = listRequests.slice(before)
+    expect(during.filter((p) => p === '/api/v1/clients'), 'one /clients request after the first keystroke').toHaveLength(1)
+    expect(during.filter((p) => p === '/api/v1/tokens'), 'one /tokens request after the first keystroke').toHaveLength(1)
+    // The default row is "Search tools for ..."; arrow down to the profile row, then Enter.
+    const options = palette.locator('[role="option"]')
+    const index = await options.evaluateAll(
+      (els, id) => els.findIndex((el) => el.getAttribute('data-test') === id),
+      await row.getAttribute('data-test'),
+    )
+    expect(index).toBeGreaterThan(0)
+    for (let n = 0; n < index; n++) await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(new RegExp(`/ui/profiles/${RO_PROFILE}`))
+  } finally {
+    await cleanupProfiles()
   }
 })

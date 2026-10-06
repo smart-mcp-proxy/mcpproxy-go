@@ -136,13 +136,8 @@ func (r *Runtime) MutateConfig(
 
 	diff := &ConfigDiff{Changes: diffProfiles(before, desired, hint)}
 	r.writeProfileChanges(ctx, actor, diff.Changes)
-	if len(diff.Changes) > 0 {
-		// A profile that was created, renamed or re-scoped needs its per-profile
-		// search index built or rebuilt NOW: the apply only reconciles them when
-		// mcpServers changed, so without this a locked client of a renamed profile
-		// would search an empty index until the next discovery pass.
-		r.reconcileProfileIndexes()
-	}
+	// The per-profile search indexes of a created, renamed or re-scoped profile
+	// are reconciled by the apply itself (applyConfigLocked, #1458).
 	return result, diff, nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -134,12 +133,12 @@ func init() {
 	codeExecCmd.Flags().IntVar(&codeMaxToolCalls, "max-tool-calls", 0, "Maximum number of tool calls (0 = unlimited)")
 	codeExecCmd.Flags().StringSliceVar(&codeAllowedSrvs, "allowed-servers", []string{}, "Comma-separated list of allowed server names (empty = all allowed)")
 	codeExecCmd.Flags().StringVarP(&codeLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	codeExecCmd.Flags().StringVarP(&codeConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(codeExecCmd.Flags(), &codeConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	codeExecCmd.Flags().StringVar(&codeLanguage, "language", "javascript", "Source code language: javascript, typescript")
 
 	// The scripts commands resolve the same config FILE as exec, so they take
 	// the same --config override.
-	codeScriptsListCmd.Flags().StringVarP(&codeConfigPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(codeScriptsListCmd.Flags(), &codeConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 
 	// Add examples
 	codeExecCmd.Example = `  # Execute inline code with input
@@ -652,14 +651,10 @@ func outputResultFromMCP(result *mcp.CallToolResult) error {
 // config file has been chosen, so deriving from it would disagree with the
 // file actually loaded (and with the daemon) about where stored scripts live.
 func codeConfigFilePath() (string, error) {
-	if codeConfigPath != "" {
-		return codeConfigPath, nil
+	if p := resolveCLIConfigPath(codeConfigPath); p != "" {
+		return p, nil
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user home directory: %w", err)
-	}
-	return filepath.Join(homeDir, ".mcpproxy", "mcp_config.json"), nil
+	return defaultHomeConfigPath()
 }
 
 // loadCodeConfig loads the MCP configuration file for code command

@@ -1,5 +1,6 @@
 <template>
-  <BaseDialog :open="open" :title="`Explain access${subjectLabel ? ' — ' + subjectLabel : ''}`" wide test-id="access-explainer" @close="emit('close')">
+  <BaseDialog :open="open" :title="title ?? `Explain access${subjectLabel ? ' — ' + subjectLabel : ''}`" wide test-id="access-explainer" @close="emit('close')">
+    <p v-if="note" class="text-sm opacity-80" data-test="explain-note">{{ note }}</p>
     <form class="flex flex-wrap items-end gap-2" @submit.prevent="run">
       <div class="form-control flex-1 min-w-[14rem]">
         <label class="label" for="explain-tool"><span class="label-text font-medium">Tool</span></label>
@@ -79,6 +80,11 @@ const props = defineProps<{
   open: boolean
   subject: { kind: 'client' | 'token' | 'profile' | 'anonymous'; name?: string }
   tool?: string
+  // Spec 108-j J8: an entry point (a blocked Activity row) can retitle the
+  // dialog and say what the verdict is evaluated against; the explainer is live,
+  // never a replay of the moment of the call.
+  title?: string
+  note?: string
 }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 const router = useRouter()
@@ -98,7 +104,14 @@ const resultSubject = computed(() => {
   return s.kind === 'anonymous' ? 'anonymous callers' : `${s.kind} ${s.name ?? ''}`.trim()
 })
 
+// Every explain takes a ticket and only the latest applies: closing and
+// reopening the still-mounted dialog during a pending request must not let the
+// old answer repopulate the reset dialog (#1446 F5.2).
+let runTicket = 0
+
 watch(() => props.open, open => {
+  runTicket++
+  busy.value = false
   if (!open) return
   toolInput.value = props.tool ?? ''
   result.value = null
@@ -119,6 +132,7 @@ async function loadTools() {
 
 async function run() {
   if (!toolInput.value) return
+  const ticket = ++runTicket
   busy.value = true
   error.value = ''
   const query: ExplainSubjectQuery = { tool: toolInput.value }
@@ -127,12 +141,15 @@ async function run() {
   else if (props.subject.kind === 'profile') query.profile = props.subject.name
   else query.anonymous = true
   try {
-    result.value = await api.explainAccess(query)
+    const explained = await api.explainAccess(query)
+    if (ticket !== runTicket) return
+    result.value = explained
   } catch (err) {
+    if (ticket !== runTicket) return
     result.value = null
     error.value = describeError(err)
   } finally {
-    busy.value = false
+    if (ticket === runTicket) busy.value = false
   }
 }
 
@@ -157,22 +174,24 @@ function follow(fix: { action: string; target: string }) {
     case 'allow_in_profile':
     case 'classify_in_profile':
     case 'add_server_to_profile':
-      void router.push({ name: 'profile-editor', params: { name: fix.target }, query: { focus: tool } })
+      void router.push(scope.linkTo('profile-editor', { focus: tool }, { name: fix.target }))
       break
     case 'move_client':
+      // Deliberately unscoped: a sticky profile/client filter could hide the
+      // very client row this fix is about to move.
       void router.push({ name: 'clients', query: { focus: fix.target, move: '1' } })
       break
     case 'edit_token':
       void router.push(scope.linkTo('tokens', { token: fix.target }))
       break
     case 'enable_server':
-      void router.push({ name: 'server-detail', params: { serverName: fix.target || server } })
+      void router.push(scope.linkTo('server-detail', {}, { serverName: fix.target || server }))
       break
     case 'approve_tool':
-      void router.push({ name: 'review', query: { server: fix.target || server } })
+      void router.push(scope.linkTo('review', { server: fix.target || server }))
       break
     case 'change_setting':
-      void router.push({ path: '/settings', query: { tab: 'security', focus: fix.target } })
+      void router.push(scope.linkTo('settings', { tab: 'security', focus: fix.target }))
       break
     case 'reconnect_client':
       window.dispatchEvent(new CustomEvent(CONNECT_CLIENT_EVENT, { detail: { client: fix.target } }))

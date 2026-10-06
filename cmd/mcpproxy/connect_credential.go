@@ -169,13 +169,15 @@ func parseConnectResponse(status int, raw []byte, clientID string) (*connect.Con
 // --- offline --------------------------------------------------------------
 
 // offlineConnectBackend runs the clients service locally over config.db when
-// no daemon is reachable. Its guard is the conservative one: it cannot
-// evaluate the tool-dependent reachability comparison without a published
-// snapshot, so it refuses any named binding while require_mcp_auth is off —
-// only ever stricter than the daemon's.
+// no daemon is reachable. Its guard is runtime.StrictOfflineBindingGuard: it
+// cannot evaluate the tool-dependent reachability comparison without a
+// published snapshot, so while require_mcp_auth is off it refuses any new or
+// changed named binding; a reconnect that keeps the recorded binding is
+// allowed. Only ever stricter than the daemon's.
 type offlineConnectBackend struct {
-	sm  *storage.Manager
-	svc *connect.Service
+	sm      *storage.Manager
+	svc     *connect.Service
+	clients *runtime.ClientsService
 }
 
 func (o *offlineConnectBackend) close()          { _ = o.sm.Close() }
@@ -194,17 +196,24 @@ func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error
 		Store:    sm,
 		HMACKey:  func() ([]byte, error) { return auth.GetOrCreateHMACKey(cfg.DataDir) },
 		Config:   func() *config.Config { return cfg },
+		Guard:    func() runtime.BindingGuard { return runtime.StrictOfflineBindingGuard{} },
 		Activity: sm.SaveActivity,
 	})
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).
 		WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
 		WithCredentialMinter(clients.ConnectMinter())
-	return &offlineConnectBackend{sm: sm, svc: svc}, nil
+	clients.SetConfigReader(svc)
+	return &offlineConnectBackend{sm: sm, svc: svc, clients: clients}, nil
 }
 
 func (o *offlineConnectBackend) connect(clientID, serverName string, force bool, intent connect.CredentialIntent) (*connect.ConnectResult, error) {
 	intent.ActorKind = "cli_offline"
 	intent.Surface = string(profile.SurfaceCLI)
+	// Resolve a rotation an earlier interrupted connect left staged (its new
+	// secret may already be in the client config) before staging another one,
+	// which would silently replace it. Best effort: an unreadable config keeps
+	// both secrets, exactly as the daemon's reconciler does.
+	_ = o.clients.ReconcileClient(context.Background(), clientID)
 	return o.svc.ConnectWithOptions(clientID, serverName, connect.ConnectOptions{Force: force, Intent: intent})
 }
 
@@ -226,8 +235,14 @@ func describeConnectFailure(err error, clientID string) error {
 	var guardErr *runtime.BindingGuardError
 	var conflict *connectConflictError
 	var val *runtime.ValidationError
+	var busy *runtime.ConnectInProgressError
+	var superseded *runtime.CredentialSupersededError
 	var b strings.Builder
 	switch {
+	case errors.As(err, &busy):
+		b.WriteString(busy.Error())
+	case errors.As(err, &superseded):
+		b.WriteString(superseded.Error())
 	case errors.As(err, &guardErr):
 		b.WriteString(guardErr.Error())
 		b.WriteString("\nFixes:")

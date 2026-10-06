@@ -85,15 +85,21 @@ func TestReviewCommandGoldens(t *testing.T) {
 func TestReviewCommandPromptsAndHonorsDecline(t *testing.T) {
 	for _, action := range []string{"approve", "reject"} {
 		t.Run(action, func(t *testing.T) {
+			// approve reads the review before it prompts (the prompt names the
+			// exact tool count), so it needs a daemon; reject does not.
+			recorder := &reviewRecorder{}
+			newMemoryReviewDaemon(t, recorder)
+			setOutputGlobals(t, "table", false)
 			var prompt string
 			cmd := newReviewCommand(func(message string) (bool, error) {
 				prompt = message
 				return false, nil
 			})
-			cmd.SetArgs([]string{action, "filesystem"})
+			cmd.SetArgs([]string{action, "memory"})
 			require.NoError(t, cmd.Execute())
-			require.Contains(t, prompt, "filesystem")
+			require.Contains(t, prompt, "memory")
 			require.Contains(t, strings.ToLower(prompt), action)
+			require.Empty(t, recorder.writes(), "declining sends no write")
 		})
 	}
 }
@@ -227,6 +233,39 @@ func TestReviewShowJSONNeverRevealsComposerRedaction(t *testing.T) {
 	output := captureReviewOutput(t, func() error { return runReviewRead("/api/v1/servers/alpha/review") })
 	require.NotContains(t, output, secret)
 	require.Contains(t, output, "••••23")
+}
+
+func TestFormatReviewShowPrintsScanCoverage(t *testing.T) {
+	show := func(scan string) string {
+		payload := `{"data":{"server":{"name":"notes"` + scan + `},"tools":[]}}`
+		return captureReviewOutput(t, func() error { return formatReviewResponse("table", []byte(payload), false) })
+	}
+
+	stale := show(`,"scan":{"verdict":"clean","risk_score":0,"coverage":"stale","tools_scanned":5,"unscanned_tools":["notes"]}`)
+	require.Contains(t, stale, "Scan: out of date (1 tool changed or added after the last scan: notes); run: mcpproxy security rescan notes")
+	require.NotContains(t, stale, "risk 0/100")
+
+	staleMany := show(`,"scan":{"verdict":"warnings","coverage":"stale","tools_scanned":5,"unscanned_tools":["a","b"]}`)
+	require.Contains(t, staleMany, "Scan: out of date (2 tools changed or added after the last scan: a, b); run: mcpproxy security rescan notes")
+
+	current := show(`,"scan":{"verdict":"clean","risk_score":0,"coverage":"current","tools_scanned":5}`)
+	require.Contains(t, current, "Scan: clean · risk 0/100 · covers all 5 tools")
+	require.Less(t, strings.Index(current, "Server: notes"), strings.Index(current, "Scan: clean"))
+
+	notCaptured := show(`,"scan":{"verdict":"not_scanned","coverage":"not_captured"}`)
+	require.Contains(t, notCaptured, "Scan: not checked against tool definitions: they have not been captured yet")
+	require.Contains(t, notCaptured, "Fetch tool definitions")
+	require.NotContains(t, notCaptured, "clean")
+
+	require.Contains(t, show(`,"scan":{"verdict":"clean","coverage":"tools_not_scanned"}`),
+		"Scan: the last scan did not analyse tool definitions (0 exported); run: mcpproxy security rescan notes")
+	require.Contains(t, show(`,"scan":{"verdict":"not_scanned","coverage":"none"}`),
+		"Scan: not scanned yet; run: mcpproxy security rescan notes")
+	require.Contains(t, show(`,"scan":{"verdict":"not_scanned","coverage":"scanning"}`), "Scan: in progress")
+
+	// No scan object: no line. A scan without coverage (older core): "none", as on Web and macOS.
+	require.NotContains(t, show(``), "Scan:")
+	require.Contains(t, show(`,"scan":{"verdict":"clean"}`), "Scan: none")
 }
 
 func captureReviewOutput(t *testing.T, fn func() error) string {

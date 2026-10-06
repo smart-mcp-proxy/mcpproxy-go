@@ -246,7 +246,7 @@ struct HealthStatus: Codable, Equatable {
 
 /// What an `AttentionItem` is about. Matches the Go `contracts.AttentionSubject`.
 struct AttentionSubject: Codable, Equatable {
-    let type: String // "server" | "tool" | "client"
+    let type: String // "server" | "tool" | "client" | "setting"
     let id: String
     let name: String
 }
@@ -376,11 +376,22 @@ struct ReviewQueueRow: Codable, Equatable, Identifiable {
     var id: String { server }
 }
 struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }
-struct ReviewScan: Codable, Equatable { let verdict: String; let riskScore: Int?; let reportID: String?; enum CodingKeys: String, CodingKey { case verdict; case riskScore = "risk_score"; case reportID = "report_id" } }
+/// Baseline scan summary of a review. `coverage` (current, stale, not_captured,
+/// tools_not_scanned, scanning, none) says whether the verdict describes the
+/// definitions on screen; a payload from an older core omits it and is read as `none`.
+struct ReviewScan: Codable, Equatable {
+    let verdict: String; let riskScore: Int?; let reportID: String?
+    let coverage: String?; let toolsScanned: Int?; let unscannedTools: [String]?
+    enum CodingKeys: String, CodingKey {
+        case verdict, coverage
+        case riskScore = "risk_score"; case reportID = "report_id"
+        case toolsScanned = "tools_scanned"; case unscannedTools = "unscanned_tools"
+    }
+}
 struct ReviewServerSummary: Codable, Equatable { let name: String; let transport: String?; let command: String?; let url: String?; let quarantined: Bool; let trustMode: String?; let sourceRegistryID: String?; let sourceRegistryProvenance: String?; let definitionsCaptured: Bool; let scan: ReviewScan?; enum CodingKeys: String, CodingKey { case name, transport, command, url, quarantined, scan; case trustMode = "trust_mode"; case sourceRegistryID = "source_registry_id"; case sourceRegistryProvenance = "source_registry_provenance"; case definitionsCaptured = "definitions_captured" } }
 struct ReviewToolPrevious: Codable, Equatable { let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
 struct ReviewToolDiff: Codable, Equatable { let description: String?; let inputSchema: String?; let outputSchema: String?; let annotations: String?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
-struct ReviewTool: Codable, Equatable, Identifiable { let name: String; let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; let tier: String; let approvalStatus: String; let disabled: Bool; let scanVerdict: String; let previous: ReviewToolPrevious?; let diff: ReviewToolDiff?; enum CodingKeys: String, CodingKey { case name, description, annotations, tier, disabled, previous, diff; case inputSchema = "input_schema"; case outputSchema = "output_schema"; case approvalStatus = "approval_status"; case scanVerdict = "scan_verdict" }; var id: String { name } }
+struct ReviewTool: Codable, Equatable, Identifiable { let name: String; let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; let tier: String; let approvalStatus: String; let disabled: Bool; let scanVerdict: String; let heldReason: String?; let heldSignals: [String]?; let defaultAllowed: Bool?; let previous: ReviewToolPrevious?; let diff: ReviewToolDiff?; enum CodingKeys: String, CodingKey { case name, description, annotations, tier, disabled, previous, diff; case inputSchema = "input_schema"; case outputSchema = "output_schema"; case approvalStatus = "approval_status"; case scanVerdict = "scan_verdict"; case heldReason = "held_reason"; case heldSignals = "held_signals"; case defaultAllowed = "default_allowed" }; var id: String { name } }
 struct ServerReviewResponse: Codable, Equatable { let server: ReviewServerSummary; let tools: [ReviewTool] }
 
 // MARK: - OAuth Status
@@ -966,9 +977,26 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     let hasSensitiveData: Bool?
     let detectionTypes: [String]?
     let maxSeverity: String?
+    // Spec 108-e attribution (108-k K18): who made the call and under which
+    // profile. Absent on a record from before 108 and on a core that predates
+    // it; `var` so the memberwise initialiser keeps defaulting them to nil.
+    var profile: String?
+    /// How the profile was resolved: `pin`, `binding`, `url`, `session`, `anonymous`.
+    var profileSource: String?
+    var clientId: String?
+    /// The advisory name the client announced (never trusted as identity).
+    var clientName: String?
+    var tokenName: String?
+    /// Why a blocked call was blocked (`profile_tier`, `profile_rule`, …).
+    var profileBlockReason: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, status, timestamp, arguments, response, metadata
+        case id, type, source, status, timestamp, arguments, response, metadata, profile
+        case profileSource = "profile_source"
+        case clientId = "client_id"
+        case clientName = "client_name"
+        case tokenName = "token_name"
+        case profileBlockReason = "block_reason"
         case serverName = "server_name"
         case toolName = "tool_name"
         case responseTruncated = "response_truncated"
@@ -984,6 +1012,31 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
 
     static func == (lhs: ActivityEntry, rhs: ActivityEntry) -> Bool {
         lhs.id == rhs.id
+    }
+
+    // MARK: Attribution (Spec 108-k K18)
+
+    /// The client of the call: its id when the credential identified one, else
+    /// the advisory name marked with "~" (it is not an identity).
+    var callerClientLabel: String? {
+        if let id = clientId, !id.isEmpty { return id }
+        if let name = clientName, !name.isEmpty { return "~\(name)" }
+        return nil
+    }
+
+    /// `work-ro · locked by credential`: the profile and how it was resolved, in
+    /// the words the Web UI shows (Spec 108-l L6, `source` table of labels.json).
+    /// nil for an unattributed record.
+    var callerProfileLabel: String? {
+        guard let profile, !profile.isEmpty else { return nil }
+        let source = ProfileSourceText.label(profileSource ?? "")
+        return source.isEmpty ? profile : "\(profile) · \(source)"
+    }
+
+    /// Whether any attribution field is present.
+    var hasAttribution: Bool {
+        callerClientLabel != nil || callerProfileLabel != nil
+            || !(tokenName ?? "").isEmpty || !(profileBlockReason ?? "").isEmpty
     }
 
     // MARK: Intent Helpers
@@ -1230,10 +1283,25 @@ struct ClientPresenceRecord: Codable, Identifiable, Equatable {
     let activeSessions: Int
     let calls24h: Int
     let reloadHint: String?
-    let sessions: [ClientPresenceSession]?
+    var sessions: [ClientPresenceSession]?
+
+    // Spec 108-f ClientView additions (108-k). All optional (`var`, so the
+    // memberwise init keeps defaulting them): a core older than 108 sends none
+    // of them and the Spec 109-h decoding above must not change.
+    var credentialState: CredentialState?
+    var tokenName: String?
+    var profile: String?
+    var profileTitle: String?
+    var profileMode: BindingMode?
+    /// `pin` (locked) or `binding` (switchable); empty without a client credential.
+    var profileSource: String?
+    var profileMissing: Bool?
+    var expiresAt: String?
+    var rotationPending: Bool?
+    var blocked24h: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, icon, state, installed, connected, sessions
+        case id, kind, icon, state, installed, connected, sessions, profile
         case displayName = "display_name"
         case connectionUnverified = "connection_unverified"
         case configPath = "config_path"
@@ -1242,6 +1310,43 @@ struct ClientPresenceRecord: Codable, Identifiable, Equatable {
         case activeSessions = "active_sessions"
         case calls24h = "calls_24h"
         case reloadHint = "reload_hint"
+        case credentialState = "credential_state"
+        case tokenName = "token_name"
+        case profileTitle = "profile_title"
+        case profileMode = "profile_mode"
+        case profileSource = "profile_source"
+        case profileMissing = "profile_missing"
+        case expiresAt = "expires_at"
+        case rotationPending = "rotation_pending"
+        case blocked24h = "blocked_24h"
+    }
+
+    /// Whether this row holds an ACTIVE client credential, the only state in
+    /// which the profile picker and the lock toggle work (FR-026).
+    var hasClientCredential: Bool { credentialState == .client }
+
+    /// The row's current profile as a picker value: "" is All servers.
+    var boundProfile: String { profile ?? "" }
+
+    /// Locked only means something with a client credential and a profile.
+    var isLocked: Bool { hasClientCredential && profileMode == .locked && !boundProfile.isEmpty }
+
+    /// `Work · Read-only · locked` style label for the row; nil without a
+    /// client credential (there is nothing to show).
+    var bindingLabel: String? {
+        guard hasClientCredential else { return nil }
+        var label: String
+        if profileMissing == true {
+            label = "\(boundProfile) (missing)"
+        } else if boundProfile.isEmpty {
+            label = "All servers"
+        } else if let title = profileTitle, !title.isEmpty {
+            label = title
+        } else {
+            label = boundProfile
+        }
+        if isLocked { label += " · locked" }
+        return label
     }
 
     var effectiveDisplayPath: String? { displayPath ?? configPath }
@@ -1272,6 +1377,8 @@ struct ClientPresenceRecord: Codable, Identifiable, Equatable {
 
 struct ClientsResponse: Codable, Equatable {
     let clients: [ClientPresenceRecord]
+    /// Spec 108-f: instance-level warnings, computed over the full set.
+    var warnings: [ClientWarning]?
 }
 
 /// The shared endpoint and routing-mode contract from `GET /api/v1/routing`.
@@ -1344,6 +1451,9 @@ struct StatusResponse: Codable {
     /// Spec 109-k FR-080a: availability signals. Omitted by a core that
     /// supports none of them (109-k itself ships the list empty).
     let features: StatusFeatures?
+    /// Spec 109 FR-044a: the effective telemetry state (env opt-out vs config
+    /// vs default). Omitted for scoped callers and by a core that predates it.
+    let telemetry: TelemetryStateDTO?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -1354,6 +1464,7 @@ struct StatusResponse: Codable {
         case timestamp
         case defaultInstructions = "default_instructions"
         case features
+        case telemetry
     }
 
     /// Whether the core accepts the Spec 108 `profile`/`client`/`token`
@@ -1562,39 +1673,6 @@ struct ServersListResponse: Codable {
     let servers: [ServerStatus]
 }
 
-// MARK: - Profiles (Profiles v2 T5)
-
-/// One configured profile, matching `httpapi.ProfileSummary` from
-/// `GET /api/v1/profiles`. A profile scopes tool discovery to a named subset of
-/// upstream servers.
-struct ProfileSummary: Codable, Identifiable, Equatable {
-    let name: String
-    let servers: [String]
-    let toolCount: Int
-
-    var id: String { name }
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case servers
-        case toolCount = "tool_count"
-    }
-}
-
-/// Response wrapper for `GET /api/v1/profiles`.
-struct ProfilesListResponse: Codable {
-    let profiles: [ProfileSummary]
-}
-
-/// Response wrapper for `GET|PUT /api/v1/profiles/active`.
-struct ActiveProfileResponse: Codable {
-    let activeProfile: String
-
-    enum CodingKeys: String, CodingKey {
-        case activeProfile = "active_profile"
-    }
-}
-
 // MARK: - Server Action Response
 
 /// Response for server action endpoints (enable, disable, restart, etc.).
@@ -1741,10 +1819,15 @@ struct SearchTool: Codable {
     /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`). Never
     /// derived locally.
     let tier: String?
+    /// Spec 108 view-as (`GET /tools?client=|profile=`): the tool's tier under
+    /// the viewed subject's profile and its verdict. Absent otherwise.
+    var profileTier: String?
+    var access: ToolAccess?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations, tier
+        case name, description, annotations, tier, access
         case serverName = "server_name"
+        case profileTier = "profile_tier"
     }
 }
 
@@ -1761,6 +1844,8 @@ struct SearchToolsResponse: Codable {
     let results: [SearchResult]?
     let tools: [SearchTool]?
     let total: Int?
+    /// A non-administrator view-as lists visible rows only plus these counts.
+    var counts: ViewAsCounts?
 }
 
 // MARK: - Usage Aggregate (Spec 069 A3)

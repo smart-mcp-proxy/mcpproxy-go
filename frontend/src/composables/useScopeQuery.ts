@@ -353,10 +353,25 @@ const pageRouteNames: Partial<Record<PageId, string>> = {
   'profile-editor': 'profile-editor',
 }
 
+// Routes linkTo can build but that pageIdForRouteName must keep reporting as
+// outside the contract (Settings and a server detail host no scope chips).
+const linkOnlyRouteNames: Partial<Record<PageId, string>> = {
+  settings: 'settings',
+  'server-detail': 'server-detail',
+}
+
 /** The page a route name belongs to (the inverse of the map above), or
- * undefined for a route outside the contract (Settings, a server detail...). */
-export function pageIdForRouteName(name: unknown): PageId | undefined {
+ * undefined for a route outside the contract (Settings, a server detail...).
+ * `tab` is the route's `?tab=` value, which splits the Clients route. */
+export function pageIdForRouteName(name: unknown, tab?: unknown): PageId | undefined {
   if (typeof name !== 'string') return undefined
+  // The Clients route hosts three tabs: the agent-tokens tab is the 'tokens'
+  // page, and the endpoint tab is outside the scope contract.
+  if (name === pageRouteNames.clients) {
+    const value = Array.isArray(tab) ? tab[0] : tab
+    if (value === 'tokens') return 'tokens'
+    if (value === 'endpoint') return undefined
+  }
   for (const [page, routeName] of Object.entries(pageRouteNames)) {
     if (routeName === name) return page as PageId
   }
@@ -381,9 +396,12 @@ export interface UseScopeQueryResult {
   /** Rule 8: null when the active parameters are contradictory (today, an
    * explicit `server` that disagrees with `tool`'s server prefix) — the
    * caller must issue no request and render the conflict empty state instead
-   * (chips carry `conflicting: true` for the pair). */
-  toRest: () => Record<string, string> | null
-  linkTo: (page: PageId, patch?: Record<string, string>) => RouteLocationRaw
+   * (chips carry `conflicting: true` for the pair). `ignoreConflict` returns
+   * the map the non-conflicting parameters produce anyway, for a caller that
+   * reads only parameters independent of the conflicting pair (a page whose own
+   * state already resolved it while the URL write-back is still in flight). */
+  toRest: (opts?: { ignoreConflict?: boolean }) => Record<string, string> | null
+  linkTo: (page: PageId, patch?: Record<string, string>, params?: Record<string, string>) => RouteLocationRaw
   chips: ComputedRef<ScopeChip[]>
 }
 
@@ -436,7 +454,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     set(patch)
   }
 
-  function toRest(): Record<string, string> | null {
+  function toRest(opts?: { ignoreConflict?: boolean }): Record<string, string> | null {
     const out: Record<string, string> = {}
     const snapshot: Record<string, string | undefined> = {}
     for (const def of defsForPage(page)) snapshot[def.name] = state[def.name]
@@ -470,7 +488,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     // Rule 8 ("Contradictory parameters"): no REST query could express both
     // active values, so no request is issued at all — never a partial one
     // built from whichever fields didn't conflict.
-    if (conflicted) return null
+    if (conflicted && !opts?.ignoreConflict) return null
 
     // Usage `window` (url-filter-contract.md `from`/`to` row): computed from
     // BOTH values together, including when neither is present (window=all) —
@@ -484,7 +502,9 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     return out
   }
 
-  function linkTo(target: PageId, patch: Record<string, string> = {}): RouteLocationRaw {
+  // `params` are the path params of a parameterised route (`profile-editor`'s
+  // `name`, `server-detail`'s `serverName`); they never reach the query.
+  function linkTo(target: PageId, patch: Record<string, string> = {}, params?: Record<string, string>): RouteLocationRaw {
     const query: Record<string, string> = {}
     // Rule 3: sticky params carry (profile/client/token only once available).
     for (const def of registry.values()) {
@@ -495,7 +515,11 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
       if (v) query[def.name] = v
     }
     Object.assign(query, patch)
-    const name = pageRouteNames[target]
+    // An empty patch value clears a sticky param (the caller names the subject
+    // for the target page and must not inherit a competing one: F5.1).
+    for (const key of Object.keys(query)) if (query[key] === '') delete query[key]
+    const name = pageRouteNames[target] ?? linkOnlyRouteNames[target]
+    if (name && params) return { name, params, query }
     return name ? { name, query } : { path: `/${target}`, query }
   }
 

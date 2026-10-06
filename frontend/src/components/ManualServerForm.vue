@@ -26,7 +26,7 @@
       </div>
       <div class="mb-4 space-y-2">
         <label class="label"><span class="label-text font-semibold">Headers</span></label>
-        <div v-for="(h, i) in headerRows" :key="i" class="flex gap-2 items-start">
+        <div v-for="(h, i) in headerRows" :key="h.id" class="flex gap-2 items-start">
           <input v-model="h.name" type="text" class="input input-bordered input-sm flex-1" placeholder="Header name" :data-test="`manual-header-name-${i}`" />
           <SecretToggle
             class="flex-[2]"
@@ -41,7 +41,7 @@
           />
           <button type="button" class="btn btn-ghost btn-sm" data-test="manual-header-remove" @click="headerRows.splice(i, 1)">✕</button>
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" data-test="manual-header-add" @click="headerRows.push({ name: '', value: '', mode: 'value' })">
+        <button type="button" class="btn btn-ghost btn-sm" data-test="manual-header-add" @click="headerRows.push(newRow())">
           + Add header
         </button>
       </div>
@@ -58,7 +58,7 @@
       </div>
       <div class="mb-4 space-y-2">
         <label class="label"><span class="label-text font-semibold">Environment variables</span></label>
-        <div v-for="(e, i) in envRows" :key="i" class="flex gap-2 items-start">
+        <div v-for="(e, i) in envRows" :key="e.id" class="flex gap-2 items-start">
           <input v-model="e.name" type="text" class="input input-bordered input-sm flex-1" placeholder="VAR_NAME" :data-test="`manual-env-name-${i}`" />
           <SecretToggle
             class="flex-[2]"
@@ -73,7 +73,7 @@
           />
           <button type="button" class="btn btn-ghost btn-sm" data-test="manual-env-remove" @click="envRows.splice(i, 1)">✕</button>
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" data-test="manual-env-add" @click="envRows.push({ name: '', value: '', mode: 'value' })">
+        <button type="button" class="btn btn-ghost btn-sm" data-test="manual-env-add" @click="envRows.push(newRow())">
           + Add variable
         </button>
       </div>
@@ -134,8 +134,14 @@ const trustModeConfirmationPending = ref(false)
 const url = ref('')
 const command = ref('')
 const argsText = ref('')
-const headerRows = reactive<{ name: string; value: string; mode: 'value' | 'secret' }[]>([])
-const envRows = reactive<{ name: string; value: string; mode: 'value' | 'secret' }[]>([])
+// Each row carries a stable `id` so :key survives removal of an earlier row;
+// keying by index would hand a removed row's SecretToggle (and its revealed
+// state) to the next row (review F3.1).
+type KVRow = { id: number; name: string; value: string; mode: 'value' | 'secret' }
+let rowSeq = 0
+const newRow = (): KVRow => ({ id: ++rowSeq, name: '', value: '', mode: 'value' })
+const headerRows = reactive<KVRow[]>([])
+const envRows = reactive<KVRow[]>([])
 const error = ref<string | null>(null)
 const submitting = ref(false)
 const keyringAvailable = ref(true)

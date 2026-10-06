@@ -25,6 +25,7 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 	var tools []string
 	var force bool
 	var yes bool
+	var all bool
 	cmd := &cobra.Command{Use: "review", Short: "Inspect and decide quarantined server reviews"}
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "List servers needing review", RunE: func(_ *cobra.Command, _ []string) error {
 		return runReviewRead("/api/v1/review")
@@ -36,40 +37,59 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 	show.Flags().Bool("full", false, "Show full captured schemas and descriptions")
 	cmd.AddCommand(show)
 	approve := &cobra.Command{Use: "approve <server>", Short: "Approve a server through the scan gate", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		if !yes {
-			confirmed, err := confirm(fmt.Sprintf("Approve review for server '%s'?", args[0]))
-			if err != nil {
-				return err
-			}
-			if !confirmed {
-				fmt.Println("Approval cancelled.")
-				return nil
-			}
+		server := args[0]
+		if all && len(tools) > 0 {
+			return errReviewAllWithTools
 		}
-		quarantined, err := reviewServerQuarantined(args[0])
+		state, err := reviewServerState(server)
 		if err != nil {
 			return err
 		}
-		if quarantined {
-			if len(tools) > 0 {
-				return fmt.Errorf("--tools cannot select a quarantined server approval; use --except to block tools")
-			}
-			body := map[string]interface{}{"force": force}
+		if !state.quarantined {
 			if len(except) > 0 {
-				body["block"] = except
+				return fmt.Errorf("--except applies only while approving a quarantined server")
 			}
-			return runReviewWrite(args[0], "security/approve", body)
+			if !yes {
+				confirmed, err := confirm(fmt.Sprintf("Approve review for server '%s'?", server))
+				if err != nil || !confirmed {
+					return reviewDeclined("Approval cancelled.", err)
+				}
+			}
+			body := map[string]interface{}{"approve_all": true}
+			if len(tools) > 0 {
+				body = map[string]interface{}{"tools": tools}
+			}
+			return runReviewWrite(server, "tools/approve", body)
 		}
-		if len(except) > 0 {
-			return fmt.Errorf("--except applies only while approving a quarantined server")
+		body := map[string]interface{}{"force": force}
+		prompt := fmt.Sprintf("Approve server '%s' without seeing tools?", server)
+		var summary string
+		if len(state.tools) > 0 {
+			block, allowed, err := reviewApproveSelection(state.tools, all, tools, except)
+			if err != nil {
+				return fmt.Errorf("%w for server '%s'", err, server)
+			}
+			if len(block) > 0 {
+				body["block"] = block
+			}
+			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block, all)
+		} else if len(tools) > 0 || len(except) > 0 {
+			// Nothing to select from: dropping --tools/--except would approve blind.
+			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
 		}
-		body := map[string]interface{}{"approve_all": true}
-		if len(tools) > 0 {
-			body = map[string]interface{}{"tools": tools}
+		if !yes {
+			confirmed, err := confirm(prompt)
+			if err != nil || !confirmed {
+				return reviewDeclined("Approval cancelled.", err)
+			}
 		}
-		return runReviewWrite(args[0], "tools/approve", body)
+		if summary != "" && ResolveOutputFormat() == "table" {
+			fmt.Println(summary)
+		}
+		return runReviewWrite(server, "security/approve", body)
 	}}
-	approve.Flags().StringSliceVar(&tools, "tools", nil, "Approve only these pending or changed tools on a trusted server")
+	approve.Flags().BoolVar(&all, "all", false, "Approve every pending or changed tool; tools blocked earlier stay blocked (default: only read-only tools with a clean scan, as on the Web and macOS review screens)")
+	approve.Flags().StringSliceVar(&tools, "tools", nil, "Approve exactly these tools and block the rest (trusted server: only these pending or changed tools)")
 	approve.Flags().StringSliceVar(&except, "except", nil, "Block these tools while approving the server")
 	approve.Flags().BoolVar(&force, "force", false, "Force approval when the scan verdict is dangerous")
 	approve.Flags().BoolVar(&yes, "yes", false, "Confirm the approval")
@@ -147,36 +167,136 @@ func runReviewWrite(server, operation string, value interface{}) error {
 	return formatReviewResponse(ResolveOutputFormat(), response, false)
 }
 
-func reviewServerQuarantined(server string) (bool, error) {
+var errReviewAllWithTools = fmt.Errorf("--all cannot be combined with --tools")
+
+// reviewDeclined reports a declined confirmation as a clean exit.
+func reviewDeclined(message string, err error) error {
+	if err != nil {
+		return err
+	}
+	fmt.Println(message)
+	return nil
+}
+
+// reviewToolState is the part of a review tool the approval selection needs.
+// DefaultAllowed is nil when the core predates the field, which counts as
+// false: a mismatched core fails closed (D43.1).
+type reviewToolState struct {
+	Name           string `json:"name"`
+	Tier           string `json:"tier"`
+	DefaultAllowed *bool  `json:"default_allowed"`
+}
+
+type reviewServerStateResult struct {
+	quarantined bool
+	tools       []reviewToolState
+}
+
+func reviewServerState(server string) (reviewServerStateResult, error) {
 	client, _, err := newSecurityCLIClient()
 	if err != nil {
-		return false, err
+		return reviewServerStateResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+url.PathEscape(server)+"/review", nil)
 	if err != nil {
-		return false, err
+		return reviewServerStateResult{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, err
+		return reviewServerStateResult{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, parseAPIError(body, resp.StatusCode, "read review")
+		return reviewServerStateResult{}, parseAPIError(body, resp.StatusCode, "read review")
 	}
 	var envelope struct {
 		Data struct {
 			Server struct {
 				Quarantined bool `json:"quarantined"`
 			} `json:"server"`
+			Tools []reviewToolState `json:"tools"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return false, err
+		return reviewServerStateResult{}, err
 	}
-	return envelope.Data.Server.Quarantined, nil
+	return reviewServerStateResult{quarantined: envelope.Data.Server.Quarantined, tools: envelope.Data.Tools}, nil
+}
+
+// reviewApproveSelection resolves which tools a quarantined-server approval
+// allows, the same rule the Web and macOS review screens use. The base is the
+// core's default selection, every tool (all) or exactly the named tools (only);
+// except then subtracts. block is every other tool, in review order. A name
+// that is not in the review is an error before anything is written.
+func reviewApproveSelection(tools []reviewToolState, all bool, only, except []string) (block []string, allowed int, err error) {
+	if all && len(only) > 0 {
+		return nil, 0, errReviewAllWithTools
+	}
+	known := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		known[tool.Name] = true
+	}
+	toSet := func(names []string) (map[string]bool, error) {
+		set := make(map[string]bool, len(names))
+		for _, name := range names {
+			if !known[name] {
+				return nil, fmt.Errorf("unknown tool '%s'", name)
+			}
+			set[name] = true
+		}
+		return set, nil
+	}
+	onlySet, err := toSet(only)
+	if err != nil {
+		return nil, 0, err
+	}
+	exceptSet, err := toSet(except)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, tool := range tools {
+		var allow bool
+		switch {
+		case all:
+			allow = true
+		case len(only) > 0:
+			allow = onlySet[tool.Name]
+		default:
+			allow = tool.DefaultAllowed != nil && *tool.DefaultAllowed
+		}
+		if allow && !exceptSet[tool.Name] {
+			allowed++
+		} else {
+			block = append(block, tool.Name)
+		}
+	}
+	return block, allowed, nil
+}
+
+// reviewApproveWording builds the confirmation prompt and the table-mode
+// summary line, both naming the exact count.
+func reviewApproveWording(server string, total, allowed int, block []string, all bool) (prompt, summary string) {
+	noun := func(n int) string {
+		if n == 1 {
+			return "tool"
+		}
+		return "tools"
+	}
+	if len(block) == 0 && all {
+		// --all approves pending or changed tools only; tools blocked earlier
+		// stay blocked, so "N of N; blocking none" would overstate it.
+		return fmt.Sprintf("Approve server '%s' with all %d %s?", server, total, noun(total)),
+			"Allowing all pending or changed tools; previously blocked tools stay blocked"
+	}
+	if len(block) == 0 {
+		return fmt.Sprintf("Approve server '%s' with all %d %s?", server, total, noun(total)),
+			fmt.Sprintf("Allowing %d of %d %s; blocking none", allowed, total, noun(total))
+	}
+	list := strings.Join(block, ", ")
+	return fmt.Sprintf("Approve server '%s' with %d of %d %s? Blocked: %s.", server, allowed, total, noun(total), list),
+		fmt.Sprintf("Allowing %d of %d %s; blocking %d: %s", allowed, total, noun(total), len(block), list)
 }
 
 // formatReviewResponse drops the REST envelope so CLI JSON/YAML is exactly the
@@ -224,6 +344,9 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	server, _ := value["server"].(map[string]interface{})
 	fmt.Printf("Server: %v\n", server["name"])
+	if line := reviewScanLine(server); line != "" {
+		fmt.Println(line)
+	}
 	rows := make([][]string, 0)
 	if tools, ok := value["tools"].([]interface{}); ok {
 		for _, item := range tools {
@@ -248,6 +371,48 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	fmt.Print(out)
 	return nil
+}
+
+// reviewScanLine renders the scan coverage of `review show` in the same words
+// as the Web and macOS review screens. It returns "" when the payload carries
+// no scan or predates coverage.
+func reviewScanLine(server map[string]interface{}) string {
+	scan, hasScan := server["scan"].(map[string]interface{})
+	if !hasScan {
+		return ""
+	}
+	coverage, _ := scan["coverage"].(string)
+	if coverage == "" {
+		// An older core sends no coverage: say "none" like the Web and macOS screens.
+		return "Scan: none"
+	}
+	rescan := "run: mcpproxy security rescan " + fmt.Sprint(server["name"])
+	switch coverage {
+	case "current":
+		risk, _ := scan["risk_score"].(float64)
+		scanned, _ := scan["tools_scanned"].(float64)
+		return fmt.Sprintf("Scan: %v · risk %d/100 · covers all %d tools", scan["verdict"], int(risk), int(scanned))
+	case "stale":
+		var tools []string
+		if list, ok := scan["unscanned_tools"].([]interface{}); ok {
+			for _, item := range list {
+				tools = append(tools, fmt.Sprint(item))
+			}
+		}
+		noun := "tools"
+		if len(tools) == 1 {
+			noun = "tool"
+		}
+		return fmt.Sprintf("Scan: out of date (%d %s changed or added after the last scan: %s); %s", len(tools), noun, strings.Join(tools, ", "), rescan)
+	case "not_captured":
+		return "Scan: not checked against tool definitions: they have not been captured yet; fetch them with Fetch tool definitions on the Web or macOS review screen"
+	case "tools_not_scanned":
+		return "Scan: the last scan did not analyse tool definitions (0 exported); " + rescan
+	case "scanning":
+		return "Scan: in progress"
+	default:
+		return "Scan: not scanned yet; " + rescan
+	}
 }
 
 func reviewSchemaText(label string, schema interface{}) string {

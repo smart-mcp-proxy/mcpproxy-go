@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
@@ -240,7 +242,7 @@ type ImportFromPathRequest struct {
 
 // handleImportFromPath godoc
 // @Summary Import servers from a file path
-// @Description Import MCP server configurations by reading a file from the server's filesystem
+// @Description Import MCP server configurations by reading a file from the server's filesystem. A preview (preview=true) of a file with no MCP servers (empty, {}, or no/empty server map) answers 200 with an empty imported list; an apply of such a file and a malformed file still answer 400.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -291,9 +293,23 @@ func (s *Server) handleImportFromPath(w http.ResponseWriter, r *http.Request) {
 	// Preview mode?
 	preview := r.URL.Query().Get("preview") == "true"
 
+	// A client config that exists but holds nothing (0 bytes, whitespace) is a
+	// legitimate "nothing to import" answer when auto-previewing detected
+	// clients, not a failure. Apply still reports it.
+	if preview && len(bytes.TrimSpace(content)) == 0 {
+		logger.Debug("Import preview of empty client config", "path", path)
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
+	}
+
 	// Use the common runImport function
 	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview, req.Rename, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			logger.Debug("Import preview of client config with no servers", "path", path)
+			s.writeSuccess(w, emptyImportPreview(req.Format))
+			return
+		}
 		logger.Error("Import from path failed", "path", path, "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -355,9 +371,20 @@ func (s *Server) handleImportServers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An empty "{}" file previews as "nothing to import" (as handleImportFromPath
+	// does), not as a 400 about an undetectable format.
+	if preview && isEmptyJSONObject(content) {
+		s.writeSuccess(w, emptyImportPreview(formatHint))
+		return
+	}
+
 	// Run import (rename not supported via multipart upload — leave nil)
 	result, err := s.runImport(r, content, formatHint, serverNames, preview, nil, nil, false)
 	if err != nil {
+		if preview && configimport.IsNoServers(err) {
+			s.writeSuccess(w, emptyImportPreview(formatHint))
+			return
+		}
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
@@ -400,6 +427,14 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 	var fieldOverrides *ImportFieldOverrides
 	if len(req.EnvOverride) > 0 || len(req.HeaderOverride) > 0 {
 		fieldOverrides = &ImportFieldOverrides{Env: req.EnvOverride, Headers: req.HeaderOverride}
+	}
+
+	// A pasted empty "{}" previews as "nothing to import", not a 400 about an
+	// undetectable format. Other empty configs (e.g. {"mcpServers":{}}) keep
+	// telling the user they hold no servers.
+	if preview && isEmptyJSONObject([]byte(req.Content)) {
+		s.writeSuccess(w, emptyImportPreview(req.Format))
+		return
 	}
 
 	// Run import
@@ -492,6 +527,28 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 				result.Imported[i].Server.Name = newName
 			}
 		}
+		// configimport validated the pre-rename name; re-check the renamed
+		// servers with the same boot-path validation so a rename cannot
+		// persist an entry the next startup refuses (RC4-IMPORT-001).
+		kept := result.Imported[:0]
+		for _, imported := range result.Imported {
+			if errs := config.ValidateServerForLoad(imported.Server); len(errs) > 0 {
+				msgs := make([]string, 0, len(errs))
+				for _, e := range errs {
+					msgs = append(msgs, e.Error())
+				}
+				result.Failed = append(result.Failed, configimport.FailedServer{
+					Name:    imported.Server.Name,
+					Error:   "invalid_server",
+					Details: strings.Join(msgs, "; "),
+				})
+				continue
+			}
+			kept = append(kept, imported)
+		}
+		result.Imported = kept
+		result.Summary.Imported = len(result.Imported)
+		result.Summary.Failed = len(result.Failed)
 	}
 
 	// Apply the caller's field overrides (Paste tab env/header edits)
@@ -599,6 +656,29 @@ func (s *Server) selfListenAddrs() []string {
 		addrs = append(addrs, cfg.Listen)
 	}
 	return addrs
+}
+
+// isEmptyJSONObject reports whether content is exactly an empty JSON object.
+func isEmptyJSONObject(content []byte) bool {
+	var m map[string]json.RawMessage
+	return json.Unmarshal(bytes.TrimSpace(content), &m) == nil && m != nil && len(m) == 0
+}
+
+// emptyImportPreview is the preview answer for a client config that holds no
+// MCP servers: a successful, empty ImportResponse (all lists non-nil so the
+// JSON carries [] rather than null) whose format comes from the caller's hint.
+func emptyImportPreview(formatHint string) *ImportResponse {
+	resp := &ImportResponse{
+		Imported: []ImportedServerResponse{},
+		Skipped:  []configimport.SkippedServer{},
+		Failed:   []configimport.FailedServer{},
+		Warnings: []string{},
+	}
+	if f := parseFormat(formatHint); f != configimport.FormatUnknown {
+		resp.Format = string(f)
+		resp.FormatName = f.String()
+	}
+	return resp
 }
 
 // parseFormat converts a format string to ConfigFormat

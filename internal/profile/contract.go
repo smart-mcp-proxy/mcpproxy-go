@@ -58,6 +58,10 @@ const (
 	BlockReasonUnannotated   BlockReason = "profile_unannotated"
 	BlockReasonCodeExecution BlockReason = "profile_code_execution"
 	BlockReasonManagement    BlockReason = "profile_management"
+	// BlockReasonServerScope marks a nested code_execution call to a server
+	// outside the caller's profile scope. Top-level out-of-scope refusals stay
+	// the Spec 105 non-disclosing row with no block_reason.
+	BlockReasonServerScope BlockReason = "profile_server_scope"
 )
 
 // ExplainStep is one link of the access-explanation chain, in the canonical
@@ -130,6 +134,13 @@ const (
 const (
 	ErrorCodeBindingBypassable  = "binding_bypassable_without_auth"
 	ErrorCodeNoClientCredential = "no_client_credential"
+	// ErrorCodeConnectInProgress answers a second connect, rotate, finalize or
+	// binding change of a client whose connect holds the in-flight claim
+	// (FR-021a).
+	ErrorCodeConnectInProgress = "connect_in_progress"
+	// ErrorCodeCredentialSuperseded answers a connect whose credential was
+	// replaced or revoked before it could be finalized (FR-021a).
+	ErrorCodeCredentialSuperseded = "credential_superseded"
 
 	// Spec 108-f: the profile CRUD refusals (contracts/rest-api.md).
 	ErrorCodeProfileInUse       = "profile_in_use"
@@ -140,6 +151,16 @@ const (
 	// whose precondition_token no longer matches what the preview showed.
 	// (Connect's own 409 carries the same meaning under `action`.)
 	ErrorCodePreconditionFailed = "precondition_failed"
+)
+
+// Why a classify entry no longer applies (EffectiveToolsResult.
+// StaleClassificationReasons, FR-005).
+const (
+	// StaleClassificationAnnotated: the tool now carries its own annotations,
+	// which a classify entry never overrides.
+	StaleClassificationAnnotated = "annotated"
+	// StaleClassificationMissing: the tool no longer exists.
+	StaleClassificationMissing = "missing"
 )
 
 // WarningSeverity grades a Clients-surface warning (data-model.md §7).

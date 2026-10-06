@@ -20,7 +20,7 @@ type attentionResponse struct {
 
 // handleGetAttention godoc
 // @Summary Get the needs-attention list
-// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only items whose server it may enumerate, and never a client item.
+// @Description One list, one count, every surface (Web UI, macOS tray/Home, CLI) reads from it. Filtered per caller: an administrator sees every item; a scoped caller (agent token, or a non-admin server-edition OAuth user session) sees only server items whose server it may enumerate; every other subject type (client, setting) is administrator-only.
 // @Tags attention
 // @Produce json
 // @Security ApiKeyAuth
@@ -31,8 +31,8 @@ type attentionResponse struct {
 // Both editions register this route. Rule: filtered (contracts/rest-api.md#attention,
 // FR-007) — an administrator (or a request with no AuthContext at all) sees
 // every item; a scoped caller (agent token, or a non-admin server-edition
-// OAuth user session) sees only items whose subject is a server it may
-// enumerate, and no client item at all.
+// OAuth user session) sees only server items whose server it may
+// enumerate; every other subject type is withheld (allow-list).
 func (s *Server) handleGetAttention(w http.ResponseWriter, r *http.Request) {
 	items := s.controller.Attention()
 	items = filterAttentionItems(r.Context(), items)
@@ -50,7 +50,7 @@ func (s *Server) handleGetAttention(w http.ResponseWriter, r *http.Request) {
 // event's structured item list to `{count, ids}` for one SSE subscriber
 // (contracts/rest-api.md#attention, FR-006): an administrator gets every id;
 // a scoped caller gets only ids whose subject is a server it can see, never a
-// client id, with count recomputed from the narrowed list. Per-connection
+// client or setting id, with count recomputed from the narrowed list. Per-connection
 // "unchanged since last frame" suppression is handled by the caller
 // (handleSSEEvents), which is where per-connection state lives.
 func renderAttentionChangedForCaller(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
@@ -64,10 +64,7 @@ func renderAttentionChangedForCaller(ctx context.Context, payload map[string]int
 	}
 	ids := make([]string, 0, len(items))
 	for _, it := range items {
-		if it.SubjectType == "client" {
-			continue
-		}
-		if it.SubjectType == "server" && !canSeeServer(ctx, it.SubjectID) {
+		if !scopedCallerMaySeeAttention(ctx, it.SubjectType, it.SubjectID) {
 			continue
 		}
 		ids = append(ids, it.ID)
@@ -99,16 +96,18 @@ func filterAttentionItems(ctx context.Context, items []contracts.AttentionItem) 
 	}
 	out := make([]contracts.AttentionItem, 0, len(items))
 	for _, it := range items {
-		switch it.Subject.Type {
-		case "client":
-			// Scoped callers never see client items (data-model.md §4, FR-007).
-			continue
-		case "server":
-			if !canSeeServer(ctx, it.Subject.ID) {
-				continue
-			}
+		if scopedCallerMaySeeAttention(ctx, it.Subject.Type, it.Subject.ID) {
+			out = append(out, it)
 		}
-		out = append(out, it)
 	}
 	return out
+}
+
+// scopedCallerMaySeeAttention is the ALLOW-list for a scoped caller (FR-007,
+// Spec 109-l P4): only a server item whose server the caller may enumerate.
+// Every other subject type (client, setting, and any type a later spec adds)
+// is administrator-only and fails closed, so a new kind can never leak to an
+// agent token or a tenant by being forgotten here.
+func scopedCallerMaySeeAttention(ctx context.Context, subjectType, subjectID string) bool {
+	return subjectType == "server" && canSeeServer(ctx, subjectID)
 }

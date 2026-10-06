@@ -32,10 +32,13 @@ func (mc *Client) GetPrompt(ctx context.Context, name string, args map[string]st
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
+	promptEpoch := mc.connectionEpoch.Load()
 	result, err := mc.coreClient.GetPrompt(ctx, name, args)
 	if err != nil {
 		if mc.isConnectionError(err) {
-			mc.StateManager.SetError(err)
+			// Guarded: concurrent failures on one dead transport mark it
+			// once, and never a connection Disconnect already replaced.
+			mc.setErrorIfCurrentConnection(err, promptEpoch)
 		}
 		mc.logger.Error("GetPrompt failed",
 			zap.String("server", mc.GetConfig().Name),

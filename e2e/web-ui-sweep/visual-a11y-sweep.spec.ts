@@ -11,7 +11,7 @@
 //
 // Launcher: scripts/run-web-smoke.sh (see docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
-import { RO_PROFILE, SERVER, cleanupProfiles, seedMissingProfile, seedProfiles } from './profiles-seed'
+import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -235,6 +235,29 @@ for (const theme of THEMES) {
       ).toEqual([])
     })
   }
+}
+
+// The Home dashboard lists every live MCP session under "Connected" with a relative
+// "Xs ago" timestamp. The loop above only sees that line when some earlier spec happens
+// to leave a session open, which made this gate depend on spec order (Spec 108-j QA.1,
+// follow-up #1433 item 1), so the session is opened here on purpose.
+for (const theme of THEMES) {
+  test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
+    const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
+    try {
+      await goto(page, '/', theme)
+      const age = page.locator('[data-test="dashboard-live-client-age"]').first()
+      await expect(age).toBeVisible()
+      const failures = await contrastFailures(page)
+      expect(
+        failures,
+        `WCAG AA contrast failures on / with a live client (${theme}):\n` +
+          failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+      ).toEqual([])
+    } finally {
+      await session.close()
+    }
+  })
 }
 
 test('contrast AA: filled primary buttons in both themes', async ({ page }) => {
@@ -618,7 +641,9 @@ test('the Add Secret modal takes focus, traps Tab and closes on Escape', async (
 // seeded profile and client (profiles-seed.ts), so they are skipped on an
 // instance with no fixture upstream.
 // ---------------------------------------------------------------------------
-const PROFILE_ROUTES = ['/profiles', '/clients', `/profiles/${RO_PROFILE}`] as const
+// Spec 108-j adds the scoped Tools (view-as: greyed rows, banner, reason words) and
+// Activity (scope chips) pages: the greyed rows must still pass AA contrast.
+const PROFILE_ROUTES = ['/profiles', '/clients', `/profiles/${RO_PROFILE}`, `/tools?client=${CLIENT_ID}`, `/activity?client=${CLIENT_ID}&status=blocked`] as const
 
 test.describe('Profiles v3 screens (Spec 108-i)', () => {
   test.beforeAll(async () => {
@@ -645,6 +670,11 @@ test.describe('Profiles v3 screens (Spec 108-i)', () => {
           await expect(page.locator('[data-test="clients-warnings-banner"]')).toBeVisible()
         }
         if (route.startsWith('/profiles/')) await expect(page.locator('[data-test="profile-editor"]')).toBeVisible()
+        if (route.startsWith('/tools?client=')) {
+          await expect(page.locator('[data-test="tools-view-as-banner"]')).toBeVisible()
+          await expect(page.locator('[data-test="tool-row"][data-not-callable="true"]').first()).toBeVisible()
+        }
+        if (route.startsWith('/activity?client=')) await expect(page.locator('[data-test="scope-chip-client"]')).toBeVisible()
         const failures = await contrastFailures(page)
         expect(
           failures,

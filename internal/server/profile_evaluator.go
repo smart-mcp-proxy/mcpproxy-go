@@ -181,9 +181,21 @@ func (p *MCPProxyServer) EffectiveTools(_ context.Context, name string, opt runt
 		if policyProfile != nil && policyProfile.Tools != nil {
 			for key := range policyProfile.Tools.Classify {
 				tier, exists := known[key]
-				if !exists || tier != profile.TierUnannotated {
-					res.StaleClassifications = append(res.StaleClassifications, key)
+				reason := ""
+				switch {
+				case !exists:
+					reason = profile.StaleClassificationMissing
+				case tier != profile.TierUnannotated:
+					reason = profile.StaleClassificationAnnotated
 				}
+				if reason == "" {
+					continue
+				}
+				res.StaleClassifications = append(res.StaleClassifications, key)
+				if res.StaleClassificationReasons == nil {
+					res.StaleClassificationReasons = map[string]string{}
+				}
+				res.StaleClassificationReasons[key] = reason
 			}
 			sort.Strings(res.StaleClassifications)
 		}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
@@ -146,7 +147,8 @@ func newProfileShowCmd() *cobra.Command {
 		Long: `Show a profile with the effective value of every policy field and where it comes
 from. With --effective, list every tool with the verdict of the access chain
 (callable, visible or hidden) and the reason; a classification that no longer
-applies (the tool is now annotated, or gone) is flagged.
+applies (the tool is now annotated, or gone) is flagged, with the reason taken
+from the server so a --server or --reason filter does not change it.
 
 Examples:
   mcpproxy profile show work-readonly
@@ -184,7 +186,7 @@ func runProfileShow(cmd *cobra.Command, name string, o *profileShowOpts) error {
 		if structuredOutput() {
 			return printData(data)
 		}
-		return printEffectiveTools(data)
+		return printEffectiveTools(data, o.server != "" || o.reason != "")
 	}
 	data, err := restDo("profile", http.MethodGet, profilePath(name), nil)
 	if err != nil {
@@ -205,9 +207,32 @@ func runProfileShow(cmd *cobra.Command, name string, o *profileShowOpts) error {
 const (
 	staleNoteAnnotated = "classification ignored — tool is now annotated"
 	staleNoteMissing   = "classification ignored — tool not found"
+	// staleNoteUnknown is printed when the reason cannot be told: a filtered
+	// request answered by a daemon that predates stale_classification_reasons.
+	staleNoteUnknown = "classification ignored"
 )
 
-func printEffectiveTools(data json.RawMessage) error {
+// staleNote is the note for one stale classification. The server's reason map
+// is authoritative (it sees the unfiltered tool set). Without it (an older
+// daemon) the listed rows are only a faithful view of the tool set when no
+// --server/--reason filter was sent; otherwise the reason is not guessed.
+func staleNote(res runtime.EffectiveToolsResult, id string, known map[string]bool, filtered bool) string {
+	switch res.StaleClassificationReasons[id] {
+	case profile.StaleClassificationAnnotated:
+		return staleNoteAnnotated
+	case profile.StaleClassificationMissing:
+		return staleNoteMissing
+	}
+	if filtered {
+		return staleNoteUnknown
+	}
+	if known[id] {
+		return staleNoteAnnotated
+	}
+	return staleNoteMissing
+}
+
+func printEffectiveTools(data json.RawMessage, filtered bool) error {
 	var res runtime.EffectiveToolsResult
 	if err := json.Unmarshal(data, &res); err != nil {
 		return err
@@ -240,11 +265,7 @@ func printEffectiveTools(data json.RawMessage) error {
 	if len(res.StaleClassifications) > 0 {
 		fmt.Println("Stale classifications:")
 		for _, id := range res.StaleClassifications {
-			note := staleNoteMissing
-			if known[id] {
-				note = staleNoteAnnotated
-			}
-			fmt.Printf("  %s: %s\n", id, note)
+			fmt.Printf("  %s: %s\n", id, staleNote(res, id, known, filtered))
 		}
 	}
 	return nil

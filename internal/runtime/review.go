@@ -37,11 +37,41 @@ type ReviewQueueRow struct {
 	Since         *time.Time             `json:"since,omitempty"`
 }
 
+// Review scan coverage values (ReviewScan.Coverage). They say whether the
+// latest scan verdict describes the definitions an operator is looking at.
+// Precedence when several apply: not_captured > scanning > none >
+// tools_not_scanned > stale > current.
+const (
+	// ReviewScanCoverageCurrent: the latest completed scan analysed every
+	// captured definition as it is now.
+	ReviewScanCoverageCurrent = "current"
+	// ReviewScanCoverageStale: at least one captured definition was added or
+	// changed after that scan.
+	ReviewScanCoverageStale = "stale"
+	// ReviewScanCoverageNotCaptured: no definitions are captured for review.
+	ReviewScanCoverageNotCaptured = "not_captured"
+	// ReviewScanCoverageToolsNotScanned: the scan completed but exported no
+	// tool definitions (a source-only or URL scan).
+	ReviewScanCoverageToolsNotScanned = "tools_not_scanned"
+	// ReviewScanCoverageScanning: the newest scan job is pending or running.
+	ReviewScanCoverageScanning = "scanning"
+	// ReviewScanCoverageNone: there is no completed scan (never scanned, or
+	// the newest job failed or was cancelled).
+	ReviewScanCoverageNone = "none"
+)
+
 type ReviewScan struct {
 	Verdict   string     `json:"verdict"`
 	RiskScore int        `json:"risk_score"`
 	ReportID  string     `json:"report_id,omitempty"`
 	ScannedAt *time.Time `json:"scanned_at,omitempty"`
+	// Coverage is always present; see the ReviewScanCoverage constants.
+	Coverage string `json:"coverage"`
+	// ToolsScanned is the number of tool definitions the covering job exported.
+	ToolsScanned int `json:"tools_scanned,omitempty"`
+	// UnscannedTools lists, sorted, the captured tools whose current
+	// definition the scan did not cover. Set only when Coverage is "stale".
+	UnscannedTools []string `json:"unscanned_tools,omitempty"`
 }
 
 type ServerReview struct {
@@ -78,8 +108,11 @@ type ReviewTool struct {
 	ScanVerdict    string                  `json:"scan_verdict"`
 	HeldReason     string                  `json:"held_reason"`
 	HeldSignals    []string                `json:"held_signals"`
-	Previous       *ReviewToolPrevious     `json:"previous"`
-	Diff           *ReviewToolDiff         `json:"diff,omitempty"`
+	// DefaultAllowed is the review screens' fail-closed default selection
+	// (D43). Always serialised, so an older core (field absent) reads as false.
+	DefaultAllowed bool                `json:"default_allowed"`
+	Previous       *ReviewToolPrevious `json:"previous"`
+	Diff           *ReviewToolDiff     `json:"diff,omitempty"`
 }
 
 type ReviewToolPrevious struct {
@@ -144,7 +177,7 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 			row.TierCounts = nil
 		}
 		if server.Quarantined {
-			row.Scan = r.reviewScan(ctx, server.Name, nil)
+			row.Scan, _, _ = r.reviewScanFor(ctx, server.Name, true, records)
 		}
 		queue.Servers = append(queue.Servers, row)
 	}
@@ -188,7 +221,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
 	}
 	reviewServer.DefinitionsCaptured = len(records) > 0
-	reviewScan, scanFindings := r.reviewScanAndFindings(ctx, serverName)
+	reviewScan, scanFindings, covered := r.reviewScanFor(ctx, serverName, server.Quarantined, records)
 	reviewServer.Scan = reviewScan
 	result := &ServerReview{Server: reviewServer, Tools: make([]ReviewTool, 0, len(records))}
 	if !reviewServer.DefinitionsCaptured {
@@ -200,9 +233,10 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 			InputSchema: rawSchema(record.CurrentSchema), OutputSchema: rawSchema(record.CurrentOutputSchema),
 			Annotations: cloneToolAnnotations(record.CurrentAnnotations), Tier: reviewTier(record.CurrentAnnotations),
 			ApprovalStatus: record.Status, Disabled: record.Disabled,
-			ScanVerdict: reviewToolScanVerdict(scanFindings, serverName, record),
+			ScanVerdict: reviewToolScanVerdict(scanFindings, serverName, record, covered[record.ToolName]),
 			HeldReason:  record.HeldReason, HeldSignals: append([]string(nil), record.HeldSignals...),
 		}
+		tool.DefaultAllowed = reviewDefaultAllowed(tool)
 		if record.PreviousDescription != "" || record.PreviousSchema != "" || record.PreviousOutputSchema != "" || record.PreviousAnnotations != nil {
 			tool.Previous = &ReviewToolPrevious{
 				Description: record.PreviousDescription, InputSchema: rawSchema(record.PreviousSchema),
@@ -215,6 +249,22 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		result.Tools = append(result.Tools, tool)
 	}
 	return result, nil
+}
+
+// reviewDefaultAllowed is the default selection of the review screens (D43.2).
+// An already blocked tool stays blocked; an approved tool stays allowed; a
+// pending or changed tool starts allowed only when it is read-only, the scan
+// verified its current definition as clean and nothing holds it. Everything
+// else (write, destructive, unannotated, unknown, not scanned, warnings,
+// dangerous, held) starts unchecked.
+func reviewDefaultAllowed(tool ReviewTool) bool {
+	if tool.Disabled {
+		return false
+	}
+	if tool.ApprovalStatus == storage.ToolApprovalStatusApproved {
+		return true
+	}
+	return tool.Tier == contracts.TierRead && tool.ScanVerdict == "clean" && tool.HeldReason == ""
 }
 
 func reviewTier(annotations *config.ToolAnnotations) contracts.Tier {
@@ -249,19 +299,101 @@ func copyStringMap(value map[string]string) map[string]string {
 	return copy
 }
 
-func (r *Runtime) reviewScan(ctx context.Context, serverName string, record *storage.ToolApprovalRecord) *ReviewScan {
-	result, _ := r.reviewScanAndFindings(ctx, serverName)
-	if record != nil {
-		_, findings := r.reviewScanAndFindings(ctx, serverName)
-		result.Verdict = reviewToolScanVerdict(findings, serverName, record)
+// reviewScanFor composes the scan summary for a server's review: the verdict
+// of the newest baseline job, its coverage of the captured definitions, the
+// findings, and a per-tool map of which records that scan covers.
+func (r *Runtime) reviewScanFor(ctx context.Context, serverName string, quarantined bool, records []*storage.ToolApprovalRecord) (*ReviewScan, []scanner.ScanFinding, map[string]bool) {
+	scan, findings, job := r.reviewScanAndFindings(ctx, serverName)
+	covered := make(map[string]bool, len(records))
+	for _, record := range records {
+		covered[record.ToolName] = reviewToolCovered(job, quarantined, serverName, record)
 	}
-	return result
+	scan.Coverage, scan.ToolsScanned, scan.UnscannedTools = reviewCoverage(job, records, covered)
+	return scan, findings, covered
 }
 
-func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) (*ReviewScan, []scanner.ScanFinding) {
+// reviewCoverage derives the coverage value for the newest baseline job.
+func reviewCoverage(job *scanner.ScanJob, records []*storage.ToolApprovalRecord, covered map[string]bool) (string, int, []string) {
+	toolsScanned := 0
+	if job != nil && job.ScanContext != nil {
+		toolsScanned = job.ScanContext.ToolsExported
+	}
+	switch {
+	case len(records) == 0:
+		return ReviewScanCoverageNotCaptured, 0, nil
+	case job != nil && (job.Status == scanner.ScanJobStatusPending || job.Status == scanner.ScanJobStatusRunning):
+		return ReviewScanCoverageScanning, 0, nil
+	case job == nil || job.Status != scanner.ScanJobStatusCompleted:
+		return ReviewScanCoverageNone, 0, nil
+	case toolsScanned == 0:
+		return ReviewScanCoverageToolsNotScanned, 0, nil
+	}
+	var unscanned []string
+	for _, record := range records {
+		if !covered[record.ToolName] {
+			unscanned = append(unscanned, record.ToolName)
+		}
+	}
+	if len(unscanned) == 0 {
+		return ReviewScanCoverageCurrent, toolsScanned, nil
+	}
+	sort.Strings(unscanned)
+	return ReviewScanCoverageStale, toolsScanned, unscanned
+}
+
+// reviewToolCovered reports whether a completed scan analysed the tool's
+// CURRENT definition. A wrong "covered" is the dangerous direction for a
+// security banner, so every unknown resolves to not covered.
+//
+//   - A scan that exported no definitions covers nothing.
+//   - A definition added or changed after the scan read its definitions
+//     (DefinitionChangedAt after ScanContext.ToolsExportedAt, or StartedAt
+//     for a scan that recorded no export time) is not covered.
+//   - A scan that recorded its tool names covers exactly those tools.
+//   - A legacy scan (no recorded names, ToolsExported > 0) covers approved
+//     records, and pending records of a quarantined server (its whole toolset
+//     was listed at admission). It does not cover a pending record of a
+//     trusted server (a tool added after the baseline) or a changed record
+//     with no change stamp (the change time is unknown).
+func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string, record *storage.ToolApprovalRecord) bool {
+	if job == nil || job.Status != scanner.ScanJobStatusCompleted || job.ScanContext == nil || job.ScanContext.ToolsExported == 0 {
+		return false
+	}
+	// The scan analysed the definitions as exported, which can be well before
+	// the engine stamps StartedAt (scanner resolution, image checks). Legacy
+	// jobs carry no export time and fall back to StartedAt.
+	analysedAt := job.StartedAt
+	if !job.ScanContext.ToolsExportedAt.IsZero() {
+		analysedAt = job.ScanContext.ToolsExportedAt
+	}
+	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(analysedAt) {
+		return false
+	}
+	if len(job.ScanContext.ToolNames) > 0 {
+		for _, name := range job.ScanContext.ToolNames {
+			if name == record.ToolName || name == serverName+":"+record.ToolName {
+				return true
+			}
+		}
+		return false
+	}
+	switch record.Status {
+	case storage.ToolApprovalStatusApproved:
+		return true
+	case storage.ToolApprovalStatusPending:
+		return quarantined
+	case storage.ToolApprovalStatusChanged:
+		return !record.DefinitionChangedAt.IsZero()
+	}
+	return false
+}
+
+// reviewScanAndFindings returns the newest baseline scan, its findings, and
+// the job that supplied them (nil when there is none).
+func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) (*ReviewScan, []scanner.ScanFinding, *scanner.ScanJob) {
 	metas, err := r.storageManager.ListScanJobMetas(serverName)
 	if err != nil {
-		return &ReviewScan{Verdict: "not_scanned"}, nil
+		return &ReviewScan{Verdict: "not_scanned"}, nil, nil
 	}
 	var latest, latestPass2 *scanner.ScanJobMeta
 	for _, meta := range metas {
@@ -280,18 +412,18 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 		}
 	}
 	if latest == nil && latestPass2 == nil {
-		return &ReviewScan{Verdict: "not_scanned"}, nil
+		return &ReviewScan{Verdict: "not_scanned"}, nil, nil
 	}
 	if latest == nil {
 		latest = latestPass2
 	}
 	job, err := r.storageManager.GetScanJob(latest.ID)
 	if err != nil || job == nil {
-		return &ReviewScan{Verdict: "not_scanned", ReportID: latest.ID}, nil
+		return &ReviewScan{Verdict: "not_scanned", ReportID: latest.ID}, nil, nil
 	}
 	reports, err := r.storageManager.ListScanReportsByJob(job.ID)
 	if err != nil {
-		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID}, nil
+		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID}, nil, job
 	}
 	primaryPass := scanner.ScanPassSecurityScan
 	if latest == latestPass2 {
@@ -320,13 +452,13 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 	reports = deduplicateReviewPass2Findings(reports)
 	aggregated := scanner.AggregateReportsWithJobStatus(job.ID, serverName, reports, job)
 	if aggregated == nil {
-		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID, ScannedAt: reviewTimestamp(job.CompletedAt)}, nil
+		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID, ScannedAt: reviewTimestamp(job.CompletedAt)}, nil, job
 	}
 	verdict := aggregated.Verdict
 	if verdict == "" {
 		verdict = "not_scanned"
 	}
-	return &ReviewScan{Verdict: verdict, RiskScore: aggregated.RiskScore, ReportID: job.ID, ScannedAt: reviewTimestamp(aggregated.ScannedAt)}, aggregated.Findings
+	return &ReviewScan{Verdict: verdict, RiskScore: aggregated.RiskScore, ReportID: job.ID, ScannedAt: reviewTimestamp(aggregated.ScannedAt)}, aggregated.Findings, job
 }
 
 func deduplicateReviewPass2Findings(reports []*scanner.ScanReport) []*scanner.ScanReport {
@@ -360,24 +492,35 @@ func reviewTimestamp(value time.Time) *time.Time {
 	return &value
 }
 
-func reviewToolScanVerdict(findings []scanner.ScanFinding, serverName string, record *storage.ToolApprovalRecord) string {
+// reviewToolScanVerdict is the per-tool scan verdict. covered says the latest
+// scan analysed this tool's CURRENT definition: only then do its findings
+// apply, and absence of findings means "clean". A tool the scan did not cover
+// shows its held verdict (the Spec 086 in-process check of the current
+// definition) or "not_scanned"; findings of an older scan describe an older
+// definition and are not applied.
+func reviewToolScanVerdict(findings []scanner.ScanFinding, serverName string, record *storage.ToolApprovalRecord, covered bool) string {
 	verdict := ""
-	for _, finding := range findings {
-		if !reviewFindingMatchesTool(finding.Location, serverName, record.ToolName) {
-			continue
-		}
-		if finding.ThreatLevel == scanner.ThreatLevelDangerous {
-			return "dangerous"
-		}
-		if finding.ThreatLevel == scanner.ThreatLevelWarning {
-			verdict = "warnings"
+	if covered {
+		for _, finding := range findings {
+			if !reviewFindingMatchesTool(finding.Location, serverName, record.ToolName) {
+				continue
+			}
+			if finding.ThreatLevel == scanner.ThreatLevelDangerous {
+				return "dangerous"
+			}
+			if finding.ThreatLevel == scanner.ThreatLevelWarning {
+				verdict = "warnings"
+			}
 		}
 	}
 	if verdict == "" {
 		verdict = record.HeldVerdict
 	}
 	if verdict == "" {
-		verdict = "not_scanned"
+		if covered {
+			return "clean"
+		}
+		return "not_scanned"
 	}
 	return verdict
 }

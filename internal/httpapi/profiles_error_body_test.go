@@ -55,6 +55,10 @@ func profilesErrorCases() []struct {
 			"error": "invalid max_tier", "field": "max_tier"}},
 		{"no client credential", &internalRuntime.NoClientCredentialError{ClientID: "codex", State: profile.CredentialStateNone}, http.StatusConflict, map[string]any{
 			"error": (&internalRuntime.NoClientCredentialError{ClientID: "codex"}).Error(), "code": profile.ErrorCodeNoClientCredential}},
+		{"connect in progress", &internalRuntime.ConnectInProgressError{ClientID: "cursor"}, http.StatusConflict, map[string]any{
+			"error": (&internalRuntime.ConnectInProgressError{ClientID: "cursor"}).Error(), "code": profile.ErrorCodeConnectInProgress}},
+		{"credential superseded", &internalRuntime.CredentialSupersededError{ClientID: "cursor"}, http.StatusConflict, map[string]any{
+			"error": (&internalRuntime.CredentialSupersededError{ClientID: "cursor"}).Error(), "code": profile.ErrorCodeCredentialSuperseded}},
 		{"unknown client", profile.ErrUnknownClient, http.StatusNotFound, map[string]any{"error": "client not found"}},
 		{"unknown token", profile.ErrUnknownToken, http.StatusNotFound, map[string]any{"error": "token not found"}},
 		{"client credential token", profile.ErrClientCredentialToken, http.StatusBadRequest, map[string]any{"error": profile.ErrClientCredentialToken.Error()}},

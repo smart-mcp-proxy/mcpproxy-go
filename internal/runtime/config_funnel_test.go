@@ -107,7 +107,7 @@ func TestMutateConfig_ReadMutateGuardApplyUnderOneLock(t *testing.T) {
 	close(release)
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second): // slow Windows runners take 10s+ per config commit
 		t.Fatal("binding write never ran after the config write released the lock")
 	}
 	wg.Wait()
@@ -275,7 +275,7 @@ func TestMutateConfig_ConcurrentWritesKeepBoth(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("deadlock: concurrent MutateConfig calls did not finish")
 	}
 	cfg, err := rt.GetDesiredConfig()
@@ -284,9 +284,8 @@ func TestMutateConfig_ConcurrentWritesKeepBoth(t *testing.T) {
 }
 
 // A profile that is created or renamed through the funnel gets its per-profile
-// search index NOW: the apply reconciles indexes only when mcpServers changed,
-// and a locked client of a renamed profile would otherwise search an empty index
-// until the next discovery pass (found in live QA of Spec 108-f).
+// search index NOW (found in live QA of Spec 108-f). The funnel gets this
+// through ApplyConfig, which owns the reconcile for every apply (#1458).
 func TestMutateConfig_ReconcilesPerProfileIndexes(t *testing.T) {
 	rt := newFunnelRuntime(t)
 	dirs := func() []string {

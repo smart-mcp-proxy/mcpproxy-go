@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -321,7 +320,7 @@ func initToolsFlags() {
 
 	toolsListCmd.Flags().StringVarP(&serverName, "server", "s", "", "Name of the upstream server to query (optional; omit for global list)")
 	toolsListCmd.Flags().StringVarP(&toolsLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	toolsListCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(toolsListCmd.Flags(), &configPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	toolsListCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Connection timeout")
 	toolsListCmd.Flags().BoolVar(&traceTransport, "trace-transport", false, "Enable detailed HTTP/SSE frame-by-frame tracing")
 
@@ -776,17 +775,12 @@ func runToolsSetEnabled(args []string, enabled bool) error {
 
 // loadToolsConfig loads the MCP configuration file for tools command
 func loadToolsConfig() (*config.Config, error) {
-	var configFilePath string
-
-	if configPath != "" {
-		configFilePath = configPath
-	} else {
-		// Use default path
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	configFilePath := resolveCLIConfigPath(configPath)
+	if configFilePath == "" {
+		var err error
+		if configFilePath, err = defaultHomeConfigPath(); err != nil {
+			return nil, err
 		}
-		configFilePath = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 	}
 
 	// Check if config file exists

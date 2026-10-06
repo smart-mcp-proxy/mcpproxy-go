@@ -95,7 +95,7 @@ const scope = useScopeQuery('activity')
 const open = ref(false)
 
 const isTenant = computed(() => auth.principalKind === 'tenant')
-const page = computed(() => pageIdForRouteName(route.name))
+const page = computed(() => pageIdForRouteName(route.name, route.query.tab))
 const credentialedClients = computed(() => clients.clients.filter(client => client.credential_state === 'client'))
 
 function queryValue(name: string): string {

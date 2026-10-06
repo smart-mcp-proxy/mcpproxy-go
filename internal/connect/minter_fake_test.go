@@ -14,12 +14,18 @@ type fakeMinter struct {
 	mu       sync.Mutex
 	n        int
 	issueErr error
+	// busy is what CheckIdle reports (an in-flight claim held by another connect).
+	busy     error
 	rotating bool
 
 	intents []CredentialIntent
 	issued  []*IssuedCredential
 	commits int
 	aborts  int
+	// releases counts Release calls; bindings is the recorded binding
+	// PreviewBinding reports per client (intent defaults otherwise).
+	releases int
+	bindings map[string][2]string
 
 	// classify maps a secret to the state Classify reports; held is the set
 	// of secrets HeldByRecord accepts.
@@ -63,6 +69,12 @@ func (m *fakeMinter) Issue(clientID string, intent CredentialIntent) (*IssuedCre
 	return is, nil
 }
 
+func (m *fakeMinter) CheckIdle(string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.busy
+}
+
 func (m *fakeMinter) Commit(string, CredentialIntent, *IssuedCredential) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -76,6 +88,21 @@ func (m *fakeMinter) Abort(_ string, _ CredentialIntent, is *IssuedCredential) e
 	m.aborts++
 	delete(m.held, is.Secret)
 	return nil
+}
+
+func (m *fakeMinter) Release(string, *IssuedCredential) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releases++
+}
+
+func (m *fakeMinter) PreviewBinding(clientID string, intent CredentialIntent) (string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.bindings[clientID]; ok && intent.Profile == nil {
+		return b[0], b[1], nil
+	}
+	return deref(intent.Profile), previewMode(intent), nil
 }
 
 func (m *fakeMinter) Classify(_ string, secret string) profile.CredentialState {

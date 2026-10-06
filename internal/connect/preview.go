@@ -108,6 +108,17 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 		credential = maskClientCredential
 	}
 
+	// The binding the write would apply: a reconnect with no profile keeps the
+	// client's recorded one, so the preview asks the minter (the same rule the
+	// write uses). A resolution error (an unknown profile) falls back to the
+	// intent, because the write refuses it with the same 400.
+	prof, mode := deref(intent.Profile), previewMode(intent)
+	if mint && s.minter != nil {
+		if p, m, err := s.minter.PreviewBinding(clientID, intent); err == nil {
+			prof, mode = p, m
+		}
+	}
+
 	// Determine create-vs-overwrite via an on-demand read. This is the same
 	// scoped, explicit-action read semantics as GetStatus: only touched when the
 	// file exists, so an absent config raises no macOS App-Data prompt.
@@ -146,8 +157,8 @@ func (s *Service) PreviewWithIntent(clientID, serverName string, intent Credenti
 		EntryExists:          pre.existing != nil,
 		ContainsAPIKey:       false,
 		Credential:           credential,
-		Profile:              deref(intent.Profile),
-		Mode:                 previewMode(intent),
+		Profile:              prof,
+		Mode:                 mode,
 		Keyless:              intent.Keyless,
 		Bridge:               client.Bridge,
 		AccessState:          pre.accessState,

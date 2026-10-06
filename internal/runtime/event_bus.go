@@ -495,15 +495,16 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // parentID is the correlation id of the parent code_execution call for a
 // sandbox sub-call; empty for every top-level dispatch
 func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
-	r.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutput, parentID, ActivityAttribution{})
+	r.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutput, parentID, "", ActivityAttribution{})
 }
 
 // EmitActivityToolCallCompletedAttributed is EmitActivityToolCallCompleted plus
 // the Spec 108 FR-029 scope attribution (profile, client, token in effect for
 // this call). attr is the LAST parameter, so the position of `status` that
 // TestActivityCompletionNeverHardcodesSuccess pins does not move; the zero
-// value leaves the payload exactly as it was before Spec 108.
-func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string, attr ActivityAttribution) {
+// value leaves the payload exactly as it was before Spec 108. blockReason is
+// the profile.BlockReason of a profile-refused sub-call, "" for everything else.
+func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string, blockReason string, attr ActivityAttribution) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -572,6 +573,12 @@ func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, 
 	// this map verbatim, carries parent_id for free.
 	if parentID != "" {
 		payload["parent_id"] = parentID
+	}
+	// Spec 108 FR-029 (T166): the typed cause of a profile tool-policy refusal
+	// of a code_execution sub-call. Only set when non-empty, so every other
+	// completion keeps its payload byte-for-byte.
+	if blockReason != "" {
+		payload[storage.MetadataKeyBlockReason] = blockReason
 	}
 	if a := attr.payload(); a != nil {
 		payload[attributionPayloadKey] = a

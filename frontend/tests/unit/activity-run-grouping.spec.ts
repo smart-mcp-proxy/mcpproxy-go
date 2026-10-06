@@ -279,3 +279,32 @@ describe('what a folded row prints', () => {
     ).toBe('')
   })
 })
+
+describe('groupActivityRuns attribution identity (Spec 108-j FR-029)', () => {
+  it("never folds identical calls from different clients under one caller's chips", () => {
+    const rows = [
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro' }),
+      call({ id: 'b', client_id: 'claude-code', profile: 'work-ro' }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('never folds calls under different profiles or tokens', () => {
+    expect(groupActivityRuns([
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro' }),
+      call({ id: 'b', client_id: 'cursor', profile: 'personal' }),
+    ]).map(r => r.count)).toEqual([1, 1])
+    expect(groupActivityRuns([
+      call({ id: 'a', token_name: 'ro-bot' }),
+      call({ id: 'b', token_name: 'rw-bot' }),
+    ]).map(r => r.count)).toEqual([1, 1])
+  })
+
+  it('still folds calls from the same caller', () => {
+    const rows = [
+      call({ id: 'a', client_id: 'cursor', profile: 'work-ro', profile_source: 'pin' }),
+      call({ id: 'b', client_id: 'cursor', profile: 'work-ro', profile_source: 'pin' }),
+    ]
+    expect(groupActivityRuns(rows).map(r => r.count)).toEqual([2])
+  })
+})

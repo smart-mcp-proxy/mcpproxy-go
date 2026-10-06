@@ -15,6 +15,11 @@ talks to the proxy instead of to each upstream server directly. It is available
 from the Web UI wizard, the macOS tray ("Connect Client…"), and the
 `mcpproxy connect` CLI.
 
+:::tip Agents not using your servers?
+If Claude Code or Codex reaches for `gh` or `curl` instead of the proxied tools, add the
+snippet from [Agent Instructions](/features/agent-instructions) to its `CLAUDE.md` / `AGENTS.md`.
+:::
+
 ## Clients hub
 
 The Clients hub in the Web UI and macOS app brings client presence, Endpoint &
@@ -74,6 +79,50 @@ rotation, so the old secret keeps working until the new config is written.
 Reassigning a connected client (`PUT /api/v1/clients/{client}/binding`) changes
 its profile or mode in the token store only; the client's config file is never
 touched and its live sessions are notified.
+
+### Using client credentials
+
+| To | Web UI and macOS | CLI |
+|----|-----------------|-----|
+| Connect a client to a profile | Connect sheet: choose a profile and Locked or Switchable | `mcpproxy connect cursor --profile work-readonly --lock` |
+| Connect without a credential (only while `require_mcp_auth` is off) | "Keyless" in the advanced options | `mcpproxy connect cursor --keyless` |
+| Move a client to another profile, or lock it | The profile chip on the client's row, the lock switch; the macOS tray Clients submenu | `mcpproxy client set-profile cursor work-full`, `client lock`, `client unlock` |
+| Move every client of one profile to another | Bulk move on the Clients page | `mcpproxy client set-profile --from-profile X --to-profile Y` |
+| Add a client that has no config file (a script, a CI job) | "Other client": the credential and a header snippet are shown once | `mcpproxy client add ci-bot --profile work-readonly` |
+| Replace a credential | Rotate on the row: a supported client previews the config change first; a custom client shows the new secret once and stays pending until you finalize | `mcpproxy client rotate cursor`, `client rotate ci-bot --finalize` |
+| Revoke a credential | Forget (optionally also remove the config entry) | `mcpproxy client forget cursor --disconnect` |
+
+A client whose config still holds the instance admin API key (or no credential, or a revoked or expired one) is reported on the Clients page with a warning and by `mcpproxy doctor`. Nothing is rewritten automatically. **Upgrade clients holding the admin key** (Clients page, or `mcpproxy client upgrade-admin-key-holders`) previews, then replaces the admin key in every such client's config with a per-client credential; afterwards rotate the admin API key, which the action offers as its last step only once no client holds the key any more. If some clients could not be upgraded, the dialog lists what succeeded and what failed, withholds the rotate step (rotating would break the failed clients) and offers Try again; only clients that still hold the admin key are changed on a retry. A client without an active client credential cannot be bound to a profile until it is connected with one.
+
+The credential is shown masked everywhere except the single moment it is created for a custom client. It is valid on MCP endpoints only; a client can never use it to read activity, config or other clients over REST.
+
+**Rolling back.** Before you downgrade to a pre-profiles-v3 binary, set `require_mcp_auth: true`. A binary that predates client credentials rejects them (`401` on REST, and on MCP while authentication is required), but with `require_mcp_auth` off it treats an unrecognised credential like an omitted one and gives it unconfined access. See [Profiles, upgrading and downgrading](./profiles.md#upgrading-and-downgrading).
+
+## Codex credential limitation
+
+Codex stores its MCP entry in `~/.codex/config.toml`. The Connect flow writes
+the per-client credential (`mcp_cli_`) into the entry's URL as `?apikey=...`,
+because that is the only carrier it writes for Codex. This happens whether or
+not `require_mcp_auth` is on; only a `keyless` connect writes no credential.
+Other clients get an `X-API-Key` header instead.
+
+The credential is therefore stored in plain text inside `config.toml` and can show up
+in anything that logs the URL. To reduce the exposure:
+
+- Connect Codex with an agent token (`mcp_agt_` prefix) rather than the admin
+  API key, so a leaked URL only grants that token's scope. See
+  [Agent tokens](https://docs.mcpproxy.app/features/agent-tokens).
+- Or edit the entry by hand to keep the secret out of the file:
+
+  ```toml
+  [mcp_servers.mcpproxy]
+  url = "http://127.0.0.1:8080/mcp"
+  env_http_headers = { "X-API-Key" = "MCPPROXY_API_KEY" }
+  ```
+
+  then `export MCPPROXY_API_KEY=...` in the shell that starts Codex.
+  Codex also supports `http_headers` with literal values,
+  which has the same at-rest exposure as the query string.
 
 ## What the preview discloses (Spec 091)
 

@@ -253,6 +253,13 @@ type ActivityRecord struct {
 	ClientID      string `json:"client_id,omitempty"`      // Client id from the client-credential binding
 	ClientName    string `json:"client_name,omitempty"`    // Self-reported clientInfo.name (advisory, never authoritative)
 	TokenName     string `json:"token_name,omitempty"`     // Agent/client token name
+	// TokenPrefix is the calling token's 12-char display prefix, persisted as
+	// the INTERNAL ownership proof (FR-029/FR-031): a policy_decision or
+	// prompt_get row carries no _auth_token_prefix argument, so this is how a
+	// scoped caller recognises its own rows. It is never projected: no REST,
+	// export or SSE shape maps it. Empty on records written before it existed
+	// (those fall back to the _auth_token_prefix argument, else read as foreign).
+	TokenPrefix string `json:"token_prefix,omitempty"`
 	// BlockReason is the typed cause of a profile policy refusal. It is also
 	// written to Metadata[MetadataKeyBlockReason] for one release so existing
 	// readers keep working. Display only: no filter reads it.
@@ -309,7 +316,11 @@ func (o *ActivityIdentityOwner) Owns(r *ActivityRecord) bool {
 	if o == nil || o.TokenPrefix == "" {
 		return false
 	}
-	return extractAuthMetadataField(r, authArgTokenPrefix) == o.TokenPrefix &&
+	prefix := r.TokenPrefix
+	if prefix == "" {
+		prefix = extractAuthMetadataField(r, authArgTokenPrefix) // legacy rows
+	}
+	return prefix == o.TokenPrefix &&
 		r.EffectiveTokenName() == o.TokenName
 }
 

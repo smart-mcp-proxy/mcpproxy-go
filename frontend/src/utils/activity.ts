@@ -4,6 +4,13 @@
  */
 
 import { formatDateTime } from './datetime'
+import {
+  ActivityViewAll,
+  ActivityViewCalls,
+  ActivityViewSessions,
+  ActivityViewSystem,
+  type ActivityView,
+} from '@/types/contracts'
 
 // Activity type labels.
 //
@@ -36,6 +43,16 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
 }
 
 const typeLabels = ACTIVITY_TYPE_LABELS
+
+// Spec 109 FR-090: the Activity view tab labels, keyed by the generated
+// ActivityView enum (contracts.ts) so a new Go view cannot ship without a word.
+// The same words are pinned for macOS (ActivityViewMode) by terminology.json.
+export const ACTIVITY_VIEW_LABELS: Record<ActivityView, string> = {
+  [ActivityViewCalls]: 'Tool calls',
+  [ActivityViewSessions]: 'Sessions',
+  [ActivityViewSystem]: 'System events',
+  [ActivityViewAll]: 'All',
+}
 
 // Spec 109-k (activity-scope-filters): the activity types the `view=calls`
 // Activity filter selects (url-filter-contract.md `view` -> REST `type`
@@ -709,6 +726,12 @@ export interface ActivityRunFields {
   max_severity?: string
   detection_types?: string[]
   metadata?: Record<string, any> | null
+  // Attribution (Spec 108-j): the row's attribution chips print these.
+  client_id?: string
+  client_name?: string
+  profile?: string
+  profile_source?: string
+  token_name?: string
 }
 
 /** A run of identical consecutive rows. `count === 1` for an ordinary row. */
@@ -776,6 +799,13 @@ const runIdentity = (a: ActivityRunFields): string => {
     a.has_sensitive_data ? '1' : '0',
     a.max_severity ?? '',
     a.detection_types?.length ?? 0,
+    // The attribution chips print the lead row's client, profile and token, so
+    // calls from different callers must not fold under one caller's chips (FR-029).
+    a.client_id ?? '',
+    a.client_name ?? '',
+    a.profile ?? '',
+    a.profile_source ?? '',
+    a.token_name ?? '',
     // A preflight or config change says everything in metadata.action / verdict;
     // two of them are only "the same row twice" if that text matches too.
     batch ? '' : activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),

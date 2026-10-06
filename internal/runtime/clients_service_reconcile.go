@@ -73,6 +73,9 @@ func (s *ClientsService) ReconcileClient(ctx context.Context, clientID string) e
 	if rec == nil || rec.Kind != auth.KindClient || rec.PendingHash == "" || rec.Revoked {
 		return nil
 	}
+	if s.connectInFlight(clientID) {
+		return nil // a connect is mid-write: the file legitimately still holds the old secret
+	}
 	if def := connect.FindClient(clientID); def == nil || !def.Supported {
 		if rec.RotationStartedAt != nil && s.now().Sub(*rec.RotationStartedAt) >= clientRotationCustomOverlap {
 			_, err := s.finalizeLocked(ctx, reconcilerActor, clientID)
@@ -207,6 +210,9 @@ func (s *ClientsService) ReconcileTimeOnly(ctx context.Context) error {
 	for i := range all {
 		rec := &all[i]
 		if rec.Kind != auth.KindClient || rec.PendingHash == "" || rec.Revoked || rec.RotationStartedAt == nil {
+			continue
+		}
+		if s.connectInFlight(rec.ClientID) {
 			continue
 		}
 		if def := connect.FindClient(rec.ClientID); def != nil && def.Supported {

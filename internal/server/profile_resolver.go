@@ -336,7 +336,16 @@ func (p *MCPProxyServer) resolveActiveProfileWithSourceFromIndex(ctx context.Con
 // review round 2). idx.position is the O(1) existence check the pin/slug
 // tiers actually need.
 func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) string {
-	if pin := profilePinFromContext(ctx); pin != "" {
+	// A SWITCHABLE client credential's ProfilePin is its BINDING (the base for
+	// switchable_to), which FR-020 ranks BELOW the url and session tiers. It is
+	// authoritative only while no selection is in effect, so a just-written
+	// slug must be reported instead of the binding. A locked credential and a
+	// regular agent-token pin stay authoritative.
+	switchableBinding := ""
+	if pin, mode, ok := clientCredentialFromContext(ctx); ok && mode != auth.ProfileModeLocked {
+		switchableBinding = pin
+	}
+	if pin := profilePinFromContext(ctx); pin != "" && pin != switchableBinding {
 		if idx != nil && idx.position(pin) >= 0 {
 			return pin
 		}
@@ -354,10 +363,12 @@ func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Conte
 	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
 		return urlScope.Name
 	}
-	if slug != "" && idx != nil && idx.position(slug) >= 0 {
+	if slug != "" && idx != nil && idx.position(slug) >= 0 && (switchableBinding == "" || idx.position(switchableBinding) >= 0) {
 		return slug
 	}
-	return ""
+	// No selection in effect: a switchable credential falls back to its binding
+	// (a dangling binding stays deny-all, as resolveV3Base resolves it).
+	return switchableBinding
 }
 
 // profileScopeFromIndex builds the ProfileScope for slug's FULL membership

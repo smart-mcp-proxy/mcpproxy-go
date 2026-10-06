@@ -140,6 +140,25 @@ func TestConnectClientCredential_Keyless(t *testing.T) {
 	}
 }
 
+// FR-021a: a keyless connect never mints, but it writes the same config, so it
+// is refused while another connect of the client holds the in-flight claim.
+func TestConnectClientCredential_KeylessRefusedWhileClaimed(t *testing.T) {
+	svc, home := testServiceWithKey(t)
+	minter := withFakeMinter(svc)
+	seedClientConfig(t, home, "cursor")
+	minter.busy = errors.New("connect_in_progress")
+
+	before, _ := os.ReadFile(ConfigPath("cursor", home))
+	_, err := svc.ConnectWithOptions("cursor", "mcpproxy", ConnectOptions{Force: true, Intent: CredentialIntent{Keyless: true}})
+	if !errors.Is(err, minter.busy) {
+		t.Fatalf("keyless connect must be refused while claimed, got %v", err)
+	}
+	after, _ := os.ReadFile(ConfigPath("cursor", home))
+	if !bytes.Equal(before, after) {
+		t.Fatal("a refused keyless connect must not write")
+	}
+}
+
 // A token-name conflict (client-<id> held by a regular token) or a guard
 // refusal comes back from the minter BEFORE any write: the file is
 // byte-identical, no backup is taken and Commit is never called.

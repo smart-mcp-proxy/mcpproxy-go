@@ -3,7 +3,7 @@ id: needs-attention
 title: Needs Attention
 sidebar_label: Needs Attention
 sidebar_position: 15
-description: The one needs-attention list every MCPProxy surface reads from — sign-in prompts, reviews, errors, missing secrets, configuration problems and unseen clients.
+description: The one needs-attention list every MCPProxy surface reads from — sign-in prompts, reviews, errors, missing secrets, configuration problems, unseen clients and client-credential warnings.
 keywords: [attention, needs attention, health, quarantine, review, sign in, dashboard, home, tray, cli, doctor]
 ---
 
@@ -40,6 +40,12 @@ lists instead of re-rendering the whole thing on every change.
 
 | Kind | Rank | Condition | Fix |
 |---|---|---|---|
+| `anonymous_denied_by_binding_guard` | 4 | Client bindings could be bypassed without authentication, so anonymous callers are denied | `change_setting` → Settings → Security, scrolled to `require_mcp_auth` (nothing is saved for you) |
+| `client_holds_admin_key` | 5 | A client's observed credential is the admin API key | `upgrade_admin_key_holders` → the Clients page, the upgrade review |
+| `client_token_name_conflict` | 6 | A regular agent token holds the name `client-<id>` | `edit_token` → the Agent tokens tab, filtered to that token |
+| `profile_missing` | 7 | A client is bound to a profile that no longer exists, so it is denied everything | `move_client` → the Clients row, to choose a profile |
+| `client_rotation_pending` | 8 | A client credential rotation has not finished | `reconnect_client` → the Clients row |
+| `client_credential_expiring` | 9 | A client credential expires within 14 days | `reconnect_client` → the Clients row |
 | `sign_in_required` | 10 | `health.status == sign_in_required` (includes a quarantined OAuth server, or a failed token refresh) | `login` → opens the server, which offers Sign in |
 | `missing_secret` | 20 | `health.status == needs_secret` | `set_secret` → opens the server's secret form |
 | `config_error` | 30 | `health.status == needs_config` | `configure`/`edit_url` → opens the server's Configuration tab, field focused |
@@ -47,6 +53,14 @@ lists instead of re-rendering the whole thing on every change.
 | `server_review` | 50 | `admin_state == quarantined` (and enabled) | `review` → opens the review location — never a one-click approve |
 | `tool_review` | 60 (changed) / 61 (pending) | A trusted server with ≥ 1 tool in that approval state; one item per state, so a server with both is two items | `review` → opens the review location, filtered to that state |
 | `client_never_seen` | 70 | A client MCPProxy recorded as connected ≥ 5 minutes ago, with no MCP session observed since | `reload_hint` → shows how to restart the client |
+
+The first six kinds are the [profiles](https://docs.mcpproxy.app/features/profiles)
+warnings, computed by the same function that fills the Clients page banner, so
+the two cannot disagree. They outrank the server items because they are
+security-relevant, and each opens the screen that fixes it without changing
+anything itself. `client_holds_admin_key` appears once MCPProxy has observed
+what a client's configuration holds (open the client's row once); it never
+reads a client's configuration file in the background.
 
 Never an item: a disabled server, a server `connecting` for under 60 seconds,
 a `ready` server whatever its proactive `actions` (a login nudge for a token
@@ -94,4 +108,6 @@ the 5-minute default; there is no equivalent hook for the 60-second
 An administrator (the API key, the local socket, or a server-edition admin
 user) sees every item. A scoped caller — an agent token, or a non-admin
 server-edition user session — sees only items whose subject is a server it
-may enumerate, and never sees a client item at all.
+may enumerate. Every other subject (a client, or the binding-guard setting) is
+for administrators only, so the profiles warnings never reach an agent token or
+a tenant.

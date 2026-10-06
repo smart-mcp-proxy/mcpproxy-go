@@ -43,7 +43,10 @@ type AttentionClient struct {
 type AttentionInput struct {
 	Servers []AttentionServer
 	Clients []AttentionClient
-	Now     time.Time
+	// ClientWarnings are the Spec 108 warnings (109-l). Empty in the server
+	// edition, which has no clients service.
+	ClientWarnings []AttentionClientWarning
+	Now            time.Time
 
 	// ServerErrorThreshold and ClientNeverSeenThreshold override the package
 	// defaults (AttentionServerErrorThreshold, AttentionClientNeverSeenThreshold)
@@ -90,6 +93,8 @@ func Compute(in AttentionInput) []contracts.AttentionItem {
 			items = append(items, item)
 		}
 	}
+
+	items = append(items, computeClientWarningItems(in.ClientWarnings, now)...)
 
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Rank != items[j].Rank {

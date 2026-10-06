@@ -56,6 +56,15 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        advertise_upstream_servers:
+          description: |-
+            AdvertiseUpstreamServers controls whether MCP clients are told the
+            names of the upstream servers they can reach — in the initialize
+            instructions and the retrieve_tools description — so agents use the
+            proxied tools instead of falling back to shell CLIs. Names are always
+            filtered to the caller's profile and agent-token scope. Default true;
+            set false to keep server names out of client context. Read live.
+          type: boolean
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -1758,7 +1767,7 @@ components:
         name:
           type: string
         type:
-          description: server|tool|client
+          description: server|tool|client|setting
           type: string
       type: object
     contracts.ConfigApplyResult:
@@ -3881,6 +3890,16 @@ components:
           $ref: '#/components/schemas/runtime.EffectiveCounts'
         profile:
           type: string
+        stale_classification_reasons:
+          additionalProperties:
+            type: string
+          description: |-
+            StaleClassificationReasons maps each stale classify entry to why it no
+            longer applies: profile.StaleClassificationAnnotated or
+            profile.StaleClassificationMissing. It is computed over the UNFILTERED
+            tool set, so a server or reason filter never changes it. Administrators
+            only.
+          type: object
         stale_classifications:
           description: |-
             StaleClassifications lists classify entries for tools that are now
@@ -4823,6 +4842,12 @@ components:
         action:
           $ref: '#/components/schemas/profile.FixAction'
         label:
+          type: string
+        profile:
+          description: |-
+            Profile is set for move_client only: the destination profile slug the fix
+            moves the client to. Target stays the client id (UIs navigate by it) and
+            Label carries the title, so neither can name the slug.
           type: string
         step:
           type: string
@@ -5848,7 +5873,8 @@ paths:
       description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
-        only items whose server it may enumerate, and never a client item.'
+        only server items whose server it may enumerate; every other subject type
+        (client, setting) is administrator-only.'
       responses:
         "200":
           content:
@@ -6197,8 +6223,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.BindingGuardResponse'
-          description: no_client_credential, or binding_bypassable_without_auth with
-            bindings and fixes
+          description: no_client_credential, connect_in_progress (a connect of this
+            client is mid-write), or binding_bypassable_without_auth with bindings
+            and fixes
         "503":
           content:
             application/json:
@@ -6271,7 +6298,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
-          description: no_client_credential, or precondition_failed
+          description: no_client_credential, precondition_failed, connect_in_progress
+            (another connect of this client is mid-write), or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)
         "503":
           content:
             application/json:
@@ -6326,7 +6356,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
-          description: no_client_credential
+          description: no_client_credential, or connect_in_progress (a connect of
+            this client is mid-write)
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -6561,6 +6592,14 @@ paths:
           description: 'binding_bypassable_without_auth: the patch would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -6619,6 +6658,14 @@ paths:
           description: 'binding_bypassable_without_auth: the write would let a client
             bound to a named profile escape it while require_mcp_auth is off (FR-008a);
             nothing was written'
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: telemetry.enabled is locked while an environment variable (DO_NOT_TRACK,
+            CI, MCPPROXY_TELEMETRY=false) disables telemetry; nothing was written
+            (FR-044a)
         "500":
           content:
             application/json:
@@ -6936,7 +6983,10 @@ paths:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
           description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
             (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse);
-            or conflicting_token (ClientCredentialConflictResponse)'
+            or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress
+            (another connect of this client is mid-write) or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)'
         "503":
           content:
             application/json:
@@ -9700,7 +9750,9 @@ paths:
   /api/v1/servers/import/path:
     post:
       description: Import MCP server configurations by reading a file from the server's
-        filesystem
+        filesystem. A preview (preview=true) of a file with no MCP servers (empty,
+        {}, or no/empty server map) answers 200 with an empty imported list; an apply
+        of such a file and a malformed file still answer 400.
       parameters:
       - description: If true, return preview without importing
         in: query
@@ -10001,8 +10053,9 @@ paths:
       - stats
   /api/v1/status:
     get:
-      description: Get comprehensive server status including running state, listen
-        address, upstream statistics, and timestamp
+      description: |-
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
           content:

@@ -127,6 +127,20 @@ type Runtime struct {
 	selfWriteMu      sync.Mutex
 	recentSelfWrites []selfWriteEntry
 
+	// preFixReported holds the servers the "predate the config-load admission
+	// gate" advisory has already named in this process, so the gate passes at
+	// startup and on every later publish do not repeat it.
+	preFixMu       sync.Mutex
+	preFixReported map[string]struct{}
+
+	// bootKnownServers is the set of servers config.db held the first time
+	// the admission gate read it in this process (RC-UPG-001). Only those can
+	// carry a stale record from an older release; a server added while this
+	// process runs is saved to config.db before its config is published, so
+	// the gate must not read it as "known but never approved".
+	bootKnownOnce    sync.Once
+	bootKnownServers map[string]struct{}
+
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status
@@ -2011,6 +2025,16 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		r.logger.Error("Failed to update config service", zap.Error(err))
 	}
 
+	// Issue #1458: a profile edit is live the moment the apply returns, so its
+	// per-profile search index must be too, not after the next discovery pass.
+	// A stale index only hides in-scope tools (retrieve_tools re-admits every
+	// hit against the live profile scope), but a widened or new profile would
+	// search an incomplete store. After configSvc.Update because the reconcile
+	// reads r.Config(); before the event so a subscriber that re-queries sees it.
+	if profileIndexInputsChanged(changedFieldsCopy) {
+		r.reconcileProfileIndexes()
+	}
+
 	// Emit config.reloaded event (after releasing lock)
 	r.emitConfigReloaded(cfgPathCopy)
 
@@ -2481,8 +2505,13 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	// Read the global isolation block ONCE, outside the loop: every server's
 	// projection needs it to resolve the effective isolation state (GH #1142).
 	var globalIsolation *config.DockerIsolationConfig
+	var oauthExpiryWarningHours float64
 	if cfg, err := r.GetConfig(); err == nil && cfg != nil {
 		globalIsolation = cfg.DockerIsolation
+		// Read here rather than via r.cfg in the loop below: the servers.changed
+		// coalescer calls this from its own goroutine, and r.cfg is swapped by
+		// applyConfigLocked under r.mu (data race with a concurrent apply).
+		oauthExpiryWarningHours = cfg.OAuthExpiryWarningHours
 	}
 
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
@@ -2800,8 +2829,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		// Calculate unified health status
 		healthConfig := health.DefaultHealthConfig()
-		if r.cfg != nil && r.cfg.OAuthExpiryWarningHours > 0 {
-			healthConfig.ExpiryWarningDuration = time.Duration(r.cfg.OAuthExpiryWarningHours * float64(time.Hour))
+		if oauthExpiryWarningHours > 0 {
+			healthConfig.ExpiryWarningDuration = time.Duration(oauthExpiryWarningHours * float64(time.Hour))
 		}
 
 		healthInput := health.HealthCalculatorInput{

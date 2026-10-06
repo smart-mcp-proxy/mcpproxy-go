@@ -199,6 +199,19 @@ jobs:
         shell: bash
         run: npm ci --prefix bench/tscg
 
+      # tiktoken-go downloads the BPE into a shared temp dir and ends with an
+      # atomic rename. `go test ./...` runs packages in parallel, so on Windows
+      # the losing package hits "Access is denied" on the rename (seen as
+      # TestBaseline_CountToolWithSchemaParity). Populating the cache first
+      # makes every later tokenizer construction a cache hit. Same fix as
+      # unit-tests.yml.
+      - name: Warm the tiktoken vocabulary cache
+        if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
+        shell: bash
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
       - name: Run tests (skip binary E2E tests - not compatible with cross-compilation)
         # Skip tests for Windows ARM64 (cross-compilation - can't run ARM64 binaries on AMD64 runner)
         if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
@@ -210,6 +223,8 @@ jobs:
           else
             go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
           fi
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Build binary and create archives
         shell: bash

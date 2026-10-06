@@ -151,6 +151,13 @@ type Server struct {
 	admissionScanMu     sync.Mutex
 	admissionScanKicked map[string]bool
 
+	// Automatic tool definition capture after a settled scan (see
+	// review_capture.go). reviewCaptureFn defaults to
+	// runtime.RefreshServerTools and is replaceable in tests;
+	// reviewCaptureInFlight is the per-server single-flight guard.
+	reviewCaptureFn       func(ctx context.Context, serverName string) error
+	reviewCaptureInFlight sync.Map
+
 	// Informational Pass-1 baseline scanning (see scan_informational.go).
 	// infoScanKnown holds every server name observed since process start, so a
 	// servers.changed carrying a name that is not in it is a NEW admission;
@@ -781,6 +788,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 				s.mcpProxy.RefreshPrompts()
+				// retrieve_tools' description names the reachable servers;
+				// re-list clients when that set changes.
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
 			// and must have its baseline scan triggered so the settle handler can
@@ -822,6 +832,9 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 				// session, so an unguarded call would make any unrelated config
 				// edit look, to a client, exactly like the tool set changing.
 				s.mcpProxy.RefreshDirectModeToolsOnSerializationChange()
+				// advertise_upstream_servers is hot-reloadable: re-list
+				// retrieve_tools clients when it flips (guarded on change).
+				s.mcpProxy.NotifyUpstreamInventoryChanged()
 			}
 		case runtime.EventTypeUpstreamPromptsChanged:
 			// F13: an upstream added/removed a prompt at runtime (debounced
@@ -840,6 +853,10 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
 			serverName, _ := evt.Payload["server_name"].(string)
 			s.maybeAutoApproveScanSettled(context.Background(), serverName)
+			// A freshly scanned, still-quarantined server has its tool
+			// definitions captured for review (never blocks this loop).
+			status, _ := evt.Payload["status"].(string)
+			s.maybeCaptureReviewDefinitions(serverName, status)
 		}
 	}
 }
@@ -2035,11 +2052,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	if updates.Protocol != "" {
 		existing.Protocol = updates.Protocol
 	}
-	// Booleans are always applied since the handler only calls UpdateServer
-	// when the caller explicitly provided these fields
+	// Enabled and ReconnectOnUse are always applied: the REST handler resolves
+	// them against the existing server before calling UpdateServer.
 	existing.Enabled = updates.Enabled
-	existing.Quarantined = updates.Quarantined
 	existing.ReconnectOnUse = updates.ReconnectOnUse
+	// Quarantine is applied only when the caller stated it (the REST PATCH
+	// handler marks the explicit bit when the body carries `quarantined`).
+	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+	// false copied from a config snapshot, which must never un-quarantine.
+	if updates.QuarantineExplicitlySet() {
+		existing.Quarantined = updates.Quarantined
+		existing.MarkQuarantineExplicitlySet(true)
+	}
 
 	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
 	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
@@ -3892,7 +3916,7 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 	// Check if server exists
 	_, exists := s.runtime.UpstreamManager().GetClient(serverName)
 	if !exists {
-		return nil, fmt.Errorf("server not found: %s", serverName)
+		return nil, fmt.Errorf("%w: %s", contracts.ErrServerNotFound, serverName)
 	}
 
 	// Read from server-specific log file
@@ -4113,7 +4137,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
 		intrinsic := profile.IntrinsicTier(annotations, found)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
-			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
 			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))

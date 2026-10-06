@@ -34,7 +34,6 @@ import (
 )
 
 const (
-	precedenceTierText       = "blocked by profile: github:create_issue is a write tool; this profile allows read tools only"
 	precedenceOutOfScopeText = "Server 'github' is not in scope for this agent token"
 )
 
@@ -110,6 +109,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 	t.Run("P1 dangling pin beats server scope", func(t *testing.T) {
 		p := newPrecedenceFixture(t, nil)
 		dangling := p.call(t, agentCtx([]string{"*"}, allPerms, "gone"), contracts.ToolVariantRead, "github:list_issues")
+		require.Equal(t, []string{"token_scope"}, p.denyReasons(t), "the dangling pin's own deny reason")
 		unpinnedOutOfScope := p.call(t, agentCtx([]string{"notion"}, allPerms, ""), contracts.ToolVariantRead, "github:list_issues")
 		require.Equal(t, precedenceOutOfScopeText, dangling)
 		require.Equal(t, unpinnedOutOfScope, dangling, "a dangling pin answers with the bytes of an out-of-scope token")
@@ -147,7 +147,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 			cfg.Profiles = append(cfg.Profiles, both)
 		})
 		text := p.call(t, pinnedProfileCtx("rule-and-cap"), contracts.ToolVariantWrite, "github:create_issue")
-		require.Equal(t, "blocked by profile: github:create_issue is denied by a profile rule", text)
+		require.Equal(t, v3Disclosed(t, "rule", "github", "create_issue", profile.TierWrite, "read", "rule-and-cap"), text)
 		p.requireBlockReason(t, "github", "create_issue", profile.BlockReasonRule)
 		p.requireNoUpstreamCalls(t)
 	})
@@ -157,7 +157,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 		p := newPrecedenceFixture(t, nil)
 		ctx := agentCtx([]string{"*"}, []string{auth.PermRead}, "work-readonly")
 		text := p.call(t, ctx, contracts.ToolVariantDestructive, "github:get_secret_scanning_alert")
-		require.Equal(t, "blocked by profile: github:get_secret_scanning_alert is denied by a profile rule", text)
+		require.Equal(t, v3Disclosed(t, "rule", "github", "get_secret_scanning_alert", profile.TierRead, "read", "work-readonly"), text)
 		require.NotContains(t, text, "Insufficient permissions")
 		p.requireBlockReason(t, "github", "get_secret_scanning_alert", profile.BlockReasonRule)
 		p.requireNoUpstreamCalls(t)
@@ -227,7 +227,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 			require.NoError(t, controlErr)
 			require.Contains(t, resultText(t, controlResult), state.mustNotContain, "the server-state gate must fire when the profile admits the call")
 			text := p.call(t, pinnedProfileCtx("work-readonly"), contracts.ToolVariantWrite, "github:create_issue")
-			require.Equal(t, precedenceTierText, text)
+			require.Equal(t, v3TierRefusal(t), text)
 			require.NotContains(t, text, state.mustNotContain)
 			p.requireBlockReason(t, "github", "create_issue", profile.BlockReasonTier)
 			p.requireNoUpstreamCalls(t)
@@ -241,7 +241,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 			ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending,
 		}))
 		text := p.call(t, pinnedProfileCtx("work-readonly"), contracts.ToolVariantWrite, "github:create_issue")
-		require.Equal(t, precedenceTierText, text)
+		require.Equal(t, v3TierRefusal(t), text)
 		require.NotContains(t, text, "pending")
 		p.requireBlockReason(t, "github", "create_issue", profile.BlockReasonTier)
 		p.requireNoUpstreamCalls(t)

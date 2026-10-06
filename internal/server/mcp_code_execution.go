@@ -297,7 +297,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			serverName, toolName, profile.IntrinsicTier(identity.Annotations, identity.Found),
 		)
 		if !admitted && reason != profile.ReasonServerNotInProfile {
-			sandbox.profileRefusal, _ = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName)
+			sandbox.profileRefusal, sandbox.profileBlockReason = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName, profileRefusalSubject(profileResolution, profileIdx))
 		}
 		return required, rawGate
 	}
@@ -508,7 +508,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, scrubResultForRecord(result, execFwdOut), nil, codeExecContentTrust)
+	p.emitActivityInternalToolCall(ctx, "code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, scrubResultForRecord(result, execFwdOut), nil, codeExecContentTrust)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
@@ -823,16 +823,36 @@ type upstreamToolCaller struct {
 // dispatchGate's second result carried along: false means no gate was
 // evaluated (a proxy without storage).
 type sandboxGate struct {
-	gate           toolGate
-	gated          bool
-	profileRefusal string
+	gate               toolGate
+	gated              bool
+	profileRefusal     string
+	profileBlockReason profile.BlockReason
 }
+
+// The sandbox asserts these two methods separately (jsruntime
+// resolveDispatchGates). Changing ProfilePolicyRefusal's signature would
+// silently stop the assertion matching and DROP nested profile refusals, so
+// both are pinned at compile time.
+var _ interface {
+	ProfilePolicyRefusal() string
+	ProfilePolicyBlockReason() string
+} = (*sandboxGate)(nil)
 
 func (g *sandboxGate) ProfilePolicyRefusal() string {
 	if g == nil {
 		return ""
 	}
 	return g.profileRefusal
+}
+
+// ProfilePolicyBlockReason is the typed cause (profile_tier, profile_rule,
+// profile_unannotated) of the refusal ProfilePolicyRefusal reports, "" when the
+// gate is not refused (Spec 108 FR-029).
+func (g *sandboxGate) ProfilePolicyBlockReason() string {
+	if g == nil {
+		return ""
+	}
+	return string(g.profileBlockReason)
 }
 
 // CallTool implements jsruntime.ToolCaller. It takes the gate read itself,
@@ -933,7 +953,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		if u.proxy != nil {
 			u.proxy.auditAuthz(ctx, "deny", policyRefusalReasonKey(gate))
 		}
-		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 		return nil, refusal
 	}
 	if u.proxy != nil && u.proxy.dispatchGatePause != nil {
@@ -979,7 +999,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
 			u.proxy.auditAuthz(ctx, "deny", telemetry.BlockReasonToolNotCallable)
-			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 			return nil, refusal
 		}
 		certified = live
@@ -1028,7 +1048,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		if u.proxy != nil {
 			u.proxy.auditToolCall(ctx, "error", "", "", duration.Milliseconds(), nil, nil)
 		}
-		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 		return nil, refusal
 	}
 	if err == nil {
@@ -1230,17 +1250,20 @@ func subCallByteSizes(args map[string]interface{}, result interface{}) (requestB
 // ctx is the sub-call's context carrying its audit.Attempt (Spec 107): the
 // `authz deny` was written by the caller at the refusing gate, so the funnel
 // this goes through writes no further audit line for a blocked status.
-func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
+//
+// blockReason is the profile.BlockReason of a profile tool-policy refusal
+// (Spec 108 FR-029); every other refusal passes "".
+func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration, blockReason string) {
 	if u.proxy == nil {
 		return
 	}
-	u.proxy.emitActivityToolCallCompleted(ctx,
+	u.proxy.emitActivityToolCallCompletedWithBlockReason(ctx,
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
 		// The policy gate refused this before dispatch, so there IS no response
 		// and 0 response bytes is a true zero, not an unmeasured one. The
 		// request was still formed and is measured like any other.
-		"", nil, "", "", rawByteSize(args), 0, "", nil, u.parentCallID)
+		"", nil, "", "", rawByteSize(args), 0, "", nil, u.parentCallID, blockReason)
 }
 
 // shedHasCanonicalRecord reports whether callErr is a limiter shed the

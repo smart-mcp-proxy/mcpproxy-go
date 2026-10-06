@@ -27,8 +27,29 @@ struct ToolsView: View {
     /// cannot overwrite the search results the user just asked for.
     @State private var loadGeneration = 0
     @State private var selectedID: String?
+    /// Spec 108-k K18: "View as" — the catalogue as a client or a profile sees it.
+    @State private var viewAs: ToolsViewAs = .everything
+    @State private var viewAsCounts: ViewAsCounts?
 
     private var apiClient: APIClient? { appState.apiClient }
+
+    /// Whose view of the catalogue is shown. Everything (admin) is the default.
+    enum ToolsViewAs: Equatable {
+        case everything
+        case client(String)
+        case profile(String)
+
+        var isScoped: Bool { self != .everything }
+
+        /// The explainer subject for a "Why?" on a row.
+        var explainerSubject: ExplainerSubject? {
+            switch self {
+            case .everything: return nil
+            case .client(let id): return .client(id)
+            case .profile(let name): return .profile(name)
+            }
+        }
+    }
 
     /// One row of the list: a tool, its server, and (for a search) its rank.
     struct ToolRow: Identifiable, Equatable {
@@ -40,17 +61,27 @@ struct ToolsView: View {
         /// |`unannotated`), never derived locally. `nil` for an older core
         /// that does not yet send it.
         let tier: String?
+        /// View-as only (Spec 108 FR-032): the verdict for the viewed subject and
+        /// the tool's tier under its profile.
+        var access: ToolAccess?
+        var profileTier: String?
 
         // Explicit initializer (rather than relying on the synthesized
         // memberwise one) so every existing call site that predates `tier`
         // keeps compiling unchanged.
-        init(server: String, name: String, description: String, score: Double?, tier: String? = nil) {
+        init(server: String, name: String, description: String, score: Double?, tier: String? = nil,
+             access: ToolAccess? = nil, profileTier: String? = nil) {
             self.server = server
             self.name = name
             self.description = description
             self.score = score
             self.tier = tier
+            self.access = access
+            self.profileTier = profileTier
         }
+
+        /// A row the viewed subject cannot use: greyed, with the reason beside it.
+        var isBlockedForSubject: Bool { access.map { !$0.callable } ?? false }
 
         /// The canonical MCP identity — what an agent would actually call.
         var qualified: String { server.isEmpty ? name : "\(server):\(name)" }
@@ -70,6 +101,9 @@ struct ToolsView: View {
             content
         }
         .task { await load() }
+        .onAppear { consumeRoute() }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
+        .onChange(of: viewAs) { _ in Task { await load() } }
         .onChange(of: appState.totalTools) { _ in
             // The index rebuilt (a server connected, tools re-discovered).
             if query.isEmpty { Task { await load() } }
@@ -84,6 +118,7 @@ struct ToolsView: View {
                 .font(.scaled(.title2, scale: fontScale).bold())
             Spacer()
             if isLoading { ProgressView().controlSize(.small) }
+            if appState.scopeFiltersAvailable { viewAsControls }
             Text(countLabel)
                 .font(.scaled(.caption, scale: fontScale))
                 .foregroundStyle(.secondary)
@@ -91,6 +126,67 @@ struct ToolsView: View {
         .padding(.horizontal)
         .padding(.top, 12)
         .padding(.bottom, 6)
+    }
+
+    /// "View as: Everything (admin) / Client… / Profile…" and its value picker.
+    @ViewBuilder
+    private var viewAsControls: some View {
+        Picker("View as", selection: Binding(
+            get: { kind(of: viewAs) },
+            set: { newKind in
+                switch newKind {
+                case "client": viewAs = .client(appState.clients.first?.id ?? "")
+                case "profile": viewAs = .profile(appState.profiles.first?.name ?? "")
+                default: viewAs = .everything
+                }
+            })) {
+            Text("View as: Everything (admin)").tag("everything")
+            Text("View as: Client…").tag("client")
+            Text("View as: Profile…").tag("profile")
+        }
+        .frame(maxWidth: 230)
+        .accessibilityIdentifier("tools-view-as")
+
+        switch viewAs {
+        case .client(let current):
+            Picker("Client", selection: Binding(get: { current }, set: { viewAs = .client($0) })) {
+                ForEach(appState.clients, id: \.id) { Text($0.displayName).tag($0.id) }
+                if !appState.clients.contains(where: { $0.id == current }) { Text(current).tag(current) }
+            }
+            .labelsHidden().frame(maxWidth: 160)
+            .accessibilityIdentifier("tools-view-as-client")
+        case .profile(let current):
+            Picker("Profile", selection: Binding(get: { current }, set: { viewAs = .profile($0) })) {
+                ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
+                if !appState.profiles.contains(where: { $0.name == current }) { Text(current).tag(current) }
+            }
+            .labelsHidden().frame(maxWidth: 160)
+            .accessibilityIdentifier("tools-view-as-profile")
+        case .everything:
+            EmptyView()
+        }
+    }
+
+    private func kind(of viewAs: ToolsViewAs) -> String {
+        switch viewAs {
+        case .everything: return "everything"
+        case .client: return "client"
+        case .profile: return "profile"
+        }
+    }
+
+    /// A Profiles-card or Clients link lands here with a profile or client filter.
+    private func consumeRoute() {
+        let filter: ScopeFilter? = appState.consumeRoute { route in
+            if case .tools(let filter) = route { return filter ?? ScopeFilter() }
+            return nil
+        }
+        guard let filter else { return }
+        if let client = filter.client, !client.isEmpty {
+            viewAs = .client(client)
+        } else if let profile = filter.profile, !profile.isEmpty {
+            viewAs = .profile(profile)
+        }
     }
 
     private var countLabel: String {
@@ -181,7 +277,26 @@ struct ToolsView: View {
                     .background(tierColor(row.displayTier).opacity(0.15))
                     .foregroundStyle(tierColor(row.displayTier))
                     .clipShape(Capsule())
+                if let profileTier = row.profileTier, profileTier != row.tier {
+                    Text("as \(ToolLabels.tierLabel(profileTier))")
+                        .font(.scaled(.caption2, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
+                if let access = row.access {
+                    // Text beside the greying: colour is never the only signal.
+                    Text(access.callable ? "Callable" : AccessReasonText.label(access.reason))
+                        .font(.scaled(.caption2, scale: fontScale))
+                        .foregroundStyle(access.callable ? Color.green : Color.orange)
+                    if let subject = viewAs.explainerSubject {
+                        Button("Why?") {
+                            appState.navigate(.explain(subject: subject, tool: row.qualified))
+                        }
+                        .buttonStyle(.link).font(.scaled(.caption2, scale: fontScale))
+                        .accessibilityLabel("Why is \(row.qualified) \(access.callable ? "allowed" : "blocked")?")
+                        .accessibilityIdentifier("tools-why-\(row.qualified)")
+                    }
+                }
                 if let score = row.score {
                     Text(String(format: "%.2f", score))
                         .font(.scaled(.caption2, scale: fontScale).monospacedDigit())
@@ -197,8 +312,11 @@ struct ToolsView: View {
             }
         }
         .padding(.vertical, 3)
+        .opacity(row.isBlockedForSubject ? 0.55 : 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.qualified). \(row.description)")
+        .accessibilityLabel(
+            "\(row.qualified). \(row.description)"
+            + (row.access.map { $0.callable ? ". Callable" : ". \(AccessReasonText.label($0.reason))" } ?? ""))
     }
 
     private func tierColor(_ tier: String) -> Color {
@@ -234,12 +352,33 @@ struct ToolsView: View {
 
         do {
             let fetched: [ToolRow]
-            if term.isEmpty {
+            if viewAs.isScoped {
+                // View-as: the catalogue with each row's verdict for the viewed
+                // subject. The search index has no view-as, so a typed query
+                // filters these rows by name instead of BM25 ranking.
+                let response: SearchToolsResponse
+                switch viewAs {
+                case .client(let id): response = try await client.viewAsTools(client: id)
+                case .profile(let name): response = try await client.viewAsTools(profile: name)
+                case .everything: response = SearchToolsResponse(query: nil, results: nil, tools: [], total: nil)
+                }
+                let typed = term.lowercased()
+                fetched = (response.tools ?? []).map {
+                    ToolRow(server: $0.serverName ?? "", name: $0.name,
+                            description: $0.description ?? "", score: nil, tier: $0.tier,
+                            access: $0.access, profileTier: $0.profileTier)
+                }
+                .filter { typed.isEmpty || $0.qualified.lowercased().contains(typed) || $0.description.lowercased().contains(typed) }
+                guard generation == loadGeneration else { return }
+                viewAsCounts = response.counts
+            } else if term.isEmpty {
+                viewAsCounts = nil
                 fetched = try await client.allTools().map {
                     ToolRow(server: $0.serverName ?? "", name: $0.name,
                             description: $0.description ?? "", score: nil, tier: $0.tier)
                 }
             } else {
+                viewAsCounts = nil
                 fetched = try await client.searchTools(query: term).map {
                     ToolRow(server: $0.tool.serverName ?? "", name: $0.tool.name,
                             description: $0.tool.description ?? "", score: $0.score, tier: $0.tool.tier)

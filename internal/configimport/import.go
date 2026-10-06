@@ -2,7 +2,10 @@ package configimport
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Import parses configuration content and imports servers.
@@ -146,9 +149,30 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 		// Map to ServerConfig
 		serverConfig, skipped, warnings := MapToServerConfig(parsed, opts.Now)
 
+		// Reject entries the next config.Load would refuse (e.g. a URL-only
+		// entry forced through a stdio-only format yields a commandless stdio
+		// server). Persisting one bricks the next startup with exit code 4.
+		if verrs := config.ValidateServerForLoad(serverConfig); len(verrs) > 0 {
+			msgs := make([]string, 0, len(verrs))
+			for _, ve := range verrs {
+				msgs = append(msgs, ve.Message)
+			}
+			result.Failed = append(result.Failed, FailedServer{
+				Name:    originalName,
+				Error:   "invalid_server",
+				Details: strings.Join(msgs, "; "),
+			})
+			continue
+		}
+
 		// Override quarantine if SkipQuarantine is set
 		if opts.SkipQuarantine {
 			serverConfig.Quarantined = false
+			// The caller stated the value: keep it as an operator statement
+			// so it is written to mcp_config.json and the admission gate
+			// obeys it after a restart, instead of re-holding a server
+			// whose tools were never discovered.
+			serverConfig.MarkQuarantineExplicitlySet(true)
 		}
 
 		// FR-040: classify env/header fields and build the second-line

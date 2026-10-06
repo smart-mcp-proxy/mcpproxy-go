@@ -34,7 +34,9 @@ vi.mock('@/services/api', () => {
   }
   const base: Record<string, unknown> = {
     getAttention: attentionSpy,
-    getServers: ok({ servers: [] }),
+    // One ready server: with none, Home shows the getting-started card
+    // instead of "All clear" (Spec 109 T170).
+    getServers: ok({ servers: [{ name: 'notes', enabled: true, connected: true, tool_count: 3 }] }),
     getActivitySummary: ok({ call_count: 5, blocked_count: 1, call_error_count: 2 }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => true),
@@ -116,6 +118,16 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     const stripBottom = wrapper.find('[data-test="home-usage-strip-bottom"]')
     expect(stripTop.exists()).toBe(true)
     expect(stripBottom.exists()).toBe(false)
+  })
+
+  it('holds the top usage strip back until the server list has loaded (#1466)', async () => {
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    const api = (await import('@/services/api')).default as unknown as { getServers: ReturnType<typeof vi.fn> }
+    // A fresh instance whose server list is still in flight: the strip must not
+    // flash only to be replaced by the getting-started card.
+    api.getServers.mockReturnValueOnce(new Promise(() => {}))
+    const wrapper = await mountHome()
+    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
   })
 
   it('lists items in the order the API returns them, with fix buttons routing to fix.target', async () => {

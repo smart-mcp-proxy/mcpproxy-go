@@ -267,6 +267,14 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		// a substring of the storage message, so the response never echoes
 		// storage internals.
 		if errors.Is(err, storage.ErrAgentTokenNameExists) || strings.Contains(err.Error(), "already exists") {
+			// Revocation is a soft delete: the record keeps its name because
+			// activity.token_name references it, and reusing it would merge two
+			// credentials' history. Say so instead of implying a live holder
+			// (#1437 item 5).
+			if holder, gerr := s.tokenStore.GetAgentTokenByName(req.Name); gerr == nil && holder != nil && holder.Revoked {
+				s.writeError(w, r, http.StatusConflict, fmt.Sprintf("A revoked token named %q still holds this name for activity history; choose another name", req.Name))
+				return
+			}
 			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("A token named %q already exists", req.Name))
 			return
 		}

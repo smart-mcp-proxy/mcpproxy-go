@@ -316,6 +316,17 @@ type ToolApprovalRecord struct {
 	CurrentOutputSchema  string                  `json:"current_output_schema,omitempty"`
 	Disabled             bool                    `json:"disabled,omitempty"`
 
+	// DefinitionChangedAt is when the stored CurrentDescription,
+	// CurrentSchema or CurrentOutputSchema last differed from the prior
+	// record. BoltDB.SaveToolApproval stamps it inside its write transaction
+	// (one seam for every writer) and carries the prior value otherwise. A
+	// brand-new record stays zero: first capture is not a change, so a scan
+	// that preceded capture is not made stale by it. Annotations are
+	// excluded, like the approval hash. It is never part of the hash. The
+	// review composer compares it with the scan start to decide whether a
+	// scan covers the current definition. Additive and omitted when zero.
+	DefinitionChangedAt time.Time `json:"definition_changed_at,omitzero"`
+
 	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
 	// the trust_mode: scan gate hold this tool for human review (spec 086
 	// FR-018). They are set ONLY on the pass that performs the hold and cleared

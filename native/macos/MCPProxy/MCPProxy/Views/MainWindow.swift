@@ -11,6 +11,9 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case home = "Home"
     // Connect
     case clients = "Clients"
+    // Spec 108-k: a profile is the named scope a client or token is bound to.
+    // Same place and order as the Web sidebar (Clients, Profiles, Servers, Tools).
+    case profiles = "Profiles"
     case servers = "Servers"
     // F16: BM25 tool discovery is the product's headline feature and had no
     // native home — a tray-first user could not answer "which of my 942 tools
@@ -32,6 +35,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "rectangle.3.group"
         case .clients: return "person.2"
+        case .profiles: return "person.crop.rectangle.stack"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
         case .review: return "checkmark.shield"
@@ -42,7 +46,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 }
 
 /// The sidebar groups below Home, named exactly as in the Web UI
-/// (contracts/navigation-map.md). Profiles joins Connect with Spec 108-k.
+/// (contracts/navigation-map.md). Profiles joined Connect with Spec 108-k.
 enum SidebarSection: CaseIterable {
     case connect, protect, monitor
 
@@ -56,19 +60,20 @@ enum SidebarSection: CaseIterable {
 
     var items: [SidebarItem] {
         switch self {
-        case .connect: return [.clients, .servers, .tools]
+        case .connect: return [.clients, .profiles, .servers, .tools]
         case .protect: return [.review, .secrets]
         case .monitor: return [.activity]
         }
     }
 }
 
-/// The toolbar "+" menu (Spec 109-i FR-052): Server / Client / Token, the same
-/// three the Web UI "+ Add" menu offers. Profile arrives with Spec 108-k.
+/// The toolbar "+" menu (Spec 109-i FR-052, Spec 108-k): Server / Client / Token
+/// / Profile, the same four (and order) the Web UI "+ Add" menu offers.
 enum AddMenuItem: String, CaseIterable, Identifiable {
     case server = "Server"
     case client = "Client"
     case token = "Token"
+    case profile = "Profile"
 
     var id: String { rawValue }
 
@@ -77,6 +82,7 @@ enum AddMenuItem: String, CaseIterable, Identifiable {
         switch self {
         case .server: return .servers
         case .client, .token: return .clients
+        case .profile: return .profiles
         }
     }
 
@@ -85,6 +91,7 @@ enum AddMenuItem: String, CaseIterable, Identifiable {
         case .server: return "server.rack"
         case .client: return "person.crop.circle.badge.plus"
         case .token: return "key"
+        case .profile: return "person.crop.rectangle.stack"
         }
     }
 }
@@ -92,6 +99,9 @@ enum AddMenuItem: String, CaseIterable, Identifiable {
 struct MainWindow: View {
     @ObservedObject var appState: AppState
     @State private var selectedItem: SidebarItem?
+    /// The access explainer is presented from here so it can open from any
+    /// section (Clients row, Tools "Why?", the profile editor).
+    @State private var explainerRequest: ExplainerRequest?
 
     /// `initialTab` seeds the sidebar selection for a window created to land
     /// on a specific section (tray "Open Activity…" → Activity). Once the
@@ -147,6 +157,8 @@ struct MainWindow: View {
                         SecretsView(appState: appState)
                     case .clients:
                         ClientsView(appState: appState)
+                    case .profiles:
+                        ProfilesView(appState: appState)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -174,10 +186,18 @@ struct MainWindow: View {
                     Label("Add", systemImage: "plus")
                 }
                 .accessibilityIdentifier("toolbar-add-menu")
-                .help("Add a server, client or agent token")
+                .help("Add a server, client, agent token or profile")
             }
         }
         .background(sidebarShortcuts)
+        // Spec 108-k: a route (a fix button, a Profiles card link, the tray)
+        // names the section that hosts its destination; the destination view
+        // consumes the route itself.
+        .onAppear { followRoute() }
+        .onChange(of: appState.pendingRoute) { _ in followRoute() }
+        .sheet(item: $explainerRequest) { request in
+            AccessExplainerSheet(appState: appState, request: request)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .switchToActivity)) { _ in
             selectedItem = .activity
         }
@@ -195,6 +215,18 @@ struct MainWindow: View {
     /// ⌘1…⌘7 shortcut order is the visual order.
     static let sidebarLayout: [(title: String?, items: [SidebarItem])] =
         [(title: nil, items: [.home])] + SidebarSection.allCases.map { (title: $0.title, items: $0.items) }
+
+    /// Switch the sidebar to the section a pending route targets, and present
+    /// the explainer for an `.explain` route (it has no section of its own).
+    private func followRoute() {
+        guard let route = appState.pendingRoute else { return }
+        if case .explain(let subject, let tool) = route {
+            appState.pendingRoute = nil
+            explainerRequest = ExplainerRequest(subject: subject, tool: tool ?? "")
+            return
+        }
+        if let item = route.sidebarItem { selectedItem = item }
+    }
 
     /// Count shown beside a sidebar row, 0 for none. Home carries the FR-001
     /// needs-attention count; Review Queue is one row per server (GET /review),
@@ -236,7 +268,7 @@ struct MainWindow: View {
         return SidebarItem(rawValue: raw)
     }
 
-    /// Hidden ⌘1…⌘7 shortcuts to jump straight to each sidebar section, in the
+    /// Hidden ⌘1…⌘8 shortcuts to jump straight to each sidebar section, in the
     /// order the sidebar shows them. Keeps keyboard navigation fast for users
     /// and lets UI-test automation reach a section (the sidebar List rows
     /// aren't directly clickable via the accessibility menu API).

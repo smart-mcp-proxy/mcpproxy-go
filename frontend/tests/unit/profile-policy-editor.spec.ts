@@ -134,7 +134,7 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     const cap = wrapper.get('[data-test="profile-tool-row-github__create_issue"]')
     expect(cap.text()).toContain('Hidden')
     expect(cap.text()).toContain('Above tier cap')
-    expect(wrapper.get('[data-test="profile-tool-row-github__other"]').text()).toContain('Unannotated — hidden')
+    expect(wrapper.get('[data-test="profile-tool-row-github__other"]').text()).toContain('Unannotated — classify')
     expect(wrapper.get('[data-test="profile-tool-row-github__search_code"]').text()).toContain('Visible')
     expect(wrapper.get('[data-test="profile-tool-counts"]').text()).toContain('2 visible')
   })
@@ -173,7 +173,7 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
   })
 
   it('Try it posts the UNSAVED draft to /profiles/try and renders the hidden list', async () => {
-    ;(api.tryProfile as any).mockResolvedValue({ results: [{ server: 'github', name: 'search_code', description: 'Search' }], hidden_by_profile: 2, hidden: [{ server: 'github', tool: 'create_issue', reason: 'above_tier_cap' }] })
+    ;(api.tryProfile as any).mockResolvedValue({ results: [{ score: 1, tool: { name: 'github:search_code', server_name: 'github', description: 'Search' } }], hidden_by_profile: 2, hidden: [{ server: 'github', tool: 'create_issue', reason: 'above_tier_cap' }] })
     const { wrapper } = await mountEditor()
     await wrapper.get('[data-test="profile-tier-destructive"]').setValue(true)
     await wrapper.get('[data-test="profile-try-query"]').setValue('issue')

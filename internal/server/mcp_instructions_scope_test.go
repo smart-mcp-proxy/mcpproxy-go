@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -61,12 +62,15 @@ func TestScopedInitialize_PublishesCustomInstructions(t *testing.T) {
 	aOnly := agentCtx([]string{"a"}, []string{auth.PermRead}, "")
 	require.False(t, auth.AuthContextFromContext(aOnly).CanAccessServer("b"), "precondition: b is outside the token's scope")
 
-	// The two surfaces that carry instructions today: the default /mcp server
-	// (resolveInstructions) and the direct server (resolveDirectInstructions,
-	// which appends its deferral legend to the operator's text).
+	// Every surface that carries instructions: p.server, the call-tool and
+	// code-execution servers that actually serve /mcp (resolveInstructions),
+	// and the direct server (resolveDirectInstructions, which appends its
+	// deferral legend to the operator's text).
 	for label, srv := range map[string]jsonRPCHandler{
-		"default": proxy.server,
-		"direct":  proxy.directServer,
+		"default":   proxy.server,
+		"call_tool": proxy.callToolServer,
+		"code_exec": proxy.codeExecServer,
+		"direct":    proxy.directServer,
 	} {
 		label, srv := label, srv
 		t.Run(label, func(t *testing.T) {
@@ -76,9 +80,18 @@ func TestScopedInitialize_PublishesCustomInstructions(t *testing.T) {
 			assert.Contains(t, scoped, "b:private_search",
 				"%s: the mention of an out-of-scope server in operator-authored instructions is published by design — the docs warn operators, the proxy does not scrub", label)
 
+			// The operator's text is the same for every caller kind (SC-005);
+			// only the proxy-generated, scope-filtered ACCESS block that
+			// follows it differs per caller (mcp_agent_access.go).
 			admin := initializeInstructions(t, adminCtx(), srv)
-			assert.Equal(t, admin, scoped,
-				"%s: instructions are the same text for every caller kind (SC-005)", label)
+			operatorPart := func(s string) string {
+				if i := strings.Index(s, "\n\nYOUR ACCESS"); i >= 0 {
+					return s[:i]
+				}
+				return s
+			}
+			assert.Equal(t, operatorPart(admin), operatorPart(scoped),
+				"%s: operator instructions are the same text for every caller kind (SC-005)", label)
 		})
 	}
 }

@@ -112,6 +112,6 @@ onMounted(() => {
   consumeCreateParam()
   void store.fetchProfiles()
   // Who uses a profile (client names) comes from the clients store.
-  if (!tenant.value && !clients.clients.length) void clients.refreshPresence()
+  if (!tenant.value && (!clients.allClients.length || clients.stale)) void clients.refreshPresence()
 })
 </script>

@@ -73,7 +73,7 @@ the curated official/popular sections with no query.
 'catalog search'/'catalog add' supersede 'registry search'/'registry add'.
 'registry list'/'add-source'/'edit'/'remove' still manage catalog SOURCES.`,
 	}
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newCatalogSearchCmd(), newCatalogShowCmd(), newCatalogAddCmd())
 	return cmd
 }
@@ -82,8 +82,8 @@ func newCatalogSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search [query]",
 		Short: "Search the catalog across every enabled source",
-		Long: `Search every enabled catalog source at once (FR-060), ranked official-first,
-then verified, then popularity, then text relevance. Omit the query to browse
+		Long: `Search every enabled catalog source at once (FR-060), ranked by how well the name
+matches, then official source, verified publisher and popularity. Omit the query to browse
 the curated "official" and "popular" sections instead.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -375,14 +375,36 @@ func catalogInstallTargetForConfigServer(s *config.ServerConfig) string {
 func renderCatalogSearch(formatter clioutput.OutputFormatter, resp *cliclient.CatalogSearchResponse) error {
 	if _, isTable := formatter.(*clioutput.TableFormatter); isTable {
 		if resp.Sections != nil {
-			fmt.Println("Official:")
-			printCatalogTable(formatter, resp.Sections.Official)
-			fmt.Println("\nPopular:")
-			printCatalogTable(formatter, resp.Sections.Popular)
+			// Popular first when it has entries (popularity if available, else
+			// the curated Official list), and never an empty section's header
+			// and table (Spec 109 D35). Same order as the Web UI and macOS.
+			printed := false
+			section := func(title string, rows []registries.CatalogResult) {
+				if len(rows) == 0 {
+					return
+				}
+				if printed {
+					fmt.Println()
+				}
+				fmt.Println(title + ":")
+				printCatalogTable(formatter, rows)
+				printed = true
+			}
+			section("Popular", resp.Sections.Popular)
+			section("Official", resp.Sections.Official)
+			if !printed {
+				printCatalogTable(formatter, nil)
+			}
 		} else {
 			printCatalogTable(formatter, resp.Results)
 		}
 		for _, u := range resp.Unavailable {
+			if u.Fallback != "" {
+				// The live fetch failed but its cached listing answered
+				// (Spec 109 D35); the rows above are marked (cached).
+				fmt.Printf("⚠ %s unavailable: %s; showing matches from its cached list\n", u.Source, u.Reason)
+				continue
+			}
 			fmt.Printf("⚠ %s unavailable: %s\n", u.Source, u.Reason)
 		}
 		return nil
@@ -403,7 +425,11 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 		if r.Added {
 			added = "✓"
 		}
-		rows = append(rows, []string{r.Source, r.ID, truncateStr(r.Title, 40), r.Transport, added})
+		source := r.Source
+		if r.FromCache {
+			source += " (cached)"
+		}
+		rows = append(rows, []string{source, r.ID, truncateStr(r.Title, 40), r.Transport, added})
 	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err == nil {

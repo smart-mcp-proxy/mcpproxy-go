@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 // contractsRelPath is the location of the generated TypeScript file
@@ -150,6 +152,12 @@ export interface HealthStatus {
 // Needs-attention list (Spec 109 FR-001-007) - generated from
 // internal/contracts/attention.go. One list, one count, every surface (Web
 // UI, macOS tray/Home, CLI) reads from GET /api/v1/attention.
+export const AttentionKindAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const AttentionKindClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const AttentionKindClientTokenNameConflict = 'client_token_name_conflict' as const;
+export const AttentionKindProfileMissing = 'profile_missing' as const;
+export const AttentionKindClientRotationPending = 'client_rotation_pending' as const;
+export const AttentionKindClientCredentialExpiring = 'client_credential_expiring' as const;
 export const AttentionKindSignInRequired = 'sign_in_required' as const;
 export const AttentionKindMissingSecret = 'missing_secret' as const;
 export const AttentionKindConfigError = 'config_error' as const;
@@ -159,6 +167,12 @@ export const AttentionKindToolReview = 'tool_review' as const;
 export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
 
 export type AttentionKind =
+  | typeof AttentionKindAnonymousDeniedByBindingGuard
+  | typeof AttentionKindClientHoldsAdminKey
+  | typeof AttentionKindClientTokenNameConflict
+  | typeof AttentionKindProfileMissing
+  | typeof AttentionKindClientRotationPending
+  | typeof AttentionKindClientCredentialExpiring
   | typeof AttentionKindSignInRequired
   | typeof AttentionKindMissingSecret
   | typeof AttentionKindConfigError
@@ -168,7 +182,7 @@ export type AttentionKind =
   | typeof AttentionKindClientNeverSeen;
 
 export interface AttentionSubject {
-  type: 'server' | 'tool' | 'client';
+  type: 'server' | 'tool' | 'client' | 'setting';
   id: string;
   name: string;
 }
@@ -449,6 +463,13 @@ export type Tier =
   | typeof TierUnknown;
 
 `)
+
+	// Spec 109 FR-090 terminology enums - generated from
+	// internal/contracts/terminology.go (the one Go source). The golden
+	// internal/contracts/testdata/terminology.json pins the same values.
+	sb.WriteString(enumBlock("ToolApproval", "ToolApprovalState", "Tool review states (approval_status)", contracts.AllToolApprovalStates()))
+	sb.WriteString(enumBlock("ActivityView", "ActivityView", "Activity views (the `view` URL parameter; the CLI has no `sessions`)", contracts.AllActivityViews()))
+	sb.WriteString(enumBlock("ClientPresence", "ClientPresenceState", "Client presence states (GET /clients row state)", contracts.AllClientPresenceStates()))
 
 	// Tool types
 	sb.WriteString(`export interface Tool {
@@ -788,12 +809,14 @@ export const BlockReasonProfileRule = 'profile_rule' as const;
 export const BlockReasonProfileUnannotated = 'profile_unannotated' as const;
 export const BlockReasonProfileCodeExecution = 'profile_code_execution' as const;
 export const BlockReasonProfileManagement = 'profile_management' as const;
+export const BlockReasonProfileServerScope = 'profile_server_scope' as const;
 export type ProfileBlockReason =
   | typeof BlockReasonProfileTier
   | typeof BlockReasonProfileRule
   | typeof BlockReasonProfileUnannotated
   | typeof BlockReasonProfileCodeExecution
-  | typeof BlockReasonProfileManagement;
+  | typeof BlockReasonProfileManagement
+  | typeof BlockReasonProfileServerScope;
 
 export const ExplainStepCredential = 'credential' as const;
 export const ExplainStepProfile = 'profile' as const;
@@ -851,6 +874,8 @@ export type CredentialState =
 
 export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
 export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+export const ErrorCodeConnectInProgress = 'connect_in_progress' as const;
+export const ErrorCodeCredentialSuperseded = 'credential_superseded' as const;
 export const ErrorCodeProfileInUse = 'profile_in_use' as const;
 export const ErrorCodeProfileIsAnonymousProfile = 'profile_is_anonymous_profile' as const;
 export const ErrorCodeProfileExists = 'profile_exists' as const;
@@ -1023,6 +1048,8 @@ export interface EffectiveToolsResult {
   counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
   // Administrators only: classify entries for annotated or missing tools.
   stale_classifications?: string[];
+  // Administrators only: why each stale entry no longer applies ("annotated" or "missing").
+  stale_classification_reasons?: Record<string, string>;
 }
 
 // GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.
@@ -1078,5 +1105,36 @@ export interface ClientView {
 }
 `)
 
+	return sb.String()
+}
+
+// enumBlock renders one terminology family as `export const <Prefix><Camel> =
+// 'v' as const;` lines plus the union type, exactly the shape of the Health*
+// and Tier* blocks above.
+func enumBlock(prefix, typeName, comment string, values []string) string {
+	var sb strings.Builder
+	sb.WriteString("// " + comment + " - generated from internal/contracts/terminology.go\n")
+	names := make([]string, 0, len(values))
+	for _, v := range values {
+		name := prefix
+		for _, w := range strings.Split(v, "_") {
+			if w == "" {
+				continue // a leading, trailing or repeated underscore adds no word
+			}
+			name += strings.ToUpper(w[:1]) + w[1:]
+		}
+		names = append(names, name)
+		sb.WriteString("export const " + name + " = '" + v + "' as const;\n")
+	}
+	sb.WriteString("export type " + typeName + " =\n")
+	for i, n := range names {
+		sb.WriteString("  | typeof " + n)
+		if i == len(names)-1 {
+			sb.WriteString(";\n")
+		} else {
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
 	return sb.String()
 }

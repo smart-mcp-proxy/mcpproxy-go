@@ -13,7 +13,7 @@
 
     <div v-else-if="loadError" role="alert" class="alert alert-error" data-test="profile-editor-error">
       <span>{{ loadError }}</span>
-      <button type="button" class="btn btn-sm" @click="load">Retry</button>
+      <button type="button" class="btn btn-sm" @click="load()">Retry</button>
     </div>
 
     <template v-else-if="saved">
@@ -136,7 +136,7 @@
             <p v-if="!usedByAny" class="text-sm opacity-70">Nothing yet.</p>
             <ul class="space-y-1 text-sm">
               <li v-for="client in saved.used_by.clients" :key="client.id" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-client-${client.id}`">
-                <span>Client {{ clientName(client.id) }}</span><span class="badge badge-sm">{{ client.mode === 'locked' ? 'Locked' : 'Switchable' }}</span>
+                <span>Client {{ clientName(client.id) }}</span><span class="badge badge-sm">{{ modeLabel(client.mode) }}</span>
                 <button v-if="canEdit" type="button" class="btn btn-xs btn-ghost" :data-test="`profile-unassign-${client.id}`" @click="unassign(client.id)">Unassign</button>
               </li>
               <li v-for="token in saved.used_by.tokens" :key="token" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-token-${token}`">
@@ -175,17 +175,19 @@
             :rows="tools?.tools ?? []"
             :counts="tools?.counts"
             :stale="tools?.stale_classifications"
+            :stale-reasons="tools?.stale_classification_reasons"
             :draft-rules="draftTools"
             :profile-label="saved.title || saved.name"
             :servers-chosen="draft.servers.length > 0"
             :loading="toolsLoading"
             :editable="canEdit"
             :focus-key="focusKey"
+            :unsaved="dirty"
             @toggle="toggleRule"
             @classify="classify"
             @remove-classification="removeClassification"
           />
-          <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" />
+          <ProfileTryPanel v-if="canEdit" :draft="() => toConfig(draft)" :dirty="dirty" />
         </div>
       </div>
 
@@ -211,7 +213,7 @@ import { useClientsStore, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useServersStore } from '@/stores/servers'
-import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, unannotatedLabel } from '@/utils/profiles'
+import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, modeLabel, unannotatedLabel } from '@/utils/profiles'
 import type { EffectiveToolsResult, ProfileConfig, ProfileToolRules, ProfileView } from '@/types/api'
 import type { ApiError } from '@/services/api'
 
@@ -399,21 +401,35 @@ async function loadTools(ticket: number) {
   }
 }
 
-async function load() {
+// The draft's content, independent of which profile it is for. Compared before
+// and after an await to tell whether the operator edited meanwhile.
+function draftSnapshot(): string {
+  return JSON.stringify({ ...toConfig(draft), name: '' })
+}
+
+// `force` replaces the draft whatever it holds (an explicit reload, or a switch
+// to another profile). Otherwise edits made while the request was in flight win:
+// the fetched profile becomes the saved baseline and the draft stays dirty.
+async function load(force = false) {
   const ticket = ++loadTicket
+  const before = draftSnapshot()
   loading.value = true
   clearErrors()
   const current = await loadProfile(ticket)
   if (!current) return
   if (saved.value) {
-    Object.assign(draft, draftFrom(saved.value))
-    changedElsewhere.value = false
+    if (force || draftSnapshot() === before) {
+      Object.assign(draft, draftFrom(saved.value))
+      changedElsewhere.value = false
+    } else {
+      changedElsewhere.value = true
+    }
     await loadTools(ticket)
   }
   if (ticket === loadTicket) loading.value = false
 }
 
-function reloadFromServer() { void load() }
+function reloadFromServer() { void load(true) }
 
 async function save() {
   if (!dirty.value || saving.value) return
@@ -424,11 +440,14 @@ async function save() {
   // while the PUT is in flight, its answer must not replace the new page's state.
   const name = props.name
   const body = toConfig(draft)
+  const sent = draftSnapshot()
   try {
     const result = await api.updateProfile(name, body)
     if (props.name !== name) return
     saved.value = result.profile
-    Object.assign(draft, draftFrom(result.profile))
+    // Edits typed while the PUT was in flight stay in the draft (and keep it
+    // dirty against the new baseline); only an untouched draft is refreshed.
+    if (draftSnapshot() === sent) Object.assign(draft, draftFrom(result.profile))
     warnings.value = result.warnings ?? []
     savedNote.value = 'Saved'
     void profiles.fetchProfiles()
@@ -519,5 +538,5 @@ onBeforeUnmount(() => {
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
 })
-watch(() => props.name, () => { renaming.value = false; void load() })
+watch(() => props.name, () => { renaming.value = false; void load(true) })
 </script>

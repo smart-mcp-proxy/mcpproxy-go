@@ -4,10 +4,73 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
+
+// refuseLockedTelemetryChange enforces, on the write doors, the lock the UIs
+// show on telemetry.enabled while an environment variable (DO_NOT_TRACK, CI,
+// MCPPROXY_TELEMETRY=false) forces telemetry off (Spec 109 FR-044a). The
+// comparison is on the typed config, so a miscased key in a hand-built document
+// (which encoding/json decodes case-insensitively) is judged by the value it
+// resolves to, not by its spelling. A value that is unchanged passes, so the
+// GET -> edit -> POST round trip of an unrelated setting keeps working.
+func refuseLockedTelemetryChange(stored, edited *config.Config) error {
+	disabled, reason := telemetry.IsDisabledByEnv()
+	if !disabled {
+		return nil
+	}
+	// "Unset" is compared as the value GET /api/v1/config renders for it
+	// (contracts.ConvertConfigToContract materializes the resolved value), so
+	// the Raw JSON editor's GET -> POST round trip of a config that never set
+	// telemetry.enabled is "unchanged", not a write to a locked setting.
+	rendered := func(c *config.Config) bool {
+		if c != nil && c.Telemetry != nil && c.Telemetry.Enabled != nil {
+			return *c.Telemetry.Enabled
+		}
+		if c == nil {
+			return true
+		}
+		return c.IsTelemetryEnabled()
+	}
+	if rendered(stored) == rendered(edited) {
+		return nil
+	}
+	return &configMutationRefusal{
+		status: http.StatusUnprocessableEntity,
+		msg: "telemetry.enabled is locked: telemetry is off — disabled by " + string(reason) +
+			" in the environment. Unset it and restart MCPProxy to change this setting.",
+	}
+}
+
+// refuseAmbiguousLockedTelemetryKeys refuses, while the env telemetry lock is
+// active, a raw document that spells the telemetry section more than once
+// under case variants ("telemetry" and "Telemetry"). encoding/json decodes keys
+// case-insensitively, so which spelling wins would depend on map iteration /
+// marshal order; a locked setting must not hinge on that.
+func refuseAmbiguousLockedTelemetryKeys(document map[string]interface{}) error {
+	disabled, reason := telemetry.IsDisabledByEnv()
+	if !disabled {
+		return nil
+	}
+	n := 0
+	for k := range document {
+		if strings.EqualFold(k, "telemetry") {
+			n++
+		}
+	}
+	if n < 2 {
+		return nil
+	}
+	return &configMutationRefusal{
+		status: http.StatusUnprocessableEntity,
+		msg: "telemetry is locked: the document repeats the telemetry section under different key spellings, which is ambiguous while telemetry is disabled by " +
+			string(reason) + " in the environment.",
+	}
+}
 
 // configFunnelController is the optional controller capability behind every
 // config-writing REST path (Spec 108-f F2): the read of the desired config, the

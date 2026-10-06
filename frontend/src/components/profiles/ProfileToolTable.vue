@@ -1,7 +1,8 @@
 <template>
   <section class="space-y-3" aria-labelledby="profile-tools-heading" data-test="profile-tool-table">
     <h2 id="profile-tools-heading" class="font-semibold">Tools under this profile</h2>
-    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts">{{ counts.visible }} visible &middot; {{ counts.hidden }} hidden</p>
+    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts"><template v-if="unsaved">Saved profile: </template>{{ counts.visible }} visible &middot; {{ counts.hidden }} hidden</p>
+    <p v-if="unsaved" class="text-xs text-warning" data-test="profile-tool-unsaved-note">Counts and access show the saved profile. Save to update them, or use Try it below to test your unsaved edits.</p>
 
     <div class="flex flex-wrap gap-2" data-test="profile-tool-filters">
       <label class="sr-only" for="tool-filter-server">Filter by server</label>
@@ -25,7 +26,7 @@
 
     <ul v-if="orphanStale.length" class="text-sm space-y-1" data-test="profile-stale-orphans">
       <li v-for="key in orphanStale" :key="key" class="flex flex-wrap items-center gap-2">
-        <code class="text-xs">{{ key }}</code> <span>classification ignored &mdash; tool is not indexed</span>
+        <code class="text-xs">{{ key }}</code> <span :data-test="`profile-stale-orphan-note-${key}`">{{ orphanNote(key) }}</span>
         <button v-if="editable" type="button" class="btn btn-xs btn-outline" @click="emit('remove-classification', key)">Remove classification</button>
       </li>
     </ul>
@@ -120,12 +121,16 @@ const props = defineProps<{
   rows: EffectiveTool[]
   counts?: EffectiveToolsResult['counts']
   stale?: string[]
+  staleReasons?: Record<string, string>
   draftRules: ProfileToolRules | undefined
   profileLabel: string
   serversChosen: boolean
   loading?: boolean
   editable?: boolean
   focusKey?: string
+  // The draft differs from the saved profile; the counts and access column
+  // are the SAVED profile's evaluation (FR-041), so say so.
+  unsaved?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'toggle', payload: { list: 'allow' | 'deny'; key: string }): void
@@ -153,6 +158,15 @@ const visibleRows = computed(() => props.rows.filter(row => {
 // A non-administrator gets visible rows only, plus a count of the rest.
 const hiddenOnly = computed(() => (props.rows.some(row => !row.access.visible) ? 0 : props.counts?.hidden ?? 0))
 const orphanStale = computed(() => (props.stale ?? []).filter(entry => !props.rows.some(row => key(row) === entry)))
+
+// Same wording as `mcpproxy profile show --effective`. The server's reason map
+// is authoritative; an older daemon sends none, so the note stays neutral.
+function orphanNote(entry: string): string {
+  const reason = props.staleReasons?.[entry]
+  if (reason === 'annotated') return 'classification ignored \u2014 tool is now annotated'
+  if (reason === 'missing') return 'classification ignored \u2014 tool not found'
+  return 'classification ignored'
+}
 
 function isListed(list: 'allow' | 'deny', row: EffectiveTool): boolean {
   return (props.draftRules?.[list] ?? []).includes(key(row))

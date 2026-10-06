@@ -364,3 +364,9 @@ func (p *CompiledPolicy) Decide(server, tool string, intrinsic Tier) (admitted b
 	}
 	return true, ReasonNone, profileTier
 }
+
+// HasAllowRules reports whether the policy has explicit tools.allow rules,
+// which Decide admits even above the tier cap.
+func (p *CompiledPolicy) HasAllowRules() bool {
+	return p != nil && len(p.allow) > 0
+}

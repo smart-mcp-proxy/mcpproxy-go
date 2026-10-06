@@ -201,7 +201,8 @@ test('the header has no Profile switcher and the Viewing chip survives navigatio
 
   // In-app links built with the link map carry the filter: the Clients row's Tools link.
   await page.locator('tbody tr', { hasText: 'E2E laptop' }).first().click()
-  await page.getByRole('link', { name: 'Tools', exact: true }).first().click()
+  // Spec 109-l: the link reads "Tools it sees" (url-filter-contract.md link map).
+  await page.locator(`[data-test="clients-row-link-tools-${CLIENT_ID}"]`).click()
   await expect(page).toHaveURL(new RegExp(`/ui/tools.*profile=${WORK}`))
   await expect(chip).toContainText(WORK)
   await page.goBack()

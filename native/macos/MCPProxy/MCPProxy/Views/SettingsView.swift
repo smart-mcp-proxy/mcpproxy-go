@@ -14,6 +14,9 @@ struct SettingsView: View {
     @ObservedObject var appState: AppState
     @StateObject private var store: ConfigStore
     @State private var tab = 0
+    /// Spec 108-k: what a fix button asked Settings to show.
+    @State private var scrollTarget: String?
+    @State private var anonymousPreselect: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -25,7 +28,8 @@ struct SettingsView: View {
             AppPrefsTab(appState: appState)
                 .tabItem { Label("App", systemImage: "macwindow") }.tag(0)
 
-            SecuritySettingsTab(store: store)
+            SecuritySettingsTab(appState: appState, store: store,
+                                scrollTarget: scrollTarget, anonymousPreselect: anonymousPreselect)
                 .tabItem { Label("Security", systemImage: "lock.shield") }.tag(1)
 
             GeneralConfigTab(store: store)
@@ -44,6 +48,8 @@ struct SettingsView: View {
                 .tabItem { Label("Raw", systemImage: "curlybraces") }.tag(5)
         }
         .frame(minWidth: 540, minHeight: 560)
+        .onAppear { consumeFocus() }
+        .onChange(of: appState.pendingRoute) { _ in consumeFocus() }
         // ⌘1–⌘6 switch tabs (handy, and lets UI tests navigate).
         .background {
             ForEach(0..<6, id: \.self) { i in
@@ -51,6 +57,33 @@ struct SettingsView: View {
                     .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
                     .opacity(0)
             }
+        }
+    }
+}
+
+extension SettingsView {
+    /// Spec 108-k K13/K20: a binding-guard or explainer fix opens Settings on
+    /// the Security tab. `require_mcp_auth` is scrolled to and highlighted; the
+    /// Anonymous callers picker is PRESELECTED, never saved.
+    fileprivate func consumeFocus() {
+        guard let focus: SettingsFocus = appState.consumeRoute({ route in
+            if case .settings(let focus) = route { return focus }
+            return nil
+        }) else { return }
+        tab = 1
+        switch focus {
+        case .requireMCPAuth:
+            anonymousPreselect = nil
+            scrollTarget = "require_mcp_auth"
+            store.highlightedKey = "require_mcp_auth"
+        case .anonymousProfile(let preselect):
+            scrollTarget = "anonymous_profile"
+            store.highlightedKey = nil
+            anonymousPreselect = preselect
+        case .setting(let key):
+            anonymousPreselect = nil
+            scrollTarget = key
+            store.highlightedKey = key
         }
     }
 }
