@@ -82,3 +82,42 @@ func TestCalculateHealthCallSitesSupplyTransportFacts(t *testing.T) {
 			missing)
 	}
 }
+
+// TestCalculateHealthCallSitesSupplyCallFailureRate guards Spec 113-d FR-063:
+// the three runtime construction sites must fill CallsInWindow from the same
+// source, or REST, `upstream_servers` and SSE would disagree about whether a
+// server is degraded by its call failure rate.
+func TestCalculateHealthCallSitesSupplyCallFailureRate(t *testing.T) {
+	const callMarker = "health.CalculateHealth("
+	markers := []string{"CallsInWindow:", ".CallsInWindow =", ".CallsInWindow,"}
+	var missing []string
+	err := filepath.Walk(filepath.Join(".."), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		text := string(b)
+		if !strings.Contains(text, callMarker) {
+			return nil
+		}
+		for _, m := range markers {
+			if strings.Contains(text, m) {
+				return nil
+			}
+		}
+		missing = append(missing, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking internal/: %v", err)
+	}
+	if len(missing) > 0 {
+		t.Errorf("these files call health.CalculateHealth without assigning CallsInWindow: %v", missing)
+	}
+}
