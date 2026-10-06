@@ -14,7 +14,11 @@ func (mc *Client) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	prompts, err := mc.coreClient.ListPrompts(ctx)
+	var prompts []mcp.Prompt
+	err := mc.withSession(ctx, string(mcp.MethodPromptsList), func() (e error) {
+		prompts, e = mc.coreClient.ListPrompts(ctx)
+		return e
+	})
 	if err != nil {
 		mc.logger.Error("Failed to list prompts",
 			zap.String("server", mc.GetConfig().Name),
@@ -33,7 +37,11 @@ func (mc *Client) GetPrompt(ctx context.Context, name string, args map[string]st
 	}
 
 	promptEpoch := mc.connectionEpoch.Load()
-	result, err := mc.coreClient.GetPrompt(ctx, name, args)
+	var result *mcp.GetPromptResult
+	err := mc.withSession(ctx, string(mcp.MethodPromptsGet), func() (e error) {
+		result, e = mc.coreClient.GetPrompt(ctx, name, args)
+		return e
+	})
 	if err != nil {
 		if mc.isConnectionError(err) {
 			// Guarded: concurrent failures on one dead transport mark it

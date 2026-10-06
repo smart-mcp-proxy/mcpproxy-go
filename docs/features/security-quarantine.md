@@ -240,6 +240,8 @@ The scan line of the review screen says whether the baseline scan describes the 
 
 Each tool's scan verdict follows the same rule: `clean` only when the scan covered that tool's current definition. After a baseline scan has listed a quarantined server's tools, MCPProxy captures the definitions itself, so the review list is not empty until someone clicks **Fetch tool definitions**. With `security.auto_baseline_scan: false` and no manual scan nothing is started automatically.
 
+Coverage is bound to the definition itself, not only to timing. When a scan exports a tool's definition it records a SHA-256 digest of the description and input schema (`tool_hashes` in the scan context). A tool counts as covered only if that digest equals the digest of its current definition, so a benign definition that was scanned and then swapped for a poisoned one inside the same timing window reads as stale. Scans stored before this field existed carry no digests and keep the earlier name-and-timing rules. Approval still re-checks the definition independently; this only keeps the review display honest.
+
 On a server that is not quarantined, the review tab shows approved state: approved tools read **Approved** or **Blocked** (no Approve or Reject), the heading says the server is approved, and **Manage tools** and **Quarantine to review again…** are offered. The second is the existing quarantine action behind a confirmation. Only a new or changed tool shows Approve and Reject.
 
 ### Scan a Server for TPAs (MCP)

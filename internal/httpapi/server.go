@@ -295,18 +295,21 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller         ServerController
-	logger             *zap.SugaredLogger
-	httpLogger         *zap.Logger // Separate logger for HTTP requests
-	router             *chi.Mux
-	observability      *observability.Manager
-	tokenStore         TokenStore                      // Agent token CRUD (T022)
-	dataDir            string                          // Data directory for HMAC key (T022)
-	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
-	connectService     *connect.Service                // Client connect/disconnect operations
-	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
-	profilesService    ProfilesAPI                     // Profiles service (Spec 108-f FR-034)
-	securityController SecurityController              // Security scanner operations (Spec 039)
+	controller        ServerController
+	logger            *zap.SugaredLogger
+	httpLogger        *zap.Logger // Separate logger for HTTP requests
+	router            *chi.Mux
+	observability     *observability.Manager
+	tokenStore        TokenStore                      // Agent token CRUD (T022)
+	dataDir           string                          // Data directory for HMAC key (T022)
+	feedbackSubmitter FeedbackSubmitter               // Feedback submission (Spec 036)
+	connectService    *connect.Service                // Client connect/disconnect operations
+	clientsService    *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	// forgetClientCredential overrides clientsService.Forget in tests only
+	// (to inject a revoke failure after a completed disconnect).
+	forgetClientCredential func(ctx context.Context, a internalRuntime.Actor, clientID string, disconnected bool) (*internalRuntime.ClientCredentialView, error)
+	profilesService        ProfilesAPI        // Profiles service (Spec 108-f FR-034)
+	securityController     SecurityController // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
 	// serialised (see maskActivityPayloads, maskEventPayload,

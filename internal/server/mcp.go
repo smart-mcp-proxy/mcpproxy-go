@@ -4871,6 +4871,12 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			RetryCount:         retryCount,
 		}
 
+		// Spec 113-d: rolling tool-call failure rate (same source at all sites).
+		if p.upstreamManager != nil {
+			healthInput.CallsInWindow, healthInput.CallFailuresInWindow, healthInput.DominantCallFailureKind =
+				p.upstreamManager.CallStats(server.Name)
+		}
+
 		// T032: Wire refresh state into health calculation (Spec 023).
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).

@@ -24,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/callstats"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -128,6 +129,11 @@ type Manager struct {
 	sweepMu     sync.Mutex
 	lastSweptAt map[string]time.Time
 
+	// callStats is the rolling per-server tool-call outcome window that feeds
+	// the health calculator's failure-rate rule (Spec 113-d). In memory only.
+	callStats  *callstats.Registry
+	callHealth callHealthNotifier
+
 	// tokenReconnect keeps last reconnect trigger time per server when detecting
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
 	// cannot write due to DB lock). Prevents rapid retrigger loops.
@@ -228,6 +234,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		tokenReconnect:    make(map[string]time.Time),
 		tokenFingerprints: make(map[string]string),
 		lastSweptAt:       make(map[string]time.Time),
+		callStats:         callstats.NewRegistry(),
 		shutdownCtx:       shutdownCtx,
 		shutdownCancel:    shutdownCancel,
 		storageMgr:        storageMgr,
@@ -461,6 +468,16 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Spec 113-d FR-066: the replacement connects to a different
+			// endpoint/command/credentials, so the old client's failure
+			// history must not degrade it. Same critical section as the
+			// delete, mirroring RemoveServer.
+			statsName := id
+			if existingConfig != nil && existingConfig.Name != "" {
+				statsName = existingConfig.Name
+			}
+			m.callStats.Drop(statsName)
+			m.dropCallHealth(statsName)
 			// Save reference to disconnect outside lock
 			clientToDisconnect = existingClient
 		} else {
@@ -639,10 +656,24 @@ func (m *Manager) RemoveServer(id string) {
 	m.captureMu.Lock()
 	m.mu.Lock()
 	client, exists := m.clients[id]
+	callStatsName := id
 	if exists {
 		// Remove from map immediately to prevent new operations
 		delete(m.clients, id)
+		if client != nil {
+			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
+				callStatsName = cfg.Name
+			}
+		}
 	}
+	// Spec 113-d FR-066: a removed (or renamed — remove + add) server must not
+	// carry its failure history into whatever reuses the name. Dropped in the
+	// SAME critical section as the delete: RecordClientCallOutcome records
+	// under m.mu.RLock, so a replacement registered after this unlock cannot
+	// have its first samples wiped by a late drop, and the old client's
+	// in-flight completions fail the registered check.
+	m.callStats.Drop(callStatsName)
+	m.dropCallHealth(callStatsName)
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 
@@ -676,6 +707,7 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 	if m.shutdownCancel != nil {
 		m.shutdownCancel()
 	}
+	m.stopCallHealthTimers()
 
 	// Wait for background goroutines to exit (with timeout)
 	waitDone := make(chan struct{})
@@ -1700,6 +1732,9 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		}
 	}
 	result, err := dispatch(ctx, actualToolName, args)
+	// Spec 113-d FR-062: record the raw dispatch outcome before any error
+	// enrichment below. Pre-dispatch refusals above never reach this line.
+	m.RecordClientCallOutcome(ctx, targetClient, result, err)
 
 	m.logger.Debug("CallTool: client.CallTool returned",
 		zap.String("server_name", serverName),
@@ -1759,6 +1794,64 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 	}
 
 	return result, nil
+}
+
+// RecordCallOutcome feeds one dispatched tool call into the named server's
+// rolling failure-rate window (Spec 113-d). callstats.Classify decides whether
+// the outcome counts: isError results, limiter/generation refusals, caller
+// cancellation and auth-required errors are excluded. Dispatch paths should use
+// RecordClientCallOutcome, which also refuses to resurrect the window of a
+// server that was removed while the call was in flight.
+func (m *Manager) RecordCallOutcome(server string, result *mcp.CallToolResult, err error) {
+	counted, failed, kind := callstats.Classify(context.Background(), result, err)
+	if !counted {
+		return
+	}
+	m.callStats.Record(server, counted, failed, kind)
+	m.noteCallHealth(server)
+}
+
+// RecordClientCallOutcome is RecordCallOutcome for a dispatch that went through
+// client. It is the single entry point shared by Manager.callTool and the
+// code_execution dispatch, which calls the managed client directly and
+// bypasses the manager. The outcome is dropped unless client is still the
+// registered client for its server: RemoveServer deletes the client and then
+// drops the window, so a call still in flight at removal (its transport closes
+// and it fails) must not recreate the history a same-named replacement would
+// inherit. The check and the Record happen under the manager read lock, which
+// RemoveServer's delete takes for writing, so either the record lands before
+// the drop (and is wiped by it) or the check fails.
+func (m *Manager) RecordClientCallOutcome(ctx context.Context, client *managed.Client, result *mcp.CallToolResult, err error) {
+	if client == nil {
+		return
+	}
+	counted, failed, kind := callstats.Classify(ctx, result, err)
+	if !counted {
+		return
+	}
+	name := client.GetConfig().Name
+	m.mu.RLock()
+	registered := false
+	for _, c := range m.clients {
+		if c == client {
+			registered = true
+			break
+		}
+	}
+	if registered {
+		m.callStats.Record(name, counted, failed, kind)
+	}
+	m.mu.RUnlock()
+	if registered {
+		m.noteCallHealth(name)
+	}
+}
+
+// CallStats returns the counted calls and failures for server inside the
+// rolling window, plus a short label for the dominant failure kind.
+func (m *Manager) CallStats(server string) (calls, failures int, dominantKind string) {
+	calls, failures, kind := m.callStats.Snapshot(server)
+	return calls, failures, kind.String()
 }
 
 // ConnectAll connects to all configured servers that should retry

@@ -43,7 +43,7 @@
 
 ## Phase 7: Polish & Docs
 
-- [ ] T012 [P] Document `activity_max_size_mb` (default 256, 0 = disabled, runs with age/count caps) in `docs/configuration.md` and the activity/retention docs.
+- [x] T012 [P] Document `activity_max_size_mb` (default 256, 0 = disabled, runs with age/count caps) in `docs/configuration.md` and the activity/retention docs.
 - [x] T013 Run the full local verification: `go test ./internal/storage/ ./internal/runtime/ ./internal/config/` and `go build ./cmd/mcpproxy`; ensure green.
 - [x] T014 Run `gofmt`/`goimports` and `./scripts/run-linter.sh` on changed files.
 
