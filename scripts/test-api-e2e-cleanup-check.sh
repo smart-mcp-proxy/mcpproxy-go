@@ -135,14 +135,10 @@ echo -e "${GREEN}Decoy running (pid=$DECOY_PID).${NC}"
 # reaps the stale process.
 baseline_launcher_pids="$(pgrep -f 'launcher-server.*--port 39933' 2>/dev/null | sort)"
 
-# descendants PID: print every recursive child PID of PID (pgrep -P walk).
-descendants() {
-    local kid
-    for kid in $(pgrep -P "$1" 2>/dev/null); do
-        echo "$kid"
-        descendants "$kid"
-    done
-}
+# descendants PID: print every recursive child PID of PID.
+# shellcheck source=scripts/descendant-pids.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/descendant-pids.sh"
+descendants() { descendant_pids "$@"; }
 
 run_abort_mode() {
     local marker="$DECOY_DIR/abort.marker"

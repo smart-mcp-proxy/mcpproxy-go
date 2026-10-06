@@ -245,6 +245,7 @@ func TestRunTelemetryStatus_ReportsEnvOverride(t *testing.T) {
 	t.Setenv("CI", "")
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv("MCPPROXY_TELEMETRY", "false")
+	t.Setenv("MCPPROXY_OUTPUT", "")
 
 	tmpDir := t.TempDir()
 	customPath := filepath.Join(tmpDir, "custom_mcp_config.json")

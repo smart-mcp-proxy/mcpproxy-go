@@ -497,6 +497,10 @@ func publisherOwnsRepo(id, sourceCodeURL string) bool {
 	return ok && domainLabelMatchesOwner(label, repoOwner)
 }
 
+// tldWords are TLD / second-level suffix words that are never a publisher
+// identity: "com.org.evil/x" must not verify as owner "org" against acme-org.
+var tldWords = map[string]bool{"com": true, "org": true, "net": true, "gov": true, "edu": true, "co": true, "ac": true, "io": true}
+
 // genericOwnerLabels are domain labels any publisher can register, so they
 // never verify through the token or affix rules (#1466).
 var genericOwnerLabels = map[string]bool{
@@ -513,7 +517,7 @@ var genericOwnerLabels = map[string]bool{
 // with the owner, so com.tools cannot borrow acme-tools. The deny-list applies
 // to the namespace label, not to the repo owner's tokens.
 func domainLabelMatchesOwner(label, repoOwner string) bool {
-	if len(label) < 3 {
+	if len(label) < 3 || tldWords[label] {
 		return false
 	}
 	if label == repoOwner {

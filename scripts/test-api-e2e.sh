@@ -721,7 +721,8 @@ cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
 # Substitute LISTEN_PORT in config file if not using default 8081
 if [ "$LISTEN_PORT" != "8081" ]; then
-    sed -i '' "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
+    # Portable in-place edit (BSD sed -i needs '', GNU sed rejects it).
+    sed "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
     echo "Updated listen port to :${LISTEN_PORT}"
 fi
 
