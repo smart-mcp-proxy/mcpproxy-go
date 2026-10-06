@@ -2,8 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2538,123 +2536,20 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// Extract created time and config fields
 		var created time.Time
 		var url, command, protocol string
-		var oauthConfig map[string]interface{}
-		var authenticated bool
-		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
-		var tokenExpiresAt time.Time
-		var hasRefreshToken bool
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
 			command = serverStatus.Config.Command
 			protocol = serverStatus.Config.Protocol
-
-			// Serialize OAuth config if present (explicit config)
-			if serverStatus.Config.OAuth != nil {
-				oauthConfig = map[string]interface{}{
-					"client_id":    serverStatus.Config.OAuth.ClientID,
-					"scopes":       serverStatus.Config.OAuth.Scopes,
-					"extra_params": serverStatus.Config.OAuth.ExtraParams,
-					"pkce_enabled": serverStatus.Config.OAuth.PKCEEnabled,
-					// auth_url, token_url will be populated from OAuth runtime state if available
-					"auth_url":  "",
-					"token_url": "",
-				}
-			}
-
-			// GH #1172: a token record left behind by an earlier OAuth login
-			// is not evidence about a server that now authenticates with a
-			// static Authorization header — see StoredOAuthTokenInPlay.
-			tokenInPlay := r.StoredOAuthTokenInPlay(serverStatus.Name, serverStatus.Config)
-
-			// Check if server has valid OAuth token in storage
-			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
-			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
-			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil && tokenInPlay {
-				r.logger.Debug("Checking OAuth token in storage",
-					zap.String("server", serverStatus.Name),
-					// #1158: the configured upstream URL routinely carries a
-					// `?token=` credential; the host and path stay readable.
-					zap.String("url", oauth.AuditRedaction.URLValue(url)),
-					zap.Bool("has_explicit_oauth_config", serverStatus.Config.OAuth != nil))
-
-				// Generate server key matching PersistentTokenStore format
-				combined := fmt.Sprintf("%s|%s", serverStatus.Name, url)
-				hash := sha256.Sum256([]byte(combined))
-				hashStr := hex.EncodeToString(hash[:])
-				serverKey := fmt.Sprintf("%s_%s", serverStatus.Name, hashStr[:16])
-
-				r.logger.Debug("Generated OAuth token lookup key",
-					zap.String("server", serverStatus.Name),
-					zap.String("server_key", serverKey))
-
-				token, err := r.storageManager.GetOAuthToken(serverKey)
-				r.logger.Debug("OAuth token lookup result",
-					zap.String("server", serverStatus.Name),
-					zap.String("server_key", serverKey),
-					zap.Bool("token_nil", token == nil),
-					zap.Error(err))
-
-				if err == nil && token != nil {
-					authenticated = true
-					tokenExpiresAt = token.ExpiresAt
-					hasRefreshToken = token.RefreshToken != ""
-					r.logger.Info("OAuth token found for server",
-						zap.String("server", serverStatus.Name),
-						zap.String("server_key", serverKey),
-						zap.Time("expires_at", token.ExpiresAt),
-						zap.Bool("has_refresh_token", hasRefreshToken))
-
-					// For autodiscovery servers (no explicit OAuth config), create minimal oauthConfig
-					if oauthConfig == nil {
-						oauthConfig = map[string]interface{}{
-							"autodiscovery": true,
-						}
-					}
-
-					// Add token expiration info to oauth config
-					if !token.ExpiresAt.IsZero() {
-						oauthConfig["token_expires_at"] = token.ExpiresAt.Format(time.RFC3339)
-						// Check if token is expired
-						isValid := time.Now().Before(token.ExpiresAt)
-						oauthConfig["token_valid"] = isValid
-						if isValid {
-							oauthStatus = string(oauth.OAuthStatusAuthenticated)
-						} else {
-							oauthStatus = string(oauth.OAuthStatusExpired)
-						}
-					} else {
-						// No expiration means token is valid indefinitely
-						oauthConfig["token_valid"] = true
-						oauthStatus = string(oauth.OAuthStatusAuthenticated)
-					}
-				} else {
-					// No token found - check if OAuth config exists to determine status
-					if oauthConfig != nil {
-						oauthStatus = string(oauth.OAuthStatusNone)
-					}
-				}
-			}
 		}
-
-		// Check for OAuth error in last_error - this indicates OAuth autodiscovery detected
-		// an OAuth-required server that has no token (user needs to authenticate)
-		if oauthStatus != string(oauth.OAuthStatusExpired) && serverStatus.LastError != "" {
-			if oauth.IsOAuthError(serverStatus.LastError) {
-				// If we have no oauthConfig yet, this is an autodiscovery server that needs OAuth
-				if oauthConfig == nil {
-					oauthConfig = map[string]interface{}{
-						"autodiscovery": true,
-					}
-					// Set status to "none" - user hasn't authenticated yet
-					oauthStatus = string(oauth.OAuthStatusNone)
-				} else {
-					// Has config but error - token might be invalid
-					oauthStatus = string(oauth.OAuthStatusError)
-				}
-			}
-		}
+		// One derivation of the OAuth token state, shared with the MCP
+		// upstream_servers list so every surface reports the same health.
+		oauthState := r.OAuthHealthState(serverStatus.Name, serverStatus.Config, serverStatus.LastError)
+		oauthConfig := oauthState.Config
+		authenticated := oauthState.Authenticated
+		oauthStatus := oauthState.Status
+		tokenExpiresAt := oauthState.TokenExpiresAt
+		hasRefreshToken := oauthState.HasRefreshToken
 
 		// Audit F12: mcp-go's streamable-HTTP transport wraps a send failure with
 		// the same "failed to send request" text at two nesting levels, so the

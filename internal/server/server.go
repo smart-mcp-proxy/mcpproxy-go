@@ -1700,9 +1700,16 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			RetryCount:         serverStatus.RetryCount,
 		}
 
-		// Check if OAuth is required for this server
-		if serverStatus.Config != nil && serverStatus.Config.OAuth != nil {
-			healthInput.OAuthRequired = true
+		// OAuth token state comes from the runtime's single derivation; leaving
+		// OAuthStatus empty reads as "no token" and reports a signed-in server
+		// as needing sign-in (#1522).
+		oauthState := s.runtime.OAuthHealthState(serverStatus.Name, cfg, serverStatus.LastError)
+		healthInput.OAuthRequired = oauthState.Config != nil
+		healthInput.OAuthStatus = oauthState.Status
+		healthInput.HasRefreshToken = oauthState.HasRefreshToken
+		healthInput.CallTimeOAuthRequired = oauthState.CallTimeOAuthRequired
+		if !oauthState.TokenExpiresAt.IsZero() {
+			healthInput.TokenExpiresAt = &oauthState.TokenExpiresAt
 		}
 
 		// T032: Wire refresh state into health calculation (Spec 023).

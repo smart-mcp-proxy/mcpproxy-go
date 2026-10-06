@@ -4861,6 +4861,16 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		// Read through the runtime seam so a stale schedule for a server that
 		// no longer uses OAuth is not reported here either (GH #1172).
 		if p.mainServer != nil && p.mainServer.runtime != nil {
+			// #1522: OAuth token state from the runtime's single derivation;
+			// an empty OAuthStatus reads as "no token" (sign-in required).
+			oauthState := p.mainServer.runtime.OAuthHealthState(server.Name, server, lastError)
+			healthInput.OAuthRequired = oauthState.Config != nil
+			healthInput.OAuthStatus = oauthState.Status
+			healthInput.HasRefreshToken = oauthState.HasRefreshToken
+			healthInput.CallTimeOAuthRequired = oauthState.CallTimeOAuthRequired
+			if !oauthState.TokenExpiresAt.IsZero() {
+				healthInput.TokenExpiresAt = &oauthState.TokenExpiresAt
+			}
 			if refreshState := p.mainServer.runtime.HealthRefreshState(server.Name, server); refreshState != nil {
 				healthInput.RefreshState = health.RefreshState(refreshState.State)
 				healthInput.RefreshRetryCount = refreshState.RetryCount
