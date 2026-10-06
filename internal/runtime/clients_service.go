@@ -51,7 +51,9 @@ type ClientsService struct {
 
 	// inflight holds the per-client connect claim (FR-021a), guarded by mu: a
 	// connect holds it from Issue until Commit, Abort or Release.
-	inflight map[string]time.Time
+	inflight map[string]connectClaim
+	// claimSeq numbers connect claims (guarded by mu).
+	claimSeq uint64
 }
 
 // ClientCredentialStore is the token-store surface the service needs;

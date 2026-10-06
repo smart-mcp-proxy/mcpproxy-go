@@ -480,6 +480,22 @@ final class ConnectClientModel: ObservableObject {
         }
     }
 
+    /// Adopt a refreshed profile list (SSE `profiles.changed`) while the sheet is
+    /// open. The selection stays when its profile still exists; otherwise it
+    /// falls back to All servers rather than naming a profile that is gone.
+    func refreshProfiles(_ updated: [ProfileView]) {
+        profiles = updated
+        if !profile.isEmpty, !updated.contains(where: { $0.name == profile }) {
+            profile = ""
+            lockedChoice = true
+            // Back to "untouched": the write then sends `.unspecified`, which
+            // keeps the client's existing binding instead of forcing
+            // All servers / switchable over it.
+            bindingTouched = false
+            invalidatePreview()
+        }
+    }
+
     // MARK: - Selection
 
     /// The selection the list may hold, given the row the user just clicked.

@@ -1076,6 +1076,12 @@ func TestSupervisor_ReconcileQuiescent(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("no reconcile action reached AddServer")
 	}
+	// startupReconciled is set by a defer once the startup pass returns, which
+	// may happen after AddServer is entered; wait for it so the in-flight
+	// counter is what keeps the supervisor non-quiescent below.
+	require.Eventually(t, sup.startupReconciled.Load, 10*time.Second, 10*time.Millisecond,
+		"startup reconcile dispatched")
+	require.Greater(t, sup.actionsInFlight.Load(), int64(0), "the held AddServer action is in flight")
 	require.False(t, sup.ReconcileQuiescent(), "an action is in flight")
 
 	releaseAll()

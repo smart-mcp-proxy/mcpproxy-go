@@ -63,6 +63,9 @@ final class AccessExplainerModel: ObservableObject {
     @Published var tool: String
     @Published private(set) var toolNames: [String] = []
     @Published private(set) var explanation: AccessExplanation?
+    /// The tool the current explanation was computed for; `tool` is live text
+    /// the operator may keep editing, so fix routes use this one.
+    private(set) var explainedTool: String?
     /// A 400, 403 or 404 (or any failure), shown inline; never an alert.
     @Published private(set) var errorMessage: String?
     @Published private(set) var isLoading = false
@@ -102,10 +105,13 @@ final class AccessExplainerModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
+        let asked = tool
         do {
-            explanation = try await source.explain(tool: tool, subject: subject.query)
+            explanation = try await source.explain(tool: asked, subject: subject.query)
+            explainedTool = asked
         } catch {
             explanation = nil
+            explainedTool = nil
             errorMessage = Self.message(for: error)
         }
     }
@@ -139,7 +145,7 @@ final class AccessExplainerModel: ObservableObject {
         }
     }
 
-    func route(for fix: ExplainFix) -> AppRoute? { Self.route(for: fix, tool: tool) }
+    func route(for fix: ExplainFix) -> AppRoute? { Self.route(for: fix, tool: explainedTool ?? tool) }
 
     /// The headline of the verdict banner.
     var verdictText: String? {

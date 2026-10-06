@@ -145,12 +145,13 @@ struct AnonymousProfileSection: View {
             HStack {
                 Picker("Anonymous callers", selection: $model.selection) {
                     Text("Unconfined (all servers)").tag("")
-                    ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                    ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                     if !model.selection.isEmpty, !appState.profiles.contains(where: { $0.name == model.selection }) {
                         Text("\(model.selection) (missing)").tag(model.selection)
                     }
                 }
                 .labelsHidden()
+                .disabled(model.isSaving)
                 .frame(maxWidth: 300)
                 .accessibilityLabel("Anonymous callers profile")
                 .accessibilityIdentifier("settings-anonymous-profile")
@@ -158,9 +159,10 @@ struct AnonymousProfileSection: View {
                 if model.isDirty { Button("Discard") { model.revert() }.buttonStyle(.borderless) }
                 Button {
                     Task {
+                        let saved = model.selection
                         await model.save()
                         if model.savedNote != nil {
-                            Self.commitSaved(model.selection, appState: appState, store: store)
+                            Self.commitSaved(saved, appState: appState, store: store)
                         }
                     }
                 } label: {

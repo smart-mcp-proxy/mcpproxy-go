@@ -51,7 +51,10 @@ final class HomeTokenSavingsBadgeTests: XCTestCase {
                       "hubSection must render the shared HomeTokenSavingsBadge")
         XCTAssertTrue(hub.contains("HomeTokenSavingsBadge.estimateHelp"),
                       "the hub estimate capsule must use the shared help text")
-        XCTAssertTrue(source.contains("HomeTokenSavingsBadge.estimateLabel"),
+        let card = try XCTUnwrap(section(of: source, from: "private var tokenSavingsSection", to: "// MARK: - Token Distribution"),
+                                 "HomeView has no tokenSavingsSection")
+        XCTAssertTrue(card.contains("Token Savings"), "the slice must be the Token Savings card")
+        XCTAssertTrue(card.contains("HomeTokenSavingsBadge.estimateLabel"),
                       "the Token Savings card must reuse the shared estimate label")
         XCTAssertEqual(source.components(separatedBy: "simulated estimate from the current tool catalog").count - 1, 1,
                        "the estimate help text must live in one place")

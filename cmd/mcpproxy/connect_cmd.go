@@ -343,7 +343,7 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 		} else {
 			fmt.Printf("Failed: %s\n", result.Message)
 		}
-		return nil
+		return connectResultError(result)
 	}
 
 	// JSON/YAML
@@ -352,7 +352,20 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 		return err
 	}
 	fmt.Println(out)
-	return nil
+	return connectResultError(result)
+}
+
+// connectResultError turns a refused connect/disconnect result into a non-nil
+// error so the exit code is 1; stdout is already printed unchanged. nil for a
+// successful result or an already_exists no-op.
+func connectResultError(result *connect.ConnectResult) error {
+	// already_exists (idempotent connect) and not_found (disconnecting a client
+	// that was never registered) are deliberate "result, not an error" no-ops,
+	// so they keep exiting 0.
+	if result == nil || result.Success || result.Action == "already_exists" || result.Action == "not_found" {
+		return nil
+	}
+	return cliRefusalError{fmt.Errorf("%s", result.Message)}
 }
 
 func loadConnectConfig() (*config.Config, error) {

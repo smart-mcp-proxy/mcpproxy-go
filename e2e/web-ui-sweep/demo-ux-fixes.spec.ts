@@ -110,12 +110,13 @@ for (const viewport of VIEWPORTS) {
     await shot(page, `radio-labels-create-${label}`)
   })
 
-  test(`custom-client and bulk-move radio labels sit next to their radios at ${label}`, async ({ page }) => {
+  test(`custom-client, bulk-move and upgrade-admin-key radio labels sit next to their radios at ${label}`, async ({ page }) => {
     await page.setViewportSize(viewport)
     await open(page, '/clients')
     const cases: Array<{ open: string; radios: string; shot: string }> = [
       { open: '[data-test="clients-add-other"]', radios: '[data-test^="custom-client-mode-"]', shot: 'custom-client' },
       { open: '[data-test="clients-bulk-move"]', radios: '[data-test^="bulk-mode-"]', shot: 'bulk-move' },
+      { open: '[data-test="clients-upgrade-admin-key"]', radios: '[data-test^="upgrade-mode-"]', shot: 'upgrade-admin-key' },
     ]
     for (const c of cases) {
       const opener = page.locator(c.open)

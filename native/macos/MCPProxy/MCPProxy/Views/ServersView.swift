@@ -137,7 +137,7 @@ struct ServersView: View {
                         get: { profileFilter ?? "" },
                         set: { profileFilter = $0.isEmpty ? nil : $0 })) {
                         Text("All profiles").tag("")
-                        ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                        ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                         if let current = profileFilter, !appState.profiles.contains(where: { $0.name == current }) {
                             Text(current).tag(current)
                         }

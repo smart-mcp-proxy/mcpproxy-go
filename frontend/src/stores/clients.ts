@@ -24,51 +24,102 @@ export const useClientsStore = defineStore('clients', () => {
   // A response is applied only while it is still the latest of its kind and the
   // scope it was asked for is still the active one: changing ?profile= / ?client=
   // must not let the previous scope's rows land afterwards.
+  // One ticket covers every GET /clients (load and refreshPresence), so an older
+  // response can never overwrite a newer one. loadTicket only owns the loading
+  // flag, so a load superseded by a presence poll still clears it.
+  let fetchTicket = 0
   let loadTicket = 0
-  let presenceTicket = 0
   const scopeKey = () => JSON.stringify(scope)
+  const isUnscoped = () => !scope.profile && !scope.client
+
+  // The unscoped roster (updated only by unscoped fetches). The sidebar badge,
+  // the assign dialog and the profile usage list read it, so a ?profile= /
+  // ?client= filter on the Clients page never shrinks them.
+  const allClients = ref<ClientPresence[]>([])
+  // Set by clearScope(): the roster must be refetched before it is trusted.
+  const stale = ref(false)
+  // Both GET /clients reads of one refresh; the unscoped one is shared when the
+  // active scope is already unscoped.
+  async function fetchRosters() {
+    const scoped = api.getClients(scope)
+    const all = isUnscoped() ? scoped : api.getClients({})
+    return Promise.all([scoped, all])
+  }
+  function applyAll(response: { success: boolean; data?: { clients?: ClientPresence[] } }) {
+    if (response.success && Array.isArray(response.data?.clients)) {
+      allClients.value = response.data.clients
+      stale.value = false
+    }
+  }
 
   async function load(nextScope?: { profile?: string; client?: string }) {
     if (nextScope) scope = nextScope
-    const ticket = ++loadTicket
+    const ticket = ++fetchTicket
+    const mine = ++loadTicket
     const asked = scopeKey()
     loading.value = true
     error.value = null
-    const [clientResponse, routingResponse] = await Promise.all([api.getClients(scope), api.getRouting()])
-    // A newer load owns the loading flag and the rows.
-    if (ticket !== loadTicket || asked !== scopeKey()) return
+    const [[clientResponse, allResponse], routingResponse] = await Promise.all([fetchRosters(), api.getRouting()])
+    // A newer load owns the loading flag.
+    if (mine !== loadTicket || asked !== scopeKey()) return
+    // Routing is only fetched here, so a superseded load still applies it.
+    if (routingResponse.success && routingResponse.data) routing.value = routingResponse.data
+    // A newer fetch (another load or a presence poll) owns the rows.
+    if (ticket !== fetchTicket) {
+      loading.value = false
+      return
+    }
+    applyAll(allResponse)
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
       warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
     } else error.value = clientResponse.error || 'Unable to load clients'
-    if (routingResponse.success && routingResponse.data) routing.value = routingResponse.data
     loading.value = false
   }
 
   // Rows with at least one live session: the sidebar Clients badge (Spec 109-i).
-  const liveCount = computed(() => clients.value.filter(client => (client.active_sessions ?? 0) > 0).length)
+  const liveCount = computed(() => allClients.value.filter(client => (client.active_sessions ?? 0) > 0).length)
 
   // Silent presence refresh for the sidebar badge. It fetches GET /clients only
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
-    const ticket = ++presenceTicket
+    const ticket = ++fetchTicket
     const asked = scopeKey()
     try {
-      const response = await api.getClients(scope)
-      if (ticket !== presenceTicket || asked !== scopeKey()) return
+      const [response, allResponse] = await fetchRosters()
+      if (ticket !== fetchTicket || asked !== scopeKey()) return
+      applyAll(allResponse)
       if (response.success && Array.isArray(response.data?.clients)) {
         warnings.value = response.data.warnings ?? []
-        // GET /clients is metadata-only. For rows whose detail was loaded via
-        // loadDetail(), keep every detail-resolved field (state, installed,
-        // connected, connection_unverified, config paths, sessions) and take
-        // only the presence metadata from the poll. The backend omits
-        // `sessions` when empty, so its absence is not a signal.
+        // Source-of-truth rule (#1451-10): the 30s presence poll owns
+        // `last_seen` and `active_sessions`. GET /clients is metadata-only, so
+        // while the poll's presence matches the row, keep every detail-resolved
+        // field (state, installed, connected, connection_unverified, config
+        // paths, sessions) so a poll never downgrades them (#1444). The backend
+        // omits `sessions` when empty, so its absence is not a signal. When the
+        // poll's presence differs, the detail-derived presence fields (state,
+        // connected, sessions) are stale: take them from the poll, forget the
+        // detail flag and reload the detail so the row converges on one source.
         const previous = new Map(clients.value.map(client => [client.id, client]))
+        const stale: string[] = []
         clients.value = response.data.clients.map(incoming => {
           const existing = previous.get(incoming.id)
           if (!existing || !detailLoaded.has(incoming.id)) return incoming
+          const presenceChanged =
+            (incoming.active_sessions ?? 0) !== (existing.active_sessions ?? 0) ||
+            (incoming.last_seen ?? null) !== (existing.last_seen ?? null)
+          if (presenceChanged) {
+            detailLoaded.delete(incoming.id)
+            stale.push(incoming.id)
+            return {
+              ...incoming,
+              installed: existing.installed,
+              config_path: existing.config_path,
+              display_path: existing.display_path,
+            }
+          }
           return {
             ...incoming,
             state: existing.state,
@@ -80,6 +131,7 @@ export const useClientsStore = defineStore('clients', () => {
             sessions: existing.sessions,
           }
         })
+        for (const id of stale) void loadDetail(id)
         for (const id of [...detailLoaded]) {
           if (!clients.value.some(client => client.id === id)) detailLoaded.delete(id)
         }
@@ -97,7 +149,12 @@ export const useClientsStore = defineStore('clients', () => {
     else clients.value.push(row)
   }
 
-  function clearScope() { scope = {} }
+  // Dropping the scope also invalidates the rows: they were fetched under the
+  // old filter, so the next consumer must refetch rather than trust them.
+  function clearScope() {
+    scope = {}
+    stale.value = true
+  }
 
   async function loadDetail(id: string) {
     const response = await api.getClient(id)
@@ -119,5 +176,5 @@ export const useClientsStore = defineStore('clients', () => {
     })
   }
 
-  return { clients, warnings, routing, loading, error, liveCount, load, refreshPresence, loadDetail, replaceRow, clearScope }
+  return { clients, allClients, stale, warnings, routing, loading, error, liveCount, load, refreshPresence, loadDetail, replaceRow, clearScope }
 })
