@@ -2473,7 +2473,10 @@ func findOrphanedIndexServers(
 ) (orphans []string, activeCount, indexedCount int, err error) {
 	// Indexed first: a server is registered before its tools are indexed, so a
 	// server added while this runs is either missing from the indexed list or
-	// already present in the active list read after it.
+	// already present in the active list read after it. This covers servers newly
+	// added during cleanup; index entries persisted from a previous run can still
+	// be pruned if their server's async re-registration has not finished yet, and
+	// are re-indexed once discovery runs for it.
 	indexedServers, err := listIndexed()
 	if err != nil {
 		return nil, 0, 0, err
