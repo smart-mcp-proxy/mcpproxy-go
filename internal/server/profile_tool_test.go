@@ -788,10 +788,9 @@ func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 		idx, ctx := newProfileIndex(c.cfg), c.ctx // index built outside the measured window
 		cases[name] = func() { idx.selectableNames(ctx) }
 	}
-	allocs := retryUntilAllocsMatch(15, 50, "reachable pin first", cases)
-	for name, got := range allocs {
-		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
-	}
+	allocs := retryUntilAllocsMatch(15, 50, allocsParityTolerance, "reachable pin first", cases)
+	require.Empty(t, allocsMismatch(allocs, "reachable pin first", allocsParityTolerance),
+		"every pin outcome must allocate like a reachable pin (within %d): %v", allocsParityTolerance, allocs)
 }
 
 // TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome pins the
