@@ -412,6 +412,13 @@ final class ProfileEditorModel: ObservableObject {
         all.filter { $0.name != name }
     }
 
+    /// Picker entries (slug, label) for the delete sheet's reassign target.
+    /// The clash check runs against the FULL list so a target sharing a title
+    /// with the profile being deleted is still disambiguated.
+    static func reassignPickerLabels(excluding name: String, in all: [ProfileView]) -> [(name: String, label: String)] {
+        reassignTargets(excluding: name, in: all).map { ($0.name, $0.pickerTitle(in: all)) }
+    }
+
     /// `DELETE /profiles/{name}?reassign_to=&force=`.
     @discardableResult
     func delete(reassignTo: String?, force: Bool) async -> Bool {
