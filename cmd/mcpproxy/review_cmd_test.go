@@ -263,9 +263,9 @@ func TestFormatReviewShowPrintsScanCoverage(t *testing.T) {
 		"Scan: not scanned yet; run: mcpproxy security rescan notes")
 	require.Contains(t, show(`,"scan":{"verdict":"not_scanned","coverage":"scanning"}`), "Scan: in progress")
 
-	// No scan key (or a daemon that predates coverage): no Scan line at all.
+	// No scan object: no line. A scan without coverage (older core): "none", as on Web and macOS.
 	require.NotContains(t, show(``), "Scan:")
-	require.NotContains(t, show(`,"scan":{"verdict":"clean"}`), "Scan:")
+	require.Contains(t, show(`,"scan":{"verdict":"clean"}`), "Scan: none")
 }
 
 func captureReviewOutput(t *testing.T, fn func() error) string {

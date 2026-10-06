@@ -63,6 +63,9 @@ type IssuedCredential struct {
 	// Pending carries opaque minter state for Commit (a reconnect that
 	// also changes the binding applies it after the write succeeds).
 	Pending interface{}
+	// ClaimToken is the opaque per-connect token the minter set at Issue; it
+	// ties Release/Commit/Abort to that connect's in-flight claim.
+	ClaimToken string
 }
 
 // CredentialMinter mints, commits and aborts client credentials for connect,

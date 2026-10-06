@@ -8,6 +8,8 @@ vi.mock('@/services/api', () => ({
     getServers: vi.fn(),
     securityApprove: vi.fn(),
     unquarantineServer: vi.fn(),
+    disableServer: vi.fn(),
+    quarantineServer: vi.fn(),
   },
 }))
 
@@ -332,5 +334,52 @@ describe('useServersStore — totalTools counts only available tools (#1064)', (
     expect(store.totalTools).toBe(0)
     // ...while the server itself is still listed for review.
     expect(store.quarantinedServers).toHaveLength(1)
+  })
+})
+
+describe('useServersStore — optimistic disable/quarantine keep health.admin_state in step (#1466)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  async function seeded() {
+    ;(api.getServers as any).mockResolvedValueOnce({
+      success: true,
+      data: {
+        servers: [{
+          name: 'srv', protocol: 'http', enabled: true, quarantined: false, connected: true,
+          connecting: false, tool_count: 1,
+          health: { level: 'healthy', admin_state: 'enabled', summary: 'Connected', status: 'ready' },
+        }],
+      },
+    })
+    const store = useServersStore()
+    await store.fetchServers()
+    return store
+  }
+
+  it('disable sets admin_state=disabled', async () => {
+    ;(api.disableServer as any).mockResolvedValueOnce({ success: true })
+    const store = await seeded()
+    await store.disableServer('srv')
+    expect(store.servers[0].health?.admin_state).toBe('disabled')
+    expect(store.servers[0].health?.status).toBe('disabled')
+  })
+
+  it('a failed disable restores admin_state', async () => {
+    ;(api.disableServer as any).mockResolvedValueOnce({ success: false, error: 'nope' })
+    const store = await seeded()
+    await expect(store.disableServer('srv')).rejects.toThrow()
+    expect(store.servers[0].health?.admin_state).toBe('enabled')
+    expect(store.servers[0].health?.status).toBe('ready')
+  })
+
+  it('quarantine sets admin_state=quarantined', async () => {
+    ;(api.quarantineServer as any).mockResolvedValueOnce({ success: true })
+    const store = await seeded()
+    await store.quarantineServer('srv')
+    expect(store.servers[0].health?.admin_state).toBe('quarantined')
+    expect(store.servers[0].health?.status).toBe('needs_review')
   })
 })

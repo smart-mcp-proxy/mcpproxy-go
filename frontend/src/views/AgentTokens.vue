@@ -121,7 +121,7 @@
           <tr>
             <th>Name</th>
             <th>Kind</th>
-            <th>Profile</th>
+            <th class="min-w-[10rem]">Profile</th>
             <th>Mode</th>
             <th>Prefix</th>
             <th>Expires</th>
@@ -151,7 +151,7 @@
             </td>
             <td :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</td>
             <td>
-              <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
+              <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden whitespace-nowrap" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
               <span v-else class="text-base-content/40 text-sm">&mdash;</span>
             </td>
             <td>
@@ -558,23 +558,28 @@ function permissionBadgeClass(perm: string): string {
 }
 
 // Data loading
+let tokensTicket = 0
 async function loadTokens() {
+  const ticket = ++tokensTicket
   loading.value = true
   error.value = null
 
   try {
     const rest = scopeQuery?.toRest()
     const response = await apiClient.listAgentTokens({ profile: rest?.profile, token: rest?.token })
+    // A newer load owns the rows and the loading flag.
+    if (ticket !== tokensTicket) return
     if (response.success && response.data) {
       tokens.value = response.data.tokens || []
     } else {
       error.value = response.error || 'Failed to load tokens'
     }
   } catch (err: any) {
+    if (ticket !== tokensTicket) return
     error.value = err.message || 'Failed to load tokens'
     console.error('Failed to load tokens:', err)
   } finally {
-    loading.value = false
+    if (ticket === tokensTicket) loading.value = false
   }
 }
 

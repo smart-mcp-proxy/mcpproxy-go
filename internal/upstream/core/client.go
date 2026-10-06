@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -591,7 +592,11 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 		// Provide more specific error context
 		if callCtx.Err() == context.DeadlineExceeded {
+			c.logCallInterrupted(ctx, callCtx, toolName)
 			return nil, &callTimeoutError{tool: toolName, timeout: timeout}
+		}
+		if callCtx.Err() != nil {
+			c.logCallInterrupted(ctx, callCtx, toolName)
 		}
 
 		// Extra diagnostics for broken pipe/closed pipe
@@ -1053,4 +1058,60 @@ func cappedScrub(s string, limit int) string {
 		cut--
 	}
 	return scrubbed[:cut] + "… (truncated)"
+}
+
+type connectionGenerationKey struct{}
+
+// WithConnectionGeneration records the managed client's connection epoch on
+// ctx so core can attach it to structured tool-call timeout/cancel logs.
+func WithConnectionGeneration(ctx context.Context, epoch int64) context.Context {
+	return context.WithValue(ctx, connectionGenerationKey{}, epoch)
+}
+
+// Cancellation sources reported in the tool-call interruption log.
+const (
+	cancelSourceCallTimeout  = "call_timeout"
+	cancelSourceCallerCancel = "caller_cancel"
+)
+
+// logCallInterrupted emits one structured Warn when a tools/call ends because
+// its context expired or was canceled (#1321 item 4). parent is the context the
+// caller passed in; callCtx is the one (possibly with the call timeout) handed
+// to the transport. Log-only: it never alters the returned error.
+func (c *Client) logCallInterrupted(parent, callCtx context.Context, toolName string) {
+	source := cancelSourceCallerCancel
+	// The call timeout fired on our wrapper while the caller's context is
+	// still live; a caller deadline/cancel shows up on parent itself.
+	if parent.Err() == nil && callCtx.Err() == context.DeadlineExceeded {
+		source = cancelSourceCallTimeout
+	}
+
+	c.mu.RLock()
+	pid := 0
+	if c.processCmd != nil && c.processCmd.Process != nil {
+		pid = c.processCmd.Process.Pid
+	}
+	connected := c.connected
+	c.mu.RUnlock()
+
+	state := "connected"
+	if !connected {
+		state = "disconnected"
+	}
+
+	var generation int64
+	if g, ok := parent.Value(connectionGenerationKey{}).(int64); ok {
+		generation = g
+	}
+
+	c.logger.Warn("Upstream tools/call interrupted",
+		zap.String("server", c.config.Name),
+		zap.String("tool", toolName),
+		zap.String("transport", c.transportType),
+		zap.Int("pid", pid),
+		zap.Int64("connection_generation", generation),
+		zap.String("request_id", reqcontext.GetRequestID(parent)),
+		zap.String("cancellation_source", source),
+		zap.String("resulting_state", state),
+	)
 }

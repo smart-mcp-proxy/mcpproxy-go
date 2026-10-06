@@ -117,6 +117,20 @@ describe('Activity - blocked attempts in the Tool calls view (T168)', () => {
     expect(wrapper.findAll('[data-test="activity-row"]')).toHaveLength(1)
   })
 
+  it('the offer still lists refusals when an explicit type filter excludes policy_decision (#1466)', async () => {
+    mockState.rows = [REFUSAL]
+    mockState.summary = { period: '24h', total_count: 1, call_count: 0, blocked_count: 1 }
+    const { wrapper } = await mountActivityAt('/activity?view=calls&type=tool_call')
+
+    const button = wrapper.find('[data-test="activity-empty-show-blocked"]')
+    expect(button.exists()).toBe(true)
+    await button.trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="activity-row"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-test="activity-row"]')[0].text()).toContain('write')
+  })
+
   it('pluralises the offer for several blocked attempts', async () => {
     mockState.rows = []
     mockState.summary = { period: '24h', total_count: 2, call_count: 0, blocked_count: 2 }

@@ -2868,6 +2868,14 @@ function loadLogs() {
 
 async function _loadLogsWithGen(gen: number) {
   if (!server.value) return
+  // A disabled server has no running process and may have no log file: skip the
+  // request rather than surfacing a console error (#1466).
+  if (server.value.enabled === false) {
+    serverLogs.value = []
+    logsError.value = null
+    logsLoading.value = false
+    return
+  }
 
   logsLoading.value = true
   logsError.value = null
@@ -2877,6 +2885,9 @@ async function _loadLogsWithGen(gen: number) {
     if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverLogs.value = response.data.logs || []
+    } else if (/\b404\b|not found/i.test(response.error || '')) {
+      // No log file yet: an empty state, not a fault.
+      serverLogs.value = []
     } else {
       logsError.value = response.error || 'Failed to load logs'
     }

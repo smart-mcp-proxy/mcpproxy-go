@@ -42,13 +42,14 @@ const bindings = useClientBindingsStore()
 const clientId = ref('')
 const done = ref('')
 const refusal = computed(() => (clientId.value ? bindings.rowErrors[clientId.value] : undefined))
-const eligible = computed(() => clients.clients.filter(client => client.credential_state === 'client'))
+const eligible = computed(() => clients.allClients.filter(client => client.credential_state === 'client'))
 
 watch(() => props.open, open => {
   if (!open) return
   clientId.value = ''
   done.value = ''
-  if (!clients.clients.length) void clients.refreshPresence()
+  // The roster may be a scoped page's rows: always refetch the unscoped one.
+  void clients.refreshPresence()
 })
 
 async function submit() {

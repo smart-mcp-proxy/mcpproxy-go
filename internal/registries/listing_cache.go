@@ -133,18 +133,29 @@ func pruneListingCache(regs []RegistryEntry) {
 	}
 }
 
-// matchCachedEntry is the fallback filter: a case-insensitive substring of the
-// trimmed query in the entry's name, title, description OR id. The live path's
-// filterServers skips the id, but the official registry's own search matches
-// names, so including the id is what lets "github" find "io.github.*". An empty
-// query matches everything (browse).
+// matchCachedEntry is the fallback filter: every whitespace token of the
+// trimmed query must appear (case-insensitive substring) in the entry's name,
+// title, description OR id. '-' and '_' count as spaces on both sides, so
+// "github actions" finds "github-actions". The live path's filterServers skips
+// the id, but the official registry's own search matches names, so including
+// the id is what lets "github" find "io.github.*". An empty query matches
+// everything (browse).
 func matchCachedEntry(e *ServerEntry, q string) bool {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
+	tokens := strings.Fields(foldCachedMatchText(q))
+	if len(tokens) == 0 {
 		return true
 	}
-	return strings.Contains(strings.ToLower(e.Name), q) ||
-		strings.Contains(strings.ToLower(e.Title), q) ||
-		strings.Contains(strings.ToLower(e.Description), q) ||
-		strings.Contains(strings.ToLower(e.ID), q)
+	hay := foldCachedMatchText(e.Name + "\n" + e.Title + "\n" + e.Description + "\n" + e.ID)
+	for _, tok := range tokens {
+		if !strings.Contains(hay, tok) {
+			return false
+		}
+	}
+	return true
+}
+
+var matchSeparators = strings.NewReplacer("-", " ", "_", " ")
+
+func foldCachedMatchText(s string) string {
+	return matchSeparators.Replace(strings.ToLower(s))
 }

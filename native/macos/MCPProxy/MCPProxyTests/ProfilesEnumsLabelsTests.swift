@@ -67,6 +67,19 @@ final class ProfilesEnumsLabelsTests: XCTestCase {
     func testFixActionCoversTheGoValues() throws { try assertTolerantFamily("fix_action", FixAction.self) }
     func testExplainVerdictCoversTheGoValues() throws { try assertTolerantFamily("explain_verdict", ExplainVerdict.self) }
 
+    /// `ToolTier` has no key in enums.json (a Go contract change is out of scope),
+    /// so the Go tier spellings are pinned here: each must be a KNOWN case.
+    func testToolTierCoversTheGoTiers() {
+        for wire in ["read", "write", "destructive", "unannotated"] {
+            let decoded = ToolTier(wire: wire)
+            XCTAssertEqual(decoded.wire, wire, "tool tier \(wire) must round-trip")
+            XCTAssertFalse(isUnknown(decoded), "tool tier \(wire) decodes to .unknown: the Swift enum is missing a case")
+        }
+        if case .unannotated = ToolTier(wire: "unannotated") {} else { XCTFail("unannotated must be a known ToolTier case") }
+        XCTAssertTrue(isUnknown(ToolTier(wire: "brand_new_tier")))
+        XCTAssertEqual(ToolTier(wire: "brand_new_tier").wire, "brand_new_tier")
+    }
+
     func testTheComparisonCanFail() {
         XCTAssertTrue(isUnknown(FixAction(wire: "brand_new_fix")))
         XCTAssertFalse(isUnknown(FixAction(wire: "move_client")))

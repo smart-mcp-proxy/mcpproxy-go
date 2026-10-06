@@ -1731,6 +1731,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 appState.totalServers = 0
                 appState.totalTools = 0
                 appState.serversLoaded = false
+                appState.profiles = []
+                appState.anonymousProfile = ""
+                appState.clients = []
+                appState.clientWarnings = []
                 appState.apiClient = nil
                 updateStatusIcon()
                 rebuildMenu()

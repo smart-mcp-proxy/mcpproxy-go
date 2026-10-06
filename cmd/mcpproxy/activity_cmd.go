@@ -488,7 +488,7 @@ func activityPeriodFromRelative(from string) (string, error) {
 	case "-30d":
 		return "30d", nil
 	default:
-		return "", fmt.Errorf("--from on 'activity summary' accepts only -1h, -24h, -7d or -30d (aliases of --period); got '%s'", from)
+		return "", errors.New("summary supports --from -1h|-24h|-7d|-30d only")
 	}
 }
 
@@ -1623,6 +1623,11 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	// Checked before the daemon connection so an invalid --view fails the
 	// same way regardless of whether a daemon is reachable.
 	if err := validateActivityWatchView(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	// Conflicting scope flags (--token A --agent B) would otherwise make
+	// activityWatchScopeMatches reject every event and stream nothing forever.
+	if _, err := resolveActivityScope(); err != nil {
 		return outputActivityError(err, "INVALID_FILTER")
 	}
 
