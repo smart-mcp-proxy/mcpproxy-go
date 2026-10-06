@@ -108,11 +108,15 @@ func (s *ClientsService) releaseConnect(clientID, token string) {
 // A reconnect that names no profile keeps the recorded binding, so it can
 // never silently widen a locked client. That holds for an EXPIRED credential
 // too (it lapsed; the operator's binding did not). A revoked credential was
-// cut off deliberately, so reconnecting it is a fresh grant and starts from
-// the defaults (All servers) unless a profile is given.
+// cut off deliberately (disconnect), but its tombstone preserves the prior
+// profile pin and mode, so a profileless reconnect re-mints with that binding
+// instead of silently widening a profile-locked client to All servers. A
+// tombstone with no binding (or no record) starts from the defaults, and an
+// explicit profile always wins.
 func (s *ClientsService) resolveBindingLocked(rec *auth.AgentToken, profilePtr, modePtr *string) (pin, mode string, err error) {
 	keepBinding := rec != nil && profilePtr == nil &&
-		(s.stateOf(rec) == profile.CredentialStateClient || s.stateOf(rec) == profile.CredentialStateExpired)
+		(s.stateOf(rec) == profile.CredentialStateClient || s.stateOf(rec) == profile.CredentialStateExpired ||
+			s.stateOf(rec) == profile.CredentialStateRevoked)
 	if keepBinding {
 		pin = rec.ProfilePin
 		mode, err = resolveMode(pin, modePtr, rec.ProfileMode)

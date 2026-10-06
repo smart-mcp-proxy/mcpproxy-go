@@ -29,8 +29,18 @@ func TestConnectMinter_PreviewBindingEqualsIssue(t *testing.T) {
 			connect.CredentialIntent{Profile: strp("full")}, "full", "locked"},
 		{"mode only keeps the pin", func(h *svcHarness) { h.mint("cursor", "ro", nil) },
 			connect.CredentialIntent{Mode: strp("switchable")}, "ro", "switchable"},
-		{"revoked starts from the defaults", func(h *svcHarness) {
+		{"revoked with a preserved binding re-mints with it", func(h *svcHarness) {
 			h.mint("cursor", "ro", nil)
+			_, err := h.sm.ForgetClientCredential("cursor")
+			require.NoError(h.t, err)
+		}, connect.CredentialIntent{}, "ro", "locked"},
+		{"revoked with an explicit profile still wins", func(h *svcHarness) {
+			h.mint("cursor", "ro", nil)
+			_, err := h.sm.ForgetClientCredential("cursor")
+			require.NoError(h.t, err)
+		}, connect.CredentialIntent{Profile: strp("full")}, "full", "locked"},
+		{"revoked with no binding starts from the defaults", func(h *svcHarness) {
+			h.mint("cursor", "", nil)
 			_, err := h.sm.ForgetClientCredential("cursor")
 			require.NoError(h.t, err)
 		}, connect.CredentialIntent{}, "", "switchable"},
