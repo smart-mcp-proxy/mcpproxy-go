@@ -222,6 +222,12 @@ final class ConfigStore: ObservableObject {
 
     func revert(_ keys: [String]) {
         for k in keys { configSet(&working, k, configGet(original, k)) }
+        // Discarding the Listen edit ends "the user cleared it": follow the
+        // running core's address again.
+        if keys.contains("listen") {
+            listenCleared = false
+            adoptRunningListenIfBlank()
+        }
         revision += 1
     }
 
