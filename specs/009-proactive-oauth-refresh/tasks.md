@@ -151,7 +151,7 @@
 
 ### Implementation for User Story 4
 
-- [ ] T054 [US4] Add oauthExpired computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
+- [x] T054 [US4] Add oauthExpired computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
 - [x] T055 [US4] Update Login button v-if condition to include oauthExpired in frontend/src/components/ServerCard.vue
 - [x] T056 [US4] Ensure Login button styling is consistent in frontend/src/components/ServerCard.vue
 
@@ -173,7 +173,7 @@
 
 ### Implementation for User Story 5
 
-- [ ] T060 [US5] Add isAuthenticated computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
+- [x] T060 [US5] Add isAuthenticated computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
 - [x] T061 [US5] Add Logout button with v-if="isAuthenticated" in frontend/src/components/ServerCard.vue
 - [ ] T062 [US5] Implement handleLogout method with confirmation dialog in frontend/src/components/ServerCard.vue
 - [x] T063 [US5] Connect handleLogout to serversStore.triggerOAuthLogout in frontend/src/components/ServerCard.vue
