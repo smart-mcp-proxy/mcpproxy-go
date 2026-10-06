@@ -276,10 +276,22 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 		manager.tokenReconnect["parked-server"] = time.Now().Add(-time.Minute)
 	}
 
-	expireRateLimit()
-	manager.scanForNewTokens()
-	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
-		"first scan must retry with the stored token")
+	// wake runs a scan that is expected to retry the parked server. The
+	// background reconnect started by the previous scan can still be in flight
+	// (state Connecting) when the scan runs, and a scan skips a Connecting
+	// client by design, so a single shot is racy. Retry the whole
+	// expire+scan step until the scan reports it redialed; this asserts the
+	// final outcome, not the timing of the previous leg's reconnect.
+	wake := func(msg string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			expireRateLimit()
+			manager.scanForNewTokens()
+			return time.Since(manager.tokenReconnect["parked-server"]) < time.Second
+		}, 30*time.Second, 10*time.Millisecond, msg)
+	}
+
+	wake("first scan must retry with the stored token")
 	require.NotEmpty(t, manager.tokenFingerprints["parked-server"])
 
 	// Same token, rate limit expired: must NOT redial again.
@@ -291,10 +303,7 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 
 	// A fresh token (login completed) must wake it.
 	saveToken("fresh-token")
-	expireRateLimit()
-	manager.scanForNewTokens()
-	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
-		"scan did not wake the parked server when a new token appeared")
+	wake("scan did not wake the parked server when a new token appeared")
 
 	// A re-login that happens to persist a byte-identical token is still a new
 	// write, and this scan is the fallback wake when the CLI could not record an
@@ -302,8 +311,5 @@ func TestScanForNewTokens_OnlyOnNewToken(t *testing.T) {
 	// Updated with the wall clock, so give it a distinct instant.
 	time.Sleep(2 * time.Millisecond)
 	saveToken("fresh-token")
-	expireRateLimit()
-	manager.scanForNewTokens()
-	require.WithinDuration(t, time.Now(), manager.tokenReconnect["parked-server"], time.Second,
-		"scan ignored an identically-rewritten token")
+	wake("scan ignored an identically-rewritten token")
 }
