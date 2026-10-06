@@ -880,8 +880,10 @@ func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*
 	// exact tool-name match is already on top: any added clause shifts BM25
 	// query normalization for every hit, and exact-name scores are frozen.
 	segmentQuery := underscoreSegmentQuery(queryStr)
+	bare := false
 	if segmentQuery == nil {
 		segmentQuery = bareSegmentQuery(queryStr)
+		bare = true
 	}
 	if segmentQuery == nil {
 		return boolQuery, nil
@@ -894,6 +896,18 @@ func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*
 	for _, hit := range probe.Hits {
 		if fieldsContainExactToolName(hit.Fields, queryStr) {
 			return boolQuery, nil // exact match already at the top: no boost needed
+		}
+	}
+
+	if bare {
+		// Leave the query (and thus every score) untouched when no tool name
+		// has the segment: the extra clause would still shift normalization.
+		segProbe, err := b.index.Search(newToolSearchRequest(segmentQuery, 0, 1))
+		if err != nil {
+			return nil, fmt.Errorf("bare segment probe failed: %w", err)
+		}
+		if segProbe.Total == 0 {
+			return boolQuery, nil
 		}
 	}
 
