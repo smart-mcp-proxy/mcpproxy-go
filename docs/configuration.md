@@ -578,6 +578,66 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `redirect_uri` | string | No | Pins the loopback callback URL (auto-allocated if not provided) |
 | `scopes` | array | No | OAuth scopes to request |
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
+| `authorization_endpoint` | string | No | Overrides the authorization endpoint the authorization server advertises (see [Overriding OAuth discovery](#overriding-oauth-discovery)) |
+| `token_endpoint` | string | No | Overrides the token endpoint |
+| `registration_endpoint` | string | No | Overrides the Dynamic Client Registration endpoint |
+| `auth_server_metadata_url` | string | No | Authorization server metadata URL to use instead of discovering one |
+
+#### Overriding OAuth discovery
+
+mcpproxy normally discovers the authorization server from the upstream's
+Protected Resource Metadata (RFC 9728) and the authorization server metadata
+(RFC 8414). When a provider publishes metadata at a non-standard location, or
+advertises an endpoint that does not work for a native client, set one or more
+per-server overrides:
+
+```json
+"oauth": {
+  "auth_server_metadata_url": "https://login.example.com/custom/openid.json",
+  "token_endpoint": "https://login.example.com/oauth2/v1/exchange"
+}
+```
+
+- `auth_server_metadata_url` replaces discovery: it is the only metadata URL
+  used.
+- `authorization_endpoint`, `token_endpoint` and `registration_endpoint` take
+  precedence over whatever the metadata advertises. With any of them set,
+  mcpproxy always hands the OAuth client a metadata URL (your
+  `auth_server_metadata_url`, else the discovered one, else
+  `/.well-known/oauth-authorization-server` on the override's origin), so the
+  client never falls back to guessing `/authorize`, `/token` and `/register`.
+  If that metadata cannot be fetched and both `authorization_endpoint` and
+  `token_endpoint` are set, mcpproxy answers with a document built from your
+  overrides.
+- `extra_params` (for example the RFC 8707 `resource`) are added to requests to
+  the effective token endpoint, whether it was overridden or discovered.
+
+Each override must be an absolute `https` URL (`http` is accepted only for
+`localhost`, `127.0.0.0/8` and `::1`) with a host and no query string, fragment
+or user info. Extra authorize parameters belong in `extra_params`. Overrides
+are validated when you write the configuration (REST, MCP `upstream_servers`,
+CLI, `mcp_config.json` edits through the API). An invalid override already on
+disk is dropped at startup with a warning that names the field, never the
+value, and the server starts without it.
+
+#### Refresh tokens and `offline_access`
+
+When you do not set `oauth.scopes` and mcpproxy takes the scopes from the
+upstream's Protected Resource Metadata, it also requests `offline_access` if the
+authorization server advertises it in `scopes_supported`, so the login can be
+refreshed. An explicit `oauth.scopes` is sent exactly as written. If the
+authorization server publishes `grant_types_supported` without `refresh_token`,
+mcpproxy logs one warning per server per run, because that login cannot be
+refreshed and will expire.
+
+#### Discovery caching
+
+mcpproxy caches the discovery documents it fetches before a login or reconnect
+(Protected Resource Metadata, authorization server metadata and the scopes read
+from them) per server URL and override set. Successful lookups are cached for
+one hour, failures for 30 seconds, and at most 256 entries are kept. Changing
+the server URL or any of the four override fields uses a fresh entry, and an
+upstream that advertises a different `resource_metadata` URL discards the old one.
 
 #### The `oauth` block declares that OAuth is required
 

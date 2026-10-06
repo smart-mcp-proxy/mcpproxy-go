@@ -425,6 +425,18 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
 				server.OAuth.PKCEEnabled = pkceEnabled
 			}
+			if v, ok := oauth["authorization_endpoint"].(string); ok {
+				server.OAuth.AuthorizationEndpoint = v
+			}
+			if v, ok := oauth["token_endpoint"].(string); ok {
+				server.OAuth.TokenEndpoint = v
+			}
+			if v, ok := oauth["registration_endpoint"].(string); ok {
+				server.OAuth.RegistrationEndpoint = v
+			}
+			if v, ok := oauth["auth_server_metadata_url"].(string); ok {
+				server.OAuth.AuthServerMetadataURL = v
+			}
 			if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
 				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
 					server.OAuth.TokenExpiresAt = &parsedTime

@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -746,8 +747,15 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 	metadataURL := ExtractResourceMetadataURL(wwwAuth)
 
 	if metadataURL != "" {
-		// Try to fetch Protected Resource Metadata
-		metadata, err := DiscoverProtectedResourceMetadata(metadataURL, resourceDetectRequestTimeout)
+		// A 401 that advertises a different resource_metadata URL than the one the
+		// cached discovery results came from makes them stale (Spec 113 FR-026).
+		if globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, metadataURL) {
+			logger.Info("Server advertised a different resource_metadata URL; discarded cached OAuth discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("metadata_url", logSafeURL(metadataURL)))
+		}
+		// Try to fetch Protected Resource Metadata (cached)
+		metadata, err := cachedPRM(serverConfig.URL, overridesFromConfig(serverConfig), metadataURL, resourceDetectRequestTimeout)
 		if err != nil {
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
@@ -857,6 +865,12 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	}
 
 	// Priority 2: Try RFC 9728 Protected Resource Metadata discovery
+	// (cached per server URL + overrides; Spec 113 FR-026)
+	ov := overridesFromConfig(serverConfig)
+	scopeSource := ""
+	if len(scopes) > 0 {
+		scopeSource = "config"
+	}
 	if len(scopes) == 0 {
 		baseURL, err := parseBaseURL(serverConfig.URL)
 		if err == nil && baseURL != "" {
@@ -864,41 +878,11 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("base_url", logSafeURL(baseURL)))
 
-			// Make a preflight HEAD request to get WWW-Authenticate header
-			resp, err := http.Head(serverConfig.URL)
-			if err == nil && resp.StatusCode == 401 {
-				wwwAuth := resp.Header.Get("WWW-Authenticate")
-				if metadataURL := ExtractResourceMetadataURL(wwwAuth); metadataURL != "" {
-					discoveredScopes, err := DiscoverScopesFromProtectedResource(metadataURL, 5*time.Second)
-					if err == nil && len(discoveredScopes) > 0 {
-						scopes = discoveredScopes
-						logger.Info("✅ Auto-discovered OAuth scopes from Protected Resource Metadata (RFC 9728)",
-							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", logSafeURL(metadataURL)),
-							zap.Strings("scopes", scopes))
-					} else if err != nil {
-						logger.Debug("Protected Resource Metadata discovery failed",
-							zap.String("server", serverConfig.Name),
-							zap.Error(err))
-					} else {
-						// err == nil but no scopes returned
-						logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
-							zap.String("server", serverConfig.Name),
-							zap.String("metadata_url", logSafeURL(metadataURL)))
-					}
-				} else {
-					logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
-						zap.String("server", serverConfig.Name),
-						zap.Any("www_authenticate", resp.Header["Www-Authenticate"]))
-				}
-			} else if err != nil {
-				logger.Warn("Preflight request for WWW-Authenticate header failed; OAuth clients may not see login button",
-					zap.String("server", serverConfig.Name),
-					zap.Error(err))
-			} else {
-				logger.Warn("Preflight request did not return 401; server did not advertise WWW-Authenticate metadata",
-					zap.String("server", serverConfig.Name),
-					zap.Int("status_code", resp.StatusCode))
+			res, err := cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("prm-scopes", serverConfig.URL, ov), serverConfig.URL,
+				func() (prmScopeResult, error) { return preflightPRMScopes(serverConfig, ov, logger) })
+			if err == nil && len(res.scopes) > 0 {
+				scopes = append([]string(nil), res.scopes...)
+				scopeSource = "prm"
 			}
 		}
 	}
@@ -911,9 +895,10 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("base_url", logSafeURL(baseURL)))
 
-			discoveredScopes, err := DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second)
+			discoveredScopes, err := discoverASScopesCached(serverConfig, ov, baseURL)
 			if err == nil && len(discoveredScopes) > 0 {
-				scopes = discoveredScopes
+				scopes = append([]string(nil), discoveredScopes...)
+				scopeSource = "as"
 				logger.Info("✅ Auto-discovered OAuth scopes from Authorization Server Metadata (RFC 8414)",
 					zap.String("server", serverConfig.Name),
 					zap.Strings("scopes", scopes))
@@ -1174,35 +1159,54 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// - Cloudflare: Same domain for MCP and OAuth
 	//   OAuth metadata at: https://logs.mcp.cloudflare.com/.well-known/oauth-authorization-server
 	var authServerMetadataURL string
-	if serverConfig.URL != "" {
-		// First, try to discover the auth server URL from Protected Resource Metadata
-		// This is necessary for servers like Smithery that use separate domains
-		authServerURL := DiscoverAuthServerURL(serverConfig.URL, 5*time.Second)
-		urlToUse := serverConfig.URL
-		if authServerURL != "" {
-			urlToUse = authServerURL
-			logger.Info("Using discovered auth server URL for metadata discovery",
-				zap.String("server", serverConfig.Name),
-				zap.String("mcp_url", logSafeURL(serverConfig.URL)),
-				zap.String("auth_server_url", logSafeURL(authServerURL)))
-		}
-
-		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
-		workingURL, err := FindWorkingMetadataURL(urlToUse, 10*time.Second)
+	var asDoc *asMetadataDoc
+	switch {
+	case ov.metadataURL != "":
+		// Spec 113 FR-024: an explicit auth_server_metadata_url replaces discovery.
+		authServerMetadataURL = ov.metadataURL
+		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
+			return httpFetchRaw(ov.metadataURL, 10*time.Second)
+		})
 		if err != nil {
-			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
+			logger.Warn("Configured oauth.auth_server_metadata_url could not be fetched",
 				zap.String("server", serverConfig.Name),
-				zap.String("url_tried", logSafeURL(urlToUse)),
+				zap.String("metadata_url", logSafeURL(ov.metadataURL)),
 				logSafeErrorField(err))
 		} else {
-			authServerMetadataURL = workingURL
-			logger.Info("Using validated OAuth metadata URL",
+			asDoc = doc
+		}
+		logger.Info("Using configured OAuth metadata URL",
+			zap.String("server", serverConfig.Name),
+			zap.String("metadata_url", logSafeURL(ov.metadataURL)))
+	case serverConfig.URL != "":
+		authServerMetadataURL, asDoc = preflightMetadataURL(serverConfig, ov, logger)
+	default:
+		logger.Info("Skipping OAuth metadata URL - no server URL configured",
+			zap.String("server", serverConfig.Name))
+	}
+
+	// FR-024: with any endpoint override mcp-go must always be given a metadata
+	// URL, otherwise it falls back to its in-memory /authorize, /token, /register
+	// defaults. The wrapper answers that URL (rewritten, or synthetic when unreachable).
+	if authServerMetadataURL == "" {
+		authServerMetadataURL = derivedMetadataURL(ov)
+		if authServerMetadataURL != "" {
+			logger.Info("Using RFC 8414 metadata URL derived from the endpoint override origin",
 				zap.String("server", serverConfig.Name),
 				zap.String("metadata_url", logSafeURL(authServerMetadataURL)))
 		}
-	} else {
-		logger.Info("Skipping OAuth metadata URL - no server URL configured",
-			zap.String("server", serverConfig.Name))
+	}
+
+	// FR-020: the PRM-derived scope list gains offline_access when the AS
+	// advertises it; explicit oauth.scopes and AS-derived scopes are never touched.
+	if asDoc != nil {
+		if scopeSource == "prm" && containsString(asDoc.meta.ScopesSupported, "offline_access") && !containsString(scopes, "offline_access") {
+			scopes = append(scopes, "offline_access")
+			logger.Info("Requesting offline_access (advertised by the authorization server) so the login can be refreshed",
+				zap.String("server", serverConfig.Name))
+		}
+		// FR-021
+		warnIfNoRefreshGrant(logger, serverConfig.Name, asDoc.meta)
 	}
 
 	// Use persistent token store to persist tokens across daemon restarts if storage is available
@@ -1243,9 +1247,21 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	}
 
 	wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
+	// Effective endpoints: the discovered ones first, then the operator's overrides
+	// on top, so extra_params injection matches the real URLs (FR-025).
+	if asDoc != nil {
+		wrapper.learnEndpoints(asDoc.meta.AuthorizationEndpoint, asDoc.meta.TokenEndpoint)
+	}
+	wrapper.SetEndpoints(wrapperEndpoints{
+		serverURL:   serverConfig.URL,
+		overrides:   ov,
+		metadataURL: authServerMetadataURL,
+		cache:       globalDiscoveryCache,
+	})
 	httpClient := &http.Client{
-		Transport: wrapper,
-		Timeout:   30 * time.Second,
+		Transport:     wrapper,
+		Timeout:       30 * time.Second,
+		CheckRedirect: oauthCheckRedirect,
 	}
 
 	// Check if static OAuth credentials are provided in config
@@ -2017,4 +2033,161 @@ func IsOAuthCapable(serverConfig *config.ServerConfig) bool {
 		// Unknown protocol - assume HTTP-based and try OAuth
 		return true
 	}
+}
+
+// prmScopeResult is the cached outcome of the RFC 9728 scope preflight.
+type prmScopeResult struct {
+	scopes []string
+	prmURL string
+}
+
+// preflightPRMScopes runs the HEAD + Protected Resource Metadata scope discovery
+// once per cache key. It logs only when it actually fetches.
+func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (prmScopeResult, error) {
+	var res prmScopeResult
+	resp, err := http.Head(serverConfig.URL)
+	if err != nil {
+		logger.Warn("Preflight request for WWW-Authenticate header failed; OAuth clients may not see login button",
+			zap.String("server", serverConfig.Name),
+			logSafeErrorField(err))
+		return res, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		logger.Warn("Preflight request did not return 401; server did not advertise WWW-Authenticate metadata",
+			zap.String("server", serverConfig.Name),
+			zap.Int("status_code", resp.StatusCode))
+		return res, fmt.Errorf("preflight returned HTTP %d", resp.StatusCode)
+	}
+	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	metadataURL := ExtractResourceMetadataURL(wwwAuth)
+	if metadataURL == "" {
+		logger.Warn("WWW-Authenticate header missing resource_metadata; OAuth clients may refuse to launch browser until PRM exists",
+			zap.String("server", serverConfig.Name),
+			zap.Any("www_authenticate", resp.Header["Www-Authenticate"]))
+		return res, errors.New("no resource_metadata in WWW-Authenticate")
+	}
+	globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, metadataURL)
+	res.prmURL = metadataURL
+
+	prm, err := cachedPRM(serverConfig.URL, ov, metadataURL, 5*time.Second)
+	if err != nil {
+		logger.Debug("Protected Resource Metadata discovery failed",
+			zap.String("server", serverConfig.Name),
+			logSafeErrorField(err))
+		return res, err
+	}
+	if len(prm.ScopesSupported) == 0 {
+		logger.Warn("Protected Resource Metadata returned no scopes - some clients wait for this before showing OAuth UI",
+			zap.String("server", serverConfig.Name),
+			zap.String("metadata_url", logSafeURL(metadataURL)))
+		return res, nil
+	}
+	res.scopes = prm.ScopesSupported
+	logger.Info("✅ Auto-discovered OAuth scopes from Protected Resource Metadata (RFC 9728)",
+		zap.String("server", serverConfig.Name),
+		zap.String("metadata_url", logSafeURL(metadataURL)),
+		zap.Strings("scopes", res.scopes))
+	return res, nil
+}
+
+// discoverASScopesCached is the RFC 8414 scope fallback, read through the cache.
+// With an explicit auth_server_metadata_url that document is the source.
+func discoverASScopesCached(serverConfig *config.ServerConfig, ov discoveryOverrides, baseURL string) ([]string, error) {
+	if ov.metadataURL != "" {
+		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
+			return httpFetchRaw(ov.metadataURL, 5*time.Second)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return doc.meta.ScopesSupported, nil
+	}
+	return cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("as-scopes", serverConfig.URL, ov, baseURL), serverConfig.URL,
+		func() ([]string, error) { return DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second) })
+}
+
+// metadataPreflight is the cached result of auth-server + metadata URL discovery.
+type metadataPreflight struct {
+	url string
+	doc *asMetadataDoc
+}
+
+// preflightMetadataURL finds the working AS metadata URL (and its document) for
+// the configured server, once per cache key.
+func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
+	key := makeDiscoveryKey("metadata-url", serverConfig.URL, ov)
+	v, err := globalDiscoveryCache.doWith(key, serverConfig.URL, func() (any, time.Duration, []discoverySeed, error) {
+		// First, try to discover the auth server URL from Protected Resource Metadata
+		// This is necessary for servers like Smithery that use separate domains
+		authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
+			// Record the advertised PRM URL so a later 401 that advertises a
+			// different one invalidates this result (FR-026).
+			globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
+			return cachedPRM(serverConfig.URL, ov, prmURL, 5*time.Second)
+		})
+		urlToUse := serverConfig.URL
+		if authServerURL != "" {
+			urlToUse = authServerURL
+			logger.Info("Using discovered auth server URL for metadata discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("mcp_url", logSafeURL(serverConfig.URL)),
+				zap.String("auth_server_url", logSafeURL(authServerURL)))
+		}
+
+		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
+		workingURL, doc, err := findWorkingMetadataDoc(urlToUse, 10*time.Second)
+		if err != nil {
+			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
+				zap.String("server", serverConfig.Name),
+				zap.String("url_tried", logSafeURL(urlToUse)),
+				logSafeErrorField(err))
+			return nil, 0, nil, err
+		}
+		logger.Info("Using validated OAuth metadata URL",
+			zap.String("server", serverConfig.Name),
+			zap.String("metadata_url", logSafeURL(workingURL)))
+		// When the PRM step yielded no authorization server the result came from
+		// the fallback on the MCP origin; that may be a transient PRM failure, so
+		// keep it only for the failure TTL instead of pinning it for an hour.
+		ttl := time.Duration(0)
+		if authServerURL == "" {
+			ttl = discoveryFailureTTL
+		}
+		// Seed the document cache so mcp-go's own metadata GET (served by the
+		// transport wrapper) needs no second request. Stored atomically with this
+		// result, so an invalidation that raced the fetch discards both.
+		seeds := []discoverySeed{{key: asDocKey(serverConfig.URL, ov, workingURL), val: doc}}
+		return metadataPreflight{url: workingURL, doc: doc}, ttl, seeds, nil
+	})
+	if err != nil {
+		return "", nil
+	}
+	res, _ := v.(metadataPreflight)
+	return res.url, res.doc
+}
+
+// derivedMetadataURL builds the RFC 8414 well-known URL from the origin of the
+// first endpoint override that is set (authorization, token, registration).
+func derivedMetadataURL(ov discoveryOverrides) string {
+	for _, raw := range []string{ov.authz, ov.token, ov.registration} {
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		return u.Scheme + "://" + u.Host + "/.well-known/oauth-authorization-server"
+	}
+	return ""
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

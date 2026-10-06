@@ -815,6 +815,16 @@ type OAuthConfig struct {
 	Scopes       []string          `json:"scopes,omitempty" mapstructure:"scopes"`
 	PKCEEnabled  bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
 	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
+
+	// Spec 113-b: optional per-server discovery overrides. Each is an absolute
+	// https URL (http only on a loopback host) with no query, fragment or
+	// userinfo; validated at write time only (ValidateOAuthEndpointOverrides).
+	// The endpoint overrides rewrite the matching fields of the authorization
+	// server metadata mcp-go reads; AuthServerMetadataURL replaces discovery.
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" mapstructure:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint,omitempty" mapstructure:"token_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint,omitempty" mapstructure:"registration_endpoint"`
+	AuthServerMetadataURL string `json:"auth_server_metadata_url,omitempty" mapstructure:"auth_server_metadata_url"`
 }
 
 // IsolationMode selects how an stdio MCP server's process is isolated (MCP-34.2).
@@ -2329,6 +2339,7 @@ func (v ValidationError) Error() string {
 func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
 	errors = append(errors, c.forwardHeadersErrors()...)
+	errors = append(errors, c.oauthEndpointOverrideErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -3047,7 +3058,11 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	if old.ClientID != new.ClientID ||
 		old.ClientSecret != new.ClientSecret ||
 		old.RedirectURI != new.RedirectURI ||
-		old.PKCEEnabled != new.PKCEEnabled {
+		old.PKCEEnabled != new.PKCEEnabled ||
+		old.AuthorizationEndpoint != new.AuthorizationEndpoint ||
+		old.TokenEndpoint != new.TokenEndpoint ||
+		old.RegistrationEndpoint != new.RegistrationEndpoint ||
+		old.AuthServerMetadataURL != new.AuthServerMetadataURL {
 		return true
 	}
 

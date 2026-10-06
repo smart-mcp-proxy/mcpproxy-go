@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -153,6 +154,10 @@ func (o *OAuthConfig) Validate() error {
 		return fmt.Errorf("oauth config validation failed: %w", err)
 	}
 
+	if errs := ValidateOAuthEndpointOverrides(o); len(errs) > 0 {
+		return fmt.Errorf("oauth config validation failed: %s %s", errs[0].Field, errs[0].Message)
+	}
+
 	// A malformed redirect_uri is a permanent, undiagnosable connect failure
 	// (the provider rejects a callback URL that does not match the registered
 	// one, and mcpproxy refuses to silently downgrade to a random port).
@@ -164,4 +169,134 @@ func (o *OAuthConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// oauthEndpointOverrideField describes one of the Spec 113-b per-server OAuth
+// discovery overrides.
+type oauthEndpointOverrideField struct {
+	name string
+	get  func(*OAuthConfig) string
+	set  func(*OAuthConfig, string)
+}
+
+var oauthEndpointOverrideFields = []oauthEndpointOverrideField{
+	{"authorization_endpoint", func(o *OAuthConfig) string { return o.AuthorizationEndpoint }, func(o *OAuthConfig, v string) { o.AuthorizationEndpoint = v }},
+	{"token_endpoint", func(o *OAuthConfig) string { return o.TokenEndpoint }, func(o *OAuthConfig, v string) { o.TokenEndpoint = v }},
+	{"registration_endpoint", func(o *OAuthConfig) string { return o.RegistrationEndpoint }, func(o *OAuthConfig, v string) { o.RegistrationEndpoint = v }},
+	{"auth_server_metadata_url", func(o *OAuthConfig) string { return o.AuthServerMetadataURL }, func(o *OAuthConfig, v string) { o.AuthServerMetadataURL = v }},
+}
+
+// IsLoopbackHost reports whether host (no port, no brackets) is localhost, an
+// address in 127.0.0.0/8, or ::1.
+func IsLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateOAuthEndpointURL checks one override value. The returned message
+// never echoes the value: an operator may have pasted a URL with credentials.
+func validateOAuthEndpointURL(raw string) error {
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return fmt.Errorf("must not contain whitespace")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("is not a valid URL")
+	}
+	switch {
+	case !u.IsAbs() || u.Host == "" || u.Hostname() == "":
+		return fmt.Errorf("must be an absolute URL with a host")
+	case u.User != nil:
+		return fmt.Errorf("must not contain userinfo")
+	case u.RawQuery != "" || u.ForceQuery:
+		return fmt.Errorf("must not contain a query string (put extra authorize parameters in oauth.extra_params)")
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return fmt.Errorf("must not contain a fragment")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if IsLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("must use https (http is allowed only for a loopback host)")
+	default:
+		return fmt.Errorf("must use https (http is allowed only for a loopback host)")
+	}
+}
+
+// ValidateOAuthEndpointOverrides validates the Spec 113-b discovery overrides
+// (FR-023). It is a WRITE-TIME check: callers are OAuthConfig.Validate and
+// Config.ValidateDetailed. It must never be reachable from the boot path.
+func ValidateOAuthEndpointOverrides(o *OAuthConfig) []ValidationError {
+	if o == nil {
+		return nil
+	}
+	var errs []ValidationError
+	for _, f := range oauthEndpointOverrideFields {
+		v := f.get(o)
+		if v == "" {
+			continue
+		}
+		if err := validateOAuthEndpointURL(v); err != nil {
+			errs = append(errs, ValidationError{Field: "oauth." + f.name, Message: err.Error()})
+		}
+	}
+	return errs
+}
+
+// oauthEndpointOverrideErrors reports every per-server invalid override with a
+// mcpServers[i].oauth.<field> path. Write-time only, like oauthRedirectURIErrors.
+func (c *Config) oauthEndpointOverrideErrors() []ValidationError {
+	var errs []ValidationError
+	for i, s := range c.Servers {
+		if s == nil || s.OAuth == nil {
+			continue
+		}
+		for _, e := range ValidateOAuthEndpointOverrides(s.OAuth) {
+			e.Field = fmt.Sprintf("mcpServers[%d].%s", i, e.Field)
+			errs = append(errs, e)
+		}
+	}
+	return errs
+}
+
+// OAuthEndpointOverrideNormalization records the override fields dropped from one server.
+type OAuthEndpointOverrideNormalization struct {
+	Server  string
+	Dropped []string // field names only
+}
+
+// NormalizeOAuthEndpointOverrides is the lenient load-time counterpart of
+// ValidateOAuthEndpointOverrides: it clears each invalid override in place so a
+// hand-edited bad value cannot brick boot, and reports which fields it dropped.
+func NormalizeOAuthEndpointOverrides(cfg *Config) []OAuthEndpointOverrideNormalization {
+	if cfg == nil {
+		return nil
+	}
+	var out []OAuthEndpointOverrideNormalization
+	for _, s := range cfg.Servers {
+		if s == nil || s.OAuth == nil {
+			continue
+		}
+		var dropped []string
+		for _, f := range oauthEndpointOverrideFields {
+			v := f.get(s.OAuth)
+			if v == "" {
+				continue
+			}
+			if validateOAuthEndpointURL(v) != nil {
+				f.set(s.OAuth, "")
+				dropped = append(dropped, f.name)
+			}
+		}
+		if len(dropped) > 0 {
+			out = append(out, OAuthEndpointOverrideNormalization{Server: s.Name, Dropped: dropped})
+		}
+	}
+	return out
 }
