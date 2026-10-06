@@ -100,13 +100,13 @@ The credential is shown masked everywhere except the single moment it is created
 
 ## Codex credential limitation
 
-Codex stores its MCP entry in `~/.codex/config.toml`. When `require_mcp_auth`
-is on, the Connect flow writes the credential into the entry's URL as
-`?apikey=...`, because that is the only carrier it writes for Codex. Other
-clients get an `X-API-Key` header instead. With `require_mcp_auth` off (the
-default), no credential is written.
+Codex stores its MCP entry in `~/.codex/config.toml`. The Connect flow writes
+the per-client credential (`mcp_cli_`) into the entry's URL as `?apikey=...`,
+because that is the only carrier it writes for Codex. This happens whether or
+not `require_mcp_auth` is on; only a `keyless` connect writes no credential.
+Other clients get an `X-API-Key` header instead.
 
-The key is therefore stored in plain text inside `config.toml` and can show up
+The credential is therefore stored in plain text inside `config.toml` and can show up
 in anything that logs the URL. To reduce the exposure:
 
 - Connect Codex with an agent token (`mcp_agt_` prefix) rather than the admin
