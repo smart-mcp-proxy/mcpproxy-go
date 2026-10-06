@@ -77,6 +77,10 @@ const quarantined = (extra: ServerOverrides = {}): ServerOverrides => ({
   ...extra,
 })
 
+function empty_text(w: any): string {
+  return w.find('[data-test="server-tools-empty"]').text()
+}
+
 describe('ServerDetail — Tools tab empty state on a quarantined server (F08)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -131,15 +135,16 @@ describe('ServerDetail — Tools tab empty state on a quarantined server (F08)',
     expect(text).not.toMatch(/\d/)
   })
 
-  it('offers a way through to the Security tab where the findings live', async () => {
+  it('offers a way through to the Review tab', async () => {
     const wrapper = await mountDetail(
       quarantined({ quarantine: { pending_count: 2, changed_count: 0, blocked_count: 0 } })
     )
     const cta = wrapper.find('[data-test="server-tools-empty-security"]')
     expect(cta.exists()).toBe(true)
+    expect(empty_text(wrapper)).not.toContain('Security tab')
     await cta.trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-test="security-tab"]').classes()).toContain('tab-active')
+    expect(wrapper.find('[data-test="review-tab"]').classes()).toContain('tab-active')
   })
 
   // Integrated-review finding. The withheld copy told the user to "approve the

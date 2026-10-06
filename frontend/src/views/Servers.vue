@@ -242,7 +242,7 @@
           class="btn btn-outline"
           data-test="servers-empty-registry"
         >
-          Browse Registry
+          Browse catalog
         </router-link>
       </div>
       <p class="mt-4 text-sm">
