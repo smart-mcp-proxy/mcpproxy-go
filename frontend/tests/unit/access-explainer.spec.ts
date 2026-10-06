@@ -122,6 +122,31 @@ describe('AccessExplainer (Spec 108-i T094, FR-046)', () => {
     expect(wrapper.emitted('close')).toBeTruthy()
   })
 
+  it('fix routes go through the scope link map; only move_client stays unscoped (#1446-10)', async () => {
+    setAvailableFeatures(['scope_filters'])
+    ;(api.explainAccess as any).mockResolvedValue({ ...FIXTURE, fixes: [
+      { step: 'tier_cap', action: 'edit_token', target: 'ci', label: 'Fix edit_token' },
+      { step: 'tier_cap', action: 'move_client', target: 'cursor', label: 'Fix move_client' },
+    ] })
+    const router = makeRouter()
+    await router.push('/clients?profile=work-ro&client=cursor')
+    await router.isReady()
+    const wrapper = mount(AccessExplainer, { props: { open: false, subject: { kind: 'client', name: 'cursor' } }, global: { plugins: [router] } })
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    await run(wrapper)
+    await wrapper.get('[data-test="explain-fix-edit_token"]').trigger('click')
+    await flushPromises()
+    // The tokens page registers profile: the sticky filter carries, client does not.
+    expect(router.currentRoute.value.path).toBe('/tokens')
+    expect(router.currentRoute.value.query).toEqual({ profile: 'work-ro', token: 'ci' })
+    await router.push('/clients?profile=work-ro&client=cursor')
+    await wrapper.get('[data-test="explain-fix-move_client"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/clients')
+    expect(router.currentRoute.value.query).toEqual({ focus: 'cursor', move: '1' })
+  })
+
   it('reconnect_client dispatches the connect event for the client', async () => {
     ;(api.explainAccess as any).mockResolvedValue({ ...FIXTURE, fixes: [{ step: 'credential', action: 'reconnect_client', target: 'cursor', label: 'Reconnect Cursor' }] })
     const { wrapper } = await mountExplainer()

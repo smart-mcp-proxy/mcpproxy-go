@@ -118,7 +118,7 @@ struct AccessExplainerSheet: View {
                 Picker("Profile", selection: Binding(
                     get: { model.subject.name ?? "" },
                     set: { model.subject = .profile($0) })) {
-                    ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                    ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                 }
                 .accessibilityIdentifier("access-explainer-subject-value")
             default:

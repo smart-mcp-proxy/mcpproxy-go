@@ -128,6 +128,16 @@ struct ScopeFilter: Equatable {
         token = value("token")
     }
 
+    /// `next` with this filter's sticky `from`/`to` window carried over (a link
+    /// follows the time range the user is looking at; every other field
+    /// belongs to the link). `next`'s own window wins when it sets one.
+    func linked(_ next: ScopeFilter) -> ScopeFilter {
+        var f = next
+        if f.from == nil { f.from = from }
+        if f.to == nil { f.to = to }
+        return f
+    }
+
     /// Tray glance client row → that client's calls.
     static func forSession(_ id: String) -> ScopeFilter {
         var f = ScopeFilter()

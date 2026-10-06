@@ -45,7 +45,7 @@ func enumFamilies() map[string][]string {
 		"source": strs(SourcePin, SourceBinding, SourceURL, SourceSession,
 			SourceAnonymous, SourceNone),
 		"block_reason": strs(BlockReasonTier, BlockReasonRule, BlockReasonUnannotated,
-			BlockReasonCodeExecution, BlockReasonManagement),
+			BlockReasonCodeExecution, BlockReasonManagement, BlockReasonServerScope),
 		"explain_step": strs(StepOrder()...),
 		"fix_action": strs(FixAllowInProfile, FixClassifyInProfile, FixAddServerToProfile,
 			FixMoveClient, FixEditToken, FixEnableServer, FixApproveTool,

@@ -441,6 +441,20 @@ test('Activity sessions rows open their calls (SC-009)', async ({ page }) => {
   await page.waitForTimeout(500)
   const row = page.locator('[data-test="sessions-row"]').first()
   test.skip((await row.count()) === 0, 'no MCP sessions recorded on this instance')
+
+  // The row's "View Activity" link must land on the calls view scoped to that
+  // session, and the page's own REST request must carry the session filter.
+  const seen = collect(page, /^\/api\/v1\/activity$/)
+  await row.locator('[data-test="session-view-activity"]').click()
+  await expect(page).toHaveURL(/\/ui\/activity\?(?:[^#]*&)?session=[^&]+/)
+  const session = new URL(page.url()).searchParams.get('session')!
+  await page.waitForTimeout(1000)
+  expect(seen.length, 'sessions row: no activity REST request was issued').toBeGreaterThan(0)
+  // toRest() routes a `ws-` work session to work_session_id, a transport id to session_id.
+  const param = session.startsWith('ws-') ? 'work_session_id' : 'session_id'
+  for (const req of seen) {
+    expect(new URL(req).searchParams.get(param), `sessions row: ${req}`).toBe(session)
+  }
 })
 
 test('the status pill opens Servers and attention "See all" opens Home (Spec 109 FR-053)', async ({ page }) => {
