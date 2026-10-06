@@ -1153,6 +1153,20 @@ func TestFilterBlockedTools(t *testing.T) {
 	assert.NotContains(t, names, "tool_b")
 }
 
+func TestHash_UnchangedByOverrides(t *testing.T) {
+	// Given same tool description/schema, When hash is computed with different
+	// annotation_overrides (or nil vs wildcard), Then hash must be identical.
+	// This proves hash stability: annotation overrides are read-path only.
+	h1 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, nil)
+	h2 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, &config.ToolAnnotations{ReadOnlyHint: boolP(true)})
+	h3 := calculateToolApprovalHashWithOutputSchema("tool_a", "desc A", `{"type":"object"}`, "", &config.ToolAnnotations{DestructiveHint: boolP(false), OpenWorldHint: boolP(true)})
+	assert.Equal(t, h1, h2, "nil vs with-annotations must produce same hash")
+	assert.Equal(t, h1, h3, "different overrides must not affect hash")
+	// mutation killing: different description must still produce different hash
+	hDiff := calculateToolApprovalHash("tool_a", "desc B", `{"type":"object"}`, nil)
+	assert.NotEqual(t, h1, hDiff)
+}
+
 func TestFilterBlockedTools_EmptyBlocked(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{Name: "tool_a"},

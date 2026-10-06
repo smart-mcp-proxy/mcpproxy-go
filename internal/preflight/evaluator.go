@@ -166,6 +166,13 @@ type EvalContext struct {
 	// Pins maps a requested id to its pin string, for callers that carry pins
 	// separately from the refs. A ToolRef.PinHash always wins over this map.
 	Pins map[string]string
+	// AnnotationOverrides carries per-server operator hint corrections
+	// (server -> tool -> override, wildcard "*" allowed) for the annotation
+	// filter slot. The evaluator resolves the effective annotations via
+	// config.EffectiveAnnotationsForTool so raw upstream hints never bypass
+	// overrides here. Nil means no overrides. internal/config does not import
+	// this package, so there is no import cycle.
+	AnnotationOverrides map[string]map[string]*config.ToolAnnotations
 	// RequireRuntimeEntry says the State reader is the served, authoritative
 	// snapshot. A configured server missing from it is state that has not been
 	// PUBLISHED yet (the stateview starts empty and fills per-server
@@ -408,6 +415,11 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		var annotations *config.ToolAnnotations
 		if indexed != nil {
 			annotations = indexed.Annotations
+			// Apply per-server operator overrides so the filters judge the
+			// effective annotations (same merge the capture path applies).
+			if ov, ok := ec.AnnotationOverrides[serverName]; ok && ov != nil {
+				annotations = config.EffectiveAnnotationsForTool(ov, toolName, annotations)
+			}
 		}
 		if filterKey, explicit, excluded := toolannotations.ExcludeReasonFor(annotations, ec.Filters); excluded {
 			reason := ReasonMissingAnnotation

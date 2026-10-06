@@ -45,9 +45,17 @@ type Client struct {
 	// connection was created even after a config hot-reload. Updated via
 	// SetExposePrompts, mirroring managed.Client's cfg pointer swap.
 	exposePrompts atomic.Pointer[bool]
-	globalConfig  *config.Config
-	storage       *storage.BoltDB
-	logger        *zap.Logger
+	// annotationOverrides mirrors config.AnnotationOverrides but can be updated
+	// without a reconnect (same hot-reload rationale as exposePrompts above):
+	// config itself is set once in NewClient and never reassigned, so without
+	// this a hot-reloaded annotation_overrides value would stay frozen until
+	// the next reconnect. Updated via SetAnnotationOverrides, mirroring
+	// managed.Client's cfg pointer swap. The stored map is a deep copy owned
+	// by this client — callers must not mutate the map they pass in.
+	annotationOverrides atomic.Pointer[map[string]*config.ToolAnnotations]
+	globalConfig        *config.Config
+	storage             *storage.BoltDB
+	logger              *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger
@@ -208,6 +216,7 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		),
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
+	c.SetAnnotationOverrides(resolvedServerConfig.AnnotationOverrides)
 	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
 
 	// Create secure environment manager
@@ -428,6 +437,19 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		}
 
 		toolMeta.Annotations = toolAnnotationsFromWire(tool.Annotations)
+
+		// Apply per-server operator overrides (admin-only, persisted in ServerConfig).
+		// Read from the hot-reloadable atomic snapshot (see SetAnnotationOverrides),
+		// not from c.config which is frozen at NewClient time.
+		var overrides map[string]*config.ToolAnnotations
+		if p := c.annotationOverrides.Load(); p != nil {
+			overrides = *p
+		}
+		if eff := config.EffectiveAnnotationsForTool(overrides, tool.Name, toolMeta.Annotations); eff != nil {
+			toolMeta.Annotations = eff
+		} else if overrides != nil && (overrides["*"] != nil || overrides[tool.Name] != nil) {
+			toolMeta.Annotations = nil
+		}
 
 		// Compute hash for tool change detection.
 		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
@@ -930,6 +952,17 @@ func (c *Client) GetConfig() *config.ServerConfig {
 // torn down and recreated.
 func (c *Client) SetExposePrompts(exposePrompts *bool) {
 	c.exposePrompts.Store(exposePrompts)
+}
+
+// SetAnnotationOverrides updates the per-server annotation_overrides without
+// requiring a reconnect (same hot-reload rationale as SetExposePrompts).
+// Call this whenever the owning managed.Client's config is refreshed so a
+// hot-reloaded annotation_overrides value takes effect on the next ListTools
+// instead of only after the connection is torn down and recreated. The map is
+// deep-copied; the caller retains ownership of its argument.
+func (c *Client) SetAnnotationOverrides(overrides map[string]*config.ToolAnnotations) {
+	cp := config.CloneAnnotationOverrides(overrides)
+	c.annotationOverrides.Store(&cp)
 }
 
 // SetOnToolsChangedCallback sets the callback invoked when a notifications/tools/list_changed
