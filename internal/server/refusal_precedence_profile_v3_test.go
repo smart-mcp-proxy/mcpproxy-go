@@ -113,6 +113,7 @@ func TestRefusalPrecedence_ProfileV3ExplainerOrder(t *testing.T) {
 		unpinnedOutOfScope := p.call(t, agentCtx([]string{"notion"}, allPerms, ""), contracts.ToolVariantRead, "github:list_issues")
 		require.Equal(t, precedenceOutOfScopeText, dangling)
 		require.Equal(t, unpinnedOutOfScope, dangling, "a dangling pin answers with the bytes of an out-of-scope token")
+		require.Equal(t, []string{"token_scope", "token_scope"}, p.denyReasons(t))
 		p.requireNoUpstreamCalls(t)
 	})
 
