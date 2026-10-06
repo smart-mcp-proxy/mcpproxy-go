@@ -105,6 +105,12 @@ type AgentToken struct {
 	Revoked        bool       `json:"revoked"`
 	UserID         string     `json:"user_id,omitempty"`     // Owner user ID (server edition)
 	ProfilePin     string     `json:"profile_pin,omitempty"` // Profile this token is pinned to (Profiles v2 T3)
+	// PriorProfilePin/PriorProfileMode snapshot the binding of the revoked or
+	// expired record a fresh client mint replaced. An aborted or undone connect
+	// restores them onto the tombstone so it does not keep the binding of a
+	// connect that never took effect. PriorProfileMode is the presence marker.
+	PriorProfilePin  string `json:"prior_profile_pin,omitempty"`
+	PriorProfileMode string `json:"prior_profile_mode,omitempty"`
 
 	// Kind, ClientID and ProfileMode are the Spec 108-c client-credential
 	// fields (data-model.md §3). Kind is ""/"agent" for a regular token,

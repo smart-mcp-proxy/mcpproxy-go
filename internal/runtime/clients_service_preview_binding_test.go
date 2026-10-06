@@ -29,8 +29,18 @@ func TestConnectMinter_PreviewBindingEqualsIssue(t *testing.T) {
 			connect.CredentialIntent{Profile: strp("full")}, "full", "locked"},
 		{"mode only keeps the pin", func(h *svcHarness) { h.mint("cursor", "ro", nil) },
 			connect.CredentialIntent{Mode: strp("switchable")}, "ro", "switchable"},
-		{"revoked starts from the defaults", func(h *svcHarness) {
+		{"revoked with a preserved binding re-mints with it", func(h *svcHarness) {
 			h.mint("cursor", "ro", nil)
+			_, err := h.sm.ForgetClientCredential("cursor")
+			require.NoError(h.t, err)
+		}, connect.CredentialIntent{}, "ro", "locked"},
+		{"revoked with an explicit profile still wins", func(h *svcHarness) {
+			h.mint("cursor", "ro", nil)
+			_, err := h.sm.ForgetClientCredential("cursor")
+			require.NoError(h.t, err)
+		}, connect.CredentialIntent{Profile: strp("full")}, "full", "locked"},
+		{"revoked with no binding starts from the defaults", func(h *svcHarness) {
+			h.mint("cursor", "", nil)
 			_, err := h.sm.ForgetClientCredential("cursor")
 			require.NoError(h.t, err)
 		}, connect.CredentialIntent{}, "", "switchable"},
@@ -74,4 +84,85 @@ func TestConnectMinter_PreviewBindingEqualsIssue(t *testing.T) {
 		require.ErrorAs(t, err, &val)
 		require.Equal(t, "profile", val.Field)
 	})
+}
+
+// An explicit-profile reconnect over a revoked tombstone must not leave the
+// aborted/undone connect's binding on the tombstone (F1.1).
+func TestConnectMinter_AbortAndUndoRestoreTombstoneBinding(t *testing.T) {
+	setup := func(t *testing.T) *svcHarness {
+		h := newSvcHarness(t)
+		h.mint("cursor", "ro", nil)
+		_, err := h.sm.ForgetClientCredential("cursor")
+		require.NoError(t, err)
+		return h
+	}
+	wantTombstone := func(t *testing.T, h *svcHarness) {
+		pin, mode, err := h.svc.ConnectMinter().PreviewBinding("cursor", connect.CredentialIntent{})
+		require.NoError(t, err)
+		require.Equal(t, "ro", pin)
+		require.Equal(t, "locked", mode)
+	}
+	intent := connect.CredentialIntent{Profile: strp(""), ActorKind: "api_key", Surface: "api"}
+
+	t.Run("abort", func(t *testing.T) {
+		h := setup(t)
+		m := h.svc.ConnectMinter()
+		issued, err := m.Issue("cursor", intent)
+		require.NoError(t, err)
+		require.Equal(t, "", issued.Profile)
+		require.NoError(t, m.Abort("cursor", intent, issued))
+		wantTombstone(t, h)
+	})
+	t.Run("undo", func(t *testing.T) {
+		h := setup(t)
+		m := h.svc.ConnectMinter()
+		issued, err := m.Issue("cursor", intent)
+		require.NoError(t, err)
+		require.NoError(t, m.Commit("cursor", intent, issued))
+		_, err = m.ForgetUnheld("cursor", "", intent)
+		require.NoError(t, err)
+		wantTombstone(t, h)
+	})
+}
+
+// A later binding change makes the mint-time snapshot stale: undoing after it
+// must not resurrect the older tombstone binding over the newer one (F2.1).
+func TestConnectMinter_UndoAfterLaterBindingChangeKeepsCurrent(t *testing.T) {
+	h := newSvcHarness(t)
+	h.mint("cursor", "ro", nil)
+	_, err := h.sm.ForgetClientCredential("cursor")
+	require.NoError(t, err)
+	intent := connect.CredentialIntent{Profile: strp("full"), ActorKind: "api_key", Surface: "api"}
+	m := h.svc.ConnectMinter()
+	issued, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.NoError(t, m.Commit("cursor", intent, issued))
+	_, _, err = h.sm.UpdateClientCredentialBinding("cursor", "", "switchable")
+	require.NoError(t, err)
+	_, err = m.ForgetUnheld("cursor", "", intent)
+	require.NoError(t, err)
+	pin, mode, err := m.PreviewBinding("cursor", connect.CredentialIntent{})
+	require.NoError(t, err)
+	require.Equal(t, "", pin)
+	require.Equal(t, "switchable", mode)
+}
+
+// The undo record shows the binding the credential held when revoked, not the
+// tombstone binding restored afterwards (F2.2).
+func TestConnectMinter_UndoRecordKeepsHeldBinding(t *testing.T) {
+	h := newSvcHarness(t)
+	h.mint("cursor", "ro", nil)
+	_, err := h.sm.ForgetClientCredential("cursor")
+	require.NoError(t, err)
+	intent := connect.CredentialIntent{Profile: strp("full"), ActorKind: "api_key", Surface: "api"}
+	m := h.svc.ConnectMinter()
+	issued, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.NoError(t, m.Commit("cursor", intent, issued))
+	_, err = m.ForgetUnheld("cursor", "", intent)
+	require.NoError(t, err)
+	last := h.changes()[len(h.changes())-1]
+	require.Equal(t, "forget", last["change"])
+	require.Equal(t, "full", last["profile"])
+	require.Equal(t, "full", last["previous_profile"])
 }

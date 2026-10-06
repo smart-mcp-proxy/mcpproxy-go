@@ -1127,7 +1127,15 @@ curl "http://127.0.0.1:8080/api/v1/connect/claude-desktop?apikey=your-api-key"
 
 #### POST/DELETE /api/v1/connect/{client}
 
-Connect/disconnect are unchanged except that a permission-denied config access
+`DELETE` removes the entry **and revokes the client's credential** (the
+`client-<id>` token stops authenticating at once, a `forget` change record with
+`disconnected: true` is written). The result names it in `credential_revoked`;
+a client with no credential leaves the field empty. If the entry was removed but
+the revoke failed, the response is still `200`: `credential_revoke_error` carries
+the reason and `DELETE /api/v1/clients/{client}` retries the revoke. Undoing a
+disconnect (below) restores the file only: the credential stays revoked and a
+later connect mints a new one. Apart from that, connect/disconnect are unchanged
+except that a permission-denied config access
 now returns **`403 Forbidden`** whose error body carries the remediation text
 (distinct from a generic `400` or a `404` not-found).
 
@@ -1165,8 +1173,9 @@ and threat model.
 
 **Client credential (Spec 108).** The body also accepts `profile` (a profile
 name; `""` is All servers; omitted means All servers for a fresh credential and
-the existing binding on a reconnect, including over an expired credential; a
-revoked one restarts at All servers), `mode` (`locked` or `switchable`) and
+the existing binding on a reconnect, including over an expired or revoked
+credential: a revoked record keeps its prior pin and mode, so a profile-locked
+client is never silently widened to All servers), `mode` (`locked` or `switchable`) and
 `keyless`. The write embeds a per-client `mcp_cli_` credential, never the admin
 API key, and the result carries `credential` (masked), `token_name`, `profile`,
 `mode`, `keyless` and, for a reconnect over an active credential, `rotation`

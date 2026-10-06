@@ -69,6 +69,13 @@ func GetDisconnectCommand() *cobra.Command {
 		Long: `Remove the MCPProxy entry from the specified client's configuration file.
 A backup of the original config file is created before any modification.
 
+Disconnect also revokes the client's credential (token client-<id>): it stops
+authenticating at once, so a secret copied out of the config is dead. Undoing
+a disconnect restores the config entry only; a later "mcpproxy connect" mints
+a new credential. A client with no credential just loses its entry. If the
+entry is removed but the revoke fails, the command says so and
+"mcpproxy client forget <client>" retries it.
+
 Examples:
   mcpproxy disconnect claude-code
   mcpproxy disconnect cursor --name my-proxy`,
@@ -142,8 +149,6 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth)
-
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	formatter, err := clioutput.NewFormatter(format)
 	if err != nil {
@@ -151,11 +156,18 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 	}
 
 	clientID := args[0]
-	result, err := svc.Disconnect(clientID, connectServerName)
+	// Same daemon/offline split as connect: the daemon revokes the credential
+	// and records presence; offline revokes over config.db directly.
+	backend, err := newConnectBackend(cfg)
+	if err != nil {
+		return describeConnectFailure(err, clientID)
+	}
+	defer backend.close()
+	result, err := backend.disconnect(clientID, connectServerName)
 	if err != nil {
 		return err
 	}
-	if result.Success {
+	if result.Success && !backend.viaDaemon() {
 		notifyClientDisconnected(cfg, clientID)
 	}
 
@@ -332,6 +344,9 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 			if line := connectCredentialLine(result); line != "" {
 				fmt.Println(line)
 			}
+			if line := disconnectCredentialLine(result); line != "" {
+				fmt.Println(line)
+			}
 			// FR-037: Config shows the home-shortened display_path; the full
 			// path is still available via -o json's config_path.
 			fmt.Printf("Config: %s\n", connectResultDisplayPath(result))
@@ -353,6 +368,22 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 	}
 	fmt.Println(out)
 	return connectResultError(result)
+}
+
+// disconnectCredentialLine reports what a disconnect did to the client
+// credential. Empty for a connect result (CredentialRevoked is also set by an
+// undo, which prints its own line elsewhere) and for a not-found disconnect.
+func disconnectCredentialLine(r *connect.ConnectResult) string {
+	switch {
+	case r.Action != "removed":
+		return ""
+	case r.CredentialRevokeError != "":
+		return fmt.Sprintf("Credential: NOT revoked (%s); retry with: mcpproxy client forget %s", r.CredentialRevokeError, r.Client)
+	case r.CredentialRevoked != "":
+		return fmt.Sprintf("Credential: revoked (token %s)", r.CredentialRevoked)
+	default:
+		return "Credential: none to revoke"
+	}
 }
 
 // connectResultError turns a refused connect/disconnect result into a non-nil

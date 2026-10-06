@@ -7,6 +7,14 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
+  and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
+  of the removed config stops authenticating. The result reports `credential_revoked`, or
+  `credential_revoke_error` when the revoke failed after the entry was removed (still HTTP 200 / exit
+  0; retry with `mcpproxy client forget <id>`). Undoing a disconnect restores the file only; a
+  reconnect mints a fresh credential. **Migration:** a script that disconnected a client and kept
+  using its old credential must connect again. (refs #1435, #1451)
+
 - **profiles / tool refusals:** a profile's tool refusal now names the profile to a caller whose
   effective profile is its own (a pin, a client binding, the URL or `set_profile`):
   `blocked by profile: github:create_issue is a write tool; profile "Work Read-only" (work-readonly)

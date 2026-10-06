@@ -1378,10 +1378,19 @@ components:
             (`mcp_cli_••••`); the real secret is never returned (FR-024). Empty for a
             keyless entry, a disconnect and every refusal.
           type: string
+        credential_revoke_error:
+          description: |-
+            CredentialRevokeError is set when a disconnect removed the entry but
+            revoking the client credential failed. The disconnect still succeeded;
+            the credential is still active and `mcpproxy client forget <id>`
+            retries the revoke.
+          type: string
         credential_revoked:
           description: |-
-            CredentialRevoked names the credential an undo revoked because the
-            restored config no longer holds it (plan D16).
+            CredentialRevoked names the credential that was revoked: by an undo,
+            because the restored config no longer holds it (plan D16), or by a
+            disconnect, which cuts the client off (a later undo of that disconnect
+            does not bring the credential back).
           type: string
         display_path:
           description: |-
@@ -6812,6 +6821,7 @@ paths:
       description: |-
         Remove the MCPProxy entry from the specified client's configuration file.
         Creates a backup of the existing config before modifying.
+        Also revokes the client's credential (it stops authenticating at once); the result names it in credential_revoked, or reports credential_revoke_error when the revoke failed after the entry was removed. Undoing a disconnect does not restore the credential: a later connect mints a new one.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode, zcode)
