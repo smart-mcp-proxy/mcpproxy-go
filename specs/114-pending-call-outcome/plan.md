@@ -1,184 +1,268 @@
 # Implementation Plan: Typed Pending-Call Outcome and Call Correlation
 
-**Branch**: `114-pending-call-outcome` | **Date**: 2026-10-06 | **Spec**: [spec.md](spec.md)
+**Branch**: `114-pending-call-outcome` | **Date**: 2026-10-06 (revised after review round 1) | **Spec**: [spec.md](spec.md)
 **Input**: Feature specification from `/specs/114-pending-call-outcome/spec.md`
 
 ## Summary
 
-mcpproxy mints a `call_id` for every upstream `tools/call` and carries it in ctx. A stdio transport decorator records the JSON-RPC id for each call. When the caller's ctx ends after dispatch, the call becomes an `unresolved` entry in an in-memory registry keyed by `(server, connectionEpoch, principal)`. The client's `isError` result keeps today's text and gains a typed `pending_call` block.
+mcpproxy mints a `call_id` for every upstream `tools/call` and carries it in ctx with the principal and the gate tier (`pending.CallMeta`).
+
+At `managed.Client.callTool`, after admission and the generation re-check, one registry operation runs. It checks the gate and creates a dispatch record (`CheckAndBegin`). This is the authoritative gate, and it covers every entry point, including activity replay.
+
+For stdio, a transport decorator captures the typed JSON-RPC id and always runs the inner `SendRequest` detached, with a deadline fixed at dispatch. That way a response that arrives after the caller's deadline can still be observed.
+
+When the caller's ctx ends after dispatch, the record becomes `unresolved`, unless a late response or an epoch bump has already decided it. The client's error keeps its legacy string and gains a typed `pending_call` block, with a per-surface envelope.
 
 Each entry resolves in one of five ways:
-- a detached wait observes the late response (stdio only);
-- a successful read on the same epoch reconciles it;
-- an explicit cancel, which sends `notifications/cancelled` where possible;
-- an epoch bump;
+- late completion (stdio only);
+- per-entry reconciliation by a later read, which must be explicitly `readOnlyHint:true`;
+- an explicit cancel, sent through the transport instance captured at dispatch;
+- an epoch bump (stdio only);
 - the TTL expires.
 
-While an entry is unresolved, a gate at the two dispatch choke points refuses (`enforce`) or annotates (`warn`) the same principal's write- and destructive-tier calls to that server. The refusal is self-healing. Every new field is metadata layered on the 113-c taxonomy. There is no new error vocabulary.
+Caller cancellation is never forwarded upstream in v1. Every new field is metadata layered on the 113-c taxonomy.
 
 ## Technical Context
 
 **Language/Version**: Go 1.26, backend only. Also generated TS types and a read-only count in the Web UI.
 **Primary Dependencies**: existing only: mcp-go v1.0.0, zap, bbolt, Cobra. **No new dependencies.**
-**Storage**: the registry is in memory. Activity records gain five `omitempty` fields. `UpstreamRecord` gains one `omitempty` field, the per-server `pending_call_gate`.
-**Testing**: per-package unit tests with `-race`. A stdio fixture in `cmd/mcpfixture`, `slow_tool` (sleeps N seconds, optionally emits progress, then succeeds or returns `isError`), counts `tools/call` receipts and records received `notifications/cancelled`. Also goleak, `./scripts/test-api-e2e.sh`, and a real isolated instance.
+**Storage**:
+- The registry is in memory.
+- Activity records gain five `omitempty` fields.
+- A new bbolt index maps `call_id` to the activity id, written in the same transaction as the record (FR-024a).
+- `UpstreamRecord` gains one `omitempty` field.
+
+**Testing**:
+- Per-package unit tests with `-race`.
+- A stdio fixture in `cmd/mcpfixture`, `slow_tool`. It can sleep, emit progress, succeed late, return `isError` late, return a JSON-RPC error late, or return a malformed result late. It counts `tools/call` receipts and records any `notifications/cancelled` it receives, including the raw `requestId` JSON.
+- goleak, `./scripts/test-api-e2e.sh`, and a real isolated instance.
+
 **Target Platform**: all three desktop OSes, plus the server edition (shared code, no build tags).
 **Project Type**: single Go module.
-**Performance Goals**:
-- The gate check is O(entries for the server) under an RWMutex read lock. Entries are capped at 32, and there is no allocation on the allow path.
-- No added latency on calls when the registry is empty.
+**Performance Goals** (measured by benchmarks in `internal/upstream/pending` and `core`):
+- `CheckAndBegin`: O(gating entries for the server and principal) under the per-server mutex. That is at most `max_pending_calls_per_principal` (16). It makes one record allocation per call.
+- Detached dispatch (stdio): each `tools/call` costs one goroutine, one buffered channel and one select. Budget: < 50 µs of added p50 latency and < 4 KB per in-flight call. This replaces the earlier claim of "no allocation / no added latency", which the always-detached design cannot meet.
+- With the registry empty and the mode `off`, the HTTP/SSE path adds only `CheckAndBegin` and `Complete`.
 
 **Constraints**:
-- `Manager.CallTool`, `Manager.CallToolOnEpoch` and `managed.Client.CallTool` signatures stay frozen.
-- No change to `call_tool_*` input schemas.
+- The signatures of `Manager.CallTool`, `Manager.CallToolOnEpoch` and `managed.Client.CallTool` stay frozen.
+- No `call_tool_*` input schema changes.
 - No reconnect on a config change.
-- Timeouts and successes in `warn` / `off` mode stay byte-identical.
+- The legacy error string at each surface stays byte-identical in every mode (spec FR-003a). Success results are unchanged.
 
-**Scale/Scope**: the bound is ≤ 32 live entries and ≤ 32 detached waits per server. That is enough for many concurrent agents against one stdio upstream.
+**Scale/Scope**: the bounds are those in spec FR-007a.
 
 ## Constitution Check
 
-- **Security by default**: yes. The gate is scoped per principal, and listing and cancel are owner- or admin-only, with a non-oracle `not_found`. Call ids grant nothing.
+- **Security by default**: yes.
+  - The gate is scoped per principal, with a stable token principal id (FR-020).
+  - Visibility and cancel are re-checked against the current effective scope and the exact permission (FR-021).
+  - SSE events are filtered per principal (FR-024b).
+  - Non-disclosing `not_found`. Call ids grant nothing.
 - **No new dependencies**: yes.
-- **Backward compatible**: yes, under the recommended `warn` default (Q2). All fields are additive and `omitempty`.
-- **Both editions**: yes. In the server edition the principal comes from the user id.
+- **Backward compatible**: additive.
+  - The legacy strings are preserved per surface.
+  - The `call_tool_*` `troubleshooting` value changes for timeouts only (spec FR-003a).
+  - REST adds a 409 for refusals, which happen only in `enforce` mode.
+  - `upstream_servers` gains a documented schema delta (FR-033).
+- **Both editions**: yes. No tenant allowlist change (FR-023).
 - **Tests first**: every task in tasks.md (to be generated by `/speckit.tasks`) writes the failing test first.
-- **Narrow blast radius**: yes. Sibling ctx values are used, not signature changes. The `Client.CallTool` callers (jsruntime, activity replay, code execution, routing, httpapi, CLI) compile unchanged.
+- **Narrow blast radius**: yes. Sibling ctx values are used instead of signature changes. The authoritative gate lives at one seam.
 
 ## Research & Decisions
 
 | # | Decision | Rationale | Rejected alternatives |
 |---|---|---|---|
-| R1 | Mint our own `call_id`; capture the JSON-RPC id in a `transport.Interface` decorator | mcp-go assigns the JSON-RPC id inside `client.Client` and does not return it. The decorator sees `SendRequest(ctx, req)` with `req.ID` and our ctx | Fork mcp-go; upstream patch (slow; can follow later) |
-| R2 | Detached wait inside the decorator (stdio only): call the inner `SendRequest` with `context.WithoutCancel(ctx)` in a goroutine, return `ctx.Err()` to the caller on deadline, and keep waiting until response, `ErrTransportClosed` or `expires_at` | This is the only way to observe a late response without changing mcp-go. The stdio `SendRequest` already ends on `c.done` (transport close), so the wait cannot leak past a reconnect | Read raw stdout (duplicates mcp-go framing); give up on late detection (then "resolved_late" can never happen, and every entry waits for the TTL) |
-| R3 | No detached wait on HTTP/SSE | It would keep the HTTP request open past the deadline and change today's abort behavior and connection usage | Same mechanism for all transports |
-| R4 | Key the registry on `(server, epoch)`, scope the gate to the principal | An epoch bump provably ends the old process or session, so entries are resolved for free. Principal scoping prevents cross-caller DoS and information leaks | Per-server gate across callers (one agent's timeout blocks every other agent); per-MCP-session gate (a client that reconnects with a new session bypasses it) |
-| R5 | Tier from `tierForAnnotations` (target tool), not the variant | The caller picks the variant. Spec 104 and 105 already use the target-tier principle, and the `read` variant on a write tool is already rejected | Gate on the variant |
-| R6 | Gate in `Manager.callTool` + `code_execution` sub-call dispatch, before admission | These are the same two choke points as 113-d FR-062. Together they cover all four entry points. A gate in `handleCallToolVariant` alone could be bypassed through the direct surface, REST and code_execution | Gate per handler (four sites, and a new handler would silently bypass) |
-| R7 | Intent, principal and call id travel in ctx (`pending.WithCallMeta`) | Keeps the frozen signatures (memory note: narrow-blast-radius rule) | New `CallToolGated` siblings (more surface for the same effect; kept as a fallback if ctx plumbing proves fragile) |
-| R8 | No automatic `notifications/cancelled` on our deadline; forward a caller's cancel | In #1317 the long call was a human consent, and auto-cancel would destroy it. A caller's explicit cancel is the case the MCP spec expects an intermediary to propagate | Always cancel on timeout; never cancel |
-| R9 | Inject `_meta.progressToken = call_id` (stdio, only when absent) to derive `still_running` | This is the only protocol-level liveness signal. It is harmless to servers that ignore it | No liveness distinction (loses the `still_running` hint); MCP Tasks (needs upstream support; separate spec) |
-| R10 | Typed outcome as metadata (`pending_call` in the body and `_meta`), keeping the text | Clients that ignore it see today's text (SC-005), and 113-c remains the single classification | New error text; new `error_class` values (both break 113-c FR-047/049) |
-| R11 | List and cancel on `upstream_servers` (MCP), not a new built-in tool | Avoids a new top-level tool on every surface. `upstream_servers` already carries server operations and is golden-tested; one enum addition is documented | New `pending_calls` built-in tool (affects BM25 index, goldens, direct surface) |
-| R12 | REST refusal = `409 Conflict` | The request conflicts with the server's current state and becomes valid once that state resolves. The Spec 093 shed's 429 means "capacity", which is different | 429; 423 Locked |
-| R13 | In-memory only | A restart restarts every upstream, so there is nothing to protect | BBolt persistence |
+| R1 | Mint our own `call_id`; capture the typed `mcp.RequestId` in a `transport.Interface` decorator | mcp-go assigns the JSON-RPC id inside `client.Client` and does not return it. The decorator sees `SendRequest(ctx, req)` with `req.ID`. A string conversion would lose the JSON type (numeric `1` vs `"1"`) | Fork mcp-go; store the id as a string |
+| R2 | **Always-detached** inner `SendRequest` for stdio `tools/call` with `CallMeta`: inner ctx = `WithDeadline(WithoutCancel(ctx), dispatch + remaining(ctx) + ttl)`, fixed at dispatch; ties go to the result | `Stdio.SendRequest` deletes the response channel on `ctx.Done()` (`stdio.go:~594-650`), so switching to waiting only after the deadline is impossible. `WithoutCancel` alone has no end, so the deadline is required | Detach only after the deadline (cannot work); `WithoutCancel` with no deadline (leaks until transport close) |
+| R3 | No detached wait on HTTP/SSE | It would keep the HTTP request open past the deadline and change today's abort behavior | Same mechanism for all transports |
+| R4 | Gate key: `(server, principal)`, plus the epoch for stdio. An epoch bump resolves **stdio** entries only | A stdio bump kills the child, so mcpproxy can no longer observe the call, but it does not prove the effect was undone (accepted ambiguity, Q5). An HTTP reconnect does not stop remote work | Resolve every transport on a bump (unsafe for HTTP); keep stdio entries across a bump (blocks until the TTL with no way to observe the call) |
+| R5 | Gate tier = `contracts.AnnotationTier`, with `unannotated → write` and not-found → `destructive`; read only with an explicit `readOnlyHint:true` | `tierForAnnotations`/`DeriveCallWith` map unannotated tools to read, which would make the gate inert for most real servers. The caller picks the variant, so the gate uses the target tier | `tierForAnnotations`; reusing the Spec 108 profile `unannotated` policy (it is per profile, absent under legacy profiles, and its default is not conservative) |
+| R6 | **Authoritative** gate = `CheckAndBegin` at `managed.Client.callTool` after the post-admission generation re-check, under the per-server registry mutex that also serializes `MarkUnresolved`. **Advisory** pre-admission check in `Manager.callTool` and the `code_execution` dispatch | A check before admission only lets a queued write slip through. The managed seam is the only place shared with activity replay (`runtime.go:1571`). The advisory check saves concurrency slots | Gate only in `Manager.callTool` + `code_execution` (misses replay and queued writes); gate per handler |
+| R7 | Intent, principal and call id travel in ctx (`pending.WithCallMeta`). Missing meta → fail-closed (`destructive`) | Keeps the frozen signatures and fails safe for any future caller | New `CallToolGated` siblings |
+| R8 | Never send `notifications/cancelled` on mcpproxy's own deadline or on a caller ctx end; only on `cancel_pending_call` | mcp-go's server cancels the handler ctx with a plain `WithCancel` and handles inbound `notifications/cancelled` before user handlers (`request_handler.go:111-120`, `server.go:2477-2486`). A client-side timeout, a script deadline, an SSE disconnect and a shutdown cannot be told apart from an explicit cancel. Forwarding would kill the #1317 consent | Forward caller cancels (undoes #1317); a configurable mode now (no attributable signal; deferred to Q4) |
+| R9 | Inject `_meta.progressToken = call_id` (stdio, only when absent); progress window = 30s constant | The only protocol-level liveness signal. Harmless to servers that ignore it | Configurable window (no use case) |
+| R10 | Typed outcome as metadata. The legacy error string is preserved per surface, `pending_call` is added, and only the timeout `troubleshooting` value changes | Clients reading text still see the existing string, and 113-c remains the single classification | Byte-identical whole JSON body (cannot add `pending_call`); `_meta`-only (agents reading text get no self-healing hint) |
+| R11 | List and cancel on `upstream_servers` (MCP), not a new built-in tool; documented delta: 2 enum values + `call_id` | Avoids a new top-level tool. The cost is that the cancel action is unavailable where `upstream_servers` is hidden, so the refusal text computes availability per caller (FR-016) | New `pending_calls` built-in tool (BM25 index, goldens, direct surface) |
+| R12 | REST refusal = `409 Conflict` | A state conflict that resolves later. Different from the Spec 093 429 "capacity" | 429; 423 |
+| R13 | In-memory only | Persistence would not make a restart safe: stdio children die, and remote HTTP work is unobservable either way. Stated as accepted ambiguity | BBolt persistence |
+| R14 | Principal id for agent tokens = hash of `(Name, CreatedAt)`, stamped on `AuthContext.TokenPrincipalID` at authentication | No stable id exists today. `Name` alone conflates a deleted and recreated token. The prefix changes on regenerate. `UserID` conflates sibling tokens | Add a persisted random token id (needs a migration for existing tokens; could follow later); use name, prefix or user id |
+| R15 | Cancel is sent through the transport instance captured at dispatch, with a bounded send outside every lock | Checking the epoch and then sending through the current client is a TOCTOU across a reconnect | Epoch check + current client; holding `epochMu` across I/O |
 
 ## Data Model
 
 ```go
-// internal/upstream/pending (new package; stdlib + zap only)
-type State string   // unresolved | completed_late | reconciled | cancelled | connection_reset | expired
-type Reason string  // deadline_exceeded | still_running | caller_cancelled  (waiting_human reserved, Q1)
-type Tier string    // read | write | destructive (same strings as tierForAnnotations)
+// internal/upstream/pending (new package; stdlib + zap + mcp-go/mcp types only)
+type State string  // dispatched | unresolved | completed_late | reconciled | cancelled | connection_reset | expired
+type Reason string // deadline_exceeded | still_running | caller_deadline | caller_cancelled (waiting_human reserved, Q1)
+type GateTier string // read | write | destructive
+type LateOutcome string // success | tool_error | jsonrpc_error | malformed
 
-type Entry struct {
-    CallID, Server, Tool string
-    Epoch                int64
-    Principal            Principal
-    Tier                 Tier
-    JSONRPCID            string    // "" when unknown (HTTP/SSE)
-    DispatchedAt         time.Time
-    UnresolvedAt         time.Time
-    ExpiresAt            time.Time
-    LastProgressAt       time.Time
-    Reason               Reason
-    State                State
-    LateOutcome          string    // success | tool_error
-    ResolvedAt           time.Time
+type Principal struct{ Kind, ID string } // Kind: agent_token | local
+
+type Record struct {
+    CallID, Server, Tool, Transport string
+    Epoch            int64
+    Principal        Principal
+    GateTier         GateTier
+    JSONRPCID        *mcp.RequestId // typed; nil when unknown (HTTP/SSE)
+    Canceller        Canceller      // the decorator instance captured at dispatch; nil for HTTP/SSE without a live session
+    DispatchedAt, UnresolvedAt, ExpiresAt, LastProgressAt, ResolvedAt time.Time
+    Reason           Reason
+    State            State
+    respondedLate    *LateOutcome // set by ResolveLate while State==dispatched (FR-010a)
+    LateOutcome      LateOutcome
+    ResolutionActor  string // principal kind
 }
 
-type Principal struct{ Kind, ID string } // Kind: agent_token | user | local
+type Canceller interface {
+    // CancelRequest sends notifications/cancelled for id on THIS transport
+    // instance. It returns ErrTransportClosed when the instance is gone.
+    CancelRequest(ctx context.Context, id mcp.RequestId, reason string) error
+}
 
-type Registry struct { /* per-server map, RWMutex, monotonic clock, caps */ }
-func (r *Registry) Begin(meta CallMeta, epoch int64)                       // record dispatch (cheap; no entry yet)
-func (r *Registry) MarkUnresolved(callID string, reason Reason) Entry      // ctx ended after dispatch
-func (r *Registry) Complete(callID string)                                 // normal completion: forget
-func (r *Registry) ResolveLate(callID, outcome string)                     // decorator callback
-func (r *Registry) ResolveEpoch(server string, newEpoch int64)             // called under epochMu
-func (r *Registry) Reconcile(server string, epoch int64, p Principal, dispatchedAt time.Time)
-func (r *Registry) Cancel(callID string, caller Principal, admin bool) (Entry, bool /*found*/)
-func (r *Registry) Gate(server string, epoch int64, p Principal, t Tier) Decision
-func (r *Registry) List(server string, caller Principal, admin bool) []Entry
-func (r *Registry) Touch(callID string)                                    // progress observed
+type Registry struct { /* map[server]*serverSet; serverSet{mu sync.Mutex; epochFloor int64; ...}; caps; monotonic clock */ }
 
-type CallMeta struct{ CallID string; Principal Principal; Tier Tier; Mode Mode }
+// All methods for one server take serverSet.mu. Nothing does I/O under it.
+func (r *Registry) CheckAndBegin(m CallMeta, server, transport string, epoch int64, mode Mode) (Decision, *Record)
+func (r *Registry) Advisory(m CallMeta, server string, epoch int64, mode Mode) Decision   // read lock only; never admits
+func (r *Registry) Complete(callID string)                                              // dispatched -> dropped (or Reconcile, see below)
+func (r *Registry) CompleteRead(callID string, ok bool)                                 // runs FR-018 against entries with UnresolvedAt < rec.DispatchedAt
+func (r *Registry) MarkUnresolved(callID string, reason Reason) Record                  // dispatched -> unresolved | completed_late | connection_reset
+func (r *Registry) ResolveLate(callID string, out LateOutcome)                          // dispatched -> respondedLate; unresolved -> completed_late
+func (r *Registry) ResolveEpoch(server string, newEpoch int64)                          // stdio records < newEpoch -> connection_reset; epochFloor = newEpoch
+func (r *Registry) Cancel(callID string, caller Caller) (Record, CancelPlan, bool)      // marks cancelled; returns the plan to send OUTSIDE the lock
+func (r *Registry) List(server string, caller Caller) []Record                          // FR-021 visibility
+func (r *Registry) Touch(callID string)
+
+type Caller interface { // implemented by an adapter over auth.AuthContext, evaluated per request
+    Principal() Principal
+    IsAdmin() bool
+    CanSeeServer(server string) bool   // CanAccessServer ∩ profile scope (Spec 105)
+    HasPermission(tier GateTier) bool  // exact match
+    ReadOnlyMode() bool
+}
+
+type CallMeta struct{ CallID string; Principal Principal; Tier GateTier; Mode Mode; Source string }
 func WithCallMeta(ctx context.Context, m CallMeta) context.Context
 func CallMetaFrom(ctx context.Context) (CallMeta, bool)
 var ErrPendingCallUnresolved = errors.New("pending call unresolved")
-type RefusedError struct{ Blocking []Entry }  // errors.Is(err, ErrPendingCallUnresolved)
+type RefusedError struct{ Blocking []Record; Actions []Action } // errors.Is(err, ErrPendingCallUnresolved)
 ```
 
 ```go
-// internal/upstream/core: stdio transport decorator
+// internal/upstream/core/transport_correlate.go (new)
 type correlatingTransport struct {
-    inner transport.Interface
-    reg   *pending.Registry
-    // forwards BidirectionalInterface et al. via wrapper variants chosen at construction
+    inner  transport.Interface
+    reg    *pending.Registry
+    closed atomic.Bool
+    // detached-wait accounting per principal (FR-007a)
 }
+type bidiCorrelatingTransport struct{ *correlatingTransport } // + SetRequestHandler; chosen at construction iff inner implements BidirectionalInterface
+func (t *correlatingTransport) CancelRequest(ctx context.Context, id mcp.RequestId, reason string) error
 ```
+
+**Transition ordering** (all under `serverSet.mu`, in this order of precedence):
+
+1. `CheckAndBegin` creates `dispatched`, or refuses.
+2. `ResolveLate` on `dispatched` → `respondedLate`. On `unresolved` → `completed_late`. On a terminal record → no-op.
+3. `MarkUnresolved`:
+   - if `respondedLate` → `completed_late`;
+   - else if `Epoch < epochFloor` (stdio) → `connection_reset`;
+   - else → `unresolved`.
+   - On a terminal record → no-op.
+4. `ResolveEpoch`, called inside the `epochMu` section of `managed/client.go` (`:578-580`, `:669-671`): stdio records below the new epoch → `connection_reset`, and the floor is raised. This is the one place `serverSet.mu` is taken under `epochMu`. The order is always `epochMu` → `serverSet.mu`, never the reverse.
+5. A terminal record is a tombstone until it is evicted (FR-007a).
 
 Config:
 
 ```go
 // internal/config/config.go
-PendingCallGate          string   `json:"pending_call_gate,omitempty" mapstructure:"pending-call-gate"`               // off|warn|enforce
-PendingCallTTL           Duration `json:"pending_call_ttl,omitempty" mapstructure:"pending-call-ttl"`
-PendingCallHistory       Duration `json:"pending_call_history,omitempty" mapstructure:"pending-call-history"`
-MaxPendingCallsPerServer int      `json:"max_pending_calls_per_server,omitempty" mapstructure:"max-pending-calls-per-server"`
+PendingCallGate             string   `json:"pending_call_gate,omitempty" mapstructure:"pending-call-gate"` // off|warn|enforce
+PendingCallTTL              Duration `json:"pending_call_ttl,omitempty" mapstructure:"pending-call-ttl"`
+PendingCallHistory          Duration `json:"pending_call_history,omitempty" mapstructure:"pending-call-history"`
+MaxPendingCallsPerPrincipal int      `json:"max_pending_calls_per_principal,omitempty" mapstructure:"max-pending-calls-per-principal"`
+MaxDetachedWaitsPerServer   *int     `json:"max_detached_waits_per_server,omitempty" mapstructure:"max-detached-waits-per-server"` // pointer: 0 is meaningful
 // ServerConfig
 PendingCallGate string `json:"pending_call_gate,omitempty" mapstructure:"pending_call_gate"`
 ```
 
-Activity (`storage.ActivityRecord`, `contracts.ActivityRecord`): `CallID`, `PendingState`, `PendingReason`, `LateOutcome`, `ResolvedAt`, all `omitempty`.
+Auth: `AuthContext.TokenPrincipalID string`, stamped by `AgentToken.AuthContext()`.
+
+Activity (`storage.ActivityRecord`, `contracts.ActivityRecord`): `CallID`, `PendingState`, `PendingReason`, `LateOutcome`, `ResolvedAt`, all `omitempty`. New bucket `activity_call_index` (`call_id → activity id`), pruned with its record.
 
 ## Contracts
 
-**Timeout result body** (`isError:true`; the text block is unchanged and the JSON gains these keys):
+**Timeout, `call_tool_*`** (`isError:true`; the `error` value is the existing Manager-wrapped string, unchanged):
 
 ```json
 {
-  "error": "CallTool 'navigate_page' timed out after 2m0s",
+  "error": "<legacy string, byte-identical to the base-commit golden>",
   "server_name": "chrome-devtools",
   "tool_name": "navigate_page",
   "troubleshooting": "The upstream may still be executing this call. See pending_call.resolve.",
   "pending_call": {
     "call_id": "pc_4K7Q…",
+    "server": "chrome-devtools",
+    "tool": "navigate_page",
+    "transport": "stdio",
     "state": "unresolved",
     "reason": "deadline_exceeded",
     "connection_generation": 42,
     "upstream_may_still_be_running": true,
-    "dispatched_at": "…", "expires_at": "…",
+    "late_completion_observable": true,
+    "dispatched_at": "…", "unresolved_at": "…", "expires_at": "…",
     "resolve": [
       {"action": "wait", "until": "…"},
-      {"action": "reconcile", "how": "call a read-only tool on chrome-devtools (call_tool_read)"},
+      {"action": "reconcile", "how": "call a tool with readOnlyHint:true on chrome-devtools"},
       {"action": "cancel", "how": "upstream_servers {operation:\"cancel_pending_call\", call_id:\"pc_4K7Q…\"}"}
     ]
   }
 }
 ```
 
-The same `pending_call` object is in `result._meta["io.mcpproxy/pending_call"]`.
+The `cancel` action appears only when FR-016's availability check passes. The same object is in `result._meta["io.mcpproxy/pending_call"]`.
 
-**Gate refusal** (`isError:true`; REST 409):
+**Timeout, other surfaces** (spec FR-003a):
+- Direct surface: the legacy text plus one appended line, and the same `_meta`.
+- `code_execution`: the thrown error has `pendingCall`; the run result has `pending_calls: [call_id…]`.
+- REST: `500` with `{…existing envelope…, "pending_call": {…}}`.
+- Replay: the record has `call_id` and `pending_state`.
+
+**Gate refusal** (`isError:true`; REST `409`):
 
 ```json
 {
-  "error": "refused: chrome-devtools has 1 unresolved write call from you (pc_4K7Q…, navigate_page, 14s ago). The upstream may still apply it. Wait until <expires_at>, call a read-only tool on chrome-devtools to reconcile, or cancel it with upstream_servers cancel_pending_call.",
+  "error": "refused: chrome-devtools has 1 unresolved write call from you (pc_4K7Q…, navigate_page, 14s ago). The upstream may still apply it. <available actions, one sentence each>",
   "error_class": "proxy_policy", "fault_domain": "proxy",
   "pending_calls": [ { "call_id": "pc_4K7Q…", "tool": "navigate_page", "age_ms": 14000, "expires_at": "…" } ],
-  "resolve": [ … as above … ]
+  "resolve": [ … only the available actions … ]
 }
 ```
 
 `error_class` / `fault_domain` are present only once 113-c is merged.
 
-**MCP** `upstream_servers`: adds `operation` values `pending_calls` (optional `name`) and `cancel_pending_call` (`call_id`). The response entries use the `pending.Entry` JSON shape without `principal.id` for non-admin callers.
+**Audit** (Spec 107; spec FR-030):
+- Advisory refusal: `authz decision:deny reason:pending_call_unresolved`.
+- Authoritative refusal: `tool_call outcome:rejected reason:pending_call_unresolved`.
+- Docs: `docs/` audit JSON Schema and the Spec 107 `contracts/audit-line-events.md` table each gain the value. `schema_version` stays 1.
 
-**REST**: `GET /api/v1/pending-calls?server=&state=`, `GET /api/v1/servers/{name}/pending-calls`, `POST /api/v1/pending-calls/{call_id}/cancel`. All are added to `oas/swagger.yaml`.
+**MCP** `upstream_servers`:
+- New `operation` values `pending_calls` (optional `name`) and `cancel_pending_call` (required `call_id`).
+- New string property `call_id`.
+- The response entries omit `principal.id` for non-admin callers.
+
+**REST**: `GET /api/v1/pending-calls?server=&state=`, `GET /api/v1/servers/{name}/pending-calls`, `POST /api/v1/pending-calls/{call_id}/cancel`.
+- Added to `oas/swagger.yaml`.
+- Not added to the tenant allowlist.
 
 **CLI**: `mcpproxy upstream pending list [--server NAME] [--state STATE] [-o table|json|yaml]` and `mcpproxy upstream pending cancel CALL_ID`. Both support `--help-json`.
 
-**SSE**: `pending_call.unresolved`, `pending_call.resolved`, `pending_call.refused`. Payloads carry ids and states only.
+**SSE**: `pending_call.unresolved`, `pending_call.resolved`, `pending_call.refused`.
+- Payload: `server`, `call_id`, `state`, `reason`, timestamps.
+- An internal `_principal` is used for filtering and stripped before sending.
+- The types are registered in `identityBearingEventTypes`.
+- A principal-aware visibility check runs after `eventVisibleToCaller`.
 
 ## Project Structure
 
@@ -188,105 +272,147 @@ The same `pending_call` object is in `result._meta["io.mcpproxy/pending_call"]`.
 specs/114-pending-call-outcome/
 ├── spec.md
 ├── plan.md        # this file
-└── tasks.md       # /speckit.tasks, after maintainer review of Q1-Q3
+└── tasks.md       # /speckit.tasks, after maintainer review of Q1-Q6
 ```
 
 ### Source Code (touched packages)
 
 | Place | Change |
 |---|---|
-| `internal/upstream/pending/` (new) | Registry, states, gate, principal, ctx helpers, typed errors |
-| `internal/upstream/core/client.go` | Mint/receive the call id from ctx. Mark dispatched. On ctx end after dispatch, `MarkUnresolved` with the reason (progress-aware). Inject the progress token (stdio). Extend `logCallInterrupted` with `call_id` / `pending_*`. Return a typed error that wraps `callTimeoutError` (113-c) plus the entry |
-| `internal/upstream/core/connection_stdio.go` | Wrap `stdioTransport` in `correlatingTransport` before `client.NewClient` |
-| `internal/upstream/core/transport_correlate.go` (new) | Decorator: id capture, detached wait (FR-010), `Cancel(callID)` via `SendNotification`, optional-interface forwarding |
-| `internal/upstream/core/connection_lifecycle.go` | Notification handler: route `notifications/progress` with a matching token to `Registry.Touch` |
-| `internal/upstream/managed/client.go` | `ResolveEpoch` on every epoch bump under `epochMu` (connect `:579`, disconnect `:670`). Forward caller cancel (FR-012) |
-| `internal/upstream/manager.go` | Owns the `Registry`. Runs the gate in `callTool` before dispatch. Derives the tier when ctx lacks it. Calls `Reconcile` after a successful read |
-| `internal/server/mcp.go` | Set `CallMeta` (principal from auth ctx, tier from `tierForAnnotations`) before `dispatchOnEpoch`. Pending block in `createDetailedErrorResponse`. Refusal branch beside the shed/generation branches. Activity fields. `upstream_servers` new operations |
-| `internal/server/mcp_code_execution.go` | Same `CallMeta` plus a gate call at the sub-call dispatch. Script error lists call ids |
-| `internal/server/mcp_routing.go` | `CallMeta` on the direct surface |
-| `internal/httpapi/server.go` | `CallMeta` for `/tools/call`, 409 mapping, new pending-calls endpoints |
-| `internal/auth` | `Principal` derivation helper (agent token stable id / user id / `local`) |
-| `internal/storage`, `internal/contracts`, `cmd/generate-types`, `frontend/src/types/contracts.ts`, `oas/` | Activity fields, `ActivityFilter.PendingState`, `UpstreamRecord.PendingCallGate`, server `pending_calls` count |
-| `internal/runtime` (event bus) | Three SSE event types |
+| `internal/upstream/pending/` (new) | Registry, states, ordering, caps, gate, `Caller`, ctx helpers, typed errors |
+| `internal/upstream/managed/client.go` | `CheckAndBegin` after the post-admission re-check (`:1195-1204`). `MarkUnresolved` / `Complete` / `CompleteRead` on return. `ResolveEpoch` inside the two `epochMu` sections. Mint the call id and fail-closed meta when ctx lacks `CallMeta` |
+| `internal/upstream/core/client.go` | Inject the progress token (stdio). Classify `reason` via `context.Cause`. Extend `logCallInterrupted`. Return a typed error wrapping today's error and the record, so that `.Error()` is unchanged |
+| `internal/upstream/core/connection_stdio.go` | Wrap `stdioTransport` in the correlating transport at `client.NewClient` (`:244`). `c.stderr` still comes from the concrete transport (`:282`) |
+| `internal/upstream/core/transport_correlate.go` (new) | Id capture, always-detached wait, tie rule, `CancelRequest`, interface-preserving variants, per-principal detached accounting |
+| `internal/upstream/core/connection_lifecycle.go` | Route `notifications/progress` with a matching token to `Registry.Touch` |
+| `internal/upstream/manager.go` | Owns the `Registry`. Advisory check before admission. Pass `RefusedError` through verbatim (like `LimitError`, `:1714-1718`) |
+| `internal/server/mcp.go` | Set `CallMeta` (principal from auth ctx, gate tier from annotations) before `dispatchOnEpoch`. Timeout envelope in `createDetailedErrorResponse`. Refusal branch beside the shed/generation branches. Audit arms. Activity fields. `upstream_servers` operations |
+| `internal/server/mcp_routing.go` | `CallMeta`; direct-surface envelope |
+| `internal/server/mcp_code_execution.go` | `CallMeta` and the advisory check at the sub-call dispatch; `pendingCall` on the thrown error; run-level `pending_calls` |
+| `internal/server/audit_funnel.go` | `auditReasonFromBlockKey` arm; `tool_call` rejected reason |
+| `internal/runtime/runtime.go` | `ReplayToolCall` sets `CallMeta` (gate tier from stored annotations, principal from auth ctx); replay record fields |
+| `internal/runtime/activity_service.go`, `internal/storage` | `call_id` persistence and index, held-update map, update by `call_id` |
+| `internal/httpapi/server.go`, `internal/httpapi/sse_scope.go` | `CallMeta` for `/tools/call`; 409 mapping; pending-calls endpoints; event visibility |
+| `internal/auth` | `AuthContext.TokenPrincipalID`; `ServerOpPendingCalls`, `ServerOpCancelPendingCall` (not denied) |
+| `internal/contracts`, `cmd/generate-types`, `frontend/src/types/contracts.ts`, `oas/` | Activity fields, `ActivityFilter.PendingState`, `UpstreamRecord.PendingCallGate`, server `pending_calls` count |
 | `internal/telemetry` | `BlockReasonPendingCallUnresolved` |
-| `internal/config` | Fields, defaults, `ValidateDetailed` (enum, TTL ≥ `call_tool_timeout`), Copy/Merge/DetectConfigChanges |
+| `internal/config` | Fields, defaults, `ValidateDetailed` (enum, ranges, TTL ≥ `call_tool_timeout`, `enforce` capability gate), Copy/Merge/DetectConfigChanges |
 | `cmd/mcpproxy` | `upstream pending list|cancel`, `activity list --pending-state` |
-| `cmd/mcpfixture` | `slow_tool` with progress / late success / late isError / cancel recording |
-| `docs/` | `docs/features/pending-calls.md` (new), `docs/configuration.md`, `docs/api/rest-api.md`, `docs/cli-management-commands.md` |
+| `cmd/mcpfixture` | `slow_tool` modes listed under Testing |
+| `docs/` | `docs/features/pending-calls.md` (new), `docs/configuration.md`, `docs/api/rest-api.md`, `docs/cli-management-commands.md`, audit schema |
 
-**Structure Decision**: single Go module. The new logic sits in one new leaf package, `internal/upstream/pending`, with no imports from `internal/server` or `internal/httpapi`, so both choke points can call it.
+**Structure Decision**: single Go module. The new logic sits in one new leaf package, `internal/upstream/pending`, which does not import `internal/server`, `internal/httpapi` or `internal/auth`. Authorization reaches it through the `Caller` adapter.
 
 ## Phases
 
-Each phase is one PR. Each lands at the merge bar from an updated `main`, with no stacking (memory: merge-early-dont-stack). Every commit uses `Related #1321`.
+Each phase is one PR, landed at the merge bar from an updated `main`, with no stacking. Every commit uses `Related #1321`. The capability set compiled into each build (spec FR-034) drives the `resolve` actions, so no phase advertises an action that it does not ship.
 
-1. **Phase 1: Correlation and typed outcome** (User Stories 1 and 5 listing, read-only).
-   - `pending` package (registry without gate), call id, decorator id capture, `MarkUnresolved`, epoch resolution, TTL and history sweeper.
-   - Pending block in results.
-   - Activity fields, SSE `unresolved` events.
-   - List on MCP / REST / CLI (owner-scoped).
-   - Logging fields.
+1. **Phase 1: correlation, typed outcome, listing.**
+   - The `pending` package (no gate decisions).
+   - `CallMeta` at all five entry points, plus fail-closed meta.
+   - `CheckAndBegin` in allow-only form, `MarkUnresolved`, epoch resolution, TTL and history sweeper, bounds.
+   - Per-surface envelopes. Activity fields and index. SSE events with principal filtering. Listing on MCP/REST/CLI. Logging fields.
+   - `resolve` lists `wait` (and `reconcile` as advice).
    - No behavior change for any call.
-   - Can land before 113-c.
-2. **Phase 2: Gate** (User Stories 2 and 4).
-   - Gate at `Manager.callTool` and code_execution, modes `off|warn|enforce` with the Q2 default.
-   - Refusal shape, 409, telemetry block reason, reconciliation (Q3), 113-d interplay test.
-   - Needs 113-c for `proxy_policy` stamping. Otherwise it ships with the Spec 093-style audit and picks up 113-c automatically.
-3. **Phase 3: Late completion, cancel and progress** (User Story 3).
-   - Detached wait, `completed_late`.
-   - `cancel_pending_call` with `notifications/cancelled`, caller-cancel forwarding.
+2. **Phase 2: late completion and cancel.**
+   - The decorator with id capture, always-detached wait, tie rule, and late outcomes with activity update.
+   - `cancel_pending_call` through the captured instance.
    - Progress token and `still_running`.
-   - Goleak and memory-bound tests.
-4. **Phase 4 (optional)**: read-only Web UI badge and macOS tray count. A Tasks-based design spec for upstreams that advertise task support.
+   - Goleak, memory-bound and benchmark tests.
+   - `resolve` gains `cancel` where available.
+3. **Phase 3: gate.**
+   - The authoritative and advisory checks, and modes `off|warn|enforce` (`enforce` is now accepted by validation).
+   - Refusal envelopes, 409, telemetry block reason, audit arms.
+   - Per-entry reconciliation.
+   - 113-d interplay test. Proxy_policy stamping needs 113-c; without it, the refusal is recorded like the Spec 093 shed.
+4. **Phase 4 (optional)**: read-only Web UI badge and macOS tray count. A Tasks-based design spec for upstreams that advertise task support. Q4 forwarding mode, if mcp-go gains an attributable cause.
 
 ## Test Strategy
 
 - **Unit (`pending`)**:
-  - State machine table test covering every transition and the terminal idempotence.
-  - Gate truth table: mode × tier × principal × epoch.
-  - Cap eviction.
+  - A transition table covering every pair in the spec FR-008 graph, tombstone idempotence, and the precedence order above.
+  - A gate truth table: mode × gate tier × principal × epoch × transport.
+  - `gateTier` truth table: nil annotations, empty hints, each hint combination, not found.
+  - Bounds:
+    - per-principal cap with self-eviction keeping the gate closed;
+    - cross-principal flood never evicts a gating entry;
+    - 256 non-gating/terminal cap;
+    - global cap;
+    - detached share per principal.
   - Monotonic TTL with a fake clock.
-  - Concurrent `Gate`/`MarkUnresolved`/`ResolveEpoch` under `-race`.
+  - Interleavings under `-race` with `GOMAXPROCS=1 -count=20`:
+    - `CheckAndBegin` vs `MarkUnresolved` (queued write);
+    - `ResolveLate` before `MarkUnresolved`;
+    - `ResolveEpoch` between the deadline and `MarkUnresolved`.
+  - Reconciliation ordering: a read dispatched before the entry became unresolved does not clear it.
 - **Unit (`core`)**:
-  - The decorator captures the JSON-RPC id only for `tools/call` with call meta.
-  - It forwards `BidirectionalInterface` (sampling test still passes).
-  - The detached wait ends on response, on transport close and on `expires_at` (goleak).
-  - Cancel sends a well-formed `notifications/cancelled` with the captured id.
-  - A late response marks `completed_late` with the correct `late_outcome`.
+  - The decorator captures the id only for `tools/call` with meta.
+  - The reflection test checks the interface set (spec FR-002). The sampling test still passes.
+  - The always-detached wait ends on response, on transport close and on its fixed deadline (goleak).
+  - Tie: response and deadline ready together → the caller gets the result.
+  - Late outcomes `success`, `tool_error`, `jsonrpc_error`, `malformed`. Late content passes through the sensitive-data detector, and no content reaches a client.
+  - `CancelRequest` sends `notifications/cancelled` whose `requestId` raw JSON equals the request's, for numeric `1`, string `"1"` and an integer above 2^53.
+  - `CancelRequest` on a closed instance → `ErrTransportClosed`, and it never touches a newer instance.
   - Progress with the matching token sets `still_running`.
+  - `reason` from `context.Cause`: our timeout, a parent deadline, a parent cancel, and a script `WithTimeoutCause`.
+  - A pin test for mcp-go `SendRequest` cancellation semantics (Assumption A5).
+  - Benchmark of the detached path against the performance budget.
 - **Unit (`managed`)**:
-  - An epoch bump resolves old entries before any new-epoch call can be gated (interleaving test with `GOMAXPROCS=1 -count=20`, memory: shuffle-race-repro).
+  - An epoch bump resolves stdio entries before any new-epoch call can be gated. HTTP entries survive a bump.
+  - The `reconnect_on_use` path.
+  - A missing `CallMeta` is gated as destructive.
   - The existing `calltool_cancel_test.go` is unchanged.
-- **Server/httpapi**:
-  - The four entry points each refuse in `enforce`, each annotate in `warn`, and each pass reads.
-  - `call_tool_read` on a write tool is still rejected by intent validation.
-  - Cross-principal list and cancel return an identical `not_found`.
-  - Admin cancel is audited.
-  - Byte-identical timeout text in `warn` / `off` (golden).
+- **Server / httpapi / runtime**:
+  - Each of the five entry points (including replay) refuses in `enforce`, annotates in `warn`, and passes explicit reads.
+  - The queued-write test (spec US2 AS7).
+  - `call_tool_read` on a write-annotated tool: the intent validator allows it under `strict` true and false, and the gate refuses it.
+  - Per-surface timeout and refusal envelope contract tests, and the legacy-string goldens captured from the base commit.
+  - Authorization:
+    - two-token tests for list, cancel, count, SSE (all three types, shared and disjoint servers) and activity pending fields;
+    - scope revocation, profile reassignment, read-only token, destructive-only token;
+    - token regenerate keeps the principal; delete+recreate does not;
+    - `not_found` bodies byte-identical.
+  - `cancel` availability in the refusal text under `disable_management`, `read_only_mode`, `max_tier: write` and a `management_tools` exclusion.
+  - `agentDeniedServerOps` pin test for the two new ops.
+  - Tenant walk test: the three new routes return the fixed 403 for a tenant session.
+  - Audit: advisory refusal → one `authz deny`; authoritative refusal → `authz allow` + `tool_call rejected`; count invariants hold; no line for `cancel_pending_call`.
+  - Activity linkage: a late response arriving immediately after the timeout updates the record (held-update path).
   - MCP/REST/CLI parity test.
-  - The toolsurface golden is updated only for the `upstream_servers` operation enum (memory: toolsurface-frozen-goldens).
-- **113-d interplay** (once merged): a refusal is excluded from the failure rate, and a late completion does not add a second outcome.
-- **E2E**: `./scripts/test-api-e2e.sh`. The CI `-skip` regex is applied for `internal/server`.
-- **Real instance** (SC-007): isolated `HOME` / data dir, high port, `mcpfixture slow_tool` as a stdio server, `call_tool_timeout: 2s`, curl JSON-RPC through `/mcp`. Steps: timeout, then refused write, then wait for the late response, then `activity show`, then a write passes. Repeat with `cancel_pending_call` and with a reconcile read.
+  - The toolsurface golden diff equals exactly spec FR-033.
+- **Config (FR-028)**:
+  - Each field round-trips through the file, BBolt, Copy/Merge and REST PATCH.
+  - A hot-reload through the file watcher and through PATCH applies to the next call with no epoch bump.
+  - Validation refuses a bad enum, out-of-range values, TTL < `call_tool_timeout`, and `enforce` in a build without the phase 2 capabilities.
+- **113-d interplay** (once merged): a refusal is excluded from the failure rate, and a late completion adds no second outcome.
+- **E2E**: `./scripts/test-api-e2e.sh`, with the CI `-skip` regex for `internal/server`.
+- **Real instance** (SC-007):
+  - Setup: isolated `HOME` / data dir, high port, `mcpfixture slow_tool` as a stdio server, `call_tool_timeout: 2s`, curl JSON-RPC through `/mcp`.
+  - Steps: timeout → refused write → late response → `activity show` → a write passes.
+  - Repeat with `cancel_pending_call` (check the fixture's recorded `requestId`) and with a reconcile read.
 - **Lint**: `golangci-lint run --config .github/.golangci.yml ./...`, both bare and with `--build-tags server`.
 
 ## Rollout
 
-- Phase 1 is invisible to clients that ignore the new fields. It ships in the next minor release.
-- Phase 2 ships with `pending_call_gate` at the Q2 default (`warn` recommended). The release notes explain `enforce` and the per-server override. The recommended setting for the #1317 user is `"pending_call_gate": "enforce"` on the `chrome-devtools` server.
-- After one minor release of `warn`, review the opt-in telemetry: the count of `pending_call_warning` per server type, and how often a warned write follows an unresolved call that later `completed_late`. Then flip stdio to `enforce` in a follow-up PR that references this spec.
-- Rollback: `pending_call_gate: off` (global or per server) disables refusals without a restart. The registry and typed outcome remain, and they are inert.
-- Close #1321 by hand after SC-007 passes on a release build. #1513 does not close it.
+- Phase 1 is invisible to clients that ignore the new fields, apart from the timeout `troubleshooting` value. It ships in the next minor release.
+- Phase 2 adds late completion and cancel. There is still no gate.
+- Phase 3 ships with `pending_call_gate` at the Q2 default (`warn` recommended).
+  - The release notes explain `enforce`, the per-server override, the unannotated-tool rule (spec Known Limitation 9), and that `connection_reset` and a restart do not prove the work stopped.
+  - The recommended setting for the #1317 user is `"pending_call_gate": "enforce"` on the `chrome-devtools` server.
+- After one minor release of `warn`, review the opt-in telemetry: the `pending_call_warning` count per server type, and how often a warned write follows an entry that later became `completed_late`. Then flip stdio to `enforce` in a follow-up PR.
+- Rollback: `pending_call_gate: off` (global or per server) disables refusals without a restart. `max_detached_waits_per_server: 0` disables detached waits.
+- Close #1321 by hand after SC-007 passes on a release build.
 
 ## Risks
 
-- **Decorator forwarding of optional interfaces.** If mcp-go adds a new type-asserted interface, the wrapper hides it. Mitigation: a test that asserts the wrapper implements every interface the inner stdio transport implements, using a reflection list.
-- **Detached-wait goroutines.** These are bounded by the per-server cap and `expires_at`, and stdio close ends them. goleak covers this.
-- **mcp-go upgrade changes `SendRequest` cancellation semantics.** A test pins the behavior: the deadline returns promptly to the caller while the inner request is still pending.
-- **False positives in `enforce`.** One principal running two independent agents against one server shares a gate (FR-020). The self-healing message and `warn` default mitigate this. Revisit principal granularity if telemetry shows it.
-- **113-c / 113-d drift.** Both are unmerged. This plan names their FRs. If their final shape changes, phases 2 and 3 adapt the mapping only, and the registry is unaffected.
+- **Decorator interface forwarding.** If mcp-go adds a newly type-asserted interface, the wrapper hides it. Mitigation: the reflection test, plus a test that fails on an mcp-go bump until the enumerated list in spec Context item 6 is re-checked.
+- **Detached-wait cost and goroutines.** Bounded per server and per principal, ended by a fixed deadline or transport close; goleak and a benchmark cover them. Escape hatch: `max_detached_waits_per_server: 0`.
+- **mcp-go `SendRequest` semantics change.** Pinned by the A5 test.
+- **False positives in `enforce`.** These come from the conservative unannotated rule and from one principal running two independent agents. The self-healing text, the `warn` default and per-server override mitigate this.
+- **Lock ordering.** `epochMu → serverSet.mu` is the only nested acquisition. A test with `-race` and a lock-order assertion helper covers it.
+- **113-c / 113-d drift.** Both are unmerged; citations are pinned to `d5de9320d`. If their final shape changes, phase 3 adapts the mapping only.
 
 ## Complexity Tracking
 
-No constitution violations. The one new package is justified by R6: a shared leaf that both choke points need.
+No constitution violations.
+- The one new package is justified by R6: a shared leaf that the authoritative seam and the advisory sites all need.
+- The always-detached design (R2) is the minimum that makes late completion possible without forking mcp-go.
