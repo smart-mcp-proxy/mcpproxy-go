@@ -31,7 +31,7 @@
     <!-- Search results (across all sections) -->
     <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
       <div class="card-body">
-        <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
+        <h2 class="card-title text-lg">Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
         <SettingsSection :key="`sec-${formEpoch}`" section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
       </div>
     </div>
@@ -60,7 +60,7 @@
       <!-- Security & Access -->
       <div v-show="activeTab === 'security'" class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-lg">🔒 Security &amp; Access</h2>
+          <h2 class="card-title text-lg">Security &amp; Access</h2>
           <p class="text-sm text-base-content/60 mb-2">The settings that most affect how exposed and protected your instance is.</p>
           <!-- connect-a-client helper -->
           <div class="alert bg-base-200 border-base-300 mb-3 flex-col sm:flex-row items-start sm:items-center gap-2">
@@ -92,7 +92,7 @@
       <!-- General -->
       <div v-show="activeTab === 'general'" class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-lg">⚙️ General</h2>
+          <h2 class="card-title text-lg">General</h2>
           <SettingsSection :key="`sec-${formEpoch}`" section-id="general" :fields="generalFields" :working="state.working" :original="state.original" :locks="fieldLocks" @saved="onSectionSaved" />
         </div>
       </div>
