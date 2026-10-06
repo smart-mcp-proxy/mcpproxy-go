@@ -78,4 +78,13 @@ final class ActivityFoldingTests: XCTestCase {
     func testDisabledFoldingReturnsOneRowPerRecord() {
         XCTAssertEqual(ActivityFolding.fold(approvals(5), enabled: false).map(\.count), [1, 1, 1, 1, 1])
     }
+
+    func testEmptyStatusFallsBackToChangedVerb() {
+        let rows = ActivityFolding.fold((0..<3).map {
+            entry("e\($0)", type: "tool_quarantine_change", server: "fs", status: "",
+                  at: String(format: "2026-09-26T12:00:%02dZ", 59 - $0))
+        })
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].summary, "fs: 3 tools changed")
+    }
 }

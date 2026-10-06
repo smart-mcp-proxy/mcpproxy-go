@@ -175,8 +175,9 @@ func parseConnectResponse(status int, raw []byte, clientID string) (*connect.Con
 // changed named binding; a reconnect that keeps the recorded binding is
 // allowed. Only ever stricter than the daemon's.
 type offlineConnectBackend struct {
-	sm  *storage.Manager
-	svc *connect.Service
+	sm      *storage.Manager
+	svc     *connect.Service
+	clients *runtime.ClientsService
 }
 
 func (o *offlineConnectBackend) close()          { _ = o.sm.Close() }
@@ -201,12 +202,18 @@ func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error
 	svc := connect.NewService(cfg.Listen, cfg.APIKey).
 		WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
 		WithCredentialMinter(clients.ConnectMinter())
-	return &offlineConnectBackend{sm: sm, svc: svc}, nil
+	clients.SetConfigReader(svc)
+	return &offlineConnectBackend{sm: sm, svc: svc, clients: clients}, nil
 }
 
 func (o *offlineConnectBackend) connect(clientID, serverName string, force bool, intent connect.CredentialIntent) (*connect.ConnectResult, error) {
 	intent.ActorKind = "cli_offline"
 	intent.Surface = string(profile.SurfaceCLI)
+	// Resolve a rotation an earlier interrupted connect left staged (its new
+	// secret may already be in the client config) before staging another one,
+	// which would silently replace it. Best effort: an unreadable config keeps
+	// both secrets, exactly as the daemon's reconciler does.
+	_ = o.clients.ReconcileClient(context.Background(), clientID)
 	return o.svc.ConnectWithOptions(clientID, serverName, connect.ConnectOptions{Force: force, Intent: intent})
 }
 

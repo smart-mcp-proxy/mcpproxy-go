@@ -1210,7 +1210,7 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	// wait (a queued call may outlive a reconnect), so a transport failure is
 	// only ever charged to the session that produced it (RC4-STDIO-001).
 	callEpoch := mc.connectionEpoch.Load()
-	result, err := mc.callToolWithSession(ctx, invoker, toolName, args, expectedEpoch)
+	result, err := mc.callToolWithSession(core.WithConnectionGeneration(ctx, callEpoch), invoker, toolName, args, expectedEpoch)
 	if err != nil {
 		if errors.Is(err, ErrSessionReestablished) || errors.Is(err, ErrConnectionGenerationChanged) {
 			// Spec 113-e: the session was re-established and the call was

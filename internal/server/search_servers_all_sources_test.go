@@ -22,10 +22,6 @@ func withMCPCatalogFixture(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"id":"one","name":"Alpha Tool","description":"d1"}]`))
 	}))
 	t.Cleanup(fast.Close)
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	t.Cleanup(slow.Close)
 
 	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
 	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{

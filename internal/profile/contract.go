@@ -58,6 +58,10 @@ const (
 	BlockReasonUnannotated   BlockReason = "profile_unannotated"
 	BlockReasonCodeExecution BlockReason = "profile_code_execution"
 	BlockReasonManagement    BlockReason = "profile_management"
+	// BlockReasonServerScope marks a nested code_execution call to a server
+	// outside the caller's profile scope. Top-level out-of-scope refusals stay
+	// the Spec 105 non-disclosing row with no block_reason.
+	BlockReasonServerScope BlockReason = "profile_server_scope"
 )
 
 // ExplainStep is one link of the access-explanation chain, in the canonical

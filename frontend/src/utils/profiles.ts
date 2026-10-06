@@ -95,7 +95,8 @@ export function explainSubjectForRecord(record: {
 
 // Spec 108-j J9: what a blocked record can offer. `allow` edits a rule or the
 // tier of one tool (the editor opens focused on it); `open` is the profile
-// itself (code execution and management are profile switches, not a tool row).
+// itself (code execution and management are profile switches, and a server outside
+// the profile is added in the profile editor, not on a tool row).
 export function blockedProfileAction(reason: string | undefined): 'allow' | 'open' | null {
   switch (reason) {
     case 'profile_tier':
@@ -104,6 +105,7 @@ export function blockedProfileAction(reason: string | undefined): 'allow' | 'ope
       return 'allow'
     case 'profile_code_execution':
     case 'profile_management':
+    case 'profile_server_scope':
       return 'open'
     default:
       return null

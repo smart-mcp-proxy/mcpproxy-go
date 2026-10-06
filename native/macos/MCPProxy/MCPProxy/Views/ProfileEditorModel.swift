@@ -95,6 +95,9 @@ final class ProfileEditorModel: ObservableObject {
     /// The exact marker text of a classification whose tool gained annotations
     /// (FR-005).
     static let staleMarkerText = "classification ignored — tool is now annotated"
+    /// Same words as `mcpproxy profile show --effective`.
+    static let staleMissingText = "classification ignored — tool not found"
+    static let staleUnknownText = "classification ignored"
 
     /// What the editor lays out, in order. A new profile has no saved version,
     /// so no `effective-tools` table, but "Try it" works on the unsaved draft.
@@ -282,7 +285,26 @@ final class ProfileEditorModel: ObservableObject {
         row.classificationStale ? Self.staleMarkerText : nil
     }
 
+    /// Stale classify entries with no row in the table (the tool is gone, or
+    /// annotated and filtered out), each with the server's reason as a note.
+    var staleOrphans: [(id: String, note: String)] {
+        guard let effective else { return [] }
+        let listed = Set(effective.tools.map(\.fullName))
+        return (effective.staleClassifications ?? []).filter { !listed.contains($0) }.map { id in
+            (id, Self.staleNote(reason: effective.staleClassificationReasons?[id]))
+        }
+    }
+
+    static func staleNote(reason: String?) -> String {
+        switch reason {
+        case "annotated": return staleMarkerText
+        case "missing": return staleMissingText
+        default: return staleUnknownText
+        }
+    }
+
     func removeClassification(_ row: EffectiveTool) { classify(row, as: nil) }
+    func removeClassification(id: String) { draft.tools.classify.removeValue(forKey: id) }
 
     // MARK: Try it
 

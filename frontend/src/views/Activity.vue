@@ -553,7 +553,7 @@
               type="button"
               class="btn btn-sm btn-outline mt-2"
               data-test="activity-empty-show-blocked"
-              @click="filterStatus = 'blocked'"
+              @click="showBlockedAttempts"
             >
               Show {{ blockedAttemptCount }} blocked attempt{{ blockedAttemptCount === 1 ? '' : 's' }}
             </button>
@@ -2058,6 +2058,18 @@ const summaryParts = computed(() => compactSummaryParts(summary.value))
 const BLOCKED_CALLS_TITLE =
   'Blocked call attempts in the last 24 h, including calls a profile or token refused. Click to list them.'
 const blockedAttemptCount = computed(() => summary.value?.blocked_count ?? 0)
+// An explicit `type` filter overrides the view's types, so a filter that excludes
+// `policy_decision` would leave the blocked status filter matching nothing.
+function showBlockedAttempts() {
+  if (selectedTypes.value.length > 0 && !selectedTypes.value.includes('policy_decision')) {
+    // One URL write for both params: two back-to-back router.replace calls each
+    // start from the stale route.query and the second would drop the first.
+    // The route watcher hydrates both refs from the URL.
+    scopeQuery.set({ type: [...selectedTypes.value, 'policy_decision'].join(','), status: 'blocked' })
+    return
+  }
+  filterStatus.value = 'blocked'
+}
 const showBlockedOffer = computed(
   () => activeView.value === 'calls' && !filterStatus.value && blockedAttemptCount.value > 0
 )

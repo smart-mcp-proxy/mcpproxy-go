@@ -26,7 +26,7 @@
 
     <ul v-if="orphanStale.length" class="text-sm space-y-1" data-test="profile-stale-orphans">
       <li v-for="key in orphanStale" :key="key" class="flex flex-wrap items-center gap-2">
-        <code class="text-xs">{{ key }}</code> <span>classification ignored &mdash; tool is not indexed</span>
+        <code class="text-xs">{{ key }}</code> <span :data-test="`profile-stale-orphan-note-${key}`">{{ orphanNote(key) }}</span>
         <button v-if="editable" type="button" class="btn btn-xs btn-outline" @click="emit('remove-classification', key)">Remove classification</button>
       </li>
     </ul>
@@ -121,6 +121,7 @@ const props = defineProps<{
   rows: EffectiveTool[]
   counts?: EffectiveToolsResult['counts']
   stale?: string[]
+  staleReasons?: Record<string, string>
   draftRules: ProfileToolRules | undefined
   profileLabel: string
   serversChosen: boolean
@@ -157,6 +158,15 @@ const visibleRows = computed(() => props.rows.filter(row => {
 // A non-administrator gets visible rows only, plus a count of the rest.
 const hiddenOnly = computed(() => (props.rows.some(row => !row.access.visible) ? 0 : props.counts?.hidden ?? 0))
 const orphanStale = computed(() => (props.stale ?? []).filter(entry => !props.rows.some(row => key(row) === entry)))
+
+// Same wording as `mcpproxy profile show --effective`. The server's reason map
+// is authoritative; an older daemon sends none, so the note stays neutral.
+function orphanNote(entry: string): string {
+  const reason = props.staleReasons?.[entry]
+  if (reason === 'annotated') return 'classification ignored \u2014 tool is now annotated'
+  if (reason === 'missing') return 'classification ignored \u2014 tool not found'
+  return 'classification ignored'
+}
 
 function isListed(list: 'allow' | 'deny', row: EffectiveTool): boolean {
   return (props.draftRules?.[list] ?? []).includes(key(row))

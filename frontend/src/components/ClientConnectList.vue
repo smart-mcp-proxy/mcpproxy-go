@@ -276,12 +276,19 @@
               <span>{{ conflictOf(client.id)!.message }}</span>
               <span>Revoke or delete token <code>{{ conflictOf(client.id)!.conflicting_token }}</code>, then connect again.</span>
             </div>
+            <!-- A failed re-fetch leaves the old preview up with Connect disabled;
+                 say why. (Mutually exclusive with the no-preview error below.) -->
+            <p
+              v-if="previewError[client.id]"
+              :data-test="`connect-preview-error-${client.id}`"
+              class="text-xs text-error"
+            >{{ previewError[client.id] }}</p>
             <div class="flex items-center gap-2 pt-1">
               <button
                 :data-test="`client-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id] || previews[client.id]!.access_state === 'malformed'"
+                :disabled="loading.clients[client.id] || previewRefreshing[client.id] || previewStale[client.id] || previews[client.id]!.access_state === 'malformed'"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>
@@ -846,13 +853,43 @@ async function onBindingToggle(clientId: string) {
   await refreshPreview(clientId)
 }
 
+// One ticket per client: a slow preview for an older intent must not land over
+// the newer one. `previewRefreshing` keeps Connect disabled while the intent on
+// screen and the precondition token in hand disagree.
+const previewTickets: Record<string, number> = {}
+const previewRefreshing = ref<Record<string, boolean>>({})
+// A re-fetch after a binding change failed: the token in hand belongs to an
+// older intent, so Connect stays disabled until a fetch succeeds or Cancel.
+const previewStale = ref<Record<string, boolean>>({})
+function setStale(clientId: string, on: boolean) {
+  previewStale.value = { ...previewStale.value, [clientId]: on }
+}
+function setRefreshing(clientId: string, on: boolean) {
+  previewRefreshing.value = { ...previewRefreshing.value, [clientId]: on }
+}
+
 async function refreshPreview(clientId: string) {
+  const ticket = (previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1)
   setRefusal(clientId, null)
+  setRefreshing(clientId, true)
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
-    if (response.success && response.data) previews.value = { ...previews.value, [clientId]: response.data }
+    if (ticket !== previewTickets[clientId]) return
+    if (response.success && response.data) {
+      previews.value = { ...previews.value, [clientId]: response.data }
+      setStale(clientId, false)
+      previewError.value = { ...previewError.value, [clientId]: '' }
+    } else {
+      setStale(clientId, true)
+      previewError.value = { ...previewError.value, [clientId]: response.error || 'Failed to refresh preview' }
+    }
   } catch (err) {
+    if (ticket !== previewTickets[clientId]) return
+    setStale(clientId, true)
     setRefusal(clientId, err as ApiError)
+    previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to refresh preview') }
+  } finally {
+    if (ticket === previewTickets[clientId]) setRefreshing(clientId, false)
   }
 }
 
@@ -863,20 +900,27 @@ async function startConnect(clientId: string) {
   previewLoading[clientId] = true
   previewError.value = { ...previewError.value, [clientId]: '' }
   setRefusal(clientId, null)
+  const ticket = (previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1)
+  setRefreshing(clientId, false)
+  setStale(clientId, false)
   // The row's current binding lives in the clients store; make sure it is there.
   if (!clientsStore.clients.some(c => c.id === clientId)) await clientsStore.refreshPresence()
   delete forms[clientId]
   try {
     const response = await fetchPreview(clientId, intentFor(clientId))
+    if (ticket !== previewTickets[clientId]) return
     if (response.success && response.data) {
       previews.value = { ...previews.value, [clientId]: response.data }
     } else {
       // The preview read may have been blocked by macOS App-Data — resolve the
       // access state so a denial renders the existing remediation banner.
+      if (previews.value[clientId]) setStale(clientId, true)
       previewError.value = { ...previewError.value, [clientId]: response.error || 'Failed to load preview' }
       void checkAccess(clientId)
     }
   } catch (err) {
+    if (ticket !== previewTickets[clientId]) return
+    if (previews.value[clientId]) setStale(clientId, true)
     previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to load preview') }
     void checkAccess(clientId)
   } finally {
@@ -886,16 +930,23 @@ async function startConnect(clientId: string) {
 
 // Cancel dismisses the preview WITHOUT writing anything (Spec 078 US1).
 function cancelPreview(clientId: string) {
+  // Invalidate any preview still in flight and drop its refusal (the bulk path
+  // never goes through here).
+  previewTickets[clientId] = (previewTickets[clientId] ?? 0) + 1
+  setRefreshing(clientId, false)
+  setStale(clientId, false)
+  setRefusal(clientId, null)
   const next = { ...previews.value }
   delete next[clientId]
   previews.value = next
+  // Dismissing also drops a failed re-fetch's message.
+  const nextErr = { ...previewError.value }
+  delete nextErr[clientId]
+  previewError.value = nextErr
 }
 
 function clearPreview(clientId: string) {
   cancelPreview(clientId)
-  const nextErr = { ...previewError.value }
-  delete nextErr[clientId]
-  previewError.value = nextErr
 }
 
 // Confirm proceeds with the connect. If an entry already exists, confirming
@@ -970,6 +1021,8 @@ async function connect(
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
       resultReloadHint.value = response.data.reload_hint || ''
+      // A stale refusal from an earlier attempt no longer applies.
+      setRefusal(clientId, null)
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
@@ -1307,6 +1360,10 @@ watch(() => props.show, (newVal) => {
     previews.value = {}
     previewError.value = {}
     connectRefusal.value = {}
+    // Invalidate any preview fetch still in flight from the previous open.
+    for (const id of Object.keys(previewTickets)) previewTickets[id] += 1
+    previewRefreshing.value = {}
+    previewStale.value = {}
     for (const id of Object.keys(forms)) delete forms[id]
     Object.assign(bulkForm, { profile: '', locked: false, touched: false })
     lastConnect.value = null

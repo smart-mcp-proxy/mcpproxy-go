@@ -105,27 +105,15 @@ func TestRetrieveTools_ScopeLatency_ScopedVsAdmin(t *testing.T) {
 	const warmup = 20
 	const timed = 200
 
-	measure := func(ctx context.Context) []time.Duration {
-		req := mcp.CallToolRequest{}
-		req.Params.Arguments = map[string]interface{}{"query": query, "limit": float64(limit)}
-
-		for i := 0; i < warmup; i++ {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]interface{}{"query": query, "limit": float64(limit)}
+	// Arms interleaved (see measureInterleaved): a runner noise burst must not
+	// land on one arm alone.
+	scopedDurations, adminDurations := measureInterleaved(t, scopedCtx, adminScopeCtx, warmup, timed,
+		func(ctx context.Context) error {
 			_, err := proxy.handleRetrieveTools(ctx, req)
-			require.NoError(t, err)
-		}
-
-		durations := make([]time.Duration, 0, timed)
-		for i := 0; i < timed; i++ {
-			start := time.Now()
-			_, err := proxy.handleRetrieveTools(ctx, req)
-			durations = append(durations, time.Since(start))
-			require.NoError(t, err)
-		}
-		return durations
-	}
-
-	scopedDurations := measure(scopedCtx)
-	adminDurations := measure(adminScopeCtx)
+			return err
+		})
 
 	p95Scoped := p95(scopedDurations)
 	p95Admin := p95(adminDurations)
@@ -154,7 +142,13 @@ func TestRetrieveTools_ScopeLatency_ScopedVsAdmin(t *testing.T) {
 // same reason as T078.
 
 // measureLatency runs warm-up then timed calls of fn under ctx and returns
-// the timed durations.
+// the timed durations. Single-arm; two-arm comparisons use measureInterleaved.
+//
+// Kept (unused here) because scope-latency.yml copies this file over a
+// merge-base checkout whose own scope_latency_profile_v3_test.go may still
+// call it.
+//
+//nolint:unused
 func measureLatency(t *testing.T, ctx context.Context, warmup, timed int, fn func(context.Context) error) []time.Duration {
 	t.Helper()
 	for i := 0; i < warmup; i++ {
@@ -167,6 +161,41 @@ func measureLatency(t *testing.T, ctx context.Context, warmup, timed int, fn fun
 		durations = append(durations, time.Since(start))
 	}
 	return durations
+}
+
+// measureInterleaved is measureLatency for a two-arm comparison (scoped vs
+// admin, legacy vs v3). Both arms are warmed up, then each timed iteration
+// times ONE call of each arm back to back, alternating which arm goes first
+// (arm A first on even i, arm B first on odd i) so ordering bias cancels.
+//
+// Why interleave: measuring one arm's 200 calls and then the other's lets a
+// shared-runner noise burst land on a single arm and show up as a false p95
+// gap (#1465: 29.6 ms on read_cache; #1387). Interleaved, a burst hits both
+// arms alike. The budget, p95 and recordAdminLatencyResult are unchanged; only
+// the sampling order differs. measureLatency is kept for merge-base callers.
+func measureInterleaved(t *testing.T, ctxA, ctxB context.Context, warmup, timed int, fn func(context.Context) error) (a, b []time.Duration) {
+	t.Helper()
+	for i := 0; i < warmup; i++ {
+		require.NoError(t, fn(ctxA))
+		require.NoError(t, fn(ctxB))
+	}
+	a = make([]time.Duration, 0, timed)
+	b = make([]time.Duration, 0, timed)
+	timeOne := func(ctx context.Context) time.Duration {
+		start := time.Now()
+		require.NoError(t, fn(ctx))
+		return time.Since(start)
+	}
+	for i := 0; i < timed; i++ {
+		if i%2 == 0 {
+			a = append(a, timeOne(ctxA))
+			b = append(b, timeOne(ctxB))
+		} else {
+			b = append(b, timeOne(ctxB))
+			a = append(a, timeOne(ctxA))
+		}
+	}
+	return a, b
 }
 
 // assertScopedWithinBudget is the FR-011 SC-006 assertion shared by every
@@ -226,8 +255,7 @@ func TestScopeLatency_ReadCache_ScopedVsAdmin(t *testing.T) {
 		return nil
 	}
 
-	adminDurations := measureLatency(t, adminCtx(), 20, 200, call)
-	scopedDurations := measureLatency(t, scopedCtx, 20, 200, call)
+	scopedDurations, adminDurations := measureInterleaved(t, scopedCtx, adminCtx(), 20, 200, call)
 	assertScopedWithinBudget(t, "read_cache", scopedDurations, adminDurations)
 }
 
@@ -301,8 +329,7 @@ func TestScopeLatency_PromptsList_ScopedVsAdmin(t *testing.T) {
 		}
 		return nil
 	}
-	adminDurations := measureLatency(t, adminCtx(), 20, 200, call)
-	scopedDurations := measureLatency(t, scopedCtx, 20, 200, call)
+	scopedDurations, adminDurations := measureInterleaved(t, scopedCtx, adminCtx(), 20, 200, call)
 	assertScopedWithinBudget(t, "prompts/list", scopedDurations, adminDurations)
 }
 
@@ -367,8 +394,7 @@ func TestScopeLatency_ToolsList_ScopedVsAdmin(t *testing.T) {
 		}
 		return nil
 	}
-	adminDurations := measureLatency(t, adminCtx(), 20, 200, call)
-	scopedDurations := measureLatency(t, scopedCtx, 20, 200, call)
+	scopedDurations, adminDurations := measureInterleaved(t, scopedCtx, adminCtx(), 20, 200, call)
 	assertScopedWithinBudget(t, "tools/list", scopedDurations, adminDurations)
 }
 
@@ -429,4 +455,51 @@ func p95(durations []time.Duration) time.Duration {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// TestMeasureInterleaved pins the sampler's contract: warm-up excluded, equal
+// sample counts, alternating order, and a contiguous slow burst spreads over
+// both arms instead of landing on one.
+func TestMeasureInterleaved(t *testing.T) {
+	type key struct{}
+	ctxA := context.WithValue(context.Background(), key{}, "A")
+	ctxB := context.WithValue(context.Background(), key{}, "B")
+
+	var order []string
+	calls := 0
+	const warmup, timed = 3, 10
+	a, b := measureInterleaved(t, ctxA, ctxB, warmup, timed, func(ctx context.Context) error {
+		calls++
+		order = append(order, ctx.Value(key{}).(string))
+		// A slow burst over a contiguous run of calls in the timed phase.
+		if calls > 2*warmup+4 && calls <= 2*warmup+8 {
+			time.Sleep(3 * time.Millisecond)
+		}
+		return nil
+	})
+	require.Len(t, a, timed)
+	require.Len(t, b, timed)
+	require.Equal(t, 2*warmup+2*timed, calls)
+
+	timedOrder := order[2*warmup:]
+	for i := 0; i < timed; i++ {
+		first, second := "A", "B"
+		if i%2 == 1 {
+			first, second = "B", "A"
+		}
+		require.Equal(t, first, timedOrder[2*i], "iteration %d first arm", i)
+		require.Equal(t, second, timedOrder[2*i+1], "iteration %d second arm", i)
+	}
+
+	slow := func(ds []time.Duration) int {
+		n := 0
+		for _, d := range ds {
+			if d >= 2*time.Millisecond {
+				n++
+			}
+		}
+		return n
+	}
+	require.Positive(t, slow(a), "burst must reach arm A")
+	require.Positive(t, slow(b), "burst must reach arm B")
 }

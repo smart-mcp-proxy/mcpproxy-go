@@ -185,7 +185,7 @@ struct TokensView: View {
                 set: { filter.profile = $0.isEmpty ? nil : $0 })) {
                 Text("All profiles").tag(TokenProfileFilter.all)
                 Text("Unpinned").tag(TokenProfileFilter.unpinned)
-                ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                 if let current = filter.profile, current != TokenProfileFilter.unpinned,
                    !appState.profiles.contains(where: { $0.name == current }) {
                     Text(current).tag(current)
@@ -254,7 +254,7 @@ struct TokensView: View {
                 token: token,
                 onRevoke: { Task { await revokeToken(token.name) } },
                 onShowActivity: appState.scopeFiltersAvailable
-                    ? { appState.openActivity(with: .forToken(token.name)) }
+                    ? { appState.openActivity(with: filter.linked(.forToken(token.name))) }
                     : nil,
                 onMigrate: { migrating = token }
             )
@@ -511,7 +511,7 @@ struct CreateTokenSheet: View {
                     .font(.scaled(.subheadline, scale: fontScale).bold())
                 Picker("Profile", selection: $model.profile) {
                     Text("Choose…").tag(TokenCreateModel.choose)
-                    ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                    ForEach(appState.profiles) { Text($0.pickerTitle(in: appState.profiles)).tag($0.name) }
                     Text("None — legacy scope").tag(TokenCreateModel.legacy)
                 }
                 .labelsHidden()

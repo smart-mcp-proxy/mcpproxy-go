@@ -743,6 +743,11 @@ func expandDataDir(cfg *Config) {
 	cfg.DataDir = resolved
 }
 
+// ApplyEnvOverrides applies the MCPPROXY_* environment overlay (listen, TLS,
+// data dir, trusted hosts...) that Load applies, for callers that build a
+// config from DefaultConfig without reading a file.
+func ApplyEnvOverrides(cfg *Config) { applyTLSEnvOverrides(cfg) }
+
 // applyTLSEnvOverrides applies the MCPPROXY_* environment overrides. Each one
 // goes through OverrideForProcess so no save path persists it (see
 // process_overrides.go); the env-sourced set is rebuilt from scratch on every
