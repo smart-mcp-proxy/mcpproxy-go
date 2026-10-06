@@ -242,6 +242,9 @@ func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (bef
 		updated := *existing
 		updated.ProfilePin = pin
 		updated.ProfileMode = mode
+		// The mint-time snapshot is stale once the binding moves: undoing a
+		// later connect must keep the current binding, not resurrect it.
+		updated.PriorProfilePin, updated.PriorProfileMode = "", ""
 		if err := auth.ValidateTokenInvariants(&updated, auth.KindClient); err != nil {
 			return fmt.Errorf("binding update produced an invalid client credential record: %w", err)
 		}
@@ -365,6 +368,7 @@ func (m *Manager) FinalizeClientCredentialRotation(clientID string) (*auth.Agent
 
 		pendingBucket := tx.Bucket([]byte(AgentTokenPendingBucket))
 		newHash := existing.PendingHash
+		existing.PriorProfilePin, existing.PriorProfileMode = "", ""
 		existing.TokenHash = newHash
 		existing.TokenPrefix = existing.PendingPrefix
 		existing.PendingHash = ""

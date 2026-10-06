@@ -685,6 +685,16 @@ func (s *ClientsService) forgetLockedOpt(ctx context.Context, a Actor, clientID 
 	if restorePrior {
 		forget = s.store.ForgetClientCredentialRestoringPrior
 	}
+	// The restore path rewrites the revoked record's binding, so capture the
+	// binding it held when revoked for the audit record.
+	heldPin := ""
+	if restorePrior {
+		if all, rerr := s.records(); rerr == nil {
+			if rec := clientRecord(all, clientID); rec != nil {
+				heldPin = rec.ProfilePin
+			}
+		}
+	}
 	revoked, err := forget(clientID)
 	if err != nil {
 		if errors.Is(err, storage.ErrClientCredentialNotFound) {
@@ -692,8 +702,11 @@ func (s *ClientsService) forgetLockedOpt(ctx context.Context, a Actor, clientID 
 		}
 		return nil, err
 	}
+	if !restorePrior {
+		heldPin = revoked.ProfilePin
+	}
 	s.writeChange(ctx, a, changeRecord{
-		change: profile.ChangeForget, profile: revoked.ProfilePin, previousProfile: revoked.ProfilePin,
+		change: profile.ChangeForget, profile: heldPin, previousProfile: heldPin,
 		clientID: clientID, tokenName: revoked.Name, diff: diff,
 	})
 	return s.view(revoked), nil

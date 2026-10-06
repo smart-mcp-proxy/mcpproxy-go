@@ -124,3 +124,45 @@ func TestConnectMinter_AbortAndUndoRestoreTombstoneBinding(t *testing.T) {
 		wantTombstone(t, h)
 	})
 }
+
+// A later binding change makes the mint-time snapshot stale: undoing after it
+// must not resurrect the older tombstone binding over the newer one (F2.1).
+func TestConnectMinter_UndoAfterLaterBindingChangeKeepsCurrent(t *testing.T) {
+	h := newSvcHarness(t)
+	h.mint("cursor", "ro", nil)
+	_, err := h.sm.ForgetClientCredential("cursor")
+	require.NoError(t, err)
+	intent := connect.CredentialIntent{Profile: strp("full"), ActorKind: "api_key", Surface: "api"}
+	m := h.svc.ConnectMinter()
+	issued, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.NoError(t, m.Commit("cursor", intent, issued))
+	_, _, err = h.sm.UpdateClientCredentialBinding("cursor", "", "switchable")
+	require.NoError(t, err)
+	_, err = m.ForgetUnheld("cursor", "", intent)
+	require.NoError(t, err)
+	pin, mode, err := m.PreviewBinding("cursor", connect.CredentialIntent{})
+	require.NoError(t, err)
+	require.Equal(t, "", pin)
+	require.Equal(t, "switchable", mode)
+}
+
+// The undo record shows the binding the credential held when revoked, not the
+// tombstone binding restored afterwards (F2.2).
+func TestConnectMinter_UndoRecordKeepsHeldBinding(t *testing.T) {
+	h := newSvcHarness(t)
+	h.mint("cursor", "ro", nil)
+	_, err := h.sm.ForgetClientCredential("cursor")
+	require.NoError(t, err)
+	intent := connect.CredentialIntent{Profile: strp("full"), ActorKind: "api_key", Surface: "api"}
+	m := h.svc.ConnectMinter()
+	issued, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.NoError(t, m.Commit("cursor", intent, issued))
+	_, err = m.ForgetUnheld("cursor", "", intent)
+	require.NoError(t, err)
+	last := h.changes()[len(h.changes())-1]
+	require.Equal(t, "forget", last["change"])
+	require.Equal(t, "full", last["profile"])
+	require.Equal(t, "full", last["previous_profile"])
+}
