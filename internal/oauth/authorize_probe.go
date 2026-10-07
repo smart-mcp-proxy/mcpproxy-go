@@ -74,7 +74,11 @@ func (r AuthorizeProbeResult) Summary() string {
 // registration, and must not clear a valid stored client.
 var (
 	clientThenRejection = regexp.MustCompile(`\bclient(?:_id| id)?\s+(?:(?:is|was|has\s+been)\s+)?(?:invalid|unknown|not found|does not exist|doesn't exist|not registered|no longer exists)\b`)
-	rejectionThenClient = regexp.MustCompile(`\b(?:invalid|unknown|unregistered|nonexistent|no such)\s+client(?:_id| id)?\b`)
+	// "invalid client" must END the phrase (end of text, punctuation, or a
+	// quoted/bracketed id), so "Invalid client authentication method" or
+	// "Invalid client assertion" — request errors for an existing client —
+	// do not match.
+	rejectionThenClient = regexp.MustCompile(`\b(?:invalid|unknown|unregistered|nonexistent|no such)\s+client(?:_id| id)?(?:\s*$|\s*[.,;:!)]|\s+['"\x60(\[])`)
 )
 
 // ClassifyAuthorizeClientRejection decides whether an authorization-endpoint
