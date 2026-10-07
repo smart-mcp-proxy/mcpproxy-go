@@ -30,6 +30,20 @@ import (
 // call works. It is not a connection failure and never marks the server Error.
 var ErrSessionReestablished = errors.New("upstream session was lost and re-established; the call was not repeated")
 
+// sessionReestablishedError is the ErrSessionReestablished returned for a
+// call that was not repeated. It also matches transport.ErrSessionTerminated,
+// its cause, so call-error classification (Spec 113-c) still reports
+// session_terminated rather than the bare 404 status.
+type sessionReestablishedError struct{ detail string }
+
+func (e *sessionReestablishedError) Error() string {
+	return ErrSessionReestablished.Error() + " (" + e.detail + ")"
+}
+
+func (e *sessionReestablishedError) Is(target error) bool {
+	return target == ErrSessionReestablished || target == transport.ErrSessionTerminated
+}
+
 // reinitTimeout bounds one re-init flight (initialize + tools/list). The
 // flight is detached from any single caller's context so one caller going
 // away cannot fail the callers waiting on it.
@@ -318,12 +332,12 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 		if expectedEpoch != nil {
 			return nil, ErrConnectionGenerationChanged
 		}
-		return nil, fmt.Errorf("%w (tool %q identity not confirmed after re-initialize)", ErrSessionReestablished, toolName)
+		return nil, &sessionReestablishedError{detail: fmt.Sprintf("tool %q identity not confirmed after re-initialize", toolName)}
 	}
 	// Both the listing the caller was certified against and the re-listed one
 	// must say read-only: annotations are not part of the identity hash.
 	if !pre.readOnly || !post.readOnly {
-		return nil, fmt.Errorf("%w (tool %q is not read-only)", ErrSessionReestablished, toolName)
+		return nil, &sessionReestablishedError{detail: fmt.Sprintf("tool %q is not read-only", toolName)}
 	}
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
