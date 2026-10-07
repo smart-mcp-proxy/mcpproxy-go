@@ -104,8 +104,8 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 
 	doneA := make(chan error, 1)
 	go func() {
-		err := c.exchangeAuthorizationCode(ctx, hA, cbA, codeA, stateA, verA)
-		if err == nil {
+		stored, err := c.exchangeAuthorizationCode(ctx, hA, cbA, codeA, stateA, verA)
+		if err == nil && !stored { // as finishOAuth(!stored)
 			c.persistCompletedDCRCredentials(hA.GetClientID(), hA.GetClientSecret())
 		}
 		doneA <- err
@@ -118,8 +118,9 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 		t.Fatal("login A never reached its token save")
 	}
 
-	require.NoError(t, c.exchangeAuthorizationCode(ctx, hB, cbB, codeB, stateB, verB))
-	c.persistCompletedDCRCredentials(hB.GetClientID(), hB.GetClientSecret())
+	storedB, err := c.exchangeAuthorizationCode(ctx, hB, cbB, codeB, stateB, verB)
+	require.NoError(t, err)
+	require.True(t, storedB)
 
 	close(gateA.release)
 	require.NoError(t, <-doneA)
@@ -169,7 +170,9 @@ func TestLoginCompletion_ExtraParamsClientIDNotReplacedByHandlerClient(t *testin
 	f := newStaleDCRFixture(t, oauthserver.ErrorMode{}, "login-pair-extra")
 	c := f.client(t, &config.OAuthConfig{ExtraParams: map[string]string{"client_id": "from-extra-params"}})
 	h, code, state, verifier := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
-	require.NoError(t, c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier))
+	stored, err := c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier)
+	require.NoError(t, err)
+	assert.False(t, stored, "an untagged exchange leaves the client write to finishOAuth")
 	rec, err := f.db.GetOAuthToken(f.key)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rec.RefreshToken)
@@ -206,4 +209,39 @@ func TestLoginCompletion_AllExchangeSitesUseHelper(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]int{"exchangeAuthorizationCode": 1}, callers)
+}
+
+// Each exchange site completes through finishOAuth with the exchange's own
+// result, never markOAuthComplete (which always rewrites the client and its
+// callback metadata from the registry).
+func TestLoginCompletion_ExchangeSitesFinishWithExchangeResult(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "connection_oauth.go", nil, 0)
+	require.NoError(t, err)
+	sites := 0
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Name.Name == "exchangeAuthorizationCode" {
+			continue
+		}
+		calls := map[string][]*ast.CallExpr{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					calls[sel.Sel.Name] = append(calls[sel.Sel.Name], call)
+				}
+			}
+			return true
+		})
+		if len(calls["exchangeAuthorizationCode"]) == 0 {
+			continue
+		}
+		sites++
+		assert.Empty(t, calls["markOAuthComplete"], "%s must finish with finishOAuth", fn.Name.Name)
+		require.Len(t, calls["finishOAuth"], 1, fn.Name.Name)
+		arg, ok := calls["finishOAuth"][0].Args[0].(*ast.UnaryExpr)
+		require.True(t, ok, "%s: finishOAuth(!clientStored)", fn.Name.Name)
+		id, ok := arg.X.(*ast.Ident)
+		assert.True(t, ok && id.Name == "clientStored", "%s: finishOAuth(!clientStored)", fn.Name.Name)
+	}
+	assert.Equal(t, 3, sites)
 }

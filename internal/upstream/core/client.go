@@ -87,12 +87,6 @@ type Client struct {
 	oauthCompleted     bool
 	lastOAuthTimestamp time.Time
 
-	// exchangedClients counts, per client id, code exchanges that already
-	// stored their token and client registration together; the completion
-	// write for that client is then skipped (see exchangeAuthorizationCode).
-	exchangedMu      sync.Mutex
-	exchangedClients map[string]int
-
 	// SSE request serialization (prevent concurrent requests on SSE transport)
 	// SSE transport has limitations with concurrent requests - responses can get lost
 	// when multiple requests are in-flight simultaneously
