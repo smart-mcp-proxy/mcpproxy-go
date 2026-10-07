@@ -169,6 +169,11 @@ type Options struct {
 
 	// Pre-registered clients (in addition to auto-generated test client)
 	Clients []ClientConfig
+
+	// OnRegister, when set, runs at the start of every Dynamic Client
+	// Registration request, before the response is written. Tests use it to
+	// interleave a concurrent write with an in-flight registration.
+	OnRegister func()
 }
 
 // ClientConfig defines a pre-registered OAuth client.

@@ -169,3 +169,42 @@ func TestClearOAuthClientCredentialsIfClientID(t *testing.T) {
 		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
 	}
 }
+
+// The stale-DCR recovery persists its fresh registration only while the
+// record's DCR fields are still empty (it just cleared them), so a login
+// that saved its own registration in between is never overwritten.
+func TestSaveOAuthClientCredentialsIfUnset(t *testing.T) {
+	db := newTestDB(t)
+
+	// No record yet: saved.
+	ok, err := db.SaveOAuthClientCredentialsIfUnset("k1", "new", "", 1234, "http://127.0.0.1:1234/oauth/callback")
+	if err != nil || !ok {
+		t.Fatalf("first save: ok=%v err=%v", ok, err)
+	}
+	id, _, port, redirect, err := db.GetOAuthClientCredentials("k1")
+	if err != nil || id != "new" || port != 1234 || redirect != "http://127.0.0.1:1234/oauth/callback" {
+		t.Fatalf("stored = %q %d %q err=%v", id, port, redirect, err)
+	}
+
+	// A registration is already stored: not overwritten.
+	ok, err = db.SaveOAuthClientCredentialsIfUnset("k1", "other", "s", 5678, "x")
+	if err != nil || ok {
+		t.Fatalf("second save must be refused: ok=%v err=%v", ok, err)
+	}
+	if id, _, _, _, _ = db.GetOAuthClientCredentials("k1"); id != "new" {
+		t.Fatalf("registration overwritten: %q", id)
+	}
+
+	// Cleared record (token kept, DCR fields empty): saved, token preserved.
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: "k2", AccessToken: "at"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.SaveOAuthClientCredentialsIfUnset("k2", "fresh", "", 1, "r")
+	if err != nil || !ok {
+		t.Fatalf("save into cleared record: ok=%v err=%v", ok, err)
+	}
+	rec, err := db.GetOAuthToken("k2")
+	if err != nil || rec.ClientID != "fresh" || rec.AccessToken != "at" {
+		t.Fatalf("record = %+v err=%v", rec, err)
+	}
+}

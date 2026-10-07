@@ -67,6 +67,40 @@ func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, err
 	return callbackPort, c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 }
 
+// persistRecoveredDCRRegistration stores the registration obtained by the
+// stale-client recovery, but only while the record's DCR fields are still
+// empty (the recovery just cleared them). saved is false when another login
+// stored its own registration in the meantime; that one wins.
+func (c *Client) persistRecoveredDCRRegistration(clientID, clientSecret string) (callbackPort int, saved bool, err error) {
+	if c.storage == nil {
+		return 0, true, nil
+	}
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	var redirectURI string
+	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+		callbackPort = callbackServer.Port
+		redirectURI = callbackServer.RedirectURI
+	}
+	saved, err = c.storage.SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	return callbackPort, saved, err
+}
+
+// signInAgainFlowError reports a stale-client recovery that stopped without
+// handing out a URL; the next sign-in starts from what storage now holds.
+func (c *Client) signInAgainFlowError(correlationID, message string) error {
+	return scrubbedFlowError(&contracts.OAuthFlowError{
+		Success:       false,
+		ErrorType:     contracts.OAuthErrorFlowFailed,
+		ErrorCode:     contracts.OAuthCodeFlowFailed,
+		ServerName:    c.config.Name,
+		CorrelationID: correlationID,
+		Message:       message,
+		Details:       &contracts.OAuthErrorDetails{ServerURL: c.logSafeURL()},
+		Suggestion:    "Sign in again; a fresh client registration will be used.",
+		DebugHint:     fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+	})
+}
+
 // registerOAuthClientSafely runs Dynamic Client Registration on the handler,
 // converting a panic (mcp-go dereferences missing server metadata) into an
 // error.
@@ -169,19 +203,23 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 				zap.String("server", c.config.Name),
 				zap.String("correlation_id", correlationID),
 				zap.String("old_client_id", persistedClientID))
-			return "", scrubbedFlowError(&contracts.OAuthFlowError{
-				Success:       false,
-				ErrorType:     contracts.OAuthErrorFlowFailed,
-				ErrorCode:     contracts.OAuthCodeFlowFailed,
-				ServerName:    c.config.Name,
-				CorrelationID: correlationID,
-				Message: fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s), and another sign-in has already replaced it",
-					c.config.Name, persistedClientID, rejection),
-				Details:    &contracts.OAuthErrorDetails{ServerURL: c.logSafeURL()},
-				Suggestion: "Sign in again; the new client registration will be used.",
-				DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
-			})
+			return "", c.signInAgainFlowError(correlationID, fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s), and another sign-in has already replaced it",
+				c.config.Name, persistedClientID, rejection))
 		}
+	}
+
+	// mcp-go's handler keeps its client_secret when a registration response
+	// carries none (and asks for client_secret_post because one is set), so
+	// re-registering on this handler would pair the old secret with the new
+	// client_id at code exchange. The rejected registration is already
+	// removed; the next sign-in builds a fresh handler and registers cleanly.
+	if oauthHandler.GetClientSecret() != "" {
+		c.logger.Warn("Rejected DCR registration was a confidential client - removed; the next sign-in registers a new client",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID),
+			zap.String("old_client_id", persistedClientID))
+		return "", c.signInAgainFlowError(correlationID, fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s); it has been removed",
+			c.config.Name, persistedClientID, rejection))
 	}
 
 	if regErr := c.registerOAuthClientSafely(ctx, oauthHandler); regErr != nil {
@@ -225,10 +263,20 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 		})
 	}
 
-	if callbackPort, saveErr := c.persistDCRRegistration(newClientID, oauthHandler.GetClientSecret()); saveErr != nil {
+	if callbackPort, saved, saveErr := c.persistRecoveredDCRRegistration(newClientID, oauthHandler.GetClientSecret()); saveErr != nil {
 		c.logger.Warn("Failed to persist the re-registered DCR credentials - token refresh may fail later",
 			zap.String("server", c.config.Name),
 			logSafeErrorField(saveErr))
+	} else if !saved {
+		// Another login stored its own registration while this one was being
+		// registered. Using ours would leave storage and this flow on
+		// different clients, so stop and let the next sign-in use theirs.
+		c.logger.Info("Another login stored a client registration during re-registration - not using this one",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID),
+			zap.String("discarded_client_id", newClientID))
+		return "", c.signInAgainFlowError(correlationID, fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s), and another sign-in stored a new one in the meantime",
+			c.config.Name, persistedClientID, rejection))
 	} else {
 		c.logger.Info("✅ Re-registered OAuth client after the persisted DCR client_id was rejected",
 			zap.String("server", c.config.Name),

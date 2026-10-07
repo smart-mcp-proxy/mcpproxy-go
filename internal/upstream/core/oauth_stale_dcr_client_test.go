@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -41,10 +42,15 @@ type staleDCRFixture struct {
 
 func newStaleDCRFixture(t *testing.T, mode oauthserver.ErrorMode, name string) *staleDCRFixture {
 	t.Helper()
+	return newStaleDCRFixtureWithOptions(t, oauthserver.Options{ErrorMode: mode}, name)
+}
+
+func newStaleDCRFixtureWithOptions(t *testing.T, opts oauthserver.Options, name string) *staleDCRFixture {
+	t.Helper()
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "")
 	t.Setenv("HEADLESS", "1") // never open a browser from a test
 
-	srv := oauthserver.Start(t, oauthserver.Options{ErrorMode: mode})
+	srv := oauthserver.Start(t, opts)
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
 	require.NoError(t, err)
@@ -304,6 +310,70 @@ func TestRecoverStaleDCRClient_ReviewRound1(t *testing.T) {
 		assert.EqualValues(t, 0, f.srv.Server.AuthorizeGETCount())
 		assert.EqualValues(t, 0, f.srv.Server.RegistrationCount())
 		assert.Equal(t, "dead-client", f.storedClientID(t))
+	})
+}
+
+// Review round 2 (opencode Sol 6.1) findings, each pinned by a test.
+func TestRecoverStaleDCRClient_ReviewRound2(t *testing.T) {
+	ctx := context.Background()
+
+	// Another login saves its own registration WHILE this recovery's DCR call
+	// is in flight (after the compare-and-clear). The recovered client must
+	// not overwrite it.
+	t.Run("registration saved during re-registration is not overwritten", func(t *testing.T) {
+		var f *staleDCRFixture
+		var once sync.Once
+		f = newStaleDCRFixtureWithOptions(t, oauthserver.Options{
+			ErrorMode: oauthserver.ErrorMode{AuthorizeUnknownClientJSON400: true},
+			OnRegister: func() {
+				once.Do(func() {
+					require.NoError(t, f.db.UpdateOAuthClientCredentials(f.key, "concurrent-winner", "", 1, "http://127.0.0.1:1"+oauth.DefaultRedirectPath))
+				})
+			},
+		}, "stale-dcr-race-after-clear")
+		f.seedPersistedClient(t, "dead-client")
+		c := &Client{
+			config:  &config.ServerConfig{Name: f.name, URL: f.srv.MCPURL, Protocol: "http"},
+			logger:  zap.NewNop(),
+			storage: f.db,
+		}
+		h := newStaleDCRHelperHandler(f, "dead-client")
+		authURL, err := h.GetAuthorizationURL(ctx, "st", "cc")
+		require.NoError(t, err)
+
+		_, err = c.recoverStaleDCRClient(ctx, h, "dead-client", authURL, "st", "cc", nil, "corr")
+		require.Error(t, err, "sign in again: another login's registration is now stored")
+		assert.Equal(t, "concurrent-winner", f.storedClientID(t))
+	})
+
+	// mcp-go keeps the old client_secret in memory when a re-registration
+	// returns none, then sends it with the new client_id at code exchange. A
+	// rejected CONFIDENTIAL registration is therefore cleared and the user
+	// is asked to sign in again (a fresh handler registers cleanly), rather
+	// than re-registering on the handler that still holds the old secret.
+	t.Run("rejected confidential registration is cleared, not re-registered in place", func(t *testing.T) {
+		f := newStaleDCRFixture(t, oauthserver.ErrorMode{AuthorizeUnknownClientJSON400: true}, "stale-dcr-secret")
+		f.seedPersistedClient(t, "dead-client")
+		c := &Client{
+			config:  &config.ServerConfig{Name: f.name, URL: f.srv.MCPURL, Protocol: "http"},
+			logger:  zap.NewNop(),
+			storage: f.db,
+		}
+		h := uptransport.NewOAuthHandler(uptransport.OAuthConfig{
+			ClientID:              "dead-client",
+			ClientSecret:          "old-secret",
+			RedirectURI:           "http://127.0.0.1:1" + oauth.DefaultRedirectPath,
+			Scopes:                []string{"read"},
+			AuthServerMetadataURL: f.srv.IssuerURL + "/.well-known/oauth-authorization-server",
+			PKCEEnabled:           true,
+		})
+		authURL, err := h.GetAuthorizationURL(ctx, "st", "cc")
+		require.NoError(t, err)
+
+		_, err = c.recoverStaleDCRClient(ctx, h, "dead-client", authURL, "st", "cc", nil, "corr")
+		require.Error(t, err)
+		assert.Equal(t, "", f.storedClientID(t), "the rejected registration is removed")
+		assert.EqualValues(t, 0, f.srv.Server.RegistrationCount())
 	})
 }
 

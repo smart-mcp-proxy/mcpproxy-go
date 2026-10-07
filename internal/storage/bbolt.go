@@ -925,6 +925,40 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 	})
 }
 
+// SaveOAuthClientCredentialsIfUnset stores a DCR registration like
+// UpdateOAuthClientCredentials, but only while the record holds no client id
+// (missing record, or DCR fields cleared). It reports whether it saved. The
+// stale-DCR login recovery clears the rejected registration and then
+// re-registers; a login that saved its own registration in between must win,
+// not be overwritten.
+func (b *BoltDB) SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
+	saved := false
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		record := &OAuthTokenRecord{ServerName: serverKey, Created: time.Now()}
+		if data := bucket.Get([]byte(serverKey)); data != nil {
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			if record.ClientID != "" {
+				return nil
+			}
+		}
+		record.ClientID = clientID
+		record.ClientSecret = clientSecret
+		record.CallbackPort = callbackPort
+		record.RedirectURI = redirectURI
+		record.Updated = time.Now()
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		saved = true
+		return bucket.Put([]byte(serverKey), newData)
+	})
+	return saved && err == nil, err
+}
+
 // GetOAuthClientCredentials retrieves the client credentials, callback port and redirect URI for
 // token refresh. callbackPort returns 0 and redirectURI returns "" if not stored (legacy records
 // or fresh records without DCR).

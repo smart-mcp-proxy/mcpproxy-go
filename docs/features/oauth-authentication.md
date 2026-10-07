@@ -100,7 +100,11 @@ not found"), MCPProxy:
 1. clears the stored registration, but only if it still holds that same
    `client_id` (if another sign-in has already replaced it, this sign-in stops
    and asks you to sign in again rather than registering yet another client);
-2. registers a new client once and stores it;
+2. registers a new client once and stores it, unless another sign-in stored
+   one in the meantime (then this sign-in stops and asks you to sign in
+   again). A rejected registration that had a `client_secret` is removed and
+   you are asked to sign in again, so the new client is registered without
+   the old secret;
 3. builds the authorization URL again with the new `client_id`.
 
 If the provider also rejects the new client, sign-in stops with an error
