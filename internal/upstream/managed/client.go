@@ -449,10 +449,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// any logging in the unlocked window.
 	serverName := mc.GetConfig().Name
 
+	mc.listToolsMu.Lock()
+	listToolsInProgress := mc.listToolsInProgress
+	mc.listToolsMu.Unlock()
 	mc.logger.Info("Starting managed connection to upstream server",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("current_state", mc.StateManager.GetState().String()),
-		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
+		zap.Bool("list_tools_in_progress", listToolsInProgress))
 
 	// CRITICAL FIX: When reconnecting from Error state, disconnect core client first
 	// to clear stale c.connected flag that may remain from a previous connection
@@ -680,9 +683,12 @@ func (mc *Client) Disconnect() error {
 	// Reset state
 	mc.StateManager.Reset()
 
+	mc.listToolsMu.Lock()
+	listToolsInProgress := mc.listToolsInProgress
+	mc.listToolsMu.Unlock()
 	mc.logger.Debug("Managed client disconnect complete",
 		zap.String("server", mc.GetConfig().Name),
-		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
+		zap.Bool("list_tools_in_progress", listToolsInProgress))
 
 	return nil
 }
