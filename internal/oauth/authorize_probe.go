@@ -82,7 +82,8 @@ var (
 // parsed OAuth error code and description alongside the verdict.
 //
 // Matches (status 400 or 401, OAuth JSON error body):
-//   - error=invalid_client or error=unauthorized_client;
+//   - error=invalid_client (never unauthorized_client: that is a policy
+//     refusal for a client that exists);
 //   - error=invalid_request whose error_description names the client(_id) as
 //     invalid, unknown, not found, not registered or nonexistent
 //     (Cloudflare: "Invalid client_id"), case-insensitively — unless the
@@ -100,7 +101,10 @@ func ClassifyAuthorizeClientRejection(status int, body []byte) (rejected bool, o
 	}
 	oauthErr, description = payload.Error, payload.ErrorDescription
 	switch strings.ToLower(strings.TrimSpace(oauthErr)) {
-	case "invalid_client", "unauthorized_client":
+	case "invalid_client":
+		// unauthorized_client is deliberately NOT here: it means the client
+		// exists but may not use this grant/method (a policy decision), so
+		// re-registering would discard a valid registration.
 		return true, oauthErr, description
 	case "invalid_request":
 		d := strings.ToLower(description)

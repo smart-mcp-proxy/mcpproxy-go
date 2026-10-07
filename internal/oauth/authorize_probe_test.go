@@ -31,7 +31,7 @@ func TestClassifyAuthorizeClientRejection(t *testing.T) {
 		{"cloudflare 400 different case", 400, `{"error":"INVALID_REQUEST","error_description":"invalid CLIENT_ID"}`, true},
 		{"token-endpoint style 401 invalid_client", 401, `{"error":"invalid_client","error_description":"Client not found"}`, true},
 		{"400 invalid_client", 400, `{"error":"invalid_client"}`, true},
-		{"400 unauthorized_client", 400, `{"error":"unauthorized_client","error_description":"client is not allowed"}`, true},
+		{"400 unauthorized_client is a policy error, not a dead registration", 400, `{"error":"unauthorized_client","error_description":"client is not allowed"}`, false},
 		{"invalid_request unknown client", 400, `{"error":"invalid_request","error_description":"Unknown client"}`, true},
 		{"invalid_request client not found", 400, `{"error":"invalid_request","error_description":"Client not found"}`, true},
 		{"invalid_request client_id is invalid", 400, `{"error":"invalid_request","error_description":"The client_id is invalid"}`, true},

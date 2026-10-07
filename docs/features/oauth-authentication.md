@@ -93,12 +93,13 @@ and never redirects back to MCPProxy.
 
 Before handing out an authorization URL that uses a **reused** registration,
 MCPProxy sends one request to that URL (no redirects followed, 5 s timeout). If
-the response says the client is unknown (`invalid_client`,
-`unauthorized_client`, or `invalid_request` with a description such as
-"Invalid client_id" or "Client not found"), MCPProxy:
+the response says the client is unknown (`invalid_client`, or
+`invalid_request` with a description such as "Invalid client_id" or "Client
+not found"), MCPProxy:
 
 1. clears the stored registration, but only if it still holds that same
-   `client_id`;
+   `client_id` (if another sign-in has already replaced it, this sign-in stops
+   and asks you to sign in again rather than registering yet another client);
 2. registers a new client once and stores it;
 3. builds the authorization URL again with the new `client_id`.
 

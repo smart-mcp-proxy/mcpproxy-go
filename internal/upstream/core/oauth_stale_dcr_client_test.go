@@ -255,6 +255,58 @@ func TestRecoverStaleDCRClient_Helper(t *testing.T) {
 	})
 }
 
+// Review round 1 (opencode Sol 6.1) findings, each pinned by a test.
+func TestRecoverStaleDCRClient_ReviewRound1(t *testing.T) {
+	ctx := context.Background()
+	newHelperClient := func(f *staleDCRFixture) *Client {
+		return &Client{
+			config:  &config.ServerConfig{Name: f.name, URL: f.srv.MCPURL, Protocol: "http"},
+			logger:  zap.NewNop(),
+			storage: f.db,
+		}
+	}
+
+	// A concurrent login already replaced the rejected registration: the
+	// compare-and-clear finds a different id. This flow must not register yet
+	// another client and overwrite the winner's credentials (which would pair
+	// the winner's grant with the wrong client_id).
+	t.Run("registration replaced concurrently is not overwritten", func(t *testing.T) {
+		f := newStaleDCRFixture(t, oauthserver.ErrorMode{AuthorizeUnknownClientJSON400: true}, "stale-dcr-concurrent")
+		f.seedPersistedClient(t, "winner-client")
+		c := newHelperClient(f)
+		h := newStaleDCRHelperHandler(f, "dead-client")
+		authURL, err := h.GetAuthorizationURL(ctx, "st", "cc")
+		require.NoError(t, err)
+
+		_, err = c.recoverStaleDCRClient(ctx, h, "dead-client", authURL, "st", "cc", nil, "corr")
+		require.Error(t, err, "a structured retry error, not a URL with yet another client")
+		assert.Equal(t, "winner-client", f.storedClientID(t))
+		assert.EqualValues(t, 0, f.srv.Server.RegistrationCount())
+	})
+
+	// An extra_params client_id equal to the persisted id would be re-applied
+	// over the fresh client's id after re-registration, so the second probe
+	// would test the dead id again and wrongly clear the fresh registration.
+	// Any operator-supplied client_id in extra_params opts out of recovery.
+	t.Run("extra_params client_id equal to the persisted id is never probed", func(t *testing.T) {
+		f := newStaleDCRFixture(t, oauthserver.ErrorMode{AuthorizeUnknownClientJSON400: true}, "stale-dcr-extra-same")
+		f.seedPersistedClient(t, "dead-client")
+		c := newHelperClient(f)
+		h := newStaleDCRHelperHandler(f, "dead-client")
+		authURL, err := h.GetAuthorizationURL(ctx, "st", "cc")
+		require.NoError(t, err)
+		extra := map[string]string{"client_id": "dead-client"}
+		authURL = c.applyExtraParamsToAuthURL(authURL, extra)
+
+		got, err := c.recoverStaleDCRClient(ctx, h, "dead-client", authURL, "st", "cc", extra, "")
+		require.NoError(t, err)
+		assert.Equal(t, authURL, got)
+		assert.EqualValues(t, 0, f.srv.Server.AuthorizeGETCount())
+		assert.EqualValues(t, 0, f.srv.Server.RegistrationCount())
+		assert.Equal(t, "dead-client", f.storedClientID(t))
+	})
+}
+
 // The three authorization-URL emission paths are near-duplicates; all three
 // must run the stale-client recovery (they change in lockstep).
 func TestRecoverStaleDCRClient_CalledFromAllAuthorizePaths(t *testing.T) {

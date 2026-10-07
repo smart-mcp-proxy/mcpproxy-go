@@ -125,6 +125,12 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
 		return authURL, nil // operator static client_id: never probed or cleared
 	}
+	if _, overridden := extraParams["client_id"]; overridden {
+		// An operator-supplied client_id in oauth.extra_params is re-applied
+		// over every rebuilt URL, so a re-registration could never take effect
+		// (and a second probe would test the old id again).
+		return authURL, nil
+	}
 	if oauthHandler.GetClientID() != persistedClientID || authURLClientID(authURL) != persistedClientID {
 		return authURL, nil
 	}
@@ -154,9 +160,27 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 				zap.String("server", c.config.Name),
 				logSafeErrorField(clearErr))
 		} else if !cleared {
-			c.logger.Info("Stored DCR registration already replaced by another login - leaving it in place",
+			// Another login replaced the rejected registration after this
+			// attempt read it. Registering yet another client here would
+			// overwrite the winner's credentials and pair its grant with the
+			// wrong client_id, so stop and let the next sign-in use the
+			// registration that is now stored.
+			c.logger.Info("Stored DCR registration already replaced by another login - not re-registering",
 				zap.String("server", c.config.Name),
+				zap.String("correlation_id", correlationID),
 				zap.String("old_client_id", persistedClientID))
+			return "", scrubbedFlowError(&contracts.OAuthFlowError{
+				Success:       false,
+				ErrorType:     contracts.OAuthErrorFlowFailed,
+				ErrorCode:     contracts.OAuthCodeFlowFailed,
+				ServerName:    c.config.Name,
+				CorrelationID: correlationID,
+				Message: fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s), and another sign-in has already replaced it",
+					c.config.Name, persistedClientID, rejection),
+				Details:    &contracts.OAuthErrorDetails{ServerURL: c.logSafeURL()},
+				Suggestion: "Sign in again; the new client registration will be used.",
+				DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+			})
 		}
 	}
 
