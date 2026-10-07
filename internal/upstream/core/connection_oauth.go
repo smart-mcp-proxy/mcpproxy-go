@@ -1140,15 +1140,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
 			if c.storage != nil && clientID != "" {
-				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				// Get the callback server port and redirect URI to persist alongside DCR credentials
-				var callbackPort int
-				var redirectURI string
-				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-					callbackPort = callbackServer.Port
-					redirectURI = callbackServer.RedirectURI
-				}
-				if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); err != nil {
+				if callbackPort, err := c.persistDCRRegistration(clientID, clientSecret); err != nil {
 					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(err))
@@ -1222,30 +1214,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 		})
 	}
 
-	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
-	// extraParams contains both auto-detected values (from CreateOAuthConfigWithExtraParams) and manual config
-	if len(extraParams) > 0 {
-		parsedURL, err := url.Parse(authURL)
-		if err == nil {
-			query := parsedURL.Query()
-			for key, value := range extraParams {
-				query.Set(key, value)
-				c.logger.Debug("Added extra OAuth parameter to authorization URL",
-					zap.String("server", c.config.Name),
-					zap.String("key", key),
-					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
-			}
-			parsedURL.RawQuery = query.Encode()
-			authURL = parsedURL.String()
-			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
-				zap.String("server", c.config.Name),
-				zap.Int("extra_params_count", len(extraParams)))
-		} else {
-			c.logger.Warn("Failed to parse authorization URL for extra params",
-				zap.String("server", c.config.Name),
-				logSafeErrorField(err))
-		}
-	}
+	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
+	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
 	// Never proceed with an authorization URL that lacks a client_id — the
 	// provider will reject it (e.g. Figma after a DCR 403, GitHub which has no
@@ -1253,6 +1223,16 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// client_id supplied via oauth.extra_params still passes.
 	if flowErr := c.emptyClientIDFlowError(authURL, "", dcrErr); flowErr != nil {
 		return flowErr
+	}
+
+	// A persisted DCR client the authorization server has since deleted is
+	// re-registered once instead of opening a browser on a dead client_id.
+	if !hasStaticCredentials && hasPersistedCredentials {
+		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, "")
+		if staleErr != nil {
+			return staleErr
+		}
+		authURL = recoveredURL
 	}
 
 	// Always log the computed authorization URL so users can copy/paste if auto-launch fails.
@@ -1498,14 +1478,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				zap.String("client_id", clientID))
 			// Persist DCR credentials and callback port for future use (Spec 022)
 			if c.storage != nil && clientID != "" {
-				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				var callbackPort int
-				var redirectURI string
-				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-					callbackPort = callbackServer.Port
-					redirectURI = callbackServer.RedirectURI
-				}
-				if saveErr := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); saveErr != nil {
+				if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); saveErr != nil {
 					c.logger.Warn("Failed to persist DCR credentials",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(saveErr))
@@ -1548,36 +1521,23 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		})
 	}
 
-	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
-	// extraParams contains both auto-detected values (from CreateOAuthConfigWithExtraParams) and manual config
-	// This is the same injection done in handleOAuthAuthorization() - fixes issue #271
-	if len(extraParams) > 0 {
-		parsedURL, err := url.Parse(authURL)
-		if err == nil {
-			query := parsedURL.Query()
-			for key, value := range extraParams {
-				query.Set(key, value)
-				c.logger.Debug("Added extra OAuth parameter to authorization URL",
-					zap.String("server", c.config.Name),
-					zap.String("key", key),
-					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
-			}
-			parsedURL.RawQuery = query.Encode()
-			authURL = parsedURL.String()
-			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
-				zap.String("server", c.config.Name),
-				zap.Int("extra_params_count", len(extraParams)))
-		} else {
-			c.logger.Warn("Failed to parse authorization URL for extra params",
-				zap.String("server", c.config.Name),
-				logSafeErrorField(err))
-		}
-	}
+	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
+	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
 	// Never store or open an authorization URL that lacks a client_id — the
 	// provider is guaranteed to reject it (issue #975).
 	if flowErr := c.emptyClientIDFlowError(authURL, result.CorrelationID, dcrErr); flowErr != nil {
 		return result, flowErr
+	}
+
+	// A persisted DCR client the authorization server has since deleted is
+	// re-registered once instead of opening a browser on a dead client_id.
+	if !hasStaticCredentials && hasPersistedCredentials {
+		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, result.CorrelationID)
+		if staleErr != nil {
+			return result, staleErr
+		}
+		authURL = recoveredURL
 	}
 
 	// Store the auth URL in the result
@@ -2098,15 +2058,10 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			// Persist DCR credentials and callback port (Spec 022)
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
-			if c.storage != nil && clientID != "" {
-				serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-				var callbackPort int
-				var redirectURI string
-				if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-					callbackPort = callbackServer.Port
-					redirectURI = callbackServer.RedirectURI
-				}
-				_ = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+			if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); saveErr != nil {
+				c.logger.Warn("Failed to persist DCR credentials",
+					zap.String("server", c.config.Name),
+					logSafeErrorField(saveErr))
 			}
 		}
 	}
@@ -2134,36 +2089,24 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 		})
 	}
 
-	// Append extra OAuth parameters to authorization URL (RFC 8707 resource, etc.)
-	// extraParams contains both auto-detected values (from CreateOAuthConfigWithExtraParams) and manual config
-	// This is the same injection done in handleOAuthAuthorization() - fixes issue #271
-	if len(extraParams) > 0 {
-		parsedURL, err := url.Parse(authURL)
-		if err == nil {
-			query := parsedURL.Query()
-			for key, value := range extraParams {
-				query.Set(key, value)
-				c.logger.Debug("Added extra OAuth parameter to authorization URL",
-					zap.String("server", c.config.Name),
-					zap.String("key", key),
-					zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
-			}
-			parsedURL.RawQuery = query.Encode()
-			authURL = parsedURL.String()
-			c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
-				zap.String("server", c.config.Name),
-				zap.Int("extra_params_count", len(extraParams)))
-		} else {
-			c.logger.Warn("Failed to parse authorization URL for extra params",
-				zap.String("server", c.config.Name),
-				logSafeErrorField(err))
-		}
-	}
+	// Append extra OAuth parameters (RFC 8707 resource, oauth.extra_params) - issue #271
+	authURL = c.applyExtraParamsToAuthURL(authURL, extraParams)
 
 	// Issue #975: never hand back an authorization URL without a client_id —
 	// the provider is guaranteed to reject it (GitHub 404s on client_id=).
 	if flowErr := c.emptyClientIDFlowError(authURL, correlationID, dcrErr); flowErr != nil {
 		return "", nil, "", "", flowErr
+	}
+
+	// A persisted DCR client the authorization server has since deleted is
+	// re-registered once instead of handing out a URL the server answers with
+	// HTTP 400 "Invalid client_id" and never redirects back from.
+	if !hasStaticCredentials && hasPersistedCredentials {
+		recoveredURL, staleErr := c.recoverStaleDCRClient(ctx, oauthHandler, oauthConfig.ClientID, authURL, state, codeChallenge, extraParams, correlationID)
+		if staleErr != nil {
+			return "", nil, "", "", staleErr
+		}
+		authURL = recoveredURL
 	}
 
 	// Claim the state on the callback server before handing the URL back — the

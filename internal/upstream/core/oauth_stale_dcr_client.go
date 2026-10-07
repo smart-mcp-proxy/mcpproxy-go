@@ -1,0 +1,278 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+
+	uptransport "github.com/mark3labs/mcp-go/client/transport"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+)
+
+// authorizeProbeHTTPClient is the HTTP client recoverStaleDCRClient probes
+// the authorization endpoint with; nil uses a default client. Tests override
+// it.
+var authorizeProbeHTTPClient *http.Client
+
+// applyExtraParamsToAuthURL appends the extra OAuth parameters (RFC 8707
+// resource, oauth.extra_params, ...) to an authorization URL. extraParams holds
+// both the auto-detected values (CreateOAuthConfigWithExtraParams) and the
+// manual config. Shared by every authorization-URL emission path (issue #271).
+// On a parse failure the URL is returned unchanged.
+func (c *Client) applyExtraParamsToAuthURL(authURL string, extraParams map[string]string) string {
+	if len(extraParams) == 0 {
+		return authURL
+	}
+	parsedURL, err := url.Parse(authURL)
+	if err != nil {
+		c.logger.Warn("Failed to parse authorization URL for extra params",
+			zap.String("server", c.config.Name),
+			logSafeErrorField(err))
+		return authURL
+	}
+	query := parsedURL.Query()
+	for key, value := range extraParams {
+		query.Set(key, value)
+		c.logger.Debug("Added extra OAuth parameter to authorization URL",
+			zap.String("server", c.config.Name),
+			zap.String("key", key),
+			zap.String("value", oauth.AuditRedaction.ExtraParamValue(key, value)))
+	}
+	parsedURL.RawQuery = query.Encode()
+	c.logger.Info("✅ Appended extra OAuth parameters to authorization URL",
+		zap.String("server", c.config.Name),
+		zap.Int("extra_params_count", len(extraParams)))
+	return parsedURL.String()
+}
+
+// persistDCRRegistration stores a client registration obtained by Dynamic
+// Client Registration together with the callback port and exact redirect URI
+// it was registered for (Spec 022), so later logins and token refreshes reuse
+// it. It returns the callback port it stored.
+func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, error) {
+	if c.storage == nil || clientID == "" {
+		return 0, nil
+	}
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	var callbackPort int
+	var redirectURI string
+	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
+		callbackPort = callbackServer.Port
+		redirectURI = callbackServer.RedirectURI
+	}
+	return callbackPort, c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+}
+
+// registerOAuthClientSafely runs Dynamic Client Registration on the handler,
+// converting a panic (mcp-go dereferences missing server metadata) into an
+// error.
+func (c *Client) registerOAuthClientSafely(ctx context.Context, oauthHandler *uptransport.OAuthHandler) (regErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Warn("OAuth RegisterClient panicked - server metadata missing or malformed",
+				zap.String("server", c.config.Name),
+				zap.Any("panic", r))
+			regErr = fmt.Errorf("server does not support dynamic client registration: metadata missing")
+		}
+	}()
+	return oauthHandler.RegisterClient(ctx, "mcpproxy-go")
+}
+
+// authorizationURLSafely builds the authorization URL, converting a panic into
+// an error.
+func (c *Client) authorizationURLSafely(ctx context.Context, oauthHandler *uptransport.OAuthHandler, state, codeChallenge string) (authURL string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("GetAuthorizationURL panicked",
+				zap.String("server", c.config.Name),
+				zap.Any("panic", r))
+			err = fmt.Errorf("internal error (panic recovered): %v", r)
+		}
+	}()
+	return oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
+}
+
+// recoverStaleDCRClient guards every authorization-URL emission path
+// (getAuthorizationURLQuick, handleOAuthAuthorization,
+// handleOAuthAuthorizationWithResult) against a persisted Dynamic Client
+// Registration that the authorization server has since deleted.
+//
+// Cloudflare's MCP OAuth servers delete DCR clients; the persisted client_id
+// was reused forever, the browser landed on HTTP 400
+// {"error":"invalid_request","error_description":"Invalid client_id"}, and the
+// server never redirected back, so the login hung with no signal. The token
+// endpoint's equivalent (invalid_client) is handled on the refresh path by
+// Spec 113-a; this is the login-path counterpart.
+//
+// It acts only when persistedClientID is a DCR client_id reused from storage —
+// never an operator static oauth.client_id, never one registered moments ago
+// in this same attempt (callers pass "" then), and never when the final URL
+// carries a different client_id (oauth.extra_params override). authURL must be
+// the FINAL URL (extra params applied). It probes authURL once without
+// following redirects; when the server identifies the client as unknown it
+// compare-and-clears the stored registration, re-registers exactly once,
+// persists the new registration, rebuilds the URL and probes it once more.
+// If the fresh client is rejected too, a structured error is returned (no
+// loop). Every probe failure is fail-open: authURL is returned unchanged.
+func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptransport.OAuthHandler, persistedClientID, authURL, state, codeChallenge string, extraParams map[string]string, correlationID string) (string, error) {
+	if persistedClientID == "" || oauthHandler == nil {
+		return authURL, nil
+	}
+	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
+		return authURL, nil // operator static client_id: never probed or cleared
+	}
+	if oauthHandler.GetClientID() != persistedClientID || authURLClientID(authURL) != persistedClientID {
+		return authURL, nil
+	}
+
+	probe := oauth.ProbeAuthorizationClient(ctx, authorizeProbeHTTPClient, authURL)
+	if !probe.ClientRejected {
+		if probe.Err != nil {
+			c.logger.Debug("Authorization endpoint probe failed - proceeding with the persisted DCR client_id",
+				zap.String("server", c.config.Name),
+				logSafeErrorField(probe.Err))
+		}
+		return authURL, nil
+	}
+	rejection := oauth.ScrubUpstreamText(probe.Summary())
+
+	c.logger.Warn("⚠️ Authorization server rejected the persisted DCR client_id - clearing it and re-registering once",
+		zap.String("server", c.config.Name),
+		zap.String("correlation_id", correlationID),
+		zap.String("old_client_id", persistedClientID),
+		zap.String("authorize_response", rejection))
+
+	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
+	if c.storage != nil {
+		cleared, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, persistedClientID)
+		if clearErr != nil {
+			c.logger.Warn("Failed to clear the rejected DCR client registration",
+				zap.String("server", c.config.Name),
+				logSafeErrorField(clearErr))
+		} else if !cleared {
+			c.logger.Info("Stored DCR registration already replaced by another login - leaving it in place",
+				zap.String("server", c.config.Name),
+				zap.String("old_client_id", persistedClientID))
+		}
+	}
+
+	if regErr := c.registerOAuthClientSafely(ctx, oauthHandler); regErr != nil {
+		c.logger.Warn("⚠️ Re-registration after a rejected DCR client_id failed",
+			zap.String("server", c.config.Name),
+			zap.String("old_client_id", persistedClientID),
+			logSafeErrorField(regErr))
+		return "", scrubbedFlowError(&contracts.OAuthFlowError{
+			Success:       false,
+			ErrorType:     contracts.OAuthErrorDCRFailed,
+			ErrorCode:     contracts.OAuthCodeDCRFailed,
+			ServerName:    c.config.Name,
+			CorrelationID: correlationID,
+			Message: fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s) and re-registering a new client failed: %v",
+				c.config.Name, persistedClientID, rejection, regErr),
+			Details: &contracts.OAuthErrorDetails{
+				ServerURL: c.logSafeURL(),
+				DCRStatus: &contracts.DCRStatus{Attempted: true, Success: false, Error: regErr.Error()},
+			},
+			Suggestion: "Register an OAuth app with the provider and set oauth.client_id in the server config.",
+			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		})
+	}
+
+	newClientID := oauthHandler.GetClientID()
+	if newClientID == "" || newClientID == persistedClientID {
+		return "", scrubbedFlowError(&contracts.OAuthFlowError{
+			Success:       false,
+			ErrorType:     contracts.OAuthErrorDCRFailed,
+			ErrorCode:     contracts.OAuthCodeDCRFailed,
+			ServerName:    c.config.Name,
+			CorrelationID: correlationID,
+			Message: fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s) and re-registration did not return a new client_id",
+				c.config.Name, persistedClientID, rejection),
+			Details: &contracts.OAuthErrorDetails{
+				ServerURL: c.logSafeURL(),
+				DCRStatus: &contracts.DCRStatus{Attempted: true, Success: false, Error: "registration returned no new client_id"},
+			},
+			Suggestion: "Register an OAuth app with the provider and set oauth.client_id in the server config.",
+			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		})
+	}
+
+	if callbackPort, saveErr := c.persistDCRRegistration(newClientID, oauthHandler.GetClientSecret()); saveErr != nil {
+		c.logger.Warn("Failed to persist the re-registered DCR credentials - token refresh may fail later",
+			zap.String("server", c.config.Name),
+			logSafeErrorField(saveErr))
+	} else {
+		c.logger.Info("✅ Re-registered OAuth client after the persisted DCR client_id was rejected",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID),
+			zap.String("old_client_id", persistedClientID),
+			zap.String("new_client_id", newClientID),
+			zap.Int("callback_port", callbackPort))
+	}
+
+	newURL, urlErr := c.authorizationURLSafely(ctx, oauthHandler, state, codeChallenge)
+	if urlErr != nil {
+		return "", scrubbedFlowError(&contracts.OAuthFlowError{
+			Success:       false,
+			ErrorType:     contracts.OAuthErrorFlowFailed,
+			ErrorCode:     contracts.OAuthCodeFlowFailed,
+			ServerName:    c.config.Name,
+			CorrelationID: correlationID,
+			Message:       fmt.Sprintf("Failed to get authorization URL after re-registering the OAuth client: %v", urlErr),
+			Details:       &contracts.OAuthErrorDetails{ServerURL: c.logSafeURL()},
+			Suggestion:    "Check server OAuth configuration and try again.",
+			DebugHint:     fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		})
+	}
+	newURL = c.applyExtraParamsToAuthURL(newURL, extraParams)
+
+	// Exactly one re-registration per attempt: probe the fresh client once
+	// and stop if it is rejected too.
+	second := oauth.ProbeAuthorizationClient(ctx, authorizeProbeHTTPClient, newURL)
+	if second.ClientRejected {
+		secondRejection := oauth.ScrubUpstreamText(second.Summary())
+		c.logger.Error("❌ Authorization server rejected the freshly registered OAuth client too - not retrying",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID),
+			zap.String("old_client_id", persistedClientID),
+			zap.String("new_client_id", newClientID),
+			zap.String("authorize_response", secondRejection))
+		if c.storage != nil {
+			if _, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, newClientID); clearErr != nil {
+				c.logger.Warn("Failed to clear the rejected fresh DCR client registration",
+					zap.String("server", c.config.Name),
+					logSafeErrorField(clearErr))
+			}
+		}
+		return "", scrubbedFlowError(&contracts.OAuthFlowError{
+			Success:       false,
+			ErrorType:     contracts.OAuthErrorFlowFailed,
+			ErrorCode:     contracts.OAuthCodeFlowFailed,
+			ServerName:    c.config.Name,
+			CorrelationID: correlationID,
+			Message: fmt.Sprintf("Server '%s' rejected the stored OAuth client registration (client_id %s: %s) and also rejected the freshly registered client (client_id %s: %s); the authorization server does not accept its own dynamically registered clients",
+				c.config.Name, persistedClientID, rejection, newClientID, secondRejection),
+			Details: &contracts.OAuthErrorDetails{
+				ServerURL: c.logSafeURL(),
+				DCRStatus: &contracts.DCRStatus{Attempted: true, Success: true},
+			},
+			Suggestion: "Register an OAuth app with the provider and set oauth.client_id in the server config, or contact the server administrator.",
+			DebugHint:  fmt.Sprintf("For logs: mcpproxy upstream logs %s", c.config.Name),
+		})
+	}
+	return newURL, nil
+}
+
+// authURLClientID returns the client_id query parameter of an authorization
+// URL ("" when absent or unparsable).
+func authURLClientID(authURL string) string {
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("client_id")
+}

@@ -133,3 +133,39 @@ func TestClearOAuthClientCredentialsIf(t *testing.T) {
 		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
 	}
 }
+
+// A DCR client_id the authorization server rejects at /authorize is cleared
+// with a compare-and-clear on the client id alone: the login has no grant to
+// compare, and a concurrent login that saved a new registration (a new id)
+// must never be wiped.
+func TestClearOAuthClientCredentialsIfClientID(t *testing.T) {
+	db := newTestDB(t)
+	const key = "dcr_fedcba9876543210"
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: key, AccessToken: "at", RefreshToken: "rt", ClientID: "new-client", ClientSecret: "s", CallbackPort: 9, RedirectURI: "r"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := db.ClearOAuthClientCredentialsIfClientID(key, "dead-client")
+	if err != nil || cleared {
+		t.Fatalf("mismatch must not clear: cleared=%v err=%v", cleared, err)
+	}
+	if rec, _ := db.GetOAuthToken(key); rec.ClientID != "new-client" {
+		t.Fatalf("registration was cleared: %+v", rec)
+	}
+	if cleared, err := db.ClearOAuthClientCredentialsIfClientID(key, ""); err != nil || cleared {
+		t.Fatalf("empty expected id must not clear: cleared=%v err=%v", cleared, err)
+	}
+
+	cleared, err = db.ClearOAuthClientCredentialsIfClientID(key, "new-client")
+	if err != nil || !cleared {
+		t.Fatalf("match must clear: cleared=%v err=%v", cleared, err)
+	}
+	rec, _ := db.GetOAuthToken(key)
+	if rec.ClientID != "" || rec.ClientSecret != "" || rec.CallbackPort != 0 || rec.RedirectURI != "" || rec.AccessToken != "at" || rec.RefreshToken != "rt" {
+		t.Fatalf("unexpected record after clear: %+v", rec)
+	}
+
+	if cleared, err := db.ClearOAuthClientCredentialsIfClientID("absent", "x"); err != nil || cleared {
+		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
+	}
+}

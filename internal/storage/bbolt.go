@@ -1034,6 +1034,29 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 // therefore cannot clear a registration that a concurrent login just saved,
 // even when the login reused the same client id. It reports whether it cleared.
 func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expectedRefreshToken string) (bool, error) {
+	return b.clearOAuthClientCredentialsWhere(serverKey, func(rec *OAuthTokenRecord) bool {
+		return expectedClientID != "" && rec.ClientID == expectedClientID && rec.RefreshToken == expectedRefreshToken
+	})
+}
+
+// ClearOAuthClientCredentialsIfClientID clears the DCR fields like
+// ClearOAuthClientCredentials, but only while the stored ClientID still equals
+// expectedClientID (compare-and-clear in one transaction). It is the login
+// path's counterpart of ClearOAuthClientCredentialsIf: a login whose
+// authorization request is rejected because the persisted DCR client no longer
+// exists has no grant to compare, and DCR issues a new id per registration, so
+// a concurrent login that already saved a fresh registration is never wiped.
+// Token fields are left untouched. It reports whether it cleared.
+func (b *BoltDB) ClearOAuthClientCredentialsIfClientID(serverKey, expectedClientID string) (bool, error) {
+	return b.clearOAuthClientCredentialsWhere(serverKey, func(rec *OAuthTokenRecord) bool {
+		return expectedClientID != "" && rec.ClientID == expectedClientID
+	})
+}
+
+// clearOAuthClientCredentialsWhere clears the DCR fields of the record stored
+// under serverKey when match approves it, inside one read-modify-write
+// transaction. It reports whether it cleared.
+func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(rec *OAuthTokenRecord) bool) (bool, error) {
 	cleared := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -1045,7 +1068,7 @@ func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expe
 		if err := record.UnmarshalBinary(data); err != nil {
 			return err
 		}
-		if expectedClientID == "" || record.ClientID != expectedClientID || record.RefreshToken != expectedRefreshToken {
+		if !match(record) {
 			return nil
 		}
 		record.ClientID = ""

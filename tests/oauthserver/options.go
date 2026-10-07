@@ -35,6 +35,16 @@ type ErrorMode struct {
 	AuthAccessDenied   bool // Return `error=access_denied` on authorize
 	AuthInvalidRequest bool // Return `error=invalid_request` on authorize
 
+	// AuthorizeUnknownClientJSON400 mimics Cloudflare's workers-oauth-provider
+	// for a client_id it does not know (e.g. a DCR client it deleted): GET
+	// /authorize answers HTTP 400 with the JSON body
+	// {"error":"invalid_request","error_description":"Invalid client_id"} and
+	// never redirects back to the client.
+	AuthorizeUnknownClientJSON400 bool
+	// AuthorizeRejectAllClientsJSON400 answers every GET /authorize with that
+	// same Cloudflare-style 400, including for freshly registered clients.
+	AuthorizeRejectAllClientsJSON400 bool
+
 	// DCR endpoint errors
 	DCRInvalidRedirectURI bool // Reject registration with bad redirect
 	DCRInvalidScope       bool // Reject registration with bad scope

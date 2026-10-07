@@ -14,6 +14,7 @@ func (s *OAuthTestServer) handleRegistration(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.registrationCount.Add(1)
 
 	if !s.options.EnableDCR {
 		s.dcrError(w, http.StatusBadRequest, "invalid_request", "Dynamic client registration is disabled")
