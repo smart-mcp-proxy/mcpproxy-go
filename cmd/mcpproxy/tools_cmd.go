@@ -562,6 +562,34 @@ func sanitizeCell(s string, maxRunes int) string {
 	return escaped
 }
 
+// sanitizeDescriptionCell is sanitizeCell for free-text, one-line table cells
+// (tool descriptions, held-tool detail). Multi-line upstream prose is full of
+// ordinary \n/\t that CapEvidence would render as literal "\u000a" noise and
+// that eats the rune budget, so runs of exactly those ASCII whitespace runes
+// (\n \r \t \v \f and space) collapse to one space and the result is trimmed
+// BEFORE escaping and truncation. Every other control/format rune (ESC, bidi
+// overrides, zero-width, NUL, U+0085, U+2028, ...) is untouched and therefore
+// still escaped by CapEvidence. Names and ids keep the strict sanitizeCell: a
+// newline inside an identifier is suspicious and should stay visible.
+func sanitizeDescriptionCell(s string, maxRunes int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		switch r {
+		case ' ', '\n', '\r', '\t', '\v', '\f':
+			pendingSpace = b.Len() > 0
+			continue
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(r)
+	}
+	return sanitizeCell(b.String(), maxRunes)
+}
+
 // maxToolDescriptionCell is the description column width shared by the global
 // and server-scoped tool tables.
 const maxToolDescriptionCell = 60
@@ -601,7 +629,7 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 			sanitizeName(getStringField(t, "name")),
 			approval,
 			formatToolHold(t),
-			sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell),
+			sanitizeDescriptionCell(getStringField(t, "description"), maxToolDescriptionCell),
 		})
 	}
 	return headers, rows
@@ -651,7 +679,7 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 			lastUsed = lu
 		}
 
-		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
+		desc := sanitizeDescriptionCell(getStringField(t, "description"), maxToolDescriptionCell)
 
 		if viewAs {
 			reason := "-"
@@ -823,7 +851,7 @@ func standaloneToolRows(tools []*config.ToolMetadata) (headers []string, rows []
 		}
 		rows = append(rows, []string{
 			sanitizeName(tool.Name),
-			sanitizeCell(tool.Description, maxToolDescriptionCell),
+			sanitizeDescriptionCell(tool.Description, maxToolDescriptionCell),
 		})
 	}
 	return headers, rows
@@ -1406,7 +1434,7 @@ func preflightRows(response *contracts.PreflightResponse) (headers []string, row
 			reason,
 			retryable,
 			action,
-			sanitizeCell(detail, maxToolDescriptionCell),
+			sanitizeDescriptionCell(detail, maxToolDescriptionCell),
 		})
 	}
 	return headers, rows
