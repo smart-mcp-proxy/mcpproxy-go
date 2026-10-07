@@ -87,7 +87,7 @@ One predicate computes the decision, and everything uses it: discovery, executio
 5. The tool's tier is above `max_tier`: **`above_tier_cap`**.
 6. Otherwise admitted.
 
-Patterns are `server:tool` with `*` as the only wildcard, matched case-sensitively. A pattern naming a server outside `servers` is saved with a warning and ignored.
+Patterns are `server:tool` with `*` as the only wildcard, matched case-sensitively. A pattern naming a server outside `servers` is saved with a warning and ignored. Saving a profile (create or replace) also returns one warning per `tools.classify` entry that no longer applies (`classify entry "server:tool" is stale: annotated|missing`), the same entries the effective-tools view reports as stale.
 
 ## What a caller sees
 

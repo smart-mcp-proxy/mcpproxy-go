@@ -201,8 +201,8 @@ This is a Go backend refactoring project with CLI interface:
 - [ ] T083 [P] Add HTTP request logging to internal/upstream/core/client.go (logHTTPRequest method with sanitized headers)
 - [ ] T084 [P] Add OAuth token exchange logging to internal/oauth/ (log token requests with redacted tokens)
 - [ ] T085 [P] Update Docker log streaming in internal/upstream/core/monitoring.go monitorDockerLogsWithContext (stream stderr only)
-- [ ] T086 [P] Add token redaction helper functions to internal/logs/sanitizer.go (redactToken, sanitizeAuthHeader)
-- [ ] T087 [P] Add unit tests for sanitization functions in internal/logs/sanitizer_test.go
+- [x] T086 [P] Add token redaction helper functions to internal/logs/sanitizer.go (redactToken, sanitizeAuthHeader)
+- [x] T087 [P] Add unit tests for sanitization functions in internal/logs/sanitizer_test.go
 - [ ] T088 Validate logs include HTTP/OAuth/Docker details per FR-008a-f requirements
 
 **Checkpoint**: Logs now include comprehensive operational details (HTTP requests, OAuth flows, Docker stderr) with automatic secret sanitization.

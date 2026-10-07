@@ -107,6 +107,20 @@ type Server struct {
 | Refresh failed (after retries) | `unhealthy` | `login` |
 | User logged out | `unhealthy` | `login` |
 
+**Call failure rate (Spec 113-d):** a connected server that would otherwise be
+`healthy` is reported `degraded` (`status: ready`, action `view_logs`) when, over
+the last 5 minutes, more than 50% of its counted tool calls failed and at least 5
+calls were counted. The summary reads "N of M tool calls failed in the last 5
+min" and the detail names the most common failure kind (network, timeout, HTTP,
+JSON-RPC, session). Only transport-level failures count: `isError` tool results,
+proxy refusals (policy, quarantine, concurrency limits, argument validation),
+caller cancellation and sign-in-required errors are excluded. Every existing
+non-healthy outcome (quarantined, disabled, disconnected, error, OAuth expired,
+refresh failed, missing secret, retry stopped) takes precedence. The thresholds
+are constants (`health.CallFailureWindow`, `CallFailureMinSamples`,
+`CallFailureRatio`), not configuration; the window is in memory and dropped when
+the server is removed.
+
 **Key distinction:**
 - **Degraded** = works now but will break soon without action
 - **Unhealthy** = broken, can't use until fixed

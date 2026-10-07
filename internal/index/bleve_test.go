@@ -758,3 +758,44 @@ func TestBleveIndex_CanonicalToolName(t *testing.T) {
 		assert.Equal(t, "acme:list_widgets", tools[0].Name)
 	})
 }
+
+func TestBleveIndex_SearchBareSegment(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{Name: "create_issue", ServerName: "github", Description: "Open a ticket.", Hash: "a"},
+		{Name: "issue_list", ServerName: "github", Description: "Enumerate things.", Hash: "b"},
+		{Name: "get_issue_comments", ServerName: "github", Description: "Fetch notes.", Hash: "c"},
+		{Name: "go", ServerName: "github", Description: "Short.", Hash: "d"},
+		{Name: "tool_ab", ServerName: "github", Description: "Short segment.", Hash: "e"},
+	}))
+
+	t.Run("bare token matches trailing and interior segments", func(t *testing.T) {
+		results, err := idx.SearchTools("issue", 10)
+		require.NoError(t, err)
+		var names []string
+		for _, r := range results {
+			names = append(names, r.Tool.Name)
+		}
+		assert.Contains(t, names, "github:create_issue")
+		assert.Contains(t, names, "github:get_issue_comments")
+		// prefix match outranks segment-only matches
+		require.NotEmpty(t, names)
+		assert.Equal(t, "github:issue_list", names[0])
+	})
+
+	t.Run("two-character token does not add the clause", func(t *testing.T) {
+		assert.Nil(t, bareSegmentQuery("ab"))
+		results, err := idx.SearchTools("ab", 10)
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+
+	t.Run("non-token shapes add no clause", func(t *testing.T) {
+		assert.Nil(t, bareSegmentQuery("create_issue"))
+		assert.Nil(t, bareSegmentQuery("is*ue"))
+		assert.Nil(t, bareSegmentQuery("a b c"))
+	})
+}

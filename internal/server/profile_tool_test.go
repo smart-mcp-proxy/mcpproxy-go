@@ -788,10 +788,14 @@ func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 		idx, ctx := newProfileIndex(c.cfg), c.ctx // index built outside the measured window
 		cases[name] = func() { idx.selectableNames(ctx) }
 	}
-	allocs := retryUntilAllocsMatch(15, 50, "reachable pin first", cases)
-	for name, got := range allocs {
-		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
-	}
+	// Exact parity (tolerance 0): the regression this guards differs by only
+	// 0-2 allocations over a 64-profile fleet, so the 2-alloc slack that
+	// TestProfileMiddleware_RefusalWorkIndependentOfFleet uses for its
+	// 4096-item fleet (#1523) would let it through. This test was not the
+	// flaky one; retries absorb its additive noise.
+	allocs := retryUntilAllocsMatch(15, 50, 0, "reachable pin first", cases)
+	require.Empty(t, allocsMismatch(allocs, "reachable pin first", 0),
+		"every pin outcome must allocate exactly like a reachable pin: %v", allocs)
 }
 
 // TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome pins the

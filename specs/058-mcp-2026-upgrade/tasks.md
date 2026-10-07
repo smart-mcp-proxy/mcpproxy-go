@@ -153,8 +153,8 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 
 **Independent test**: inspect list/read responses for valid hints; compare repeated `tools/list` results for stable ordering; confirm trace ids reach activity records.
 
-- [ ] T063 [P] [US5] Write failing tests that list/read responses carry `ttlMs` and an identity-appropriate `cacheScope`, in `internal/server/cache_hints_test.go`
-- [ ] T064 [US5] Configure cache hints — private for identity-scoped surfaces, public for shared ones — in `internal/server/mcp_routing.go` and `internal/server/mcp.go`
+- [x] T063 [P] [US5] Write failing tests that list/read responses carry `ttlMs` and an identity-appropriate `cacheScope`, in `internal/server/cache_hints_test.go`
+- [x] T064 [US5] Configure cache hints — private for identity-scoped surfaces, public for shared ones — in `internal/server/mcp_routing.go` and `internal/server/mcp.go`
 - [ ] T065 [P] [US5] Write a failing test that repeated `tools/list` calls are byte-identical under unchanged state, in `internal/server/stateless_list_test.go`
 - [ ] T066 [US5] Make tool ordering deterministic wherever map iteration currently leaks in, in `internal/server/mcp_routing.go`
 - [ ] T067 [P] [US5] Write a failing test that external `$ref`s are not dereferenced and that schemas validate as JSON Schema 2020-12, in `internal/server/mcp_input_validation_test.go`

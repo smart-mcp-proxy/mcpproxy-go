@@ -580,6 +580,19 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 		result.RedirectURI = patch.RedirectURI
 	}
 
+	if patch.AuthorizationEndpoint != "" {
+		result.AuthorizationEndpoint = patch.AuthorizationEndpoint
+	}
+	if patch.TokenEndpoint != "" {
+		result.TokenEndpoint = patch.TokenEndpoint
+	}
+	if patch.RegistrationEndpoint != "" {
+		result.RegistrationEndpoint = patch.RegistrationEndpoint
+	}
+	if patch.AuthServerMetadataURL != "" {
+		result.AuthServerMetadataURL = patch.AuthServerMetadataURL
+	}
+
 	// Boolean - always take patch value
 	result.PKCEEnabled = patch.PKCEEnabled
 
@@ -767,6 +780,11 @@ func copyOAuthConfig(src *OAuthConfig) *OAuthConfig {
 		ClientSecret: src.ClientSecret,
 		RedirectURI:  src.RedirectURI,
 		PKCEEnabled:  src.PKCEEnabled,
+
+		AuthorizationEndpoint: src.AuthorizationEndpoint,
+		TokenEndpoint:         src.TokenEndpoint,
+		RegistrationEndpoint:  src.RegistrationEndpoint,
+		AuthServerMetadataURL: src.AuthServerMetadataURL,
 	}
 
 	if src.Scopes != nil {

@@ -123,7 +123,8 @@ func UnmaskLiveURL(incoming, stored string) (string, error) {
 // detector. A read-modify-write therefore persisted the MASK STRING over those
 // values.
 //
-//   - client_secret, client_id, redirect_uri — reverted, each bound to its own
+//   - client_secret, client_id, redirect_uri and the Spec 113-b endpoint
+//     overrides — reverted, each bound to its own
 //     field name, using the same rendering the read path produced.
 //   - extra_params — reverted per PARAMETER NAME, exactly as env vars and
 //     headers are reverted per key.
@@ -140,6 +141,10 @@ func UnmaskLiveOAuth(incoming, stored *config.OAuthConfig) error {
 		incoming.ClientSecret = UnmaskLiveField("client_secret", incoming.ClientSecret, stored.ClientSecret)
 		incoming.ClientID = UnmaskLiveField("client_id", incoming.ClientID, stored.ClientID)
 		incoming.RedirectURI = UnmaskLiveField("redirect_uri", incoming.RedirectURI, stored.RedirectURI)
+		incoming.AuthorizationEndpoint = UnmaskLiveField("authorization_endpoint", incoming.AuthorizationEndpoint, stored.AuthorizationEndpoint)
+		incoming.TokenEndpoint = UnmaskLiveField("token_endpoint", incoming.TokenEndpoint, stored.TokenEndpoint)
+		incoming.RegistrationEndpoint = UnmaskLiveField("registration_endpoint", incoming.RegistrationEndpoint, stored.RegistrationEndpoint)
+		incoming.AuthServerMetadataURL = UnmaskLiveField("auth_server_metadata_url", incoming.AuthServerMetadataURL, stored.AuthServerMetadataURL)
 		incoming.ExtraParams = unmaskLiveMapValues(incoming.ExtraParams, stored.ExtraParams, LiveRedaction.Leaf)
 	}
 	if path, ok := FindMaskMarker("oauth", NormalizeForRedaction(incoming)); ok {

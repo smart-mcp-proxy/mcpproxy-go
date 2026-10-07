@@ -170,6 +170,16 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Upstream prompts-changed callback registered on upstream manager")
 	}
 
+	// Spec 113-d FR-068: a rolling call-failure-rate flip changes a server's
+	// computed health level with no connection-state event, so nudge the
+	// (coalesced) servers.changed stream. The manager already debounces
+	// per server.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetCallHealthObserver(func(serverName string) {
+			r.emitServersChanged("call_failure_rate", map[string]any{"server": serverName})
+		})
+	}
+
 	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)
 	// and hot-reload them through the canonical disk-reload path. Failure
 	// degrades gracefully to no hot-reload (warning logged inside).
@@ -2434,42 +2444,66 @@ func (r *Runtime) cleanupOrphanedIndexEntries() {
 
 	r.logger.Debug("Checking for orphaned index entries")
 
-	activeServers := r.upstreamManager.GetAllServerNames()
-	activeServerMap := make(map[string]bool)
-	for _, serverName := range activeServers {
-		activeServerMap[serverName] = true
-	}
-
-	indexedServers, err := r.indexManager.GetAllIndexedServerNames()
+	orphans, activeCount, indexedCount, err := findOrphanedIndexServers(
+		r.indexManager.GetAllIndexedServerNames, r.upstreamManager.GetAllServerNames)
 	if err != nil {
 		r.logger.Warn("Failed to retrieve indexed server names for orphan cleanup", zap.Error(err))
 		return
 	}
 
 	var removedCount int
-	for _, indexedServer := range indexedServers {
-		if !activeServerMap[indexedServer] {
-			r.logger.Info("Removing orphaned index entries for server no longer in config",
-				zap.String("server", indexedServer))
-			if err := r.indexManager.DeleteServerTools(indexedServer); err != nil {
-				r.logger.Warn("Failed to delete orphaned index entries",
-					zap.String("server", indexedServer),
-					zap.Error(err))
-			} else {
-				removedCount++
-			}
+	for _, indexedServer := range orphans {
+		r.logger.Info("Removing orphaned index entries for server no longer in config",
+			zap.String("server", indexedServer))
+		if err := r.indexManager.DeleteServerTools(indexedServer); err != nil {
+			r.logger.Warn("Failed to delete orphaned index entries",
+				zap.String("server", indexedServer),
+				zap.Error(err))
+		} else {
+			removedCount++
 		}
 	}
 
 	r.logger.Debug("Orphaned index cleanup completed",
-		zap.Int("active_servers", len(activeServers)),
-		zap.Int("indexed_servers", len(indexedServers)),
+		zap.Int("active_servers", activeCount),
+		zap.Int("indexed_servers", indexedCount),
 		zap.Int("orphans_removed", removedCount))
 
 	if removedCount > 0 {
 		// Removed servers' tools leave the index; their signatures leave too.
 		r.reconcileSignatureCache()
 	}
+}
+
+// findOrphanedIndexServers returns the indexed servers that are not active,
+// plus the sizes of both lists for logging.
+func findOrphanedIndexServers(
+	listIndexed func() ([]string, error),
+	listActive func() []string,
+) (orphans []string, activeCount, indexedCount int, err error) {
+	// Indexed first: a server is registered before its tools are indexed, so a
+	// server added while this runs is either missing from the indexed list or
+	// already present in the active list read after it. This covers servers newly
+	// added during cleanup; index entries persisted from a previous run can still
+	// be pruned if their server's async re-registration has not finished yet, and
+	// are re-indexed once discovery runs for it.
+	indexedServers, err := listIndexed()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	activeServers := listActive()
+	active := make(map[string]bool, len(activeServers))
+	for _, name := range activeServers {
+		active[name] = true
+	}
+
+	for _, name := range indexedServers {
+		if !active[name] {
+			orphans = append(orphans, name)
+		}
+	}
+	return orphans, len(activeServers), len(indexedServers), nil
 }
 
 // supervisorEventForwarder subscribes to supervisor events and emits runtime events

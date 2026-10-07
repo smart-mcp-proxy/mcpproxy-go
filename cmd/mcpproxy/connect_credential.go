@@ -77,6 +77,9 @@ func connectIntentFromFlags(cmd *cobra.Command) (connect.CredentialIntent, error
 // connectBackend performs a connect write for the CLI.
 type connectBackend interface {
 	connect(clientID, serverName string, force bool, intent connect.CredentialIntent) (*connect.ConnectResult, error)
+	// disconnect removes the entry and revokes the client's credential
+	// (CredentialRevoked / CredentialRevokeError on the result).
+	disconnect(clientID, serverName string) (*connect.ConnectResult, error)
 	close()
 	// viaDaemon reports whether the daemon already recorded the connection
 	// (so the CLI must not relay it again).
@@ -126,6 +129,41 @@ func (d *daemonConnectBackend) connect(clientID, serverName string, force bool, 
 		return nil, err
 	}
 	return parseConnectResponse(resp.StatusCode, raw, clientID)
+}
+
+// disconnect asks the daemon to remove the entry; the daemon also revokes the
+// client credential and records the presence change itself.
+func (d *daemonConnectBackend) disconnect(clientID, serverName string) (*connect.ConnectResult, error) {
+	body, err := json.Marshal(connectRequestBody{ServerName: serverName})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	resp, err := d.client.DoRaw(ctx, http.MethodDelete, "/api/v1/connect/"+clientID, body)
+	if err != nil {
+		return nil, fmt.Errorf("disconnect request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return parseDisconnectResponse(resp.StatusCode, raw, clientID)
+}
+
+// parseDisconnectResponse maps a DELETE /api/v1/connect/{client} answer. A 404
+// for a known client is the "entry not found" result (exit 0, like the local
+// path); a 404 for an unknown client stays an error.
+func parseDisconnectResponse(status int, raw []byte, clientID string) (*connect.ConnectResult, error) {
+	if status == http.StatusNotFound && connect.FindClient(clientID) != nil {
+		var env struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &env)
+		return &connect.ConnectResult{Client: clientID, Action: "not_found", Message: env.Error}, nil
+	}
+	return parseConnectResponse(status, raw, clientID)
 }
 
 // parseConnectResponse maps a POST /api/v1/connect/{client} answer to a result
@@ -215,6 +253,34 @@ func (o *offlineConnectBackend) connect(clientID, serverName string, force bool,
 	// both secrets, exactly as the daemon's reconciler does.
 	_ = o.clients.ReconcileClient(context.Background(), clientID)
 	return o.svc.ConnectWithOptions(clientID, serverName, connect.ConnectOptions{Force: force, Intent: intent})
+}
+
+// disconnect removes the entry, then revokes the client credential. Like the
+// daemon, a revoke failure never turns a completed disconnect into an error.
+func (o *offlineConnectBackend) disconnect(clientID, serverName string) (*connect.ConnectResult, error) {
+	result, err := o.svc.Disconnect(clientID, serverName)
+	if err != nil || result == nil || !result.Success || !auth.ValidClientID(clientID) {
+		return result, err
+	}
+	cred, gerr := o.clients.Get(clientID)
+	if gerr != nil {
+		result.CredentialRevokeError = gerr.Error()
+		return result, nil
+	}
+	if cred == nil {
+		return result, nil
+	}
+	actor := runtime.Actor{Kind: "cli_offline", Surface: profile.SurfaceCLI}
+	view, ferr := o.clients.Forget(context.Background(), actor, clientID, true)
+	var none *runtime.NoClientCredentialError
+	switch {
+	case ferr == nil:
+		result.CredentialRevoked = view.TokenName
+	case errors.As(ferr, &none):
+	default:
+		result.CredentialRevokeError = ferr.Error()
+	}
+	return result, nil
 }
 
 // --- errors and rendering -------------------------------------------------

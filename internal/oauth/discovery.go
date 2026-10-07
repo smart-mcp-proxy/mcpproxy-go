@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,6 +33,10 @@ type OAuthServerMetadata struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
 	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+
+	// grantTypesPresent records that the document carried grant_types_supported,
+	// even as an empty list (an empty list is not the same as an absent field).
+	grantTypesPresent bool
 }
 
 // BuildRFC8414MetadataURLs constructs OAuth Authorization Server Metadata URLs per RFC 8414.
@@ -198,6 +203,14 @@ func discoverAuthServerMetadataWithFallback(authServerURL string, timeout time.D
 //   - MCP Server: server.smithery.ai/googledrive
 //   - Auth Server: auth.smithery.ai/googledrive
 func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
+	return discoverAuthServerURL(serverURL, timeout, func(prmURL string) (*ProtectedResourceMetadata, error) {
+		return DiscoverProtectedResourceMetadata(prmURL, timeout)
+	})
+}
+
+// discoverAuthServerURL is DiscoverAuthServerURL with an injectable Protected
+// Resource Metadata fetcher, so the preflight can read PRM through the discovery cache.
+func discoverAuthServerURL(serverURL string, timeout time.Duration, fetchPRM func(prmURL string) (*ProtectedResourceMetadata, error)) string {
 	logger := zap.L().Named("oauth.discovery")
 
 	// First, make a preflight request to get the WWW-Authenticate header with resource_metadata
@@ -240,7 +253,7 @@ func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
 	}
 
 	// Fetch Protected Resource Metadata
-	metadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
+	metadata, err := fetchPRM(metadataURL)
 	if err != nil {
 		logger.Debug("Failed to fetch Protected Resource Metadata",
 			zap.String("metadata_url", logSafeURL(metadataURL)),
@@ -828,3 +841,69 @@ type metadataStatus struct {
 }
 
 // Note: parseBaseURL is defined in config.go and shared within the oauth package
+
+// cachedPRM fetches Protected Resource Metadata through the discovery cache
+// (Spec 113 FR-026): the scope preflight, the auth-server discovery and the
+// resource auto-detection all read the same document.
+func cachedPRM(serverURL string, ov discoveryOverrides, prmURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
+	return cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("prm", serverURL, ov, prmURL), serverURL,
+		func() (*ProtectedResourceMetadata, error) {
+			return DiscoverProtectedResourceMetadata(prmURL, timeout)
+		})
+}
+
+// findWorkingMetadataDoc is FindWorkingMetadataURL that also returns the parsed
+// document it validated, so callers need no second fetch.
+func findWorkingMetadataDoc(serverURL string, timeout time.Duration) (string, *asMetadataDoc, error) {
+	logger := zap.L().Named("oauth.discovery")
+	var lastErr error
+	for _, metadataURL := range BuildRFC8414MetadataURLs(serverURL) {
+		raw, err := httpFetchRaw(metadataURL, timeout)
+		if err != nil {
+			lastErr = err
+			logger.Debug("Metadata URL validation failed",
+				zap.String("metadata_url", logSafeURL(metadataURL)),
+				logSafeErrorField(err))
+			continue
+		}
+		doc, err := parseASMetadataDoc(raw)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if doc.meta.AuthorizationEndpoint == "" || doc.meta.TokenEndpoint == "" {
+			lastErr = fmt.Errorf("metadata missing required fields")
+			continue
+		}
+		logger.Info("Found working OAuth metadata URL",
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("metadata_url", logSafeURL(metadataURL)),
+			zap.String("issuer", doc.meta.Issuer))
+		return metadataURL, doc, nil
+	}
+	return "", nil, fmt.Errorf("no working metadata URL found for %s: %w", logSafeURL(serverURL), lastErr)
+}
+
+// refreshGrantWarned records the servers already warned about (Spec 113 FR-021).
+var refreshGrantWarned sync.Map
+
+// warnIfNoRefreshGrant logs one Warn per server per process when the AS metadata
+// publishes grant_types_supported without refresh_token. An absent field is not
+// a warning: RFC 8414 says the default is authorization_code + implicit and many
+// servers simply omit it.
+func warnIfNoRefreshGrant(logger *zap.Logger, serverName string, meta *OAuthServerMetadata) {
+	if meta == nil || (len(meta.GrantTypesSupported) == 0 && !meta.grantTypesPresent) {
+		return
+	}
+	for _, g := range meta.GrantTypesSupported {
+		if g == "refresh_token" {
+			return
+		}
+	}
+	if _, loaded := refreshGrantWarned.LoadOrStore(serverName, struct{}{}); loaded {
+		return
+	}
+	logger.Warn("Authorization server does not list refresh_token in grant_types_supported; access tokens cannot be refreshed and logins will expire",
+		zap.String("server", serverName),
+		zap.Strings("grant_types_supported", meta.GrantTypesSupported))
+}

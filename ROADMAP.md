@@ -889,7 +889,7 @@ graph LR
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
-| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 21/81 (26%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
@@ -910,7 +910,7 @@ graph LR
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 94/113 (83%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
@@ -936,12 +936,12 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 39/58 (67%) |
 | [002-windows-installer](./specs/002-windows-installer/) | `in-flight` | 35/60 (58%) |
 | [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
-| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 73/101 (72%) |
+| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 75/101 (74%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
-| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 43/65 (66%) |
+| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 44/65 (68%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 94/103 (91%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
-| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
+| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 49/87 (56%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 25/36 (69%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
@@ -992,7 +992,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [055-frontend-major-upgrades](./specs/055-frontend-major-upgrades/) | `shipped` | 23/24 (96%) |
 | [056-output-schema-validation](./specs/056-output-schema-validation/) | `in-flight` | 22/24 (92%) |
 | [057-in-proxy-profiles](./specs/057-in-proxy-profiles/) | `in-flight` | 20/25 (80%) |
-| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `in-flight` | 19/81 (23%) |
+| [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | `in-flight` | 21/81 (26%) |
 | [059-output-sanitisation](./specs/059-output-sanitisation/) | `shipped` | 24/25 (96%) |
 | [060-settings-page](./specs/060-settings-page/) | `shipped` | 16/16 (100%) |
 | [064-glass-cockpit](./specs/064-glass-cockpit/) | — | — |
@@ -1000,7 +1000,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) | `shipped` | 25/26 (96%) |
 | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) | `in-flight` | 21/24 (88%) |
 | [071-official-registry-protocol](./specs/071-official-registry-protocol/) | `shipped` | 12/12 (100%) |
-| [073-activity-size-retention](./specs/073-activity-size-retention/) | `in-flight` | 13/14 (93%) |
+| [073-activity-size-retention](./specs/073-activity-size-retention/) | `shipped` | 14/14 (100%) |
 | [074-discovery-intervals](./specs/074-discovery-intervals/) | `in-flight` | 17/19 (89%) |
 | [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `shipped` | 30/30 (100%) |
 | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) | `in-flight` | 22/24 (92%) |
@@ -1032,10 +1032,12 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 94/113 (83%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `shipped` | 111/113 (98%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
 | [108-profiles-v3](./specs/108-profiles-v3/) | `shipped` | 194/195 (99%) |
 | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `shipped` | 257/258 (100%) |
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
+| [111-personal-docker-image](./specs/111-personal-docker-image/) | — | — |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
+| [113-upstream-resilience](./specs/113-upstream-resilience/) | `drafted` | 0/100 (0%) |

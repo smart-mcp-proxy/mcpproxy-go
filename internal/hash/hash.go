@@ -251,3 +251,20 @@ func ComputeToolHashWithOutputSchema(serverName, toolName, description string, i
 	}
 	return hash
 }
+
+// ToolDefinitionDigest returns a stable digest of the parts of a tool
+// definition a security scan reads: its description and input schema. The
+// tool name is the lookup key on both sides, and the output schema is not
+// exported to scanners, so neither is folded in. A missing, null or empty
+// schema counts as "{}" so every producer agrees.
+func ToolDefinitionDigest(description, schemaJSON string) string {
+	switch schemaJSON {
+	case "", "null":
+		schemaJSON = "{}"
+	}
+	h := sha256.New()
+	h.Write([]byte(description))
+	h.Write([]byte("|"))
+	h.Write([]byte(NormalizeJSON(schemaJSON)))
+	return hex.EncodeToString(h.Sum(nil))
+}

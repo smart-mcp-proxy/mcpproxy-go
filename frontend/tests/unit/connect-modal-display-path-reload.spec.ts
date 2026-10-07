@@ -103,6 +103,30 @@ describe('ConnectModal display_path and disconnect reload hint', () => {
     expect(wrapper.emitted('updated')).toHaveLength(1)
   })
 
+  it('does not claim success when the disconnect left the credential live', async () => {
+    ;(api.disconnectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'cursor',
+        config_path: FULL,
+        server_name: 'mcpproxy',
+        action: 'removed',
+        message: 'MCPProxy removed from Cursor',
+        credential_revoke_error: 'storage busy',
+      },
+    })
+    const wrapper = await openModal(pinia)
+    await wrapper.find('[data-test="connect-disconnect-cursor"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-disconnect-confirm-button"]').trigger('click')
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('storage busy')
+    expect(text).toContain('mcpproxy client forget cursor')
+  })
+
   it('emits a native-list refresh after a successful undo', async () => {
     ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: [{ ...connectedRow(), connected: false }] })
     ;(api.getConnectPreview as any).mockResolvedValue({

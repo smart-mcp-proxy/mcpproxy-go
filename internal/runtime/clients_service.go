@@ -65,6 +65,7 @@ type ClientCredentialStore interface {
 	FinalizeClientCredentialRotation(clientID string) (*auth.AgentToken, error)
 	RollbackClientCredentialRotation(clientID string) (*auth.AgentToken, error)
 	ForgetClientCredential(clientID string) (*auth.AgentToken, error)
+	ForgetClientCredentialRestoringPrior(clientID string) (*auth.AgentToken, error)
 	UpdateClientCredentialBinding(clientID, pin, mode string) (before, after *auth.AgentToken, err error)
 	ListAgentTokens() ([]auth.AgentToken, error)
 }
@@ -674,15 +675,38 @@ func (s *ClientsService) forget(ctx context.Context, a Actor, clientID string, d
 }
 
 func (s *ClientsService) forgetLocked(ctx context.Context, a Actor, clientID string, diff map[string]interface{}) (*ClientCredentialView, error) {
-	revoked, err := s.store.ForgetClientCredential(clientID)
+	return s.forgetLockedOpt(ctx, a, clientID, diff, false)
+}
+
+// forgetLockedOpt is forgetLocked; restorePrior rolls the tombstone's binding
+// back to the one the revoked record replaced (an undone connect).
+func (s *ClientsService) forgetLockedOpt(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool) (*ClientCredentialView, error) {
+	forget := s.store.ForgetClientCredential
+	if restorePrior {
+		forget = s.store.ForgetClientCredentialRestoringPrior
+	}
+	// The restore path rewrites the revoked record's binding, so capture the
+	// binding it held when revoked for the audit record.
+	heldPin := ""
+	if restorePrior {
+		if all, rerr := s.records(); rerr == nil {
+			if rec := clientRecord(all, clientID); rec != nil {
+				heldPin = rec.ProfilePin
+			}
+		}
+	}
+	revoked, err := forget(clientID)
 	if err != nil {
 		if errors.Is(err, storage.ErrClientCredentialNotFound) {
 			return nil, &NoClientCredentialError{ClientID: clientID, State: profile.CredentialStateNone}
 		}
 		return nil, err
 	}
+	if !restorePrior {
+		heldPin = revoked.ProfilePin
+	}
 	s.writeChange(ctx, a, changeRecord{
-		change: profile.ChangeForget, profile: revoked.ProfilePin, previousProfile: revoked.ProfilePin,
+		change: profile.ChangeForget, profile: heldPin, previousProfile: heldPin,
 		clientID: clientID, tokenName: revoked.Name, diff: diff,
 	})
 	return s.view(revoked), nil

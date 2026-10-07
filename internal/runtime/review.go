@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -349,6 +350,10 @@ func reviewCoverage(job *scanner.ScanJob, records []*storage.ToolApprovalRecord,
 //   - A definition added or changed after the scan read its definitions
 //     (DefinitionChangedAt after ScanContext.ToolsExportedAt, or StartedAt
 //     for a scan that recorded no export time) is not covered.
+//   - A scan that recorded per-tool definition digests (ToolHashes) covers a
+//     tool only when its digest equals the digest of the record's current
+//     definition, so a definition swapped inside the timing window is not
+//     covered. Scans without digests (legacy) use the rules below unchanged.
 //   - A scan that recorded its tool names covers exactly those tools.
 //   - A legacy scan (no recorded names, ToolsExported > 0) covers approved
 //     records, and pending records of a quarantined server (its whole toolset
@@ -368,6 +373,19 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 	}
 	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(analysedAt) {
 		return false
+	}
+	if len(job.ScanContext.ToolHashes) > 0 {
+		// Hash-bound scan: the analysed definition must be the record's
+		// CURRENT one. A record with no stored definition cannot be compared,
+		// so it is not covered.
+		scanned, ok := job.ScanContext.ToolHashes[record.ToolName]
+		if !ok {
+			scanned, ok = job.ScanContext.ToolHashes[serverName+":"+record.ToolName]
+		}
+		if !ok || (record.CurrentDescription == "" && record.CurrentSchema == "") {
+			return false
+		}
+		return scanned == hash.ToolDefinitionDigest(record.CurrentDescription, record.CurrentSchema)
 	}
 	if len(job.ScanContext.ToolNames) > 0 {
 		for _, name := range job.ScanContext.ToolNames {

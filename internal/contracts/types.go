@@ -215,15 +215,21 @@ type QuarantineStats struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	AuthURL        string            `json:"auth_url"`
-	TokenURL       string            `json:"token_url"`
-	ClientID       string            `json:"client_id"`
-	Scopes         []string          `json:"scopes,omitempty"`
-	ExtraParams    map[string]string `json:"extra_params,omitempty"`
-	RedirectPort   int               `json:"redirect_port,omitempty"`
-	PKCEEnabled    bool              `json:"pkce_enabled,omitempty"`
-	TokenExpiresAt *time.Time        `json:"token_expires_at,omitempty"` // When the OAuth token expires
-	TokenValid     bool              `json:"token_valid,omitempty"`      // Whether token is currently valid
+	AuthURL      string            `json:"auth_url"`
+	TokenURL     string            `json:"token_url"`
+	ClientID     string            `json:"client_id"`
+	Scopes       []string          `json:"scopes,omitempty"`
+	ExtraParams  map[string]string `json:"extra_params,omitempty"`
+	RedirectPort int               `json:"redirect_port,omitempty"`
+	PKCEEnabled  bool              `json:"pkce_enabled,omitempty"`
+	// Spec 113-b operator overrides of OAuth discovery (https-or-loopback URLs,
+	// never credentials). Empty means "use discovery".
+	AuthorizationEndpoint string     `json:"authorization_endpoint,omitempty"`
+	TokenEndpoint         string     `json:"token_endpoint,omitempty"`
+	RegistrationEndpoint  string     `json:"registration_endpoint,omitempty"`
+	AuthServerMetadataURL string     `json:"auth_server_metadata_url,omitempty"`
+	TokenExpiresAt        *time.Time `json:"token_expires_at,omitempty"` // When the OAuth token expires
+	TokenValid            bool       `json:"token_valid,omitempty"`      // Whether token is currently valid
 }
 
 // IsolationConfig represents Docker isolation configuration as it is

@@ -585,9 +585,9 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <!-- Spec 108-j J10: who made the call and under which profile.
-                     Folded away below md; the detail drawer carries the same
+                     Folded away below lg (1024px); the detail drawer carries the same
                      chips in an "Attribution" section. -->
-                <th v-if="hasScopeColumn" class="hidden xl:table-cell" data-test="activity-scope-col">Scope</th>
+                <th v-if="hasScopeColumn" class="hidden lg:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
@@ -698,7 +698,7 @@
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td v-if="hasScopeColumn" class="hidden xl:table-cell max-w-[11rem]">
+                <td v-if="hasScopeColumn" class="hidden lg:table-cell max-w-[11rem]">
                   <AttributionChips :record="row.activity" :test-id="row.activity.id" stacked />
                 </td>
                 <td>
@@ -862,7 +862,18 @@
                   >
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
-                  <span v-else data-test="activity-status" class="sr-only">
+                  <svg
+                    v-else
+                    data-test="activity-status-icon"
+                    class="inline-block h-4 w-4 text-success"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <title>Success</title>
+                    <path fill-rule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 111.4-1.4l3.8 3.8 6.8-6.8a1 1 0 011.4 0z" clip-rule="evenodd" />
+                  </svg>
+                  <span v-if="!statusPresentation(row.activity.status).pill" data-test="activity-status" class="sr-only">
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
                   <!-- Inline "Why?" only from xl: with the sidebar open the card is ~700px at 1024px and the

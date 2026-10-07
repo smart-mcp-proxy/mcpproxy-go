@@ -512,6 +512,18 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}
+			if v, ok := oauthRaw["authorization_endpoint"].(string); ok {
+				oauthCfg.AuthorizationEndpoint = v
+			}
+			if v, ok := oauthRaw["token_endpoint"].(string); ok {
+				oauthCfg.TokenEndpoint = v
+			}
+			if v, ok := oauthRaw["registration_endpoint"].(string); ok {
+				oauthCfg.RegistrationEndpoint = v
+			}
+			if v, ok := oauthRaw["auth_server_metadata_url"].(string); ok {
+				oauthCfg.AuthServerMetadataURL = v
+			}
 			if tokenExpiresAt, ok := oauthRaw["token_expires_at"].(string); ok && tokenExpiresAt != "" {
 				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
 					oauthCfg.TokenExpiresAt = &parsedTime

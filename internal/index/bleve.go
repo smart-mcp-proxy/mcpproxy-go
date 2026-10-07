@@ -31,6 +31,14 @@ const (
 	// identifier-style queries. Typical MCP tool names stay well below this cap.
 	maxUnderscoreSearchSegments = 16
 	underscoreSegmentBoost      = 5.0
+
+	// bareSegmentMinLen is the shortest single-token query that also matches
+	// as an underscore-delimited tool-name segment; shorter tokens would make
+	// the wildcard scan too broad and noisy. bareSegmentBoost stays below the
+	// exact (5.0) and prefix (3.0) tool_name clauses so existing top hits keep
+	// their order.
+	bareSegmentMinLen = 3
+	bareSegmentBoost  = 1.5
 )
 
 // BleveIndex wraps Bleve index operations
@@ -866,7 +874,17 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*bquery.BooleanQuery, error) {
 	boolQuery := buildToolSearchQuery(queryStr)
 
+	// A bare token ("issue") matches an interior/trailing segment of a
+	// keyword-analyzed tool_name ("create_issue") that no other clause can
+	// see. Like the underscore enhancement below it is added only when no
+	// exact tool-name match is already on top: any added clause shifts BM25
+	// query normalization for every hit, and exact-name scores are frozen.
 	segmentQuery := underscoreSegmentQuery(queryStr)
+	bare := false
+	if segmentQuery == nil {
+		segmentQuery = bareSegmentQuery(queryStr)
+		bare = true
+	}
 	if segmentQuery == nil {
 		return boolQuery, nil
 	}
@@ -878,6 +896,18 @@ func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*
 	for _, hit := range probe.Hits {
 		if fieldsContainExactToolName(hit.Fields, queryStr) {
 			return boolQuery, nil // exact match already at the top: no boost needed
+		}
+	}
+
+	if bare {
+		// Leave the query (and thus every score) untouched when no tool name
+		// has the segment: the extra clause would still shift normalization.
+		segProbe, err := b.index.Search(newToolSearchRequest(segmentQuery, 0, 1))
+		if err != nil {
+			return nil, fmt.Errorf("bare segment probe failed: %w", err)
+		}
+		if segProbe.Total == 0 {
+			return boolQuery, nil
 		}
 	}
 
@@ -1138,6 +1168,31 @@ func underscoreSegmentQuery(queryStr string) bquery.Query {
 	}
 
 	return bleve.NewConjunctionQuery(segmentQueries...)
+}
+
+// bareSegmentQuery matches a single alphanumeric token (>= bareSegmentMinLen
+// chars, no underscore) as a non-leading segment of tool_name. The leading
+// segment is already covered by the prefix clause. Both the query as typed and
+// its lowercase form are tried. Returns nil for any other query shape.
+func bareSegmentQuery(queryStr string) bquery.Query {
+	if len(queryStr) < bareSegmentMinLen || !isASCIIAlphanumeric(queryStr) {
+		return nil
+	}
+	forms := []string{queryStr}
+	if lower := strings.ToLower(queryStr); lower != queryStr {
+		forms = append(forms, lower)
+	}
+	queries := make([]bquery.Query, 0, len(forms)*2)
+	for _, form := range forms {
+		middle := bleve.NewWildcardQuery("*_" + form + "_*")
+		middle.SetField("tool_name")
+		suffix := bleve.NewWildcardQuery("*_" + form)
+		suffix.SetField("tool_name")
+		queries = append(queries, middle, suffix)
+	}
+	q := bleve.NewDisjunctionQuery(queries...)
+	q.SetBoost(bareSegmentBoost)
+	return q
 }
 
 func isASCIIAlphanumeric(value string) bool {
