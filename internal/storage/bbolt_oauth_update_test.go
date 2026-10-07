@@ -217,3 +217,52 @@ func TestSaveOAuthClientCredentialsIfUnsetOrSame(t *testing.T) {
 		t.Fatalf("record = %+v err=%v", rec, err)
 	}
 }
+
+// A completed login's later client write must never pair its client with a
+// refresh token it did not obtain: it is accepted only for the same client id,
+// or for a record holding neither a client id nor a refresh token. A record
+// whose DCR fields a refresh failure cleared still holds another login's
+// refresh token and is refused.
+func TestSaveOAuthClientCredentialsIfSameOrEmpty(t *testing.T) {
+	db := newTestDB(t)
+
+	// No record: saved.
+	ok, err := db.SaveOAuthClientCredentialsIfSameOrEmpty("k1", "a", "", 1, "r1")
+	if err != nil || !ok {
+		t.Fatalf("first save: ok=%v err=%v", ok, err)
+	}
+	// Same client: saved, metadata refreshed.
+	ok, err = db.SaveOAuthClientCredentialsIfSameOrEmpty("k1", "a", "", 2, "r2")
+	if err != nil || !ok {
+		t.Fatalf("same-client save: ok=%v err=%v", ok, err)
+	}
+	if _, _, port, _, _ := db.GetOAuthClientCredentials("k1"); port != 2 {
+		t.Fatalf("port not refreshed: %d", port)
+	}
+	// Different client stored: refused.
+	ok, err = db.SaveOAuthClientCredentialsIfSameOrEmpty("k1", "b", "", 3, "r3")
+	if err != nil || ok {
+		t.Fatalf("different-client save must be refused: ok=%v err=%v", ok, err)
+	}
+
+	// Cleared client but another login's refresh token kept: refused.
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: "k2", AccessToken: "at-b", RefreshToken: "rt-b"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.SaveOAuthClientCredentialsIfSameOrEmpty("k2", "a", "", 1, "r")
+	if err != nil || ok {
+		t.Fatalf("save next to a foreign refresh token must be refused: ok=%v err=%v", ok, err)
+	}
+	if id, _, _, _, _ := db.GetOAuthClientCredentials("k2"); id != "" {
+		t.Fatalf("client written next to foreign refresh token: %q", id)
+	}
+
+	// Cleared client, access token only (nothing to refresh): saved.
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: "k3", AccessToken: "at"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.SaveOAuthClientCredentialsIfSameOrEmpty("k3", "a", "", 1, "r")
+	if err != nil || !ok {
+		t.Fatalf("save into access-token-only record: ok=%v err=%v", ok, err)
+	}
+}

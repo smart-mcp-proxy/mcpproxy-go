@@ -932,6 +932,27 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 // over a different one another login stored in the meantime: that login's
 // token would end up next to this login's client_id.
 func (b *BoltDB) SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
+	return b.saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret, callbackPort, redirectURI, func(rec *OAuthTokenRecord) bool {
+		return rec.ClientID == "" || rec.ClientID == clientID
+	})
+}
+
+// SaveOAuthClientCredentialsIfSameOrEmpty stores a DCR registration like
+// UpdateOAuthClientCredentials, but only while the record already holds this
+// same client id, or holds neither a client id nor a refresh token. It reports
+// whether it saved. Unlike SaveOAuthClientCredentialsIfUnsetOrSame it refuses
+// a record whose DCR fields were cleared but which still holds a refresh
+// token: that token came from another login, and pairing it with this client
+// would make the next refresh fail.
+func (b *BoltDB) SaveOAuthClientCredentialsIfSameOrEmpty(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
+	return b.saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret, callbackPort, redirectURI, func(rec *OAuthTokenRecord) bool {
+		return rec.ClientID == clientID || (rec.ClientID == "" && rec.RefreshToken == "")
+	})
+}
+
+// saveOAuthClientCredentialsIf writes the DCR fields in one transaction when
+// the record is missing or allow(record) holds.
+func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string, allow func(*OAuthTokenRecord) bool) (bool, error) {
 	saved := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -940,7 +961,7 @@ func (b *BoltDB) SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, cl
 			if err := record.UnmarshalBinary(data); err != nil {
 				return err
 			}
-			if record.ClientID != "" && record.ClientID != clientID {
+			if !allow(record) {
 				return nil
 			}
 		}

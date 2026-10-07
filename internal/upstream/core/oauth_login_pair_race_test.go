@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/tests/oauthserver"
 )
 
@@ -91,11 +93,15 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	}
 	hA, codeA, stateA, verA := loginPairHandler(t, f, gateA)
 	hB, codeB, stateB, verB := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
+	// Each login's own callback server (what received its callback); the
+	// stored callback metadata must come from it, not the registry.
+	cbA := &oauth.CallbackServer{Port: 41001, RedirectURI: "http://127.0.0.1:41001" + oauth.DefaultRedirectPath}
+	cbB := &oauth.CallbackServer{Port: 41002, RedirectURI: "http://127.0.0.1:41002" + oauth.DefaultRedirectPath}
 	ctx := context.Background()
 
 	doneA := make(chan error, 1)
 	go func() {
-		err := c.exchangeAuthorizationCode(ctx, hA, codeA, stateA, verA)
+		err := c.exchangeAuthorizationCode(ctx, hA, cbA, codeA, stateA, verA)
 		if err == nil {
 			c.persistCompletedDCRCredentials(hA.GetClientID(), hA.GetClientSecret())
 		}
@@ -109,7 +115,7 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 		t.Fatal("login A never reached its token save")
 	}
 
-	require.NoError(t, c.exchangeAuthorizationCode(ctx, hB, codeB, stateB, verB))
+	require.NoError(t, c.exchangeAuthorizationCode(ctx, hB, cbB, codeB, stateB, verB))
 	c.persistCompletedDCRCredentials(hB.GetClientID(), hB.GetClientSecret())
 
 	close(gateA.release)
@@ -119,6 +125,12 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, rec.RefreshToken)
 	require.NotEmpty(t, rec.ClientID)
+	wantCB := cbA
+	if rec.ClientID == hB.GetClientID() {
+		wantCB = cbB
+	}
+	assert.Equal(t, wantCB.Port, rec.CallbackPort)
+	assert.Equal(t, wantCB.RedirectURI, rec.RedirectURI)
 
 	// The provider accepts the stored pair only if the refresh token was
 	// issued to the stored client.
@@ -133,6 +145,31 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	var body map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "stored refresh token rejected for stored client: %v", body)
+}
+
+// A completion write that lands after a refresh failure cleared the stored
+// client (keeping another login's refresh token) must not attach this login's
+// client to that refresh token.
+func TestPersistCompletedDCRCredentials_NotPairedWithForeignRefreshToken(t *testing.T) {
+	f := newStaleDCRFixture(t, oauthserver.ErrorMode{}, "login-pair-cleared")
+	c := f.client(t, nil)
+	require.NoError(t, f.db.SaveOAuthToken(&storage.OAuthTokenRecord{ServerName: f.key, AccessToken: "at-b", RefreshToken: "rt-b"}))
+	c.persistCompletedDCRCredentials("client-a", "")
+	assert.Empty(t, f.storedClientID(t))
+}
+
+// With oauth.extra_params.client_id the token request is sent with that
+// client id (OAuthTransportWrapper overrides the handler's), so the exchange
+// must not record the handler's client next to the token.
+func TestLoginCompletion_ExtraParamsClientIDNotReplacedByHandlerClient(t *testing.T) {
+	f := newStaleDCRFixture(t, oauthserver.ErrorMode{}, "login-pair-extra")
+	c := f.client(t, &config.OAuthConfig{ExtraParams: map[string]string{"client_id": "from-extra-params"}})
+	h, code, state, verifier := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
+	require.NoError(t, c.exchangeAuthorizationCode(context.Background(), h, nil, code, state, verifier))
+	rec, err := f.db.GetOAuthToken(f.key)
+	require.NoError(t, err)
+	assert.NotEmpty(t, rec.RefreshToken)
+	assert.NotEqual(t, h.GetClientID(), rec.ClientID)
 }
 
 // Every authorization-code exchange in this package goes through
