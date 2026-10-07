@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -52,7 +53,8 @@ func (c *Client) applyExtraParamsToAuthURL(authURL string, extraParams map[strin
 // persistDCRRegistration stores a client registration obtained by Dynamic
 // Client Registration together with the callback port and exact redirect URI
 // it was registered for (Spec 022), so later logins and token refreshes reuse
-// it. It returns the callback port it stored.
+// it. It returns the callback port it stored, or errDCRRegistrationSuperseded
+// when another login stored a registration first.
 func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, error) {
 	if c.storage == nil || clientID == "" {
 		return 0, nil
@@ -64,25 +66,28 @@ func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, err
 		callbackPort = callbackServer.Port
 		redirectURI = callbackServer.RedirectURI
 	}
-	return callbackPort, c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	saved, err := c.storage.SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	if err != nil {
+		return callbackPort, err
+	}
+	if !saved {
+		return callbackPort, errDCRRegistrationSuperseded
+	}
+	return callbackPort, nil
 }
 
-// persistRecoveredDCRRegistration stores the registration obtained by the
-// stale-client recovery, but only while the record's DCR fields are still
-// empty (the recovery just cleared them). saved is false when another login
-// stored its own registration in the meantime; that one wins.
-func (c *Client) persistRecoveredDCRRegistration(clientID, clientSecret string) (callbackPort int, saved bool, err error) {
-	if c.storage == nil {
-		return 0, true, nil
-	}
-	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-	var redirectURI string
-	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
-		callbackPort = callbackServer.Port
-		redirectURI = callbackServer.RedirectURI
-	}
-	saved, err = c.storage.SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret, callbackPort, redirectURI)
-	return callbackPort, saved, err
+// errDCRRegistrationSuperseded: another login stored its own client
+// registration while this login's DCR call was in flight. Every DCR in this
+// file runs only when storage held no client id, so the save is conditional
+// on that still being true; the stored registration wins, and this flow must
+// stop rather than continue with a client storage no longer holds (its grant
+// would later be saved next to the other login's client_id).
+var errDCRRegistrationSuperseded = errors.New("another sign-in stored a new OAuth client registration while this one was registering")
+
+// supersededDCRFlowError is returned by the ordinary DCR branch of every
+// authorize-URL path when errDCRRegistrationSuperseded fires.
+func (c *Client) supersededDCRFlowError(correlationID string) error {
+	return c.signInAgainFlowError(correlationID, fmt.Sprintf("Server '%s': %v", c.config.Name, errDCRRegistrationSuperseded))
 }
 
 // signInAgainFlowError reports a stale-client recovery that stopped without
@@ -263,11 +268,11 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 		})
 	}
 
-	if callbackPort, saved, saveErr := c.persistRecoveredDCRRegistration(newClientID, oauthHandler.GetClientSecret()); saveErr != nil {
+	if callbackPort, saveErr := c.persistDCRRegistration(newClientID, oauthHandler.GetClientSecret()); saveErr != nil && !errors.Is(saveErr, errDCRRegistrationSuperseded) {
 		c.logger.Warn("Failed to persist the re-registered DCR credentials - token refresh may fail later",
 			zap.String("server", c.config.Name),
 			logSafeErrorField(saveErr))
-	} else if !saved {
+	} else if saveErr != nil {
 		// Another login stored its own registration while this one was being
 		// registered. Using ours would leave storage and this flow on
 		// different clients, so stop and let the next sign-in use theirs.

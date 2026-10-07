@@ -377,6 +377,60 @@ func TestRecoverStaleDCRClient_ReviewRound2(t *testing.T) {
 	})
 }
 
+// Review round 3 (opencode Sol 6.1): the ORDINARY DCR branch (no stored
+// client) must not overwrite a registration another login stored while this
+// login's DCR call was in flight — otherwise the other login's grant ends up
+// paired with this login's client_id. The REST/CLI login path is not
+// serialized with background connection flows by the OAuth coordinator.
+func TestStaleDCRClient_OrdinaryDCRDoesNotOverwriteConcurrentRegistration(t *testing.T) {
+	var f *staleDCRFixture
+	var once sync.Once
+	f = newStaleDCRFixtureWithOptions(t, oauthserver.Options{
+		OnRegister: func() {
+			once.Do(func() {
+				require.NoError(t, f.db.UpdateOAuthClientCredentials(f.key, "concurrent-winner", "", 1, "http://127.0.0.1:1"+oauth.DefaultRedirectPath))
+			})
+		},
+	}, "stale-dcr-ordinary-race")
+	c := f.client(t, &config.OAuthConfig{Scopes: []string{"read"}})
+
+	_, err := quickLogin(t, c)
+	require.Error(t, err, "sign in again: another login's registration is now stored")
+	assert.Equal(t, "concurrent-winner", f.storedClientID(t))
+	assert.EqualValues(t, 1, f.srv.Server.RegistrationCount())
+}
+
+// Every authorize-URL path must abort (not continue with a client storage no
+// longer holds) when its ordinary DCR registration was superseded.
+func TestDCRSupersededHandledInAllAuthorizePaths(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "connection_oauth.go", nil, 0)
+	require.NoError(t, err)
+	want := map[string]bool{
+		"getAuthorizationURLQuick":           false,
+		"handleOAuthAuthorization":           false,
+		"handleOAuthAuthorizationWithResult": false,
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if _, tracked := want[fn.Name.Name]; !tracked {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "errDCRRegistrationSuperseded" {
+				want[fn.Name.Name] = true
+			}
+			return true
+		})
+	}
+	for name, handled := range want {
+		assert.True(t, handled, "%s must handle errDCRRegistrationSuperseded", name)
+	}
+}
+
 // The three authorization-URL emission paths are near-duplicates; all three
 // must run the stale-client recovery (they change in lockstep).
 func TestRecoverStaleDCRClient_CalledFromAllAuthorizePaths(t *testing.T) {

@@ -1140,7 +1140,9 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
 			if c.storage != nil && clientID != "" {
-				if callbackPort, err := c.persistDCRRegistration(clientID, clientSecret); err != nil {
+				if callbackPort, err := c.persistDCRRegistration(clientID, clientSecret); errors.Is(err, errDCRRegistrationSuperseded) {
+					return c.supersededDCRFlowError("")
+				} else if err != nil {
 					c.logger.Warn("Failed to persist DCR credentials - token refresh may fail later",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(err))
@@ -1478,7 +1480,9 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 				zap.String("client_id", clientID))
 			// Persist DCR credentials and callback port for future use (Spec 022)
 			if c.storage != nil && clientID != "" {
-				if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); saveErr != nil {
+				if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); errors.Is(saveErr, errDCRRegistrationSuperseded) {
+					return nil, c.supersededDCRFlowError("")
+				} else if saveErr != nil {
 					c.logger.Warn("Failed to persist DCR credentials",
 						zap.String("server", c.config.Name),
 						logSafeErrorField(saveErr))
@@ -2058,7 +2062,9 @@ func (c *Client) getAuthorizationURLQuick(ctx context.Context, oauthConfig *clie
 			// Persist DCR credentials and callback port (Spec 022)
 			clientID := oauthHandler.GetClientID()
 			clientSecret := oauthHandler.GetClientSecret()
-			if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); saveErr != nil {
+			if _, saveErr := c.persistDCRRegistration(clientID, clientSecret); errors.Is(saveErr, errDCRRegistrationSuperseded) {
+				return "", nil, "", "", c.supersededDCRFlowError(correlationID)
+			} else if saveErr != nil {
 				c.logger.Warn("Failed to persist DCR credentials",
 					zap.String("server", c.config.Name),
 					logSafeErrorField(saveErr))
