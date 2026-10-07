@@ -61,6 +61,8 @@ mcpproxy activity list [flags]
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--request-id` | | | Filter by HTTP request ID for log correlation |
 | `--parent-id` | | | List child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
+| `--error-class` | | | Filter failed tool calls by class: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled` |
+| `--fault-domain` | | | Filter failed tool calls by fault domain: `upstream`, `proxy`, `client` |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
 | `--profile` | | | Filter by the profile in effect when the call ran; `-` selects records with none |
@@ -330,6 +332,23 @@ to see sub-calls`). When the record is one of those sub-calls, it prints a
 - `CLI (CLI command)` - Tool called via `mcpproxy call tool` CLI command
 - `API (REST API)` - Tool called via REST API directly
 
+### Failure classification
+
+A failed tool call adds an `Error class` line to the table (for example
+`Error class:  http (fault: upstream, HTTP 502)`), and the same data appears as
+`error_class`, `fault_domain` and `upstream_http_status` in `-o json` and
+`-o yaml`. The fields are absent on successful calls and on older records. See
+[Failure classification](../features/activity-log.md#failure-classification-error_class-and-fault_domain)
+for the class table.
+
+```bash
+# Every call the upstream answered with an HTTP error, as JSON
+mcpproxy activity list --error-class http -o json | jq '.activities[] | {server_name, tool_name, upstream_http_status}'
+
+# Failures that were mcpproxy's own doing, not the upstream's
+mcpproxy activity list --fault-domain proxy
+```
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -457,6 +476,7 @@ mcpproxy activity export [flags]
 | `--format` | `-f` | json | Export file format: `json` (JSON Lines), `csv` |
 | `--include-bodies` | | false | Include full request/response bodies |
 | `--parent-id` | | | Export only child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
+| `--error-class`, `--fault-domain` | | | Export only failed tool calls of this class / fault domain (values as for `activity list`) |
 | *(filter flags)* | | | Same filters as `activity list`, including `--profile`, `--client`, `--token` and `--client-name`. CSV output appends `profile`, `profile_source`, `client_id`, `client_name`, `token_name` and `block_reason` after `parent_id` |
 
 ### Examples

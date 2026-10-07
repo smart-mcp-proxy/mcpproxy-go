@@ -142,6 +142,39 @@ macOS Activity window, and `mcpproxy activity list --parent-id` all expose the
 same navigation (see the "Drill into a code_execution" workflow in the CLI
 activity commands reference).
 
+#### Failure classification: error_class and fault_domain
+
+A failed tool call tells you what failed and whose fault it is. Every
+`tool_call` record with `status: "error"` (and a limiter shed or profile
+refusal) carries three optional fields, in the REST API, the SSE
+`activity.tool_call.completed` payload and `mcpproxy activity list|show -o json|yaml`:
+
+| Field | Meaning |
+|-------|---------|
+| `error_class` | What failed, one of the classes below |
+| `fault_domain` | `upstream` (the server or the network to it), `proxy` (mcpproxy refused or failed) or `client` (the caller sent something invalid or went away) |
+| `upstream_http_status` | The HTTP status of the upstream response, when known (non-2xx only) |
+
+| `error_class` | Typical `fault_domain` | When |
+|---------------|------------------------|------|
+| `tool_error` | `upstream` | The tool answered `isError: true`. The record keeps `status: "error"`; this class tells it apart from a transport failure. |
+| `jsonrpc` | `upstream` | The upstream answered with a JSON-RPC error, including server-specific codes such as `-32001`. |
+| `http` | `upstream` | The upstream answered with a non-2xx HTTP status (for example `502` with an HTML body); `upstream_http_status` is set. |
+| `network` | `upstream` | Connection refused or reset, DNS failure, EOF, closed transport, or the server is not connected. |
+| `timeout` | `upstream` or `proxy` | A deadline passed: `upstream` if the request had been sent, `proxy` if it expired before dispatch. |
+| `session_terminated` | `upstream` | The upstream no longer knows the MCP session (HTTP 404). |
+| `auth` | `upstream` | HTTP 401/403 or an OAuth authorization-required error. |
+| `proxy_policy` | `proxy` or `client` | mcpproxy refused the call: a profile policy, the concurrency limiter, or a stale connection generation (`proxy`); arguments that failed pre-dispatch validation (`client`). |
+| `proxy_internal` | `proxy` | A failure inside mcpproxy that no other class explains. |
+| `cancelled` | `client` | The caller cancelled the request. Not counted as an upstream fault. |
+
+The fields are absent on successful calls and on records written before this
+feature, which decode and display exactly as before. Filter with
+`error_class=<class>` and `fault_domain=<domain>` (REST), or
+`--error-class` and `--fault-domain` (CLI). The Spec 107 audit line keeps its
+own `error_class` vocabulary; it is derived from this classification so the
+two never disagree.
+
 ### Intent Tracking
 
 Every tool call includes intent information for security auditing:
@@ -313,6 +346,8 @@ GET /api/v1/activity
 | `offset` | integer | Pagination offset (default: 0) |
 | `include_call_tool` | boolean | Include `call_tool_*` internal tool calls (default: false). Excluded by default because every dispatch has a paired `tool_call` (or rejection) record with the same `request_id`. |
 | `parent_id` | string | Return only the sub-calls one `code_execution` issued (value = the parent record's `request_id`). Child→parent is the reverse lookup: `request_id=<child's parent_id>`. |
+| `error_class` | string | Return only failed calls of this class: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled`. See [Failure classification](#failure-classification-error_class-and-fault_domain). |
+| `fault_domain` | string | Return only failed calls with this fault domain: `upstream`, `proxy`, `client` |
 | `exclude_payloads` | boolean | Omit the bulky fields — `arguments`, `response` — and narrow `metadata` to a contextual whitelist (default: false). See below. |
 
 #### `exclude_payloads` and the contextual metadata whitelist

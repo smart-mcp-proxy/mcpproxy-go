@@ -71,6 +71,12 @@ type ActivityRecord struct {
 	TokenName     string `json:"token_name,omitempty"`     // Agent/client token name
 	BlockReason   string `json:"block_reason,omitempty"`   // Typed cause of a profile policy refusal
 
+	// Call-error taxonomy (Spec 113-c FR-045): what failed and whose fault it
+	// is. Absent on success and on records written before Spec 113.
+	ErrorClass         string `json:"error_class,omitempty"`          // network|timeout|http|jsonrpc|tool_error|session_terminated|auth|proxy_policy|proxy_internal|cancelled
+	FaultDomain        string `json:"fault_domain,omitempty"`         // upstream|proxy|client
+	UpstreamHTTPStatus int    `json:"upstream_http_status,omitempty"` // Upstream HTTP status when known
+
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
 	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:
 	// with payloads suppressed there is no text left to measure, so a consumer

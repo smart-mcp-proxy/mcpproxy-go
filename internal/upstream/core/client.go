@@ -453,6 +453,27 @@ func toolAnnotationsFromWire(annotation mcp.ToolAnnotation) *config.ToolAnnotati
 	}
 }
 
+// callTimeoutError is the error CallTool returns when its own deadline fires.
+// It keeps the exact message CallTool always produced but, unlike the bare
+// fmt.Errorf it replaces, is recognisable as context.DeadlineExceeded and as a
+// net.Error timeout, so the call-error classifier (Spec 113-c) can tell a
+// timeout from an unrelated failure without reading the message.
+type callTimeoutError struct {
+	tool    string
+	timeout time.Duration
+}
+
+func (e *callTimeoutError) Error() string {
+	return fmt.Sprintf("CallTool '%s' timed out after %v", e.tool, e.timeout)
+}
+
+// Is makes errors.Is(err, context.DeadlineExceeded) true.
+func (e *callTimeoutError) Is(target error) bool { return target == context.DeadlineExceeded }
+
+// Timeout and Temporary satisfy net.Error.
+func (e *callTimeoutError) Timeout() bool   { return true }
+func (e *callTimeoutError) Temporary() bool { return true }
+
 // CallTool executes a tool on the upstream server
 //
 // Spec 112: this is the ONLY place that derives the per-server outbound set of
@@ -551,6 +572,11 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		zap.String("server", c.config.Name),
 		zap.String("tool", toolName))
 
+	// Spec 113-c FR-041: mark the call dispatched at the exact point it is
+	// handed to mcp-go, for every transport, so a timeout or error is
+	// attributed to the upstream only when the request really left. A no-op
+	// when ctx carries no call recorder.
+	proxytransport.MarkDispatched(ctx)
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
 		// Spec 112 FR-016.1: scrub echoed forwarded values before this error
@@ -567,7 +593,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		// Provide more specific error context
 		if callCtx.Err() == context.DeadlineExceeded {
 			c.logCallInterrupted(ctx, callCtx, toolName)
-			return nil, fmt.Errorf("CallTool '%s' timed out after %v", toolName, timeout)
+			return nil, &callTimeoutError{tool: toolName, timeout: timeout}
 		}
 		if callCtx.Err() != nil {
 			c.logCallInterrupted(ctx, callCtx, toolName)

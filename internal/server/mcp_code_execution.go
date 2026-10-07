@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -968,6 +969,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
 		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+		callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 		u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, nil, err, startTime, duration)
 		return nil, err
 	}
@@ -1029,11 +1031,13 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// wrapper's own records can be scrubbed with everything any sub-call sent.
 	parentFwdSink := headerfwd.SinkFrom(ctx)
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 	if certified.certified() {
 		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
 		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
+	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)
 	// Spec 113-d FR-062: this path calls the managed client directly, bypassing
@@ -1064,6 +1068,12 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		// another upstream's arguments or return it whole.
 		if _, sanErr := u.sanitiseSubCallResult(ctx, serverName, toolName, requestID, result); sanErr != nil {
 			result, err = nil, sanErr
+			if errors.Is(sanErr, audit.ErrSanitisationFailed) {
+				callerr.Observe(ctx, nil, sanErr) // Spec 113-c: proxy_internal, audit class sanitisation
+			} else {
+				// Output-policy block: mcpproxy refused to hand the result over.
+				callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
+			}
 		}
 	}
 	duration := time.Since(startTime)

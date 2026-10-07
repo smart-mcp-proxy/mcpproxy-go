@@ -98,6 +98,14 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.ParentID = parentID
 	}
 
+	// Call-error taxonomy filters (Spec 113-c FR-046): exact match.
+	if errorClass := q.Get("error_class"); errorClass != "" {
+		filter.ErrorClass = errorClass
+	}
+	if faultDomain := q.Get("fault_domain"); faultDomain != "" {
+		filter.FaultDomain = faultDomain
+	}
+
 	// Include call_tool_* internal tool calls (default: exclude the ones a
 	// tool_call record already covers — successful and concurrency-rejected).
 	// Set include_call_tool=true to show every internal tool call.
@@ -176,6 +184,8 @@ func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
 // @Param parent_id query string false "Filter by parent call id — returns the sub-calls one code_execution issued"
+// @Param error_class query string false "Filter by call-error class (Spec 113-c)" Enums(network, timeout, http, jsonrpc, tool_error, session_terminated, auth, proxy_policy, proxy_internal, cancelled)
+// @Param fault_domain query string false "Filter by fault domain (Spec 113-c)" Enums(upstream, proxy, client)
 // @Param include_call_tool query bool false "Include successful call_tool_* internal tool calls (default: false, excluded to avoid duplicates)"
 // @Param sensitive_data query bool false "Filter by sensitive data detection (true=has detections, false=no detections)"
 // @Param detection_type query string false "Filter by specific detection type (e.g., 'aws_access_key', 'credit_card')"
@@ -458,6 +468,10 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		ClientName:    a.EffectiveClientName(),
 		TokenName:     a.EffectiveTokenName(),
 		BlockReason:   a.EffectiveBlockReason(),
+		// Call-error taxonomy (Spec 113-c FR-045)
+		ErrorClass:         a.ErrorClass,
+		FaultDomain:        a.FaultDomain,
+		UpstreamHTTPStatus: a.UpstreamHTTPStatus,
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,
@@ -620,6 +634,10 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		ClientName:        a.EffectiveClientName(),
 		TokenName:         a.EffectiveTokenName(),
 		BlockReason:       a.EffectiveBlockReason(),
+		// Call-error taxonomy (Spec 113-c FR-045)
+		ErrorClass:         a.ErrorClass,
+		FaultDomain:        a.FaultDomain,
+		UpstreamHTTPStatus: a.UpstreamHTTPStatus,
 		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
 		// NOT under includeBodies: they are sizes, not content, and the
 		// bodies-off export is exactly the case where they are the only cost
@@ -657,6 +675,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param status query string false "Filter by status"
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
 // @Param parent_id query string false "Filter by parent call id — exports the sub-calls one code_execution issued"
+// @Param error_class query string false "Filter by call-error class (Spec 113-c)" Enums(network, timeout, http, jsonrpc, tool_error, session_terminated, auth, proxy_policy, proxy_internal, cancelled)
+// @Param fault_domain query string false "Filter by fault domain (Spec 113-c)" Enums(upstream, proxy, client)
 // @Param agent query string false "Alias of token (Spec 028)"
 // @Param token query string false "Filter by the token in effect for the call; - selects records with no token (Spec 108)"
 // @Param profile query string false "Filter by the profile in effect for the call; - selects records with no profile (Spec 108)"

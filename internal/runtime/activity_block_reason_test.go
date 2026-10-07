@@ -42,6 +42,7 @@ func TestActivityService_ToolCallCompletedPersistsBlockReason(t *testing.T) {
 				nil, "", false, "", nil, "", "", 0, 0,
 				"", nil, "p-1", tc.blockReason,
 				ActivityAttribution{Profile: "x", ProfileSource: "pin"},
+				ActivityCallOutcome{},
 			)
 
 			select {

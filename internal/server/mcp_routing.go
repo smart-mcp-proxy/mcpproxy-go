@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
@@ -645,6 +646,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				zap.String("tool_name", toolName),
 				zap.String("detail", detail))
 			auditNoteErrorClass(ctx, audit.ErrorClassValidation)
+			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 
 			// The started/completed-error PAIR, not a bare rejection. A call
 			// rejected here never reaches the unconditional
@@ -689,11 +691,13 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		)
 		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
 			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
 			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
+		callerr.Observe(ctx, result, err)
 		fwdOut := fwdSink.Outbound()
 
 		durationMs := time.Since(startTime).Milliseconds()

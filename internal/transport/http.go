@@ -178,15 +178,13 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	if cfg.RetryAfter != nil {
 		rt = NewRetryAfterTransport(rt, cfg.RetryAfter, logger)
 	}
-	// Outermost: strips forwarded headers from everything but the tools/call
+	// Spec 113-c FR-042: the call recorder is the outermost layer, so every
+	// branch (plain, headers, trace, Retry-After, OAuth, SSE) reports the
+	// status of the response to the request carrying a recorder ctx.
+	//
+	// Next in: strips forwarded headers from everything but the tools/call
 	// request itself (Spec 112 FR-008), before tracing sees the request.
-	return newForwardGateTransport(rt)
-}
-
-// needsCustomTransport reports whether this config requires us to hand mcp-go
-// our own *http.Client instead of letting it build the default one.
-func (cfg *HTTPTransportConfig) needsCustomTransport() bool {
-	return cfg.TraceEnabled || cfg.RetryAfter != nil
+	return NewCallRecorderTransport(newForwardGateTransport(rt))
 }
 
 // maxRedirects mirrors net/http's default redirect limit.
@@ -439,12 +437,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		// only the OAuth metadata/DCR/token calls, so the MCP requests need our
 		// own client for the Retry-After recorder to see a 429 (#1040). No
 		// Timeout — SSE streams are long-lived by design.
+		// Always installed (Spec 113-c): the call recorder must see every
+		// tools/call response, whether or not tracing or Retry-After is on.
 		var oauthOpts []transport.ClientOption
-		if cfg.needsCustomTransport() {
-			oauthOpts = append(oauthOpts, client.WithHTTPClient(&http.Client{
-				Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
-			}))
-		}
+		oauthOpts = append(oauthOpts, client.WithHTTPClient(&http.Client{
+			Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
+		}))
 		// GH #1271: see the streamable-HTTP twin above.
 		if len(cfg.Headers) > 0 {
 			logger.Debug("Adding static headers to OAuth SSE client", zap.Int("header_count", len(cfg.Headers)))
