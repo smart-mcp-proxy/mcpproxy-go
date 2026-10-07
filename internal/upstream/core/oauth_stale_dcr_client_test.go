@@ -467,3 +467,39 @@ func TestRecoverStaleDCRClient_CalledFromAllAuthorizePaths(t *testing.T) {
 type probeRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f probeRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Review round 5 (opencode Sol 6.1): a login that exchanged its code and then
+// paused before markOAuthComplete must not, on resuming, write its client id
+// over a registration another login stored and completed with in between
+// (that would leave the other login's token next to this login's client).
+func TestPersistCompletedDCRCredentials_DoesNotOverwriteAnotherClient(t *testing.T) {
+	db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	const name, srvURL = "completion-race", "https://example.com/mcp"
+	key := oauth.GenerateServerKey(name, srvURL)
+	stored := func() string {
+		id, _, _, _, err := db.GetOAuthClientCredentials(key)
+		require.NoError(t, err)
+		return id
+	}
+	c := &Client{config: &config.ServerConfig{Name: name, URL: srvURL}, logger: zap.NewNop(), storage: db}
+
+	// Nothing stored: saved.
+	c.persistCompletedDCRCredentials("client-a", "")
+	assert.Equal(t, "client-a", stored())
+
+	// Same client: refreshed in place.
+	c.persistCompletedDCRCredentials("client-a", "")
+	assert.Equal(t, "client-a", stored())
+
+	// Another login stored client-b: left in place.
+	require.NoError(t, db.UpdateOAuthClientCredentials(key, "client-b", "", 1, "r"))
+	c.persistCompletedDCRCredentials("client-a", "")
+	assert.Equal(t, "client-b", stored())
+
+	// Operator static client_id: written as before (never a DCR race).
+	cs := &Client{config: &config.ServerConfig{Name: name, URL: srvURL, OAuth: &config.OAuthConfig{ClientID: "static-id"}}, logger: zap.NewNop(), storage: db}
+	cs.persistCompletedDCRCredentials("static-id", "")
+	assert.Equal(t, "static-id", stored())
+}

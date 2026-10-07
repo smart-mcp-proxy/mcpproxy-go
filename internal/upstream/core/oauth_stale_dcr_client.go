@@ -66,7 +66,7 @@ func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, err
 		callbackPort = callbackServer.Port
 		redirectURI = callbackServer.RedirectURI
 	}
-	saved, err := c.storage.SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	saved, err := c.storage.SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 	if err != nil {
 		return callbackPort, err
 	}

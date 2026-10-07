@@ -925,13 +925,13 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 	})
 }
 
-// SaveOAuthClientCredentialsIfUnset stores a DCR registration like
+// SaveOAuthClientCredentialsIfUnsetOrSame stores a DCR registration like
 // UpdateOAuthClientCredentials, but only while the record holds no client id
-// (missing record, or DCR fields cleared). It reports whether it saved. The
-// stale-DCR login recovery clears the rejected registration and then
-// re-registers; a login that saved its own registration in between must win,
-// not be overwritten.
-func (b *BoltDB) SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
+// (missing record, or DCR fields cleared) or already holds this same client
+// id. It reports whether it saved. A login must never write its registration
+// over a different one another login stored in the meantime: that login's
+// token would end up next to this login's client_id.
+func (b *BoltDB) SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
 	saved := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -940,7 +940,7 @@ func (b *BoltDB) SaveOAuthClientCredentialsIfUnset(serverKey, clientID, clientSe
 			if err := record.UnmarshalBinary(data); err != nil {
 				return err
 			}
-			if record.ClientID != "" {
+			if record.ClientID != "" && record.ClientID != clientID {
 				return nil
 			}
 		}

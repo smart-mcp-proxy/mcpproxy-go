@@ -173,11 +173,11 @@ func TestClearOAuthClientCredentialsIfClientID(t *testing.T) {
 // The stale-DCR recovery persists its fresh registration only while the
 // record's DCR fields are still empty (it just cleared them), so a login
 // that saved its own registration in between is never overwritten.
-func TestSaveOAuthClientCredentialsIfUnset(t *testing.T) {
+func TestSaveOAuthClientCredentialsIfUnsetOrSame(t *testing.T) {
 	db := newTestDB(t)
 
 	// No record yet: saved.
-	ok, err := db.SaveOAuthClientCredentialsIfUnset("k1", "new", "", 1234, "http://127.0.0.1:1234/oauth/callback")
+	ok, err := db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "new", "", 1234, "http://127.0.0.1:1234/oauth/callback")
 	if err != nil || !ok {
 		t.Fatalf("first save: ok=%v err=%v", ok, err)
 	}
@@ -187,7 +187,7 @@ func TestSaveOAuthClientCredentialsIfUnset(t *testing.T) {
 	}
 
 	// A registration is already stored: not overwritten.
-	ok, err = db.SaveOAuthClientCredentialsIfUnset("k1", "other", "s", 5678, "x")
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "other", "s", 5678, "x")
 	if err != nil || ok {
 		t.Fatalf("second save must be refused: ok=%v err=%v", ok, err)
 	}
@@ -195,11 +195,20 @@ func TestSaveOAuthClientCredentialsIfUnset(t *testing.T) {
 		t.Fatalf("registration overwritten: %q", id)
 	}
 
+	// The same client id: saved (port/redirect refreshed).
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "new", "", 4321, "y")
+	if err != nil || !ok {
+		t.Fatalf("same-client save: ok=%v err=%v", ok, err)
+	}
+	if _, _, port, _, _ = db.GetOAuthClientCredentials("k1"); port != 4321 {
+		t.Fatalf("port not refreshed: %d", port)
+	}
+
 	// Cleared record (token kept, DCR fields empty): saved, token preserved.
 	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: "k2", AccessToken: "at"}); err != nil {
 		t.Fatal(err)
 	}
-	ok, err = db.SaveOAuthClientCredentialsIfUnset("k2", "fresh", "", 1, "r")
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k2", "fresh", "", 1, "r")
 	if err != nil || !ok {
 		t.Fatalf("save into cleared record: ok=%v err=%v", ok, err)
 	}

@@ -1708,6 +1708,13 @@ func (c *Client) persistDCRCredentials() {
 		return
 	}
 
+	c.persistCompletedDCRCredentials(clientID, clientSecret)
+
+}
+
+// persistCompletedDCRCredentials writes the client registration a completed
+// login used (see persistDCRCredentials).
+func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 
 	// Persist the port this login actually used. Only DCR-succeeded flows used
@@ -1717,10 +1724,28 @@ func (c *Client) persistDCRCredentials() {
 	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
 	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage)
 
-	if err := c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI); err != nil {
+	// An operator static client_id is written as before. A DCR client is
+	// written only while storage holds no client or this same one: a login
+	// that paused between its code exchange and this point must not overwrite
+	// a registration another login stored and completed with in the meantime
+	// (that login's token would be left next to this login's client_id).
+	var err error
+	saved := true
+	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
+		err = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	} else {
+		saved, err = c.storage.SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	}
+	if err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
 			logSafeErrorField(err))
+		return
+	}
+	if !saved {
+		c.logger.Warn("Another login stored a different OAuth client registration - leaving it in place",
+			zap.String("server", c.config.Name),
+			zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."))
 		return
 	}
 
