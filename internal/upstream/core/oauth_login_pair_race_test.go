@@ -94,7 +94,10 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	hA, codeA, stateA, verA := loginPairHandler(t, f, gateA)
 	hB, codeB, stateB, verB := loginPairHandler(t, f, oauth.NewPersistentTokenStore(f.name, f.srv.MCPURL, f.db))
 	// Each login's own callback server (what received its callback); the
-	// stored callback metadata must come from it, not the registry.
+	// stored callback metadata must come from it, not the registry, which by
+	// completion time may hold a replacement listener on another port.
+	replacement, err := oauth.GetGlobalCallbackManager().StartCallbackServer(f.name, 0)
+	require.NoError(t, err)
 	cbA := &oauth.CallbackServer{Port: 41001, RedirectURI: "http://127.0.0.1:41001" + oauth.DefaultRedirectPath}
 	cbB := &oauth.CallbackServer{Port: 41002, RedirectURI: "http://127.0.0.1:41002" + oauth.DefaultRedirectPath}
 	ctx := context.Background()
@@ -129,6 +132,7 @@ func TestLoginCompletion_TokenAndClientStoredAsOnePair(t *testing.T) {
 	if rec.ClientID == hB.GetClientID() {
 		wantCB = cbB
 	}
+	require.NotEqual(t, replacement.Port, wantCB.Port)
 	assert.Equal(t, wantCB.Port, rec.CallbackPort)
 	assert.Equal(t, wantCB.RedirectURI, rec.RedirectURI)
 

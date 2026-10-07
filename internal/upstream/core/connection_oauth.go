@@ -1629,15 +1629,46 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 // (OAuthTransportWrapper overrides the handler's), so the handler's client is
 // not recorded and the stored one is kept, as before.
 func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.OAuthHandler, cb *oauth.CallbackServer, code, state, codeVerifier string) error {
+	var login oauth.LoginClient
 	if !c.extraParamsClientID() {
-		login := oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
+		login = oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
 		if cb != nil && cb.Port > 0 {
 			login.CallbackPort = cb.Port
 			login.RedirectURI = cb.RedirectURI
 		}
 		ctx = oauth.WithLoginClient(ctx, login)
 	}
-	return c.annotateCodeExchangeError(h, h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+	if err := c.annotateCodeExchangeError(h, h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+		return err
+	}
+	if login.ClientID != "" {
+		c.noteExchangedClient(login.ClientID)
+	}
+	return nil
+}
+
+// noteExchangedClient records that a code exchange stored its token together
+// with clientID's registration.
+func (c *Client) noteExchangedClient(clientID string) {
+	c.exchangedMu.Lock()
+	defer c.exchangedMu.Unlock()
+	if c.exchangedClients == nil {
+		c.exchangedClients = make(map[string]int)
+	}
+	c.exchangedClients[clientID]++
+}
+
+// takeExchangedClient consumes one noteExchangedClient record for clientID.
+func (c *Client) takeExchangedClient(clientID string) bool {
+	c.exchangedMu.Lock()
+	defer c.exchangedMu.Unlock()
+	if c.exchangedClients[clientID] == 0 {
+		return false
+	}
+	if c.exchangedClients[clientID]--; c.exchangedClients[clientID] == 0 {
+		delete(c.exchangedClients, clientID)
+	}
+	return true
 }
 
 // isOAuthInProgress checks if OAuth is in progress
@@ -1738,6 +1769,13 @@ func (c *Client) persistDCRCredentials() {
 // persistCompletedDCRCredentials writes the client registration a completed
 // login used (see persistDCRCredentials).
 func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
+	// The code exchange already stored this client with its token and the
+	// callback metadata of the flow's own callback server. Writing again here
+	// would replace that metadata with whatever listener the registry holds
+	// by now (possibly another attempt's).
+	if c.takeExchangedClient(clientID) {
+		return
+	}
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 
 	// Persist the port this login actually used. Only DCR-succeeded flows used
