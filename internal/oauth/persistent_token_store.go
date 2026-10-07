@@ -261,7 +261,12 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	// concurrent DCR write is never lost.
 	// FR-006a: a token produced by a refresh flight is only written while the
 	// stored grant is still the one that flight started from.
+	// A login's code exchange (WithLoginClient) instead owns the client
+	// registration too: its token and the client it was issued to are written
+	// in this same transaction, so a concurrent login can never leave this
+	// token next to its own client_id (the next refresh would be rejected).
 	flightGen, inFlight := FlightGeneration(ctx)
+	login, isLogin := loginClientFrom(ctx)
 	discarded := false
 	err := p.storage.UpdateOAuthToken(p.serverKey, func(rec *storage.OAuthTokenRecord) error {
 		if inFlight && !GenerationMatches(rec, flightGen) {
@@ -274,6 +279,16 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 		rec.TokenType = token.TokenType
 		rec.ExpiresAt = token.ExpiresAt
 		rec.Scopes = scopes
+		if isLogin {
+			rec.ClientID = login.ClientID
+			rec.ClientSecret = login.ClientSecret
+			if login.CallbackPort > 0 {
+				rec.CallbackPort = login.CallbackPort
+			}
+			if login.RedirectURI != "" {
+				rec.RedirectURI = login.RedirectURI
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -543,4 +558,27 @@ func recordFromToken(key, name string, tok *client.Token) *storage.OAuthTokenRec
 		AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken, TokenType: tok.TokenType,
 		ExpiresAt: tok.ExpiresAt, Scopes: scopes,
 	}
+}
+
+// LoginClient is the client registration a login's code exchange used. A
+// zero CallbackPort or empty RedirectURI keeps the stored value.
+type LoginClient struct {
+	ClientID     string
+	ClientSecret string
+	CallbackPort int
+	RedirectURI  string
+}
+
+type loginClientKey struct{}
+
+// WithLoginClient marks ctx as a login's code exchange that used lc: a token
+// SaveToken persists under it is stored together with lc in one transaction.
+// An empty lc.ClientID carries no registration and leaves the stored one.
+func WithLoginClient(ctx context.Context, lc LoginClient) context.Context {
+	return context.WithValue(ctx, loginClientKey{}, lc)
+}
+
+func loginClientFrom(ctx context.Context) (LoginClient, bool) {
+	lc, ok := ctx.Value(loginClientKey{}).(LoginClient)
+	return lc, ok && lc.ClientID != ""
 }

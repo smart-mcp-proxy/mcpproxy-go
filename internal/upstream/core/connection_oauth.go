@@ -1323,7 +1323,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.String("code", code[:10]+"..."))
 
-		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		err = c.exchangeAuthorizationCode(ctx, oauthHandler, code, state, codeVerifier)
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
@@ -1591,7 +1591,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 
 		// Exchange the authorization code for a token
-		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		err = c.exchangeAuthorizationCode(ctx, oauthHandler, code, state, codeVerifier)
 		if err != nil {
 			return result, fmt.Errorf("failed to process authorization response: %w", err)
 		}
@@ -1615,6 +1615,23 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	case <-ctx.Done():
 		return result, ctx.Err()
 	}
+}
+
+// exchangeAuthorizationCode exchanges a login's authorization code. The token
+// is saved together with the client registration the exchange used, in one
+// storage transaction (oauth.WithLoginClient): saving the token alone kept
+// whatever client was stored, so a login whose save was delayed past another
+// login's completion paired its refresh token with that login's client_id.
+// The callback port and redirect URI come only from this login's live
+// callback server; without one the stored values are kept.
+func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.OAuthHandler, code, state, codeVerifier string) error {
+	login := oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
+	if cb, ok := oauth.GetCallbackServer(c.config.Name); ok && cb.Port > 0 {
+		login.CallbackPort = cb.Port
+		login.RedirectURI = cb.RedirectURI
+	}
+	ctx = oauth.WithLoginClient(ctx, login)
+	return c.annotateCodeExchangeError(h, h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
 }
 
 // isOAuthInProgress checks if OAuth is in progress
@@ -2279,7 +2296,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		}
 
 		// Exchange the authorization code for a token
-		if err := c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+		if err := c.exchangeAuthorizationCode(ctx, oauthHandler, code, state, codeVerifier); err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
