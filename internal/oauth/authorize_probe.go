@@ -67,10 +67,14 @@ func (r AuthorizeProbeResult) Summary() string {
 
 // invalid_request descriptions that name the client (id) as unknown/invalid.
 // Kept deliberately narrow: "Missing client_id" (our own bug, not a stale
-// registration), a bad scope or a bad redirect_uri must not match.
+// registration), a bad scope or a bad redirect_uri must not match. The
+// rejection word must sit right next to "client"/"client_id" (only an
+// optional "is"/"was"/"has been" between them): a description such as
+// "client sent an invalid code_challenge" is about the request, not the
+// registration, and must not clear a valid stored client.
 var (
-	clientThenRejection = regexp.MustCompile(`\bclient(?:_id| id)?\b[^.;]*\b(?:invalid|unknown|not found|does not exist|doesn't exist|not registered|no longer exists)\b`)
-	rejectionThenClient = regexp.MustCompile(`\b(?:invalid|unknown|unregistered|nonexistent)\s+client(?:_id| id)?\b`)
+	clientThenRejection = regexp.MustCompile(`\bclient(?:_id| id)?\s+(?:(?:is|was|has\s+been)\s+)?(?:invalid|unknown|not found|does not exist|doesn't exist|not registered|no longer exists)\b`)
+	rejectionThenClient = regexp.MustCompile(`\b(?:invalid|unknown|unregistered|nonexistent|no such)\s+client(?:_id| id)?\b`)
 )
 
 // ClassifyAuthorizeClientRejection decides whether an authorization-endpoint
