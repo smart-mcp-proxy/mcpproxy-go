@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConnectionState_String tests the string representation of connection states
@@ -217,6 +218,12 @@ func TestConnectionInfo_ShouldAutoReconnect(t *testing.T) {
 		{"disconnected fresh server", &ConnectionInfo{State: StateDisconnected}, true},
 		{"ready server", &ConnectionInfo{State: StateReady}, true},
 		{"pending auth is parked", &ConnectionInfo{State: StatePendingAuth}, false},
+		// GH #1537: a speculative park (no oauth block, no token, no 401) is
+		// probed at the give-up cadence; a confirmed one stays parked.
+		{"speculative pending auth, just parked", &ConnectionInfo{State: StatePendingAuth, PendingAuthProbe: true, LastRetryTime: now.Add(-time.Minute)}, false},
+		{"speculative pending auth, probe interval elapsed", &ConnectionInfo{State: StatePendingAuth, PendingAuthProbe: true, LastRetryTime: now.Add(-GaveUpProbeInterval - time.Second)}, true},
+		{"speculative pending auth, no park time", &ConnectionInfo{State: StatePendingAuth, PendingAuthProbe: true}, false},
+		{"confirmed pending auth stays parked a day later", &ConnectionInfo{State: StatePendingAuth, LastRetryTime: now.Add(-24 * time.Hour)}, false},
 		{"error within backoff window", &ConnectionInfo{State: StateError, RetryCount: 5, LastRetryTime: now.Add(-1 * time.Second)}, false},
 		{"error with backoff elapsed", &ConnectionInfo{State: StateError, RetryCount: 3, LastRetryTime: now.Add(-10 * time.Second)}, true},
 		{"error no failures yet", &ConnectionInfo{State: StateError, RetryCount: 0}, true},
@@ -296,4 +303,30 @@ func TestSetPendingAuth(t *testing.T) {
 	// The wake path (user login / manual reconnect) must be a legal transition.
 	assert.NoError(t, sm.ValidateTransition(StatePendingAuth, StateConnecting))
 	assert.NoError(t, sm.ValidateTransition(StateConnecting, StatePendingAuth))
+}
+
+// GH #1537: SetPendingAuthProbe records the park's provenance, and a later
+// confirmed park (plain SetPendingAuth) clears it.
+func TestSetPendingAuthProbe(t *testing.T) {
+	sm := NewStateManager()
+	sm.TransitionTo(StateConnecting)
+
+	var cbInfo *ConnectionInfo
+	sm.SetStateChangeCallback(func(_, _ ConnectionState, info *ConnectionInfo) { cbInfo = info })
+
+	sm.SetPendingAuthProbe(errors.New("OAuth authentication required for s"), true)
+	info := sm.GetConnectionInfo()
+	assert.Equal(t, StatePendingAuth, info.State)
+	assert.True(t, info.PendingAuthProbe)
+	require.NotNil(t, cbInfo)
+	assert.True(t, cbInfo.PendingAuthProbe, "consumers see the flag on the park callback")
+	assert.Equal(t, 0, info.RetryCount, "a park never advances the retry ladder")
+	assert.False(t, info.ShouldAutoReconnect(time.Now()), "no probe before the interval")
+	assert.True(t, info.ShouldAutoReconnect(time.Now().Add(GaveUpProbeInterval+time.Second)))
+
+	sm.TransitionTo(StateConnecting)
+	sm.SetPendingAuth(errors.New("OAuth authentication required for s"))
+	info = sm.GetConnectionInfo()
+	assert.False(t, info.PendingAuthProbe, "a confirmed park clears the probe flag")
+	assert.False(t, info.ShouldAutoReconnect(time.Now().Add(24*time.Hour)))
 }

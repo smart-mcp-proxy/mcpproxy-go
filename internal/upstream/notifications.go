@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
@@ -142,6 +143,14 @@ func (nm *NotificationManager) NotifyServerConnecting(serverName string) {
 
 // StateChangeNotifier creates state change notifications based on state transitions
 func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
+	// probePromptShown is set once a speculative Pending Auth park (GH #1537)
+	// has prompted for sign-in. Such a park is re-probed every
+	// GaveUpProbeInterval (PendingAuth → Connecting → PendingAuth), and each
+	// re-park must not prompt again. Only Ready ends the episode: Ready and
+	// PendingAuth callbacks are dispatched synchronously, in transition order,
+	// whereas SetError's callback runs on its own goroutine and could land
+	// after a newer park — so an Error must never touch this flag.
+	var probePromptShown atomic.Bool
 	return func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
 		// Only send notifications for significant state changes
 		switch newState {
@@ -151,6 +160,7 @@ func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldSta
 				nm.NotifyServerConnecting(serverName)
 			}
 		case types.StateReady:
+			probePromptShown.Store(false)
 			if oldState != types.StateReady {
 				nm.NotifyServerConnected(serverName)
 			}
@@ -165,9 +175,15 @@ func StateChangeNotifier(nm *NotificationManager, serverName string) func(oldSta
 		case types.StatePendingAuth:
 			// Parked awaiting user login: the connection attempt is over and only a
 			// human can move it forward, so surface the login prompt once.
-			if oldState != types.StatePendingAuth {
-				nm.NotifyOAuthRequired(serverName)
+			if oldState == types.StatePendingAuth {
+				break
 			}
+			probe := info != nil && info.PendingAuthProbe
+			if probe && probePromptShown.Load() {
+				break // a periodic re-probe of the same unconfirmed park
+			}
+			probePromptShown.Store(probe)
+			nm.NotifyOAuthRequired(serverName)
 		case types.StateDisconnected:
 			if oldState == types.StateReady {
 				nm.NotifyServerDisconnected(serverName, info.LastError)

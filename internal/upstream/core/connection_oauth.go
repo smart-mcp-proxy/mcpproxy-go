@@ -45,6 +45,11 @@ type ErrOAuthPending struct {
 	ServerName string
 	ServerURL  string
 	Message    string
+	// Probe marks a speculative park (GH #1537): no oauth block, no stored
+	// token, and the anonymous attempt never received an HTTP 401. The
+	// managed client records it so the reconnect loop re-tries the server
+	// periodically rather than waiting forever for a sign-in it may not need.
+	Probe bool
 }
 
 func (e *ErrOAuthPending) Error() string {
@@ -102,6 +107,13 @@ func (c *Client) oauthPendingMessage() string {
 func IsOAuthPending(err error) bool {
 	var pending *ErrOAuthPending
 	return errors.As(err, &pending)
+}
+
+// IsSpeculativeOAuthPending reports whether err wraps an ErrOAuthPending whose
+// requirement was never confirmed by the upstream (ErrOAuthPending.Probe).
+func IsSpeculativeOAuthPending(err error) bool {
+	var pending *ErrOAuthPending
+	return errors.As(err, &pending) && pending.Probe
 }
 
 // OAuthStartResult contains the result of initiating an OAuth flow.
@@ -507,6 +519,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 					ServerName: c.config.Name,
 					ServerURL:  c.logSafeURL(),
 					Message:    c.oauthPendingMessage(),
+					Probe:      c.speculativeOAuthPark(ctx, hasTokenPrecheck),
 				}
 			}
 
@@ -878,6 +891,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 					ServerName: c.config.Name,
 					ServerURL:  c.logSafeURL(),
 					Message:    c.oauthPendingMessage(),
+					Probe:      c.speculativeOAuthPark(ctx, hasTokenPrecheck),
 				}
 			}
 

@@ -528,11 +528,18 @@ func (mc *Client) Connect(ctx context.Context) error {
 			// SetError forces StateError and would immediately undo the park, so
 			// the supervisor kept redialing a login-blocked server every 30s —
 			// #1013).
-			mc.StateManager.SetPendingAuth(connectErr)
+			// A speculative park (no oauth block, no token, no 401 — GH #1537)
+			// is flagged so the reconnect loop re-probes it periodically.
+			mc.StateManager.SetPendingAuthProbe(connectErr, core.IsSpeculativeOAuthPending(connectErr))
 			return fmt.Errorf("OAuth authentication pending: %w", connectErr)
 		}
+		// A DNS/dial/timeout failure is a plain retryable error. The OAuth
+		// classifiers below match a bare "401" and would misread an address or
+		// ephemeral port in the net error text as an auth failure, sending the
+		// server onto the 5m-24h OAuth backoff ladder (GH #1537).
+		isNetworkErr := core.IsNetworkError(connectErr)
 		// Check if this is an OAuth authorization requirement (not an error)
-		if mc.isOAuthAuthorizationRequired(connectErr) {
+		if !isNetworkErr && mc.isOAuthAuthorizationRequired(connectErr) {
 			// Check if this is a token refresh scenario vs full re-auth
 			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Info("🎯 OAuth authorization required during MCP initialization",
@@ -541,7 +548,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 			// Don't apply backoff for OAuth authorization requirement
 			mc.StateManager.SetError(connectErr)
 			return fmt.Errorf("OAuth authorization during MCP init failed: %w", connectErr)
-		} else if mc.isOAuthError(connectErr) {
+		} else if !isNetworkErr && mc.isOAuthError(connectErr) {
 			// Check if this is a token refresh scenario vs full re-auth
 			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
