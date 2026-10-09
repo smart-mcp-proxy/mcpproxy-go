@@ -115,6 +115,10 @@ func (c *Client) connectSSE(ctx context.Context) error {
 // (other packages match on "all authentication strategies failed").
 func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStrategy, transportLabel string) error {
 	var lastErr error
+	// GH #1537: tell the OAuth strategy whether an anonymous attempt saw a
+	// real 401, so a park without one can be re-probed instead of stranded.
+	evidence := &authEvidence{}
+	ctx = withAuthEvidence(ctx, evidence)
 	for i, strategy := range authStrategies {
 		c.logger.Debug("🔐 Trying "+transportLabel+"authentication strategy",
 			zap.Int("strategy_index", i),
@@ -132,6 +136,18 @@ func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStr
 			// For configuration errors (like no headers), always try next strategy
 			if c.isConfigError(err) {
 				continue
+			}
+
+			// A DNS/dial/timeout failure says nothing about auth, and its text
+			// quotes addresses and ports that the substring classifiers below
+			// can misread as "401"/"403" (GH #1537). Return it so the managed
+			// client retries with backoff instead of falling into OAuth.
+			if IsNetworkError(err) {
+				return err
+			}
+
+			if hasHTTPAuthChallenge(err) {
+				evidence.challenged = true
 			}
 
 			// For OAuth errors, continue to OAuth strategy

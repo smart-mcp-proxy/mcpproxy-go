@@ -87,6 +87,14 @@ type ConnectionInfo struct {
 	// permanent. Carried as a plain string so this package stays a leaf (no
 	// import of internal/diagnostics). Empty unless Terminal is set.
 	TerminalCode string `json:"terminal_code,omitempty"`
+
+	// PendingAuthProbe marks a StatePendingAuth park whose OAuth requirement
+	// was never confirmed by the upstream — no oauth block, no stored token,
+	// and no HTTP 401 on the anonymous attempt (GH #1537). Such a park is
+	// re-probed every GaveUpProbeInterval instead of waiting forever, so a
+	// no-auth server misrouted into OAuth by a transient failure self-heals.
+	// Meaningless outside StatePendingAuth.
+	PendingAuthProbe bool `json:"pending_auth_probe,omitempty"`
 }
 
 // PermanentFailureAttempts is how many classified-permanent connection failures
@@ -177,7 +185,10 @@ func (ci *ConnectionInfo) ShouldAutoReconnect(now time.Time) bool {
 	}
 	switch ci.State {
 	case StatePendingAuth:
-		return false
+		// Parked until a human signs in (#1013) — unless the park was only a
+		// guess, which is probed at the give-up cadence (GH #1537).
+		return ci.PendingAuthProbe && !ci.LastRetryTime.IsZero() &&
+			now.Sub(ci.LastRetryTime) >= GaveUpProbeInterval
 	case StateError:
 		// OAuth-classified failures are paced by SetOAuthError's coarse ladder,
 		// which bumps OAuthRetryCount and NOT RetryCount. Without this branch such
@@ -229,6 +240,9 @@ type StateManager struct {
 	// SetError, ClearTerminal, Reset and a successful connection.
 	terminal     bool
 	terminalCode string
+	// pendingAuthProbe is ConnectionInfo.PendingAuthProbe; overwritten by
+	// every SetPendingAuth/SetPendingAuthProbe park.
+	pendingAuthProbe bool
 
 	// Callbacks for state transitions
 	onStateChange func(oldState, newState ConnectionState, info *ConnectionInfo)
@@ -281,6 +295,7 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 		Terminal:         sm.terminal,
 		TerminalCode:     sm.terminalCode,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
+		PendingAuthProbe: sm.pendingAuthProbe,
 	}
 }
 
@@ -455,14 +470,23 @@ func (sm *StateManager) IsTerminal() (bool, string) {
 // RetryCount is deliberately NOT bumped: a parked server is not retrying, so there
 // is no ladder to advance and nothing to "give up" on. The wake paths are explicit
 // user action (login, manual reconnect, reconnect-on-use) and the persisted-token
-// scan in Manager.scanForNewTokens.
+// scan in Manager.scanForNewTokens. A speculative park (SetPendingAuthProbe)
+// is additionally re-probed by the reconnect loop every GaveUpProbeInterval.
 func (sm *StateManager) SetPendingAuth(err error) {
+	sm.SetPendingAuthProbe(err, false)
+}
+
+// SetPendingAuthProbe is SetPendingAuth with the park's provenance: probe=true
+// records that the OAuth requirement is unconfirmed (GH #1537), which lets
+// ShouldAutoReconnect retry the server periodically.
+func (sm *StateManager) SetPendingAuthProbe(err error, probe bool) {
 	sm.mu.Lock()
 
 	oldState := sm.currentState
 	sm.currentState = StatePendingAuth
 	sm.lastError = err
 	sm.lastRetryTime = time.Now()
+	sm.pendingAuthProbe = probe
 
 	info := ConnectionInfo{
 		State:            sm.currentState,
@@ -478,6 +502,7 @@ func (sm *StateManager) SetPendingAuth(err error) {
 		Terminal:         sm.terminal,
 		TerminalCode:     sm.terminalCode,
 		GaveUp:           sm.retryCount >= MaxConnectionRetries,
+		PendingAuthProbe: sm.pendingAuthProbe,
 	}
 
 	callback := sm.onStateChange
