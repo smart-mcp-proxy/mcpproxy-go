@@ -1337,7 +1337,8 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name),
 			zap.String("code", code[:10]+"..."))
 
-		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		var clientStored bool
+		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
 		if err != nil {
 			c.logger.Error("❌ Failed to process authorization response",
 				zap.String("server", c.config.Name),
@@ -1349,7 +1350,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 			zap.String("server", c.config.Name))
 
 		// Mark OAuth as complete to prevent retry loops
-		c.markOAuthComplete()
+		c.finishOAuth(!clientStored)
 
 		// Record OAuth completion in global token manager for other clients
 		tokenManager := oauth.GetTokenStoreManager()
@@ -1605,7 +1606,8 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		}
 
 		// Exchange the authorization code for a token
-		err = c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier))
+		var clientStored bool
+		clientStored, err = c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
 		if err != nil {
 			return result, fmt.Errorf("failed to process authorization response: %w", err)
 		}
@@ -1615,7 +1617,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 			zap.String("correlation_id", result.CorrelationID))
 
 		// Mark OAuth as complete
-		c.markOAuthComplete()
+		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
 		tokenManager.MarkOAuthCompleted(c.config.Name)
 
@@ -1629,6 +1631,37 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 	case <-ctx.Done():
 		return result, ctx.Err()
 	}
+}
+
+// exchangeAuthorizationCode exchanges a login's authorization code. The token
+// is saved together with the client registration the exchange used, in one
+// storage transaction (oauth.WithLoginClient): saving the token alone kept
+// whatever client was stored, so a login whose save was delayed past another
+// login's completion paired its refresh token with that login's client_id.
+// The callback port and redirect URI come from cb, the callback server this
+// login registered its state on (not whichever one the registry holds by the
+// time the exchange runs); with no cb the stored values are kept.
+// With oauth.extra_params.client_id the token request is sent with that id
+// (OAuthTransportWrapper overrides the handler's), so the handler's client is
+// not recorded and the stored one is kept, as before.
+//
+// It reports whether the client registration was stored with the token; the
+// caller passes that to finishOAuth so this login's completion does not write
+// the client again.
+func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.OAuthHandler, cb *oauth.CallbackServer, code, state, codeVerifier string) (clientStored bool, err error) {
+	var login oauth.LoginClient
+	if !c.extraParamsClientID() {
+		login = oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
+		if cb != nil && cb.Port > 0 {
+			login.CallbackPort = cb.Port
+			login.RedirectURI = cb.RedirectURI
+		}
+		ctx = oauth.WithLoginClient(ctx, login)
+	}
+	if err := c.annotateCodeExchangeError(h, h.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+		return false, err
+	}
+	return login.ClientID != "", nil
 }
 
 // isOAuthInProgress checks if OAuth is in progress
@@ -1648,6 +1681,15 @@ func (c *Client) markOAuthInProgress() {
 
 // markOAuthComplete marks OAuth as complete and cleans up callback server
 func (c *Client) markOAuthComplete() {
+	c.finishOAuth(true)
+}
+
+// finishOAuth is markOAuthComplete for the flow that just exchanged a code.
+// persistClient is false when that exchange already stored the client
+// registration with its token and the flow's own callback metadata: writing it
+// again here would re-resolve the callback port from the registry, which may
+// by now hold another attempt's listener.
+func (c *Client) finishOAuth(persistClient bool) {
 	c.oauthMu.Lock()
 	defer c.oauthMu.Unlock()
 
@@ -1662,7 +1704,9 @@ func (c *Client) markOAuthComplete() {
 	// Persist DCR credentials from handler to storage for proactive token refresh
 	// This is necessary because mcp-go stores ClientID in-memory during DCR,
 	// but we need it persisted to refresh tokens without re-authenticating
-	c.persistDCRCredentials()
+	if persistClient {
+		c.persistDCRCredentials()
+	}
 
 	// Notify global token manager so the running process (daemon) can trigger
 	// an immediate reconnect. Also persist a DB event when possible so other
@@ -1739,16 +1783,18 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage)
 
 	// An operator static client_id is written as before. A DCR client is
-	// written only while storage holds no client or this same one: a login
-	// that paused between its code exchange and this point must not overwrite
-	// a registration another login stored and completed with in the meantime
-	// (that login's token would be left next to this login's client_id).
+	// written only while storage holds this same client, or neither a client
+	// nor a refresh token. The code exchange already stored this login's
+	// token and client together (exchangeAuthorizationCode); a login that
+	// paused before this point must not overwrite a registration another login
+	// stored in the meantime, nor attach its client to another login's refresh
+	// token left behind when a refresh failure cleared that login's client.
 	var err error
 	saved := true
 	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
 		err = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 	} else {
-		saved, err = c.storage.SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+		saved, err = c.storage.SaveOAuthClientCredentialsIfSameOrEmpty(serverKey, clientID, clientSecret, callbackPort, redirectURI)
 	}
 	if err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
@@ -2293,7 +2339,8 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		}
 
 		// Exchange the authorization code for a token
-		if err := c.annotateCodeExchangeError(oauthHandler, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)); err != nil {
+		clientStored, err := c.exchangeAuthorizationCode(ctx, oauthHandler, callbackServer, code, state, codeVerifier)
+		if err != nil {
 			c.logger.Error("❌ Failed to exchange authorization code",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
@@ -2306,7 +2353,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 			zap.String("correlation_id", correlationID))
 
 		// Mark OAuth as complete
-		c.markOAuthComplete()
+		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
 		tokenManager.MarkOAuthCompleted(c.config.Name)
 
