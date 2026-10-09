@@ -133,3 +133,87 @@ func TestClearOAuthClientCredentialsIf(t *testing.T) {
 		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
 	}
 }
+
+// A DCR client_id the authorization server rejects at /authorize is cleared
+// with a compare-and-clear on the client id alone: the login has no grant to
+// compare, and a concurrent login that saved a new registration (a new id)
+// must never be wiped.
+func TestClearOAuthClientCredentialsIfClientID(t *testing.T) {
+	db := newTestDB(t)
+	const key = "dcr_fedcba9876543210"
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: key, AccessToken: "at", RefreshToken: "rt", ClientID: "new-client", ClientSecret: "s", CallbackPort: 9, RedirectURI: "r"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := db.ClearOAuthClientCredentialsIfClientID(key, "dead-client")
+	if err != nil || cleared {
+		t.Fatalf("mismatch must not clear: cleared=%v err=%v", cleared, err)
+	}
+	if rec, _ := db.GetOAuthToken(key); rec.ClientID != "new-client" {
+		t.Fatalf("registration was cleared: %+v", rec)
+	}
+	if cleared, err := db.ClearOAuthClientCredentialsIfClientID(key, ""); err != nil || cleared {
+		t.Fatalf("empty expected id must not clear: cleared=%v err=%v", cleared, err)
+	}
+
+	cleared, err = db.ClearOAuthClientCredentialsIfClientID(key, "new-client")
+	if err != nil || !cleared {
+		t.Fatalf("match must clear: cleared=%v err=%v", cleared, err)
+	}
+	rec, _ := db.GetOAuthToken(key)
+	if rec.ClientID != "" || rec.ClientSecret != "" || rec.CallbackPort != 0 || rec.RedirectURI != "" || rec.AccessToken != "at" || rec.RefreshToken != "rt" {
+		t.Fatalf("unexpected record after clear: %+v", rec)
+	}
+
+	if cleared, err := db.ClearOAuthClientCredentialsIfClientID("absent", "x"); err != nil || cleared {
+		t.Fatalf("absent record: cleared=%v err=%v", cleared, err)
+	}
+}
+
+// The stale-DCR recovery persists its fresh registration only while the
+// record's DCR fields are still empty (it just cleared them), so a login
+// that saved its own registration in between is never overwritten.
+func TestSaveOAuthClientCredentialsIfUnsetOrSame(t *testing.T) {
+	db := newTestDB(t)
+
+	// No record yet: saved.
+	ok, err := db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "new", "", 1234, "http://127.0.0.1:1234/oauth/callback")
+	if err != nil || !ok {
+		t.Fatalf("first save: ok=%v err=%v", ok, err)
+	}
+	id, _, port, redirect, err := db.GetOAuthClientCredentials("k1")
+	if err != nil || id != "new" || port != 1234 || redirect != "http://127.0.0.1:1234/oauth/callback" {
+		t.Fatalf("stored = %q %d %q err=%v", id, port, redirect, err)
+	}
+
+	// A registration is already stored: not overwritten.
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "other", "s", 5678, "x")
+	if err != nil || ok {
+		t.Fatalf("second save must be refused: ok=%v err=%v", ok, err)
+	}
+	if id, _, _, _, _ = db.GetOAuthClientCredentials("k1"); id != "new" {
+		t.Fatalf("registration overwritten: %q", id)
+	}
+
+	// The same client id: saved (port/redirect refreshed).
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k1", "new", "", 4321, "y")
+	if err != nil || !ok {
+		t.Fatalf("same-client save: ok=%v err=%v", ok, err)
+	}
+	if _, _, port, _, _ = db.GetOAuthClientCredentials("k1"); port != 4321 {
+		t.Fatalf("port not refreshed: %d", port)
+	}
+
+	// Cleared record (token kept, DCR fields empty): saved, token preserved.
+	if err := db.SaveOAuthToken(&OAuthTokenRecord{ServerName: "k2", AccessToken: "at"}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.SaveOAuthClientCredentialsIfUnsetOrSame("k2", "fresh", "", 1, "r")
+	if err != nil || !ok {
+		t.Fatalf("save into cleared record: ok=%v err=%v", ok, err)
+	}
+	rec, err := db.GetOAuthToken("k2")
+	if err != nil || rec.ClientID != "fresh" || rec.AccessToken != "at" {
+		t.Fatalf("record = %+v err=%v", rec, err)
+	}
+}

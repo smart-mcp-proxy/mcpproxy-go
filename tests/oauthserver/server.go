@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,10 @@ type OAuthTestServer struct {
 
 	// Rate limit tracking
 	mcpRateLimitHits int
+
+	// Request counters (see RegistrationCount / AuthorizeGETCount).
+	registrationCount atomic.Int64
+	authorizeGETCount atomic.Int64
 
 	// bogusKey signs id_tokens under IDTokenBadSignature; never published.
 	bogusKey *rsa.PrivateKey
@@ -482,6 +487,14 @@ func (s *OAuthTestServer) RegisterClient(cfg ClientConfig) (*Client, error) {
 	client := s.registerClientFromConfig(cfg)
 	return client, nil
 }
+
+// RegistrationCount reports how many POST /registration (DCR) requests the
+// server has received.
+func (s *OAuthTestServer) RegistrationCount() int64 { return s.registrationCount.Load() }
+
+// AuthorizeGETCount reports how many GET /authorize requests the server has
+// received.
+func (s *OAuthTestServer) AuthorizeGETCount() int64 { return s.authorizeGETCount.Load() }
 
 // GetClient retrieves a client by ID.
 func (s *OAuthTestServer) GetClient(clientID string) (*Client, bool) {

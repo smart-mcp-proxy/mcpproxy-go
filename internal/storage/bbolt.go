@@ -925,6 +925,40 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 	})
 }
 
+// SaveOAuthClientCredentialsIfUnsetOrSame stores a DCR registration like
+// UpdateOAuthClientCredentials, but only while the record holds no client id
+// (missing record, or DCR fields cleared) or already holds this same client
+// id. It reports whether it saved. A login must never write its registration
+// over a different one another login stored in the meantime: that login's
+// token would end up next to this login's client_id.
+func (b *BoltDB) SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) (bool, error) {
+	saved := false
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		record := &OAuthTokenRecord{ServerName: serverKey, Created: time.Now()}
+		if data := bucket.Get([]byte(serverKey)); data != nil {
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			if record.ClientID != "" && record.ClientID != clientID {
+				return nil
+			}
+		}
+		record.ClientID = clientID
+		record.ClientSecret = clientSecret
+		record.CallbackPort = callbackPort
+		record.RedirectURI = redirectURI
+		record.Updated = time.Now()
+		newData, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		saved = true
+		return bucket.Put([]byte(serverKey), newData)
+	})
+	return saved && err == nil, err
+}
+
 // GetOAuthClientCredentials retrieves the client credentials, callback port and redirect URI for
 // token refresh. callbackPort returns 0 and redirectURI returns "" if not stored (legacy records
 // or fresh records without DCR).
@@ -1034,6 +1068,29 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 // therefore cannot clear a registration that a concurrent login just saved,
 // even when the login reused the same client id. It reports whether it cleared.
 func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expectedRefreshToken string) (bool, error) {
+	return b.clearOAuthClientCredentialsWhere(serverKey, func(rec *OAuthTokenRecord) bool {
+		return expectedClientID != "" && rec.ClientID == expectedClientID && rec.RefreshToken == expectedRefreshToken
+	})
+}
+
+// ClearOAuthClientCredentialsIfClientID clears the DCR fields like
+// ClearOAuthClientCredentials, but only while the stored ClientID still equals
+// expectedClientID (compare-and-clear in one transaction). It is the login
+// path's counterpart of ClearOAuthClientCredentialsIf: a login whose
+// authorization request is rejected because the persisted DCR client no longer
+// exists has no grant to compare, and DCR issues a new id per registration, so
+// a concurrent login that already saved a fresh registration is never wiped.
+// Token fields are left untouched. It reports whether it cleared.
+func (b *BoltDB) ClearOAuthClientCredentialsIfClientID(serverKey, expectedClientID string) (bool, error) {
+	return b.clearOAuthClientCredentialsWhere(serverKey, func(rec *OAuthTokenRecord) bool {
+		return expectedClientID != "" && rec.ClientID == expectedClientID
+	})
+}
+
+// clearOAuthClientCredentialsWhere clears the DCR fields of the record stored
+// under serverKey when match approves it, inside one read-modify-write
+// transaction. It reports whether it cleared.
+func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(rec *OAuthTokenRecord) bool) (bool, error) {
 	cleared := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -1045,7 +1102,7 @@ func (b *BoltDB) ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expe
 		if err := record.UnmarshalBinary(data); err != nil {
 			return err
 		}
-		if expectedClientID == "" || record.ClientID != expectedClientID || record.RefreshToken != expectedRefreshToken {
+		if !match(record) {
 			return nil
 		}
 		record.ClientID = ""

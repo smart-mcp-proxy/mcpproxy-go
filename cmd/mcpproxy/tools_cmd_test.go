@@ -639,3 +639,57 @@ func TestStandaloneNoToolsMessage_GenuinelyNoTools(t *testing.T) {
 	msg = standaloneNoToolsMessage("demo", "destructive", 0)
 	assert.Contains(t, msg, "No tools found on server 'demo'")
 }
+
+// Ordinary whitespace in an upstream description must collapse to one clean
+// line in table cells, while every other control/format rune stays escaped
+// (GH #938 finding 3).
+func TestSanitizeDescriptionCell(t *testing.T) {
+	t.Run("cloudflare-like newlines and tabs collapse", func(t *testing.T) {
+		got := sanitizeDescriptionCell("Search the Cloudflare documentation.\n\n\tUse this tool.", 60)
+		assert.Equal(t, "Search the Cloudflare documentation. Use this tool.", got)
+	})
+	t.Run("CRLF, vtab, formfeed, space runs", func(t *testing.T) {
+		got := sanitizeDescriptionCell("  a\r\nb\vc\fd   e\t\tf  ", 60)
+		assert.Equal(t, "a b c d e f", got)
+	})
+	t.Run("ESC sequence still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("hi\x1b[2J there\nnext", 60)
+		assert.NotContains(t, got, "\x1b")
+		assert.NotContains(t, got, "\n")
+		assert.Contains(t, strings.ToLower(got), "\\u001b")
+		assert.Contains(t, got, "there next")
+	})
+	t.Run("bidi override still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("safe\u202etxt\n\tmore", 60)
+		assert.NotContains(t, got, "\u202e")
+		assert.Contains(t, strings.ToLower(got), "\\u202e")
+		assert.Contains(t, got, "more")
+	})
+	t.Run("NUL and zero-width still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("a\x00b\u200bc", 60)
+		assert.NotContains(t, got, "\x00")
+		assert.NotContains(t, got, "\u200b")
+	})
+	t.Run("truncation counts collapsed text", func(t *testing.T) {
+		in := "word\n\n\t\t" + strings.Repeat("x", 100)
+		got := sanitizeDescriptionCell(in, 60)
+		assert.Equal(t, 60, len([]rune(got)))
+		assert.True(t, strings.HasPrefix(got, "word xxx"))
+		assert.True(t, strings.HasSuffix(got, "..."))
+	})
+	t.Run("names stay strict", func(t *testing.T) {
+		assert.Contains(t, strings.ToLower(sanitizeName("a\nb")), "\\u000a")
+	})
+}
+
+func TestToolRowsCollapseDescriptionWhitespace(t *testing.T) {
+	_, rows := serverToolRows([]map[string]interface{}{
+		{"name": "search", "description": "Search docs.\n\n\tDetails here."},
+	})
+	require.NotEmpty(t, rows)
+	assert.Equal(t, "Search docs. Details here.", rows[0][len(rows[0])-1])
+
+	_, rows = standaloneToolRows([]*config.ToolMetadata{{Name: "s", Description: "A.\r\n\tB."}})
+	require.NotEmpty(t, rows)
+	assert.Equal(t, "A. B.", rows[0][1])
+}

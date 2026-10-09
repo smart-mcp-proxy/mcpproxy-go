@@ -46,6 +46,7 @@ func (s *OAuthTestServer) handleAuthorize(w http.ResponseWriter, r *http.Request
 
 // handleAuthorizeGET displays the login form.
 func (s *OAuthTestServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
+	s.authorizeGETCount.Add(1)
 	// Parse query parameters
 	query := r.URL.Query()
 	clientID := query.Get("client_id")
@@ -71,6 +72,15 @@ func (s *OAuthTestServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Requ
 
 	// Validate client
 	client, exists := s.GetClient(clientID)
+	if mode := s.errorMode(); mode.AuthorizeRejectAllClientsJSON400 || (!exists && mode.AuthorizeUnknownClientJSON400) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_request",
+			"error_description": "Invalid client_id",
+		})
+		return
+	}
 	if !exists {
 		s.authorizeError(w, redirectURI, state, "invalid_client", "Unknown client_id")
 		return

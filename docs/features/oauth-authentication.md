@@ -82,6 +82,38 @@ For OAuth providers that require additional parameters (like RFC 8707 resource i
 5. Exchanges code for access token
 6. Stores tokens securely in system keyring
 
+#### Reused client registrations
+
+When a server has no static `oauth.client_id`, MCPProxy registers a client with
+Dynamic Client Registration on the first sign-in and reuses that `client_id`
+on later sign-ins. Some providers delete these registrations after a while
+(Cloudflare's MCP servers do). The provider then answers the authorization URL
+with HTTP 400 `{"error":"invalid_request","error_description":"Invalid client_id"}`
+and never redirects back to MCPProxy.
+
+Before handing out an authorization URL that uses a **reused** registration,
+MCPProxy sends one request to that URL (no redirects followed, 5 s timeout). If
+the response says the client is unknown (`invalid_client`, or
+`invalid_request` with a description such as "Invalid client_id" or "Client
+not found"), MCPProxy:
+
+1. clears the stored registration, but only if it still holds that same
+   `client_id` (if another sign-in has already replaced it, this sign-in stops
+   and asks you to sign in again rather than registering yet another client);
+2. registers a new client once and stores it, unless another sign-in stored
+   one in the meantime (then this sign-in stops and asks you to sign in
+   again). A rejected registration that had a `client_secret` is removed and
+   you are asked to sign in again, so the new client is registered without
+   the old secret;
+3. builds the authorization URL again with the new `client_id`.
+
+If the provider also rejects the new client, sign-in stops with an error
+instead of registering again; configure a static `oauth.client_id` in that
+case. A static `oauth.client_id`, a client registered during the same sign-in,
+and a `client_id` set through `oauth.extra_params` are never checked or
+cleared. If the check itself fails (network error, timeout, 5xx, a redirect, a
+login page or an unrecognised error), sign-in continues as before.
+
 ### Token Refresh
 
 MCPProxy automatically refreshes tokens before expiration:
