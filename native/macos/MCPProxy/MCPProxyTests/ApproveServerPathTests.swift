@@ -123,8 +123,18 @@ final class ApproveServerPathTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
         let source = try String(contentsOf: path)
-        XCTAssertTrue(source.contains("ReviewPresentation.expectedHashes(review.tools)"))
+        XCTAssertTrue(source.contains("expected: expectedHashes(review.tools)"))
+        XCTAssertTrue(source.contains("expectedHashes: decision.expected"))
         XCTAssertTrue(source.contains("expectedHashes: expected"))
+        // UX-02 cross-review r4: the decision is captured at the click, the
+        // sheet is recreated per server and only the newest load of THIS
+        // server's review is shown.
+        XCTAssertTrue(source.contains("ReviewPresentation.approvalDecision(server: serverName, review: review, allowed: allowed, everything: everything)"))
+        XCTAssertTrue(source.contains("ReviewPresentation.toolApprovalExpected(server: serverName, tool: tool.name, review: review)"))
+        XCTAssertTrue(source.contains(".id(server)"))
+        XCTAssertTrue(source.contains(".task(id: serverName)"))
+        XCTAssertTrue(source.contains("guard generation == loadGeneration, value.server.name == server else { return }"))
+        XCTAssertTrue(source.contains("decision.server == serverName"))
         XCTAssertTrue(source.contains("ReviewPresentation.staleReviewMessage(error)"))
         XCTAssertTrue(source.contains("await load(); staleNotice = stale"))
     }
@@ -146,11 +156,11 @@ final class ApproveServerPathTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
         let source = try String(contentsOf: path)
-        XCTAssertTrue(source.contains("securityApproveServer(serverName, force: force, block:"))
+        XCTAssertTrue(source.contains("securityApproveServer(decision.server, force: force, block: decision.block"))
         XCTAssertTrue(source.contains("status == 409"))
         XCTAssertTrue(source.contains("message.localizedCaseInsensitiveContains(\"dangerous\")"))
         XCTAssertTrue(source.contains("showForceApprovalConfirmation = true"))
-        XCTAssertTrue(source.contains("approve(force: true)"))
+        XCTAssertTrue(source.contains("approve(decision, force: true)"))
         XCTAssertTrue(source.contains("Button(\"Reject Server\", role: .destructive)"))
         XCTAssertTrue(source.contains("securityRejectServer(serverName)"))
         XCTAssertTrue(source.contains("Text(tool.scanVerdict)"))

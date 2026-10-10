@@ -196,4 +196,46 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertEqual(ReviewPresentation.toolState(tools[3], quarantined: false), .blocked)
         for tool in tools { XCTAssertEqual(ReviewPresentation.toolState(tool, quarantined: true), .allowToggle) }
     }
+
+    // MARK: UX-02 cross-review r4: the decision is the one on screen at the click
+
+    private func hashedReview(server: String, captured: Bool = true, tools: [(String, String)]) throws -> ServerReviewResponse {
+        let toolJSON = tools.map { name, hash in
+            "{\"name\":\"\(name)\",\"description\":\"d\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"clean\",\"current_hash\":\"\(hash)\"}"
+        }.joined(separator: ",")
+        let json = "{\"server\":{\"name\":\"\(server)\",\"quarantined\":true,\"definitions_captured\":\(captured)},\"tools\":[\(toolJSON)]}"
+        return try JSONDecoder().decode(ServerReviewResponse.self, from: Data(json.utf8))
+    }
+
+    func testApprovalDecisionRefusesAnotherServersReview() throws {
+        let reviewA = try hashedReview(server: "A", tools: [("op", "h-a")])
+        // The sheet now targets B but still holds A's review (or none yet).
+        XCTAssertNil(ReviewPresentation.approvalDecision(server: "B", review: reviewA, allowed: ["op"], everything: false))
+        XCTAssertNil(ReviewPresentation.approvalDecision(server: "B", review: nil, allowed: [], everything: true))
+        XCTAssertNil(ReviewPresentation.toolApprovalExpected(server: "B", tool: "op", review: reviewA) as [String: String]??)
+    }
+
+    func testApprovalDecisionIsCapturedAtTheClick() throws {
+        let h1 = try hashedReview(server: "A", tools: [("read", "h1-read"), ("drop", "h1-drop")])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h1, allowed: ["read"], everything: false))
+        // A review load (H2: drop changed, a new tool) lands after the click.
+        let h2 = try hashedReview(server: "A", tools: [("read", "h1-read"), ("drop", "h2-drop"), ("late", "h2-late")])
+        _ = h2
+        XCTAssertEqual(decision, ReviewPresentation.ApprovalDecision(server: "A", block: ["drop"], expected: ["read": "h1-read", "drop": "h1-drop"], blind: false),
+                       "the request carries H1's hashes and block list, so the core answers 409 when definitions changed")
+
+        let all = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h1, allowed: [], everything: true))
+        XCTAssertEqual(all.block, [])
+        XCTAssertEqual(all.expected, ["read": "h1-read", "drop": "h1-drop"], "Approve All covers only the tools on screen at the click")
+
+        let perTool = try XCTUnwrap(ReviewPresentation.toolApprovalExpected(server: "A", tool: "drop", review: h1))
+        XCTAssertEqual(perTool, ["drop": "h1-drop"])
+    }
+
+    func testBlindDecisionWhenNothingWasCaptured() throws {
+        let empty = try hashedReview(server: "A", captured: false, tools: [])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))
+        XCTAssertTrue(decision.blind)
+        XCTAssertNil(decision.expected)
+    }
 }
