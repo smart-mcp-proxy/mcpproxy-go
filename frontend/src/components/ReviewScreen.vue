@@ -216,7 +216,17 @@ async function approve(force: boolean, block?: string[], decision?: ApprovalDeci
   }
   choices.clear(); emit('approved'); await load()
 }
-async function rejectServer() { approving.value = true; const res = await api.securityReject(props.serverName); approving.value = false; if (!res.success) error.value = res.error || 'Reject failed'; else await load() }
+// Like approve(), a rejection answers only the review session that sent it: a
+// late answer for A must not unlock B's in-flight approval, reload B, or show
+// A's error on B (UX-02 r8). The watcher on serverName already reset approving.
+async function rejectServer() {
+  const server = props.serverName; const session = reviewSession
+  approving.value = true
+  const res = await api.securityReject(server)
+  if (session !== reviewSession || server !== props.serverName) return
+  approving.value = false
+  if (!res.success) error.value = res.error || 'Reject failed'; else await load()
+}
 async function approveTool(name: string) {
   const session = reviewSession
   const expected = reviewedHashes((review.value?.tools ?? []).filter(t => t.name === name))
@@ -228,7 +238,7 @@ async function approveTool(name: string) {
   if (/out of date/i.test(message)) staleNotice.value = message
   else if (message) error.value = message
 }
-async function blockTool(name: string) { await api.blockTools(props.serverName, [name]); await load() }
+async function blockTool(name: string) { const server = props.serverName; const session = reviewSession; await api.blockTools(server, [name]); if (session !== reviewSession || server !== props.serverName) return; await load() }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
