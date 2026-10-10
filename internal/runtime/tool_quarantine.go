@@ -2114,7 +2114,7 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
-		record.IdentityKeyed = !(wasUnstamped && record.Restricts())
+		record.IdentityKeyed = !wasUnstamped || !record.Restricts()
 
 		batch = append(batch, record)
 	}
