@@ -219,6 +219,10 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"equals flag":          {"-c", "exec npx srv --password=hunter2"},
 		"single quoted value":  {"-lc", "exec npx srv --password 'hunter2 and more'"},
 		"env prefix":           {"-c", "PASSWORD=hunter2 npx srv --port 80"},
+		"single quoted inline": {"-c", "exec npx srv --password='hunter2 and more'"},
+		"double quoted inline": {"-c", `exec npx srv --password="hunter2 and more"`},
+		"double quoted value":  {"-c", `exec npx srv --password "hunter2 and more"`},
+		"inline then trailing": {"-c", "exec npx srv --password='hunter2 and more' --port 80"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -232,6 +236,8 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 			require.NoError(t, err)
 			require.NotContains(t, string(encoded), "hunter2")
 			require.NotContains(t, string(encoded), "and more")
+			require.NotContains(t, string(encoded), "more'")
+			require.NotContains(t, string(encoded), `more"`)
 			require.Len(t, review.Server.Args, 2)
 			require.Equal(t, args[0], review.Server.Args[0])
 			require.Contains(t, review.Server.Args[1], "npx srv")

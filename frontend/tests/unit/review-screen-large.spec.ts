@@ -175,6 +175,27 @@ describe('ReviewScreen at scale (UX-03)', () => {
     expect(blockedArg().length).toBe(15)
   })
 
+  it('approval is disabled while a refresh is unresolved, so a stale list never decides the block list', async () => {
+    const w = await mountN(180)
+    const fresh = payload(181)
+    fresh.data.tools.push({ name: 'delete_new_pending', description: 'Delete everything', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false } as any)
+    let resolveFresh!: (v: unknown) => void
+    ;(api.getServerReview as any).mockImplementationOnce(() => new Promise(r => { resolveFresh = r }))
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    const approve = w.get('[data-test="review-approve-server"]')
+    expect(approve.attributes('disabled')).toBeDefined()
+    expect(w.get('[data-test="review-approve-all"]').attributes('disabled')).toBeDefined()
+    await approve.trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).not.toHaveBeenCalled()
+    resolveFresh(fresh); await flushPromises()
+    expect(w.get('[data-test="review-approve-server"]').attributes('disabled')).toBeUndefined()
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(blockedArg()).toContain('delete_new_pending')
+  })
+
   it('pure helpers: filter semantics and page clamping', () => {
     const t = tools(30)
     const allowed = new Set([t[1].name])
