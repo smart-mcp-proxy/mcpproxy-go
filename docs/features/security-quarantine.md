@@ -302,7 +302,9 @@ mcpproxy review show github [--full]
    allows every pending or changed tool (tools you blocked earlier on a
    re-quarantined server stay blocked). If no tool definitions have been captured, the button
    reads "Approve without seeing tools" and the UI asks for a separate
-   confirmation before a blind approval can proceed.
+   confirmation before a blind approval can proceed. If tool definitions are
+   captured while that confirmation is open, confirming approves nothing and
+   the screen asks you to review the tools it now lists.
 
 The review controls are deliberate: **Fetch tool definitions** uses the
 inspection-only `discover-tools` capture to store current upstream metadata

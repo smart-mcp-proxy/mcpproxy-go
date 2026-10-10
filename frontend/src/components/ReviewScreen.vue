@@ -59,7 +59,7 @@
       <ScanHistory />
     </template>
 
-    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="approve(false)">Approve without seeing tools</button></div></div></dialog>
+    <dialog ref="confirmDialog" class="modal" @close="closeConfirm"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="confirmBlindApprove">Approve without seeing tools</button></div></div></dialog>
     <dialog ref="forceDialog" class="modal"><div class="modal-box"><h3 class="font-bold text-lg">Dangerous findings detected</h3><p class="py-3">The baseline scan found dangerous findings. Force approval activates this server despite that warning.</p><div class="modal-action"><button class="btn" @click="forceDialog?.close()">Cancel</button><button class="btn btn-error" @click="approve(true)">Force approve server</button></div></div></dialog>
       <dialog ref="requarantineDialog" class="modal" data-test="review-requarantine-dialog"><div class="modal-box"><h3 class="font-bold text-lg">Quarantine {{ serverName }} to review again?</h3><p class="py-3">Agents lose access to every tool on {{ serverName }} until you approve it again.</p><div class="modal-action"><button class="btn" data-test="review-requarantine-cancel" @click="requarantineDialog?.close?.()">Cancel</button><button class="btn btn-warning" :disabled="requarantining" data-test="review-requarantine-confirm" @click="requarantine">Quarantine</button></div></div></dialog>
   </section>
@@ -144,8 +144,34 @@ async function fetchDefinitions() {
   if (!res.success) { error.value = res.error || 'Failed to capture tool definitions'; return }
   await load()
 }
-function requestApprove(everything: boolean) { if (!review.value?.server.definitions_captured) { confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
-function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
+// The blind-approval decision is captured when the confirmation opens (UX-02
+// r7), as the tray does: its block list and the hashes of the (empty) review
+// the operator saw. Confirming submits exactly that, never the review that a
+// background refresh put on screen meanwhile.
+type ApprovalDecision = { block: string[]; expected: Record<string, string> | undefined }
+let blindDecision: (ApprovalDecision & { session: number; server: string; toolCount: number }) | null = null
+function requestApprove(everything: boolean) {
+  if (!review.value?.server.definitions_captured) {
+    const tools = review.value?.tools ?? []
+    blindDecision = { block: everything ? [] : tools.map(t => t.name).filter(name => !allowedTools.value.includes(name)), expected: reviewedHashes(tools), session: reviewSession, server: props.serverName, toolCount: tools.length }
+    confirmOpen.value = true; confirmDialog.value?.showModal(); return
+  }
+  void approve(false, everything ? [] : undefined)
+}
+function confirmBlindApprove() {
+  const decision = blindDecision
+  closeConfirm()
+  if (!decision || decision.session !== reviewSession || decision.server !== props.serverName) return
+  // Tool definitions arrived while the confirmation was open: the operator
+  // agreed to approve without seeing tools, and there are tools to see now.
+  // Abandon instead of approving them unseen; the list below is the review.
+  if ((review.value?.tools.length ?? 0) !== decision.toolCount) {
+    staleNotice.value = 'Tool definitions were captured while the confirmation was open; nothing was approved.'
+    return
+  }
+  void approve(false, undefined, decision)
+}
+function closeConfirm() { blindDecision = null; confirmOpen.value = false; confirmDialog.value?.close?.() }
 // The definitions the operator is looking at, by hash (UX-02): the core approves
 // only these and answers 409 when one changed or a new tool appeared since.
 // An EMPTY review (nothing captured, or a server that serves no tools) binds to
@@ -168,16 +194,16 @@ function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined
 // that reloaded in the background while the force dialog was open (a new or
 // changed tool) therefore makes the retry fail as out of date instead of
 // pairing the old block list with definitions the operator never decided on.
-async function approve(force: boolean, block?: string[]) {
+async function approve(force: boolean, block?: string[], decision?: ApprovalDecision) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   const session = reviewSession
   // Never submit a decision made on another server's review (UX-02).
   if (review.value && reviewServer !== server) { closeConfirm(); forceDialog.value?.close?.(); return }
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; staleNotice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
-  const retry = force && block === undefined && lastBlock.value !== null
-  const blocked = block ?? (retry && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
-  const expected = retry ? lastExpected.value : reviewedHashes(review.value?.tools ?? [])
+  const retry = !decision && force && block === undefined && lastBlock.value !== null
+  const blocked = decision ? decision.block : block ?? (retry && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  const expected = decision ? decision.expected : retry ? lastExpected.value : reviewedHashes(review.value?.tools ?? [])
   lastBlock.value = blocked; lastExpected.value = expected
   const res = expected ? await api.securityApprove(server, force, blocked, expected) : await api.securityApprove(server, force, blocked)
   if (session !== reviewSession || server !== props.serverName) return // the watcher on serverName already reset approving and the force state

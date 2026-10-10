@@ -77,12 +77,15 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 				body["block"] = block
 			}
 			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block, all)
-			if expected := reviewExpectedHashes(state.tools); expected != nil {
-				body["expected_hashes"] = expected
-			}
 		} else if len(tools) > 0 || len(except) > 0 {
 			// Nothing to select from: dropping --tools/--except would approve blind.
 			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
+		}
+		// Bound to the review read above — an empty one included (UX-02 r7): a
+		// tool captured while the confirmation is pending is then refused as
+		// out of date instead of being approved unseen.
+		if expected := reviewExpectedHashes(state.tools); expected != nil {
+			body["expected_hashes"] = expected
 		}
 		if !yes {
 			confirmed, err := confirm(prompt)
@@ -233,14 +236,20 @@ type reviewToolState struct {
 	CurrentHash string `json:"current_hash"`
 }
 
-// reviewExpectedHashes maps every reviewed tool to its definition hash. It
-// returns nil — an unbound, legacy request — only when the core reports no
+// reviewExpectedHashes maps every reviewed tool to its definition hash. An
+// EMPTY review binds to the empty snapshot {} (UX-02 r7), as on the Web and
+// macOS review screens: any tool the core holds by the time the approval
+// lands was not reviewed, so the core refuses the approval as out of date. A
+// core that predates expected_hashes ignores the field. It returns nil — an unbound, legacy request — only when the core reports no
 // hash for ANY tool (it predates current_hash), so an older core is not asked
 // for a binding it cannot honour. A tool that lacks a hash on a core that
 // reports them is left out of the binding rather than unbinding the whole
 // approval: the core then refuses the approval as out of date (the tool is
 // not in the review) unless that tool is blocked (UX-02 cross-review).
 func reviewExpectedHashes(tools []reviewToolState) map[string]string {
+	if len(tools) == 0 {
+		return map[string]string{}
+	}
 	out := make(map[string]string, len(tools))
 	for _, tool := range tools {
 		if tool.CurrentHash != "" {
