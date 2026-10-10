@@ -1314,6 +1314,10 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
+// serverRemovalCleanupHook is a test seam fired at the start of each async
+// server-removal cleanup, before it takes the config-commit lock.
+var serverRemovalCleanupHook func(name string)
+
 // LoadConfiguredServers synchronizes storage and upstream manager from the given or current config.
 // If cfg is nil, it will use the current runtime configuration.
 //
@@ -1379,8 +1383,25 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	// Guard against a transient empty config nuking every approval — explicit
 	// server deletion already cleans up via DeleteServerToolApprovals.
 	if len(configuredServers) > 0 {
-		configuredNames := make([]string, 0, len(configuredServers))
+		// The snapshot may be older than the live config (an async reload can
+		// start after a create-only add committed), so a server added since is
+		// not in it. Its approvals, hashes, blocks and call history are live
+		// state: count every server the live config holds as configured too,
+		// or a stale reload would delete a blocked tool's record and let
+		// rediscovery recreate it as approved (UX-01 r3).
+		keep := make(map[string]struct{}, len(configuredServers))
 		for name := range configuredServers {
+			keep[name] = struct{}{}
+		}
+		if live := r.Config(); live != nil {
+			for _, s := range live.Servers {
+				if s != nil {
+					keep[s.Name] = struct{}{}
+				}
+			}
+		}
+		configuredNames := make([]string, 0, len(keep))
+		for name := range keep {
 			configuredNames = append(configuredNames, name)
 		}
 		if pruned, perr := r.storageManager.PruneOrphanToolApprovals(configuredNames); perr != nil {
@@ -1547,18 +1568,33 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	for _, serverName := range serversToRemove {
 		changed = true
 		go func(name string) {
+			if serverRemovalCleanupHook != nil {
+				serverRemovalCleanupHook(name)
+			}
 			// The snapshot this sync ran with may be older than the live config
 			// (an async ApplyConfig reload can start after a create-only add
 			// committed). Judge the removal against the live config under the
 			// commit lock, which create-only add also holds from storage write
 			// to publish, so a just-added server is never reaped (UX-01 r2).
+			//
+			// A server the live config still holds is spared only if no applied
+			// config removed it: SaveConfiguration republishes every storage row,
+			// so a removed server whose cleanup has not run yet is resurrected
+			// into the live config by any later save, and must still be reaped.
+			// A deliberate re-add clears the pending-removal mark (UX-01 r3).
 			r.configCommitMu.Lock()
 			defer r.configCommitMu.Unlock()
+			removalPending := r.takePendingServerRemoval(name)
+			resurrected := false
 			if live := r.Config(); live != nil {
 				for _, s := range live.Servers {
 					if s != nil && s.Name == name {
-						r.logger.Info("Skipping removal: server present in live config", zap.String("server", name))
-						return
+						if !removalPending {
+							r.logger.Info("Skipping removal: server present in live config", zap.String("server", name))
+							return
+						}
+						resurrected = true
+						break
 					}
 				}
 			}
@@ -1576,6 +1612,15 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
 			} else {
 				r.logger.Info("Removed server tools from search index", zap.String("server", name))
+			}
+			if resurrected {
+				// Storage no longer holds the server, so re-deriving the live
+				// config and the file from it drops the resurrected entry in
+				// both places (and marks the write as our own, so the config
+				// watcher does not read the file back as an external edit).
+				if err := r.saveConfigurationLocked(); err != nil {
+					r.logger.Error("Failed to persist config after removing resurrected server", zap.Error(err), zap.String("server", name))
+				}
 			}
 		}(serverName)
 	}
@@ -1615,6 +1660,12 @@ func (r *Runtime) SaveConfiguration() error {
 	// be acquired before r.mu.
 	r.configCommitMu.Lock()
 	defer r.configCommitMu.Unlock()
+	return r.saveConfigurationLocked()
+}
+
+// saveConfigurationLocked is SaveConfiguration for callers already holding
+// configCommitMu.
+func (r *Runtime) saveConfigurationLocked() error {
 
 	latestServers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
@@ -1916,6 +1967,8 @@ func (r *Runtime) ReloadConfiguration() error {
 		}
 		r.mu.Unlock()
 	}
+
+	r.noteServerSetChange(oldSnapshot.Config, running)
 
 	// GH #965 review: an external file edit is applied silently even when it
 	// touches a restart-required field (listen, TLS, the HTTP server timeouts,

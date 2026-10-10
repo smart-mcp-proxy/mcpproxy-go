@@ -116,6 +116,13 @@ type Runtime struct {
 	// runtime), so there is no callback deadlock.
 	configCommitMu sync.Mutex
 
+	// pendingServerRemovals holds server names a committed config (apply or
+	// reload) dropped whose async cleanup has not run yet. The cleanup uses it
+	// to tell a removal an operator asked for from a stale-snapshot reap of a
+	// server added since; a deliberate re-add clears the name. Leaf lock.
+	pendingRemovalMu      sync.Mutex
+	pendingServerRemovals map[string]struct{}
+
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
 	// top of the snapshot comparison because a restart-required ApplyConfig
@@ -1982,6 +1989,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 
 	// Apply hot-reloadable changes
 	oldCfg := r.cfg
+	r.noteServerSetChange(oldCfg, newCfg)
 	r.cfg = newCfg
 	// Skip the write when the path is unchanged: LoadConfiguredServers goroutines
 	// spawned by an earlier apply read r.cfgPath without this lock, and two
@@ -4191,4 +4199,49 @@ func knownClientAliases() map[string]bool {
 
 func isKnownClientAlias(rawNormalized string) bool {
 	return knownClientAliases()[rawNormalized]
+}
+
+// noteServerSetChange records which servers a config commit removed (in old, not
+// in next) and forgets any name it re-added. Call it while committing, under
+// configCommitMu.
+func (r *Runtime) noteServerSetChange(oldCfg, next *config.Config) {
+	if oldCfg == nil || next == nil {
+		return
+	}
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	if r.pendingServerRemovals == nil {
+		r.pendingServerRemovals = make(map[string]struct{})
+	}
+	present := make(map[string]struct{}, len(next.Servers))
+	for _, s := range next.Servers {
+		if s != nil {
+			present[s.Name] = struct{}{}
+			delete(r.pendingServerRemovals, s.Name)
+		}
+	}
+	for _, s := range oldCfg.Servers {
+		if s != nil {
+			if _, ok := present[s.Name]; !ok {
+				r.pendingServerRemovals[s.Name] = struct{}{}
+			}
+		}
+	}
+}
+
+// ClearPendingServerRemoval forgets a pending removal for name; a deliberate
+// create-only add calls it so the earlier removal's cleanup cannot reap the
+// new server.
+func (r *Runtime) ClearPendingServerRemoval(name string) {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	delete(r.pendingServerRemovals, name)
+}
+
+func (r *Runtime) takePendingServerRemoval(name string) bool {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	_, ok := r.pendingServerRemovals[name]
+	delete(r.pendingServerRemovals, name)
+	return ok
 }

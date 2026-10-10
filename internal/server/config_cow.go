@@ -96,6 +96,7 @@ func (s *Server) createServer(sc *config.ServerConfig) error {
 			}
 			return nil, fmt.Errorf("failed to save server to storage: %w", err)
 		}
+		s.runtime.ClearPendingServerRemoval(sc.Name)
 		// cfg is the live immutable snapshot; copy-on-write, see
 		// configWithAppendedServer.
 		if createServerAfterSnapshotHook != nil {
