@@ -250,6 +250,27 @@ describe('ReviewScreen at scale (UX-03)', () => {
     expect(api.securityApprove).toHaveBeenCalledTimes(1)
   })
 
+  it('a late dangerous response does not reopen a force dialog that a refresh already invalidated', async () => {
+    const w = await mountN(180)
+    const dialog = w.findAll('dialog')[1].element as HTMLDialogElement & { showModal: () => void }
+    dialog.showModal = vi.fn()
+    let resolveApprove!: (v: unknown) => void
+    ;(api.securityApprove as any).mockImplementationOnce(() => new Promise(r => { resolveApprove = r }))
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    const fresh = payload(181)
+    fresh.data.tools.push({ name: 'delete_new_pending', description: 'Delete everything', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false } as any)
+    ;(api.getServerReview as any).mockResolvedValueOnce(fresh)
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises() // the newer review load settles first
+    resolveApprove({ success: false, error: 'dangerous findings present' })
+    await flushPromises()
+    expect(dialog.showModal).not.toHaveBeenCalled()
+    expect(w.get('[data-test="review-stale-force-notice"]').text()).toContain('approve again')
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(blockedArg()).toContain('delete_new_pending')
+  })
+
   it('pure helpers: filter semantics and page clamping', () => {
     const t = tools(30)
     const allowed = new Set([t[1].name])

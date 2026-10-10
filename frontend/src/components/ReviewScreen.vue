@@ -248,7 +248,14 @@ async function approve(force: boolean, block?: string[]) {
   const res = await api.securityApprove(server, force, blocked)
   if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
   approving.value = false
-  if (!res.success) { error.value = res.error || 'Approval failed'; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return }
+  if (!res.success) {
+    const message = res.error || 'Approval failed'
+    // A refresh that began while this attempt was in flight dropped its block list (lastBlock was cleared): the force retry is bound to a snapshot that is gone, so do not offer it and do not replace the refreshed review with an error panel; show the stale notice beside the fresh approval controls instead.
+    if (!force && /dangerous/i.test(message) && lastBlock.value === null) { notice.value = STALE_FORCE_NOTICE; return }
+    error.value = message
+    if (!force && /dangerous/i.test(message)) forceDialog.value?.showModal?.()
+    return
+  }
   choices.clear(); emit('approved'); await load()
 }
 async function rejectServer() { approving.value = true; const res = await api.securityReject(props.serverName); approving.value = false; if (!res.success) error.value = res.error || 'Reject failed'; else await load() }

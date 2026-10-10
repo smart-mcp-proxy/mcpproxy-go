@@ -118,6 +118,29 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	if len(tokens) == 0 {
 		return s
 	}
+	masked := r.maskTokens(tokens, spawnRules)
+
+	var b strings.Builder
+	b.Grow(len(s))
+	next := 0
+	for _, seg := range segs {
+		if seg.isRedirect {
+			b.WriteString(r.maskRedirect(seg.text, spawnRules))
+			continue
+		}
+		if !seg.isToken {
+			b.WriteString(seg.text)
+			continue
+		}
+		b.WriteString(masked[next])
+		next++
+	}
+	return b.String()
+}
+
+// maskTokens applies the flag-name and value-shape rules to a token list, plus
+// a second pass over the shell-decoded spelling of each token.
+func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 	masked := r.argvWith(tokens, spawnRules, nil)
 
 	// The flag-name rule reads token TEXT, so a shell-quoted or escaped spelling
@@ -155,19 +178,27 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 			}
 		}
 	}
+	return masked
+}
 
-	var b strings.Builder
-	b.Grow(len(s))
-	next := 0
-	for _, seg := range segs {
-		if !seg.isToken {
-			b.WriteString(seg.text)
-			continue
-		}
-		b.WriteString(masked[next])
-		next++
+// maskRedirect redacts the TARGET word of a shell redirection (a filename or a
+// here-string body). A redirection is never an argument, so it is excluded from
+// flag/value pairing, but its text still reaches the log and can carry a
+// credential (`<<< token=...`), so it gets the same value rules as any token.
+func (r Redaction) maskRedirect(text string, spawnRules bool) string {
+	i := 0
+	for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+		i++
 	}
-	return b.String()
+	for i < len(text) && (isRedirectChar(text[i]) || text[i] == '&' || text[i] == '|') {
+		i++
+	}
+	j := skipCommandSpace(text, i)
+	target := text[j:]
+	if target == "" {
+		return text
+	}
+	return text[:j] + r.maskTokens([]string{target}, spawnRules)[0]
 }
 
 // isShellVarName reports whether s is a valid shell variable name, the left
@@ -311,8 +342,9 @@ func hexVal(c byte) int {
 }
 
 type commandSegment struct {
-	text    string
-	isToken bool
+	text       string
+	isToken    bool
+	isRedirect bool
 }
 
 func isCommandSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
@@ -433,12 +465,72 @@ func scanShellWord(s string, i int, quoteAware bool) (end int, balanced bool) {
 				continue
 			}
 		}
+		if quote == 0 && c == '$' && j+1 < len(s) && s[j+1] == '(' {
+			e, ok := scanSubstitution(s, j+1, ')', quoteAware)
+			if !ok {
+				// Never closes: quote-aware callers fall back; the fallback
+				// swallows the rest as one word (over-masks, never leaks).
+				return len(s), !quoteAware
+			}
+			j = e
+			continue
+		}
+		if quote == 0 && c == '`' {
+			e, ok := scanSubstitution(s, j, '`', quoteAware)
+			if !ok {
+				// Never closes: quote-aware callers fall back; the fallback
+				// swallows the rest as one word (over-masks, never leaks).
+				return len(s), !quoteAware
+			}
+			j = e
+			continue
+		}
 		if isWordBreak(c) {
 			break
 		}
 		j++
 	}
 	return j, quote == 0
+}
+
+// scanSubstitution returns the index just past a command substitution whose
+// opener is at s[i] ('(' of `$(`, or a backtick). The whole substitution is part
+// of the surrounding word: `--password $(printf %s hunter2)` has ONE value, and
+// splitting it on the spaces inside would leave the secret fragments unmasked.
+// Nested substitutions, parentheses and quotes are balanced. ok is false when it
+// never closes.
+func scanSubstitution(s string, i int, closer byte, quoteAware bool) (end int, ok bool) {
+	depth := 0
+	var quote byte
+	for j := i; j < len(s); j++ {
+		c := s[j]
+		if c == '\\' && quote != '\'' && j+1 < len(s) {
+			j++
+			continue
+		}
+		if quoteAware && quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case quoteAware && (c == '\'' || c == '"'):
+			quote = c
+		case closer == '`':
+			if c == '`' && j > i {
+				return j + 1, true
+			}
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return j + 1, true
+			}
+		}
+	}
+	return len(s), false
 }
 
 // redirectionEnd reports the end of a shell redirection starting at s[i]: an
@@ -494,8 +586,9 @@ func splitCommandSegmentsMode(s string, quoteAware bool) (segs []commandSegment,
 			if !ok {
 				return nil, false
 			}
-			// Operator and target are not arguments: emit them as plain text.
-			segs = append(segs, commandSegment{text: s[i:end]})
+			// Operator and target are not arguments (so they never pair with a
+			// flag), but their text is still redacted by value.
+			segs = append(segs, commandSegment{text: s[i:end], isRedirect: true})
 			i = end
 			continue
 		}
