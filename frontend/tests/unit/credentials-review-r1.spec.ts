@@ -43,6 +43,9 @@ describe('ProfileChip on an ended lease', () => {
     expect(revoked.find('[data-test="credential-expiry-r"]').text()).toMatch(/^Expires 2026-10-1\d/)
     const expired = mount(CredentialLifecycle, { props: { id: 'x', kind: 'client', profile: 'p', lease: false, expiresAt: '2026-10-09T12:00:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
     expect(expired.find('[data-test="credential-expiry-x"]').text()).toMatch(/^Expired 2026-10-09/)
+    const revokedLease = mount(CredentialLifecycle, { props: { id: 'rl', kind: 'client', profile: 'p', lease: true, revoked: true, expiresAt: '2026-10-10T12:30:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
+    expect(revokedLease.find('[data-test="credential-expiry-rl"]').text()).toMatch(/^Lease was to end 2026-10-10/)
+    expect(revokedLease.text()).not.toContain('Lease ends in')
   })
 })
 
@@ -60,5 +63,26 @@ describe('callable deep link on a mounted table', () => {
     const shown = w.findAll('[data-test^="profile-tool-row-"]')
     expect(shown.length).toBe(1)
     expect(shown[0].text()).toContain('visible_one')
+  })
+})
+
+describe('a stale client detail cannot undo a lifecycle refresh', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+  it('discards a detail answered after a newer roster fetch started', async () => {
+    const api = (await import('@/services/api')).default as any
+    const { useClientsStore } = await import('@/stores/clients')
+    const row = { id: 'w1', display_name: 'w1', kind: 'custom', state: 'other', installed: false, connected: true, active_sessions: 0, calls_24h: 0 }
+    api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [{ ...row, credential_state: 'client' }] } })
+    const store = useClientsStore()
+    await store.refreshPresence()
+    let resolveDetail: (v: any) => void = () => {}
+    api.getClient = vi.fn(() => new Promise(r => { resolveDetail = r }))
+    const pending = store.loadDetail('w1')
+    api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [{ ...row, credential_state: 'revoked' }] } })
+    await store.refreshPresence()
+    expect(store.clients[0].credential_state).toBe('revoked')
+    resolveDetail({ success: true, data: { ...row, credential_state: 'client' } })
+    await pending
+    expect(store.clients[0].credential_state).toBe('revoked')
   })
 })

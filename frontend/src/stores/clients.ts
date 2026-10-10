@@ -31,6 +31,9 @@ export const useClientsStore = defineStore('clients', () => {
   // response can never overwrite a newer one. loadTicket only owns the loading
   // flag, so a load superseded by a presence poll still clears it.
   let fetchTicket = 0
+  // Bumped by every roster fetch; a client detail answered after a newer
+  // roster fetch started is discarded.
+  let rosterGeneration = 0
   let loadTicket = 0
   const scopeKey = () => JSON.stringify(scope)
   const isUnscoped = () => !scope.profile && !scope.client
@@ -56,6 +59,7 @@ export const useClientsStore = defineStore('clients', () => {
   }
 
   async function load(nextScope?: { profile?: string; client?: string }) {
+    rosterGeneration++
     if (nextScope) scope = nextScope
     const ticket = ++fetchTicket
     const mine = ++loadTicket
@@ -88,6 +92,7 @@ export const useClientsStore = defineStore('clients', () => {
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
+    rosterGeneration++
     const ticket = ++fetchTicket
     const asked = scopeKey()
     try {
@@ -160,7 +165,12 @@ export const useClientsStore = defineStore('clients', () => {
   }
 
   async function loadDetail(id: string) {
+    // A roster refresh that starts while this detail is in flight (an SSE
+    // invalidation such as credentials.changed) supersedes it: a stale detail
+    // must not overwrite the newer row (Spec 115 UI-004).
+    const generation = rosterGeneration
     const response = await api.getClient(id)
+    if (generation !== rosterGeneration) return
     if (!response.success || !response.data) return
     const index = clients.value.findIndex(client => client.id === id)
     if (index >= 0) {

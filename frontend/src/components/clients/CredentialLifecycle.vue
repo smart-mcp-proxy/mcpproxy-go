@@ -63,9 +63,12 @@ const state = computed(() => stateBadge(fields.value, nowMs.value))
 const lease = computed(() => (state.value.label === 'Revoked' || state.value.label === 'Lease ended' ? '' : leaseText(fields.value, nowMs.value)))
 const dangling = computed(() => props.profileState === 'dangling')
 // A non-lease credential still shows when it expires (UI-001).
+// A revoked lease keeps its planned end too (no countdown, no reconnect).
 const expiryText = computed(() => {
-  if (lease.value || isLease(fields.value) || !props.expiresAt) return ''
+  if (lease.value || !props.expiresAt) return ''
+  if (isLease(fields.value) && state.value.label !== 'Revoked') return ''
   const past = new Date(props.expiresAt).getTime() <= nowMs.value
+  if (isLease(fields.value)) return `Lease ${past ? 'ended' : 'was to end'} ${formatDateTimeShort(props.expiresAt)}`
   return `${past ? 'Expired' : 'Expires'} ${formatDateTimeShort(props.expiresAt)}`
 })
 </script>

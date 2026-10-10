@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -663,13 +664,12 @@ type sseCapture struct {
 	stop context.CancelFunc
 	done chan struct{}
 	err  error // the scanner's error; only the deliberate cancel is expected
-	ctx  context.Context
 }
 
 func (e *credE2E) captureSSE() *sseCapture {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &sseCapture{stop: cancel, done: make(chan struct{}), ctx: ctx}
+	c := &sseCapture{stop: cancel, done: make(chan struct{})}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.base+"/events", http.NoBody)
 	require.NoError(e.t, err)
 	req.Header.Set("X-API-Key", credE2EAPIKey)
@@ -706,7 +706,9 @@ func (c *sseCapture) text(t *testing.T) string {
 	<-c.done
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.err != nil && c.ctx.Err() == nil {
+	// Only the deliberate cancellation may end the read; any other error means
+	// the capture is incomplete.
+	if c.err != nil && !errors.Is(c.err, context.Canceled) {
 		t.Fatalf("SSE capture read failed: %v", c.err)
 	}
 	return c.buf.String()
