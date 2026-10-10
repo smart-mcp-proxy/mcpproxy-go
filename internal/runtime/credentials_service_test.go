@@ -707,3 +707,34 @@ func TestCredentialsService_LeaseHasNoExpiringWarning(t *testing.T) {
 	assert.False(t, expiring["lease-w"])
 	assert.True(t, expiring["long-w"])
 }
+
+// Review r1: client lifecycle records carry `mode` on issue and revoke, token
+// records `pin_source`; a malformed token reference is refused without echo.
+func TestCredentialsService_LifecycleDiffKindsAndTokenRefSyntax(t *testing.T) {
+	h := newCredHarness(t)
+	ctx := context.Background()
+	_, err := h.cs.IssueClient(ctx, mcpActor(), mcpClientReq("w1", "ro", "1h"))
+	require.NoError(t, err)
+	_, err = h.cs.Revoke(ctx, mcpActor(), CredentialRef{Client: "w1"}, false)
+	require.NoError(t, err)
+	_, err = h.cs.IssueToken(ctx, mcpActor(), mcpTokenReq("t1", "ro", "1h"))
+	require.NoError(t, err)
+	_, err = h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: "t1"}, false)
+	require.NoError(t, err)
+	for _, c := range h.changes() {
+		diff := c["diff"].(map[string]interface{})
+		if c["client_id"] != "" {
+			assert.Equal(t, "locked", diff["mode"], "%v", c["change"])
+		} else {
+			assert.Equal(t, "token_pin", diff["pin_source"], "%v", c["change"])
+		}
+	}
+	for _, bad := range []string{"bad name!", "a/b", strings.Repeat("x", 65)} {
+		_, err := h.cs.Get(CredentialRef{Token: bad})
+		assert.Equal(t, profile.CredentialErrorCodeInvalidArgument, codeOf(err))
+		assert.NotContains(t, err.Error(), bad)
+		_, err = h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: bad}, false)
+		assert.Equal(t, profile.CredentialErrorCodeInvalidArgument, codeOf(err))
+		assert.NotContains(t, err.Error(), bad)
+	}
+}

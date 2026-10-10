@@ -381,7 +381,7 @@ func lifecycleDiff(v CredentialView, a Actor) map[string]interface{} {
 	if v.ExpiresAt != nil {
 		exp = v.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	return map[string]interface{}{
+	diff := map[string]interface{}{
 		"credential_kind": v.Kind,
 		"binding":         v.Binding,
 		"expires_at":      exp,
@@ -390,7 +390,25 @@ func lifecycleDiff(v CredentialView, a Actor) map[string]interface{} {
 		"purpose_set":     v.Purpose != "",
 		"via":             viaOf(a),
 	}
+	// FR-021: mode for clients, pin_source for tokens, on issue AND revoke.
+	if v.Kind == CredentialKindClient {
+		diff["mode"] = v.Binding
+	} else {
+		diff["pin_source"] = "token_pin"
+	}
+	return diff
 }
+
+// ValidTokenName reports whether name has the agent-token name syntax
+// (letters, digits, '_' or '-', starting with a letter or digit, at most 64).
+func ValidTokenName(name string) bool {
+	return name != "" && len(name) <= 64 && tokenNamePattern.MatchString(name)
+}
+
+// errInvalidTokenRef is the refusal of a malformed token reference: it names
+// the field and never quotes the value (FR-020).
+var errInvalidTokenRef = credErr(profile.CredentialErrorCodeInvalidArgument, "token",
+	`invalid argument "token": must start with a letter or digit and contain only letters, digits, '_' or '-', at most 64 characters`, 400)
 
 func (s *CredentialsService) announce(v CredentialView, change profile.ChangeKind) {
 	if s.publish == nil {
@@ -645,7 +663,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	committed := candidate
 	committed.TokenPrefix = auth.TokenPrefix(raw)
 	view := ViewOf(&committed, cfg, now)
-	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, map[string]interface{}{"pin_source": "token_pin"})
+	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, nil)
 	s.announce(view, profile.ChangeIssue)
 	return &IssuedCredentialResult{View: view, Secret: raw, record: &committed}, nil
 }
@@ -865,7 +883,7 @@ func (s *CredentialsService) mintClientLocked(ctx context.Context, a Actor, req 
 	}
 	// Post-commit: nothing below can fail the call (FR-007, T015a).
 	view := ViewOf(rec, s.cfg(), s.now())
-	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, map[string]interface{}{"mode": rec.ProfileMode})
+	s.writeLifecycle(ctx, a, profile.ChangeIssue, view, nil)
 	if s.publish != nil {
 		s.publish(newEvent(EventTypeClientBindingChanged, map[string]any{
 			"client_id": req.ID, "token_name": issued.TokenName, "profile": issued.Profile,
@@ -899,6 +917,9 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	if s.tokens == nil {
 		return nil, ErrCredentialsUnavailable
 	}
+	if !allowClientRecordByToken && !ValidTokenName(ref.Token) {
+		return nil, errInvalidTokenRef
+	}
 	before, err := s.tokens.GetAgentTokenByName(ref.Token)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read credentials: %w", err)
@@ -922,11 +943,7 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		return nil, err
 	}
 	view := ViewOf(after, cfg, s.now())
-	extra := map[string]interface{}{"changed": true}
-	if after.Kind != auth.KindClient {
-		extra["pin_source"] = "token_pin"
-	}
-	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, extra)
+	s.writeLifecycle(ctx, a, profile.ChangeRevoke, view, map[string]interface{}{"changed": true})
 	s.announce(view, profile.ChangeRevoke)
 	if s.clients != nil && s.clients.notifier != nil {
 		s.clients.notifier.NotifyBindingChanged(after.Name)
@@ -1042,6 +1059,9 @@ func (s *CredentialsService) Get(ref CredentialRef) (*CredentialView, error) {
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "client", "exactly one of client or token is required", 400)
 	}
 	name, kind := ref.Token, "token"
+	if ref.Client == "" && !ValidTokenName(ref.Token) {
+		return nil, errInvalidTokenRef
+	}
 	if ref.Client != "" {
 		if !auth.ValidClientID(ref.Client) {
 			return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "client",
