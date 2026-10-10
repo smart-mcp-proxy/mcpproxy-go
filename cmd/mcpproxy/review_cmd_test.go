@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/spf13/cobra"
@@ -301,15 +302,33 @@ type fetchDaemon struct {
 	// the capture (operator decisions for tools the upstream no longer lists).
 	retained int
 	requests []reviewRequest
+	// statusDelay delays GET /api/v1/status; delayRequest delays the Nth
+	// (1-based) non-status request. Both end early if the client goes away.
+	statusDelay  time.Duration
+	delayRequest int
+	requestDelay time.Duration
+}
+
+func sleepOrGone(r *http.Request, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-r.Context().Done():
+	}
 }
 
 func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/status" {
+			if f.statusDelay > 0 {
+				sleepOrGone(r, f.statusDelay)
+			}
 			_, _ = w.Write([]byte(`{"success":true,"data":{"running":true}}`))
 			return
 		}
 		f.requests = append(f.requests, reviewRequest{method: r.Method, path: r.URL.Path})
+		if f.delayRequest > 0 && len(f.requests) == f.delayRequest {
+			sleepOrGone(r, f.requestDelay)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/servers/srv/review":
@@ -498,5 +517,45 @@ func TestReviewFetchYAMLRoundTripsServerName(t *testing.T) {
 		require.NoError(t, yaml.Unmarshal([]byte(out), &got), name)
 		require.Equal(t, name, got["server"], name)
 		require.Len(t, got, 4, "no extra fields for %q", name)
+	}
+}
+
+// --wait bounds the whole command: the daemon probe and each read share one
+// deadline, and every timeout is a nonzero, actionable, structured failure.
+func TestReviewFetchWaitBoundsWholeCommand(t *testing.T) {
+	base := func() *fetchDaemon {
+		return &fetchDaemon{enabled: true, known: true, toolsAfter: 2, capturedFlag: true, discoverCode: 200}
+	}
+	slow := func(n int) *fetchDaemon {
+		d := base()
+		d.delayRequest, d.requestDelay = n, 5*time.Second
+		return d
+	}
+	probe := base()
+	probe.statusDelay = 1500 * time.Millisecond // inside the probe's own 2s limit, past --wait
+	cases := []struct {
+		name string
+		d    *fetchDaemon
+	}{
+		{"probe", probe},
+		{"first review", slow(1)},
+		{"server list", slow(2)},
+		{"post", slow(3)},
+		{"recheck list", slow(4)},
+		{"final review", slow(5)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			out, err := runFetch(t, tc.d, "json", "--wait", "1s")
+			require.Less(t, time.Since(start), 1450*time.Millisecond)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "timed out")
+			require.ErrorContains(t, err, "--wait")
+			var got map[string]any
+			require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+			require.Contains(t, got["error"], "timed out")
+			require.Equal(t, false, got["captured"])
+		})
 	}
 }

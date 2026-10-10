@@ -743,10 +743,15 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 }
 
 func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
 	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
 		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
 	r.pruneAbsentUndecidedApprovals(serverName, tools)
+	if hook := r.captureAfterPrune; hook != nil {
+		hook()
+	}
 	r.lastGoodToolsMu.Lock()
 	snapshot := make([]*config.ToolMetadata, len(tools))
 	copy(snapshot, tools)

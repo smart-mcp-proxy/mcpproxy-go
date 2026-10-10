@@ -133,19 +133,54 @@ func reviewFetchEnabled(ctx context.Context, client reviewDoer, server string) (
 	return false, cliRefusalError{fmt.Errorf("server '%s' not found; list servers with: mcpproxy upstream list", server)}
 }
 
+// reviewFetchClient builds the daemon client under ctx. The probe inside
+// newClient has its own short timeout and is not context-aware, so it runs in
+// a goroutine and the caller stops waiting when the shared deadline passes.
+func reviewFetchClient(ctx context.Context, newClient func() (reviewDoer, error)) (reviewDoer, error) {
+	type built struct {
+		client reviewDoer
+		err    error
+	}
+	ch := make(chan built, 1)
+	go func() {
+		c, err := newClient()
+		ch <- built{c, err}
+	}()
+	select {
+	case b := <-ch:
+		return b.client, b.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func runReviewFetch(server string, wait time.Duration, format string) error {
+	return runReviewFetchWith(server, wait, format, func() (reviewDoer, error) {
+		client, _, err := newSecurityCLIClient()
+		if err != nil {
+			return nil, err
+		}
+		return client, nil
+	})
+}
+
+func runReviewFetchWith(server string, wait time.Duration, format string, newClient func() (reviewDoer, error)) error {
 	if wait <= 0 || wait > reviewFetchMaxWait {
 		return flagValidationError{fmt.Errorf("--wait must be between 1s and %s", reviewFetchMaxWait)}
 	}
-	client, _, err := newSecurityCLIClient()
-	if err != nil {
-		return err
-	}
+	// One deadline covers the whole command, including the daemon probe that
+	// builds the client and every read after the POST.
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 
 	result := reviewFetchResult{Server: server}
 	fail := func(err error) error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			var refusal cliRefusalError
+			if !errors.As(err, &refusal) {
+				err = cliRefusalError{fmt.Errorf("timed out after %s waiting for '%s'; retry with a larger --wait or check: mcpproxy upstream logs %s", wait, server, server)}
+			}
+		}
 		if format != "table" {
 			result.Error = err.Error()
 			if printErr := formatReviewResult(format, result); printErr != nil {
@@ -153,6 +188,11 @@ func runReviewFetch(server string, wait time.Duration, format string) error {
 			}
 		}
 		return err
+	}
+
+	client, err := reviewFetchClient(ctx, newClient)
+	if err != nil {
+		return fail(err)
 	}
 
 	before, err := reviewFetchReview(ctx, client, server)
