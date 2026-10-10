@@ -164,23 +164,28 @@ export const useClientsStore = defineStore('clients', () => {
     stale.value = true
   }
 
-  async function loadDetail(id: string, attempt = 0): Promise<void> {
-    // A roster refresh that starts while this detail is in flight (an SSE
-    // invalidation such as credentials.changed) supersedes it: a stale detail
-    // must not overwrite the newer row (Spec 115 UI-004). The superseded
-    // request is re-issued, so the expanded row still gets its detail.
+  async function loadDetail(id: string): Promise<void> {
     const generation = rosterGeneration
     const response = await api.getClient(id)
-    if (generation !== rosterGeneration) {
-      if (attempt < 3 && clients.value.some(client => client.id === id)) return loadDetail(id, attempt + 1)
-      return
-    }
     if (!response.success || !response.data) return
     const index = clients.value.findIndex(client => client.id === id)
-    if (index >= 0) {
+    if (index < 0) return
+    if (generation !== rosterGeneration) {
+      // A roster refresh started while this detail was in flight (an SSE
+      // invalidation such as credentials.changed): its credential and binding
+      // fields are newer, so only the detail-only fields are taken from this
+      // response (Spec 115 UI-004). The row still gets its sessions.
+      const d = response.data
+      clients.value[index] = {
+        ...clients.value[index],
+        state: d.state, installed: d.installed, connected: d.connected,
+        connection_unverified: d.connection_unverified, config_path: d.config_path,
+        display_path: d.display_path, sessions: d.sessions,
+      }
+    } else {
       clients.value[index] = response.data
-      detailLoaded.add(id)
     }
+    detailLoaded.add(id)
   }
 
   if (typeof window !== 'undefined') {

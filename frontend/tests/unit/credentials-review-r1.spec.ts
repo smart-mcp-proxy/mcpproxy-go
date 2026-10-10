@@ -66,7 +66,7 @@ describe('callable deep link on a mounted table', () => {
   })
 })
 
-describe('a stale client detail cannot undo a lifecycle refresh', () => {
+describe('a stale client detail cannot undo a lifecycle refresh but still delivers its sessions', () => {
   beforeEach(() => setActivePinia(createPinia()))
   it('discards a detail answered after a newer roster fetch started', async () => {
     const api = (await import('@/services/api')).default as any
@@ -81,9 +81,8 @@ describe('a stale client detail cannot undo a lifecycle refresh', () => {
     api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [{ ...row, credential_state: 'revoked' }] } })
     await store.refreshPresence()
     expect(store.clients[0].credential_state).toBe('revoked')
-    // The superseded detail is re-requested and the fresh answer applies.
-    api.getClient = vi.fn().mockResolvedValue({ success: true, data: { ...row, credential_state: 'revoked', sessions: [{ id: 's1' }] } })
-    resolveDetail({ success: true, data: { ...row, credential_state: 'client' } })
+    // The superseded detail contributes only its detail-only fields.
+    resolveDetail({ success: true, data: { ...row, credential_state: 'client', sessions: [{ id: 's1' }] } })
     await pending
     expect(store.clients[0].credential_state).toBe('revoked')
     expect(store.clients[0].sessions).toEqual([{ id: 's1' }])
