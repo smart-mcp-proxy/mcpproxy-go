@@ -247,6 +247,9 @@ type Runtime struct {
 	// discoveryAfterPublish is a test hook run after normal discovery published
 	// live state but before approval records are updated.
 	discoveryAfterPublish func()
+	// localReindexAfterSnapshot is a test hook run by the local-snapshot
+	// reindex paths right after they selected their snapshot (lock held).
+	localReindexAfterSnapshot func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when

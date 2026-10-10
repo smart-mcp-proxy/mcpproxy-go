@@ -471,24 +471,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			continue
 		}
 
-		r.lastGoodToolsMu.RLock()
-		snapshot, hasSnapshot := r.lastGoodTools[serverName]
-		r.lastGoodToolsMu.RUnlock()
-		if !hasSnapshot || len(snapshot) == 0 {
-			continue
-		}
-
-		// Logged at Info: this can fire repeatedly during reconnect storms and
-		// is benign self-healing, not a warning condition.
-		r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
-			zap.String("server", serverName),
-			zap.Int("snapshot_tools", len(snapshot)))
-
-		// Re-checks eligibility again immediately before the write (the check
-		// above and the connection/snapshot reads are not atomic).
-		r.captureSnapMu.Lock()
-		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
-		r.captureSnapMu.Unlock()
+		r.reapplyLastGoodSnapshot(ctx, serverName)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -2655,4 +2638,34 @@ func configsEquivalent(a, b *config.Config) bool {
 	ja, errA := json.Marshal(a)
 	jb, errB := json.Marshal(b)
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
+}
+
+// reapplyLastGoodSnapshot re-applies a server's last-good snapshot to the index
+// (the sweep fallback for a connected server missing from discovery). The
+// snapshot is selected and applied under one captureSnapMu hold: a snapshot
+// read outside the lock could be superseded by a concurrent capture that marks
+// a tool changed, and applying the stale one afterwards would look like a
+// genuine revert and clear that hold.
+func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string) {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+
+	r.lastGoodToolsMu.RLock()
+	snapshot, hasSnapshot := r.lastGoodTools[serverName]
+	r.lastGoodToolsMu.RUnlock()
+	if !hasSnapshot || len(snapshot) == 0 {
+		return
+	}
+	if hook := r.localReindexAfterSnapshot; hook != nil {
+		hook()
+	}
+
+	// Logged at Info: this can fire repeatedly during reconnect storms and
+	// is benign self-healing, not a warning condition.
+	r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
+		zap.String("server", serverName),
+		zap.Int("snapshot_tools", len(snapshot)))
+
+	// Re-checks eligibility again immediately before the write.
+	r.applyServerDiffIfEligible(ctx, serverName, snapshot)
 }
