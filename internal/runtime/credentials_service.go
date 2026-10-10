@@ -518,11 +518,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mcp := req.RequireProfile
-	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
-		return nil, err
-	}
 
 	// 1. Screen (data-model §8.2 order): every raw value, every array element.
+	// It runs BEFORE the write-gate recheck, so a value the live config now
+	// flags is reported as secret_in_argument (and never recorded) even when a
+	// gate also refuses the call.
 	if hit := s.screen().ScreenFields([]ScreenField{
 		{Name: "name", Values: []string{req.Name}},
 		{Name: "profile", Values: []string{req.Profile}},
@@ -533,6 +533,9 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		{Name: "permissions", Values: req.Permissions},
 	}); hit != nil {
 		return nil, hit
+	}
+	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
+		return nil, err
 	}
 
 	// 2. Name syntax, then the reserved client- prefix.
@@ -768,9 +771,6 @@ func (s *CredentialsService) IssueClient(ctx context.Context, a Actor, req Issue
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mcp := req.RequireProfile
-	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
-		return nil, err
-	}
 	modeText := ""
 	if req.Mode != nil {
 		modeText = *req.Mode
@@ -790,6 +790,10 @@ func (s *CredentialsService) IssueClient(ctx context.Context, a Actor, req Issue
 			sort.Strings(hit.Fields)
 		}
 		return nil, hit
+	}
+	// The write-gate recheck follows the screen (see IssueToken).
+	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
+		return nil, err
 	}
 
 	now := req.Now

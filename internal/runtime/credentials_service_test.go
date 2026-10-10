@@ -775,3 +775,21 @@ func TestCredentialsService_WriteGatesRecheckedUnderMutex(t *testing.T) {
 	q, _ := h.sm.GetAgentTokenByName("queued")
 	assert.Nil(t, q)
 }
+
+// Review r3: the service screen runs before the write-gate recheck, so a value
+// the live config flags is reported (and never recorded) even under a gate.
+func TestCredentialsService_ScreenPrecedesWriteGate(t *testing.T) {
+	h := newCredHarness(t)
+	h.cfg.ReadOnlyMode = true
+	r := mcpTokenReq("x", "ro", "1h")
+	r.EnforceWriteGates, r.Purpose = true, "k="+h.cfg.APIKey
+	_, err := h.cs.IssueToken(context.Background(), mcpActor(), r)
+	assert.Equal(t, profile.CredentialErrorCodeSecretInArgument, codeOf(err))
+	c := mcpClientReq("x", "ro", "1h")
+	c.EnforceWriteGates, c.Purpose = true, "k="+h.cfg.APIKey
+	_, err = h.cs.IssueClient(context.Background(), mcpActor(), c)
+	assert.Equal(t, profile.CredentialErrorCodeSecretInArgument, codeOf(err))
+	r.Purpose = "plain"
+	_, err = h.cs.IssueToken(context.Background(), mcpActor(), r)
+	assert.Equal(t, profile.CredentialErrorCodeReadOnlyMode, codeOf(err))
+}

@@ -85,6 +85,10 @@ func credE2ETools() (library, tracker []mcp.Tool) {
 	return
 }
 
+// credE2ELogDir is where a credE2E daemon writes its main and per-server logs
+// (debug level), so the secret-sink test can search them.
+func credE2ELogDir(cfg *config.Config) string { return cfg.Logging.LogDir }
+
 func newCredE2E(t *testing.T, mutate func(*config.Config)) *credE2E {
 	t.Helper()
 	libTools, trTools := credE2ETools()
@@ -93,7 +97,7 @@ func newCredE2E(t *testing.T, mutate func(*config.Config)) *credE2E {
 	e.logs = logs
 	f := false
 	e.env = NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{
-		Mutate: func(cfg *config.Config, _ string) {
+		Mutate: func(cfg *config.Config, tempDir string) {
 			cfg.APIKey = credE2EAPIKey
 			cfg.RequireMCPAuth = true
 			cfg.Servers = []*config.ServerConfig{
@@ -102,6 +106,9 @@ func newCredE2E(t *testing.T, mutate func(*config.Config)) *credE2E {
 			}
 			cfg.QuarantineEnabled = &f
 			cfg.ToolsLimit = 15
+			// Per-server (and main) file logs at debug, so FR-023's "main log
+			// or per-server logs, at any level" sinks exist and are searched.
+			cfg.Logging = &config.LogConfig{Level: "debug", EnableFile: true, LogDir: filepath.Join(tempDir, "logs"), Filename: "main.log", MaxSize: 10, MaxBackups: 1, MaxAge: 1}
 			cfg.CallToolTimeout = config.Duration(2 * time.Minute)
 			cfg.EnableCodeExecution = true
 			if mutate != nil {
@@ -655,12 +662,14 @@ type sseCapture struct {
 	buf  strings.Builder
 	stop context.CancelFunc
 	done chan struct{}
+	err  error // the scanner's error; only the deliberate cancel is expected
+	ctx  context.Context
 }
 
 func (e *credE2E) captureSSE() *sseCapture {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &sseCapture{stop: cancel, done: make(chan struct{})}
+	c := &sseCapture{stop: cancel, done: make(chan struct{}), ctx: ctx}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.base+"/events", http.NoBody)
 	require.NoError(e.t, err)
 	req.Header.Set("X-API-Key", credE2EAPIKey)
@@ -677,15 +686,29 @@ func (e *credE2E) captureSSE() *sseCapture {
 			c.buf.WriteByte('\n')
 			c.mu.Unlock()
 		}
+		c.mu.Lock()
+		c.err = sc.Err()
+		c.mu.Unlock()
 	}()
 	return c
 }
 
-func (c *sseCapture) text() string {
+// text stops the capture and returns it; a read error other than the
+// deliberate cancellation means the capture is incomplete.
+func (c *sseCapture) text(t *testing.T) string {
+	t.Helper()
+	select {
+	case <-c.done:
+		t.Fatalf("the SSE stream ended before the capture was stopped: %v", c.err)
+	default:
+	}
 	c.stop()
 	<-c.done
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.err != nil && c.ctx.Err() == nil {
+		t.Fatalf("SSE capture read failed: %v", c.err)
+	}
 	return c.buf.String()
 }
 
@@ -697,7 +720,8 @@ func (e *credE2E) restGet(path string) string {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(e.t, err)
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(e.t, err, "%s: a truncated sink read must fail the test", path)
 	require.Equal(e.t, http.StatusOK, resp.StatusCode, "%s: %s", path, raw)
 	return string(raw)
 }
@@ -792,6 +816,22 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		logBuf.WriteByte('\n')
 	}
 	sinks["logs"] = logBuf.String()
+	// Per-server log files (and any main file log) under the configured dir.
+	logDir := credE2ELogDir(e.env.proxyServer.runtime.Config())
+	var perServer int
+	require.NoError(t, filepath.Walk(logDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		raw, rerr := os.ReadFile(path)
+		require.NoError(t, rerr)
+		if strings.Contains(filepath.Base(path), "library") || strings.Contains(filepath.Base(path), "tracker") {
+			perServer++
+		}
+		sinks["log file "+filepath.Base(path)] = string(raw)
+		return nil
+	}))
+	require.Greater(t, perServer, 0, "per-server log files must exist and be searched (dir %s)", logDir)
 	cfgPath := config.GetConfigPath(e.env.proxyServer.runtime.Config().DataDir)
 	rawCfg, err := os.ReadFile(cfgPath)
 	require.NoError(t, err, "the config file is a sink that must be examined")
@@ -800,7 +840,7 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	require.NoError(t, err, "config.db is a sink that must be examined")
 	require.NotEmpty(t, rawDB)
 	sinks["config.db"] = string(rawDB)
-	sinks["sse"] = sse.text()
+	sinks["sse"] = sse.text(t)
 	assert.Contains(t, sinks["sse"], "credentials.changed", "the SSE capture saw the lifecycle events")
 	assert.Contains(t, sinks["activity"], "credentials", "the activity capture is not empty")
 	for name, sink := range sinks {

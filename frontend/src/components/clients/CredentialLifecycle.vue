@@ -64,7 +64,8 @@ const lease = computed(() => (state.value.label === 'Revoked' || state.value.lab
 const dangling = computed(() => props.profileState === 'dangling')
 // A non-lease credential still shows when it expires (UI-001).
 const expiryText = computed(() => {
-  if (lease.value || isLease(fields.value) || !props.expiresAt || state.value.label !== 'Active') return ''
-  return `Expires ${formatDateTimeShort(props.expiresAt)}`
+  if (lease.value || isLease(fields.value) || !props.expiresAt) return ''
+  const past = new Date(props.expiresAt).getTime() <= nowMs.value
+  return `${past ? 'Expired' : 'Expires'} ${formatDateTimeShort(props.expiresAt)}`
 })
 </script>

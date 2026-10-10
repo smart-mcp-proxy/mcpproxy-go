@@ -39,19 +39,26 @@ describe('ProfileChip on an ended lease', () => {
   it('a non-lease credential row still shows its expiry (UI-001)', () => {
     const w = mount(CredentialLifecycle, { props: { id: 'n', kind: 'client', profile: 'p', lease: false, expiresAt: '2026-10-12T12:00:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
     expect(w.find('[data-test="credential-expiry-n"]').text()).toMatch(/^Expires 2026-10-1\d/)
+    const revoked = mount(CredentialLifecycle, { props: { id: 'r', kind: 'client', profile: 'p', lease: false, revoked: true, expiresAt: '2026-10-12T12:00:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
+    expect(revoked.find('[data-test="credential-expiry-r"]').text()).toMatch(/^Expires 2026-10-1\d/)
+    const expired = mount(CredentialLifecycle, { props: { id: 'x', kind: 'client', profile: 'p', lease: false, expiresAt: '2026-10-09T12:00:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
+    expect(expired.find('[data-test="credential-expiry-x"]').text()).toMatch(/^Expired 2026-10-09/)
   })
 })
 
 describe('callable deep link on a mounted table', () => {
   const rows = [
     { server: 's', tool: 'visible_one', intrinsic_tier: 'read', profile_tier: 'read', access: { visible: true, callable: true, reason: '' }, classification_stale: false },
+    { server: 's', tool: 'pending_one', intrinsic_tier: 'read', profile_tier: 'read', access: { visible: true, callable: false, reason: 'tool_approval' }, classification_stale: false },
     { server: 's', tool: 'hidden_one', intrinsic_tier: 'write', profile_tier: 'write', access: { visible: false, callable: false, reason: 'above_tier_cap' }, classification_stale: false },
   ]
   it('re-filters when only the query changes', async () => {
     const w = mount(ProfileToolTable, { props: { rows: rows as any, draftRules: undefined, profileLabel: 'p', serversChosen: true, initialReason: '' } })
-    expect(w.findAll('[data-test^="profile-tool-row-"]').length).toBe(2)
+    expect(w.findAll('[data-test^="profile-tool-row-"]').length).toBe(3)
     await w.setProps({ initialReason: 'callable' })
-    expect((w.get('[data-test="tool-filter-reason"]').element as HTMLSelectElement).value).toBe('visible')
-    expect(w.findAll('[data-test^="profile-tool-row-"]').length).toBe(1)
+    expect((w.get('[data-test="tool-filter-reason"]').element as HTMLSelectElement).value).toBe('callable')
+    const shown = w.findAll('[data-test^="profile-tool-row-"]')
+    expect(shown.length).toBe(1)
+    expect(shown[0].text()).toContain('visible_one')
   })
 })
