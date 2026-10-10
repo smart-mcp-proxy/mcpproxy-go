@@ -19,6 +19,7 @@ For the concepts behind quarantine and the four review verbs see [Security Quara
 mcpproxy review
 ├── list                        Servers that need review
 ├── show <server> [--full]      Captured tool definitions and scan verdicts
+├── fetch <server> [--wait 30s] Capture tool definitions (does not approve)
 ├── approve <server> [flags]    Approve a server, or approve tools on a trusted server
 └── reject <server> [flags]     Keep a server quarantined, or block tools
 ```
@@ -59,9 +60,40 @@ Server: notes
 Scan: out of date (1 tool changed or added after the last scan: notes); run: mcpproxy security rescan notes
 ```
 
-A scan that covers every captured tool reads `Scan: clean · risk 0/100 · covers all 5 tools`. When definitions have not been captured, the line says so and points to **Fetch tool definitions** on the Web or macOS review screen; there is no CLI command for that capture.
+A scan that covers every captured tool reads `Scan: clean · risk 0/100 · covers all 5 tools`. When definitions have not been captured, the line says so and tells you to run `mcpproxy review fetch <server>` (the same capture as **Fetch tool definitions** on the Web or macOS review screen).
 
 Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
+
+## review fetch
+
+```bash
+mcpproxy review fetch <server> [--wait 30s]
+```
+
+Asks the daemon to connect to the server and capture its tool definitions, then re-reads the review to confirm they were stored. It is the headless counterpart of **Fetch tool definitions**, so capture, inspection and approval all work from the CLI:
+
+```bash
+mcpproxy review fetch notes
+mcpproxy review show notes
+mcpproxy review approve notes
+```
+
+```
+Captured 12 tool definitions for notes (server remains quarantined; nothing was approved).
+Review them with: mcpproxy review show notes
+```
+
+It never approves, unquarantines or enables a server. `--wait` bounds the whole command (default `30s`, maximum `2m`). `-o json` prints `{"server","captured","tool_count","quarantined"}`; on failure it adds an `error` field and the exit code is still nonzero.
+
+| Situation | Result |
+|-----------|--------|
+| Unknown server | `server 'x' not found`, exit 1 |
+| Disabled server | `server 'x' is disabled ... enable it first: mcpproxy upstream enable x`, exit 1; the command does not enable it |
+| Unreachable or invalid upstream | The daemon's connection error plus `check connectivity with: mcpproxy upstream logs x`, exit 1 |
+| Connected but zero tools | `no tool definitions captured for 'x'`, exit 1 |
+| Timeout | `timed out after 30s ...; retry with a larger --wait`, exit 1 |
+
+Retrying is safe: the command can be run again at any time.
 
 ## review approve
 
@@ -90,7 +122,7 @@ Using the wrong flag for the state fails with exit code 1 instead of doing somet
 
 - `--all` together with `--tools`: `--all cannot be combined with --tools`
 - A tool name that is not in the review (`--tools` or `--except`): `unknown tool 'x' for server 's'`; nothing is written
-- `--tools` or `--except` while no tool definitions are captured: `no tool definitions captured for server 's'; fetch them first ...`; nothing is written
+- `--tools` or `--except` while no tool definitions are captured: `no tool definitions captured for server 's'; fetch them first (mcpproxy review fetch s) ...`; nothing is written
 - `--except` on a trusted server: `--except applies only while approving a quarantined server`
 
 The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`; with `--all` it reads `Allowing all pending or changed tools; previously blocked tools stay blocked`. JSON and YAML output stay the REST data object.
