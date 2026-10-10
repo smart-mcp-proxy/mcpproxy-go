@@ -171,23 +171,19 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 	}
 	if differs {
 		maskedDecoded := r.argvWith(decoded, spawnRules, nil)
-		// A quoted or escaped multiword env assignment (PASSWORD='a b c') decodes
-		// to one token that is not a flag, so the generic leaf rule would mask
-		// only its first whitespace-delimited fragment. The NAME decides: mask
-		// the whole decoded value.
-		for i, d := range decoded {
-			if d == tokens[i] {
-				continue
-			}
-			if name, val, ok := strings.Cut(d, "="); ok && val != "" && isShellVarName(name) &&
-				r.envAssignmentNamesSecret(name, spawnRules) {
-				maskedDecoded[i] = name + "=" + r.masker()(val)
-			}
-		}
 		for i := range masked {
 			if maskedDecoded[i] != decoded[i] {
 				masked[i] = maskedDecoded[i]
 			}
+		}
+	}
+	// A NAME=value assignment whose NAME is sensitive (quoted or not) is masked
+	// whole: the generic leaf rule misses low-entropy or multiword values
+	// (API_KEY=@hunter2xyz, PASSWORD='a b c').
+	for i, d := range decoded {
+		if name, val, ok := strings.Cut(d, "="); ok && val != "" && isShellVarName(name) &&
+			r.envAssignmentNamesSecret(name, spawnRules) {
+			masked[i] = name + "=" + r.masker()(val)
 		}
 	}
 	return masked
@@ -201,20 +197,24 @@ func (r Redaction) maskSubstitutions(t string, spawnRules bool) string {
 	}
 	var b strings.Builder
 	var quote byte
+	ansi := false // inside $'...', where a backslash escapes even a quote
 	last := 0
 	for j := 0; j < len(t); j++ {
 		c := t[j]
-		if c == '\\' && quote != '\'' && j+1 < len(t) {
+		if c == '\\' && (quote != '\'' || ansi) && j+1 < len(t) {
 			j++
 			continue
 		}
 		if quote == '\'' {
 			if c == '\'' {
-				quote = 0
+				quote, ansi = 0, false
 			}
 			continue
 		}
 		switch {
+		case c == '$' && quote == 0 && j+1 < len(t) && t[j+1] == '\'':
+			quote, ansi = '\'', true
+			j++
 		case c == '\'' && quote == 0:
 			// An apostrophe inside double quotes is literal.
 			quote = c

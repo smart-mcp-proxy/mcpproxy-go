@@ -255,6 +255,9 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"unspaced or assign":        {"-c", ":||API_KEY='hunter2 and more' exec npx srv"},
 		"apostrophe then subst":     {"-c", `exec npx srv --name "it's $(helper --password hunter2xyz)"`},
 		"redirect-only subst":       {"-c", `exec npx srv --name "$(<$(helper --password hunter2xyz))"`},
+		"plain env low entropy":     {"-c", `API_KEY=@hunter2xyz exec npx srv`},
+		"plain env client secret":   {"-c", `CLIENT_SECRET=@hunter2xyz exec npx srv`},
+		"ansi-c escaped apostrophe": {"-c", `exec npx srv --name $'it\'s '$(helper --password hunter2xyz)`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

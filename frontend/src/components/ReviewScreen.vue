@@ -161,12 +161,14 @@ const banner = computed(() => {
 const bannerClass = computed(() => `alert-${banner.value?.severity ?? 'info'}`)
 // Filters and paging decide which rows are drawn. allowedTools and the block list
 // in approve() always come from the FULL review.tools, never from these.
-const searchQuery = ref(''); const tierFilter = ref('all'); const stateFilter = ref('all'); const selectionFilter = ref('all')
+// The route's ?change= restriction is just the initial value of the visible state dropdown, so All states / Clear filters really clear it.
+function initialStateFilter(c?: string) { return c && ['pending', 'changed', 'approved'].includes(c) ? c : 'all' }
+const searchQuery = ref(''); const tierFilter = ref('all'); const stateFilter = ref(initialStateFilter(props.change)); const selectionFilter = ref('all')
 const page = ref(1); const pageSize = ref<number>(REVIEW_PAGE_SIZES[0])
 const filters = computed(() => ({ query: searchQuery.value, tier: tierFilter.value, state: stateFilter.value, selection: selectionFilter.value }))
 const filtersActive = computed(() => hasActiveFilters(filters.value))
 const allowedSet = computed(() => new Set(allowedTools.value))
-const filteredTools = computed(() => filterReviewTools((review.value?.tools ?? []).filter(t => !props.change || t.approval_status === props.change), filters.value, allowedSet.value))
+const filteredTools = computed(() => filterReviewTools(review.value?.tools ?? [], filters.value, allowedSet.value))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredTools.value.length / pageSize.value)))
 const currentPage = computed(() => clampPage(page.value, filteredTools.value.length, pageSize.value))
 const pagedTools = computed(() => filteredTools.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
@@ -198,6 +200,7 @@ function bulkSet(allow: boolean) {
   }
   allowedTools.value = review.value.tools.filter(t => names.has(t.name)).map(t => t.name)
 }
+watch(() => props.change, c => { stateFilter.value = initialStateFilter(c) })
 watch([searchQuery, tierFilter, stateFilter, selectionFilter, pageSize], () => { page.value = 1 })
 const primaryLabel = computed(() => approveLabel(allowedTools.value.length, review.value?.tools.length ?? 0, review.value?.server.definitions_captured ?? false))
 const showApproveAll = computed(() => !!review.value && review.value.server.quarantined && review.value.server.definitions_captured && review.value.tools.length > 0 && allowedTools.value.length < review.value.tools.length)
