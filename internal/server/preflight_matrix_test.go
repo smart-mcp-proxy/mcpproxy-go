@@ -74,6 +74,10 @@ var mcpCheckExemptReasons = map[string]string{
 	// its scope. The two mcp_check_unknown_server / mcp_check_out_of_scope rows
 	// assert the collapse itself, which is the observable behavior.
 	preflight.ReasonServerNotConfigured: "the in-band surface is pinned to the agent-token tier (FR-009), where this collapses to not_found",
+	// Issue #1548: discovery hides a profile-excluded tool, so at the
+	// agent-token tier the check answers the same not_found an absent id gets;
+	// mcp_check_profile_hidden asserts the collapse.
+	preflight.ReasonToolBlockedByProfile: "the in-band surface is pinned to the agent-token tier (FR-009), where a profile-excluded tool collapses to not_found",
 }
 
 type sabotageMatrix struct {

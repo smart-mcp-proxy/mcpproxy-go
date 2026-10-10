@@ -101,6 +101,12 @@ type ReviewServer struct {
 	SourceRegistryProvenance string            `json:"source_registry_provenance,omitempty"`
 	Scan                     *ReviewScan       `json:"scan,omitempty"`
 	DefinitionsCaptured      bool              `json:"definitions_captured"`
+	// LiveToolCount and LastCaptureAt are the fresh-capture proof: how many of
+	// the stored records the upstream listed in its most recent capture, and
+	// when that capture ran. They are separate from the stored-record
+	// inventory (Tools), which retains operator decisions for absent tools.
+	LiveToolCount int        `json:"live_tool_count,omitempty"`
+	LastCaptureAt *time.Time `json:"last_capture_at,omitempty"`
 }
 
 type ReviewTool struct {
@@ -222,9 +228,33 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		Quarantined: server.Quarantined, TrustMode: string(server.EffectiveTrustMode()),
 		SourceRegistryID: server.SourceRegistryID, SourceRegistryProvenance: server.SourceRegistryProvenance,
 	}
+	// Stored records and the live capture state are published by different
+	// writers. A capture holds captureSnapMu for persist + prune + stamp, so
+	// reading both under the read lock yields one generation, never a mix.
+	r.captureSnapMu.RLock()
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
+		r.captureSnapMu.RUnlock()
 		return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
+	}
+	if hook := r.reviewAfterRecords; hook != nil {
+		hook()
+	}
+	r.lastGoodToolsMu.RLock()
+	if stamp, ok := r.lastCaptureAt[serverName]; ok {
+		at := stamp
+		reviewServer.LastCaptureAt = &at
+	}
+	liveNames := make(map[string]struct{}, len(r.lastGoodTools[serverName]))
+	for _, t := range r.lastGoodTools[serverName] {
+		liveNames[config.RawToolName(t)] = struct{}{}
+	}
+	r.lastGoodToolsMu.RUnlock()
+	r.captureSnapMu.RUnlock()
+	for _, rec := range records {
+		if _, ok := liveNames[rec.ToolName]; ok {
+			reviewServer.LiveToolCount++
+		}
 	}
 	reviewServer.DefinitionsCaptured = len(records) > 0
 	reviewScan, scanFindings, covered := r.reviewScanFor(ctx, serverName, server.Quarantined, records)

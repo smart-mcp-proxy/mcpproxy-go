@@ -607,6 +607,14 @@ func (m *Manager) DeleteToolApproval(serverName, toolName string) error {
 	return m.db.DeleteToolApproval(serverName, toolName)
 }
 
+// DeleteToolApprovalIf is the conditional, atomic form of DeleteToolApproval.
+func (m *Manager) DeleteToolApprovalIf(serverName, toolName string, eligible func(*ToolApprovalRecord) bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteToolApprovalIf(serverName, toolName, eligible)
+}
+
 // DeleteServerToolApprovals deletes all tool approval records for a server
 func (m *Manager) DeleteServerToolApprovals(serverName string) error {
 	m.mu.Lock()

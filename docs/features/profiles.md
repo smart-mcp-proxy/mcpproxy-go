@@ -139,7 +139,7 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 
 ## Management tools
 
-`management_tools` decides whether `upstream_servers` and `quarantine_security` are visible under a profile: `false` hides and refuses them, `true` shows them, unset keeps the pre-profile behaviour. It never widens a credential: an agent token or client credential, and a confined anonymous caller, can only `list` and `tail_log` servers inside their scope, and `quarantine_security` stays administrator-only; adding, changing, restarting or removing servers remains an operator action. The `profiles` tool is separate: it is listed only for an administrator session (API key or socket), and only when the session's effective profile is none or sets `management_tools: true`.
+`management_tools` decides whether `upstream_servers` and `quarantine_security` are visible under a profile: `false` hides and refuses them, `true` shows them, unset keeps the pre-profile behaviour. It never widens a credential: an agent token or client credential, and a confined anonymous caller, can only `list` and `tail_log` servers inside their scope, and `quarantine_security` stays administrator-only; adding, changing, restarting or removing servers remains an operator action. The `profiles` tool is separate: it is listed only for an administrator session (API key or socket), and only when the session's effective profile is none or sets `management_tools: true`. The `credentials` tool, which issues, lists and revokes the locked client credentials and profile-pinned agent tokens a profile is used through, follows exactly the same rule; see [Credential lifecycle over MCP](./mcp-credential-lifecycle.md).
 
 ## Managing profiles from every surface
 

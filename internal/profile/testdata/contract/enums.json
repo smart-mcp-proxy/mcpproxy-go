@@ -35,7 +35,27 @@
     "unlock",
     "forget",
     "rotate",
-    "anonymous"
+    "anonymous",
+    "issue",
+    "revoke"
+  ],
+  "credential_error_code": [
+    "secret_in_argument",
+    "arguments_too_large",
+    "unknown_operation",
+    "missing_argument",
+    "invalid_argument",
+    "profile_required",
+    "unknown_profile",
+    "invalid_expiry",
+    "identity_exists",
+    "reserved_identity",
+    "identity_not_found",
+    "token_limit_reached",
+    "read_only_mode",
+    "management_disabled",
+    "unsupported_edition",
+    "credentials_unavailable"
   ],
   "credential_state": [
     "client",

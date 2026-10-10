@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -513,7 +514,7 @@ func TestToolGate_LegacyCollapsedApprovalRecord_StillGates(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, result)
 			// The pending lock answers with the TOOL_QUARANTINED policy
-			// result (IsError=false by design), never with a dispatch.
+			// result (IsError=true, UX-05), never with a dispatch.
 			text := result.Content[0].(mcp.TextContent).Text
 			assert.Contains(t, text, "TOOL_QUARANTINED")
 			assert.Contains(t, text, "new_unapproved_tool")
@@ -1408,7 +1409,7 @@ func TestCallToolRead_ServerPrefixedRawName_IsNotReNormalized(t *testing.T) {
 // callToolReadResult drives call_tool_read through handleCallToolVariant for
 // any caller and returns the result plus its first text block. Unlike
 // callToolReadOn it does not assert IsError: the TOOL_QUARANTINED policy
-// answer is IsError=false by design, so the callers below assert on the body
+// answer is a parsable JSON body with IsError=true (UX-05), so the callers below assert on the body
 // and the upstream-call witness instead.
 func callToolReadResult(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) (*mcp.CallToolResult, string) {
 	t.Helper()
@@ -1542,7 +1543,7 @@ func TestCallToolRead_UnresolvedIdentityOnKnownServer_RefusedForEveryCaller(t *t
 
 		// On the retrieve surface an unknown server is classified
 		// server-not-configured by the shared gate and answered with the
-		// TOOL_BLOCKED policy body (IsError=false by design) — that answer
+		// TOOL_BLOCKED policy body (IsError=true, UX-05) — that answer
 		// is pinned here so the identity fix cannot widen into it.
 		_, text := callToolReadResult(t, proxy, adminCtx(), "zzz:ghost")
 		assert.NotContains(t, text, "Permission denied",
@@ -1600,8 +1601,20 @@ func TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
 				proxy := seedEmpty(t, &config.ServerConfig{Name: "a", Enabled: true, Quarantined: true}, func(*stateview.ServerStatus) {})
 				result, text := callToolReadResult(t, proxy, ctx, "a:erase")
 				assert.Contains(t, text, "QUARANTINED_SERVER_BLOCKED", "pre-105 body: the quarantine analysis response")
-				assert.False(t, result.IsError, "the quarantine analysis is a parsable policy payload, not an error result")
+				assert.True(t, result.IsError, "the quarantine analysis is a parsable policy payload flagged isError (UX-05)")
 				assert.NotContains(t, text, "cannot be resolved", "the identity gate must not pre-empt the quarantine verdict")
+
+				// REST/CLI path (UX-05): the block keeps a typed identity so the
+				// HTTP layer answers 403 with the payload rather than a 500.
+				directReq := mcp.CallToolRequest{}
+				directReq.Params.Name = contracts.ToolVariantRead
+				directReq.Params.Arguments = map[string]interface{}{"name": "a:erase", "args": map[string]interface{}{"token": "sk-secret"}}
+				_, derr := proxy.CallToolDirect(ctx, directReq)
+				var refusal *profile.ToolBlockedError
+				require.ErrorAs(t, derr, &refusal)
+				assert.Equal(t, blockReasonServerQuarantined, refusal.Reason)
+				assert.Contains(t, refusal.Message, "QUARANTINED_SERVER_BLOCKED")
+				assert.NotContains(t, refusal.Message, "sk-secret", "echoed args are not copied into the error text")
 			})
 		}
 		t.Run("read-only token", func(t *testing.T) {

@@ -581,8 +581,9 @@ preview/experimental flag and none was ever removed from config — the TypeScri
 path graduated by meeting its acceptance criteria, not by flipping a gate. It
 rides the same master switch as JavaScript code execution.
 
-**To enable code execution** (off by default for security — sandboxed code is a
-deliberate opt‑in):
+**Code execution is on by default** (since v0.66.0). The block below is only
+needed to tune the limits, or to re-enable it if a config file written by an
+older release carries an explicit `"enable_code_execution": false`:
 
 ```json
 {

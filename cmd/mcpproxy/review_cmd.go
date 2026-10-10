@@ -36,6 +36,7 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 	}}
 	show.Flags().Bool("full", false, "Show full captured schemas and descriptions")
 	cmd.AddCommand(show)
+	cmd.AddCommand(newReviewFetchCommand())
 	approve := &cobra.Command{Use: "approve <server>", Short: "Approve a server through the scan gate", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
 		server := args[0]
 		if all && len(tools) > 0 {
@@ -75,7 +76,7 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block, all)
 		} else if len(tools) > 0 || len(except) > 0 {
 			// Nothing to select from: dropping --tools/--except would approve blind.
-			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
+			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review fetch %s) before using --tools or --except", server, server)
 		}
 		if !yes {
 			confirmed, err := confirm(prompt)
@@ -410,7 +411,7 @@ func reviewScanLine(server map[string]interface{}) string {
 		}
 		return fmt.Sprintf("Scan: out of date (%d %s changed or added after the last scan: %s); %s", len(tools), noun, strings.Join(tools, ", "), rescan)
 	case "not_captured":
-		return "Scan: not checked against tool definitions: they have not been captured yet; fetch them with Fetch tool definitions on the Web or macOS review screen"
+		return "Scan: not checked against tool definitions: they have not been captured yet; fetch them with: mcpproxy review fetch " + fmt.Sprint(server["name"]) + " (or Fetch tool definitions on the Web or macOS review screen)"
 	case "tools_not_scanned":
 		return "Scan: the last scan did not analyse tool definitions (0 exported); " + rescan
 	case "scanning":

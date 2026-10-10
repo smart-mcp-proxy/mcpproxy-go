@@ -1258,12 +1258,35 @@ func flattenedCallToolArgs(rawArguments map[string]interface{}) map[string]inter
 		if _, known := callToolMetaKeys[k]; known {
 			continue
 		}
+		if k == "intent" && isLegacyIntentObject(v) {
+			continue
+		}
 		if flattened == nil {
 			flattened = make(map[string]interface{})
 		}
 		flattened[k] = v
 	}
 	return flattened
+}
+
+// isLegacyIntentObject reports whether v is the pre-flattening nested intent
+// object ({operation_type, data_sensitivity, reason}, any subset). It is audit
+// metadata, never an upstream argument, so flattenedCallToolArgs must not
+// forward it. A map with any other key (or a non-map) is a legitimate upstream
+// parameter that merely happens to be named "intent".
+func isLegacyIntentObject(v interface{}) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for k := range m {
+		switch k {
+		case "operation_type", "data_sensitivity", "reason":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // retrieveToolsDetailOption returns the per-call serialization override
@@ -1360,6 +1383,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// mutating operations refuse per call, and visibility is the tool filter's.
 	profilesTool := p.buildProfilesServerTool()
 	p.server.AddTool(profilesTool.Tool, profilesTool.Handler)
+
+	// credentials - Spec 115 admin tool: issue, inspect and revoke worker
+	// credentials. Registered exactly where `profiles` is, under the same
+	// visibility predicate (adminToolAccess) and per-call gates.
+	credentialsTool := p.buildCredentialsServerTool()
+	p.server.AddTool(credentialsTool.Tool, credentialsTool.Handler)
 
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
@@ -3133,7 +3162,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
+		return recordQuarantineGate(ctx, p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs)), nil
 	}
 
 	switch gate.lockStatus {
@@ -3145,7 +3174,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
 
-		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolPendingApprovalResult(serverName, actualToolName, gate.approval)), nil
 	case storage.ToolApprovalStatusChanged:
 		p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
 			zap.String("server_name", serverName),
@@ -3154,7 +3183,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
 
-		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolChangedApprovalResult(serverName, actualToolName, gate.approval)), nil
 	}
 
 	if !gate.callable() {
@@ -3755,7 +3784,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+		return recordQuarantineGate(ctx, p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args)), nil
 	}
 
 	p.logger.Debug("handleCallTool: checking connection status",
@@ -3765,11 +3794,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	case storage.ToolApprovalStatusPending:
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
-		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolPendingApprovalResult(serverName, actualToolName, gate.approval)), nil
 	case storage.ToolApprovalStatusChanged:
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
-		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolChangedApprovalResult(serverName, actualToolName, gate.approval)), nil
 	}
 
 	if !gate.callable() {
@@ -4112,7 +4141,10 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 		return mcp.NewToolResultError(fmt.Sprintf("Security block: Server '%s' is quarantined. Failed to serialize security response: %v", serverName, err))
 	}
 
-	return mcp.NewToolResultText(string(jsonResult))
+	// Parseable body, flagged isError (UX-05): a quarantine block is a refusal.
+	res := mcp.NewToolResultText(string(jsonResult))
+	res.IsError = true
+	return res
 }
 
 // handleAddServerFromRegistry implements the upstream_servers add_from_registry
@@ -7249,6 +7281,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	// layer classifies it without re-parsing the message.
 	ctx, codeExecRefusal := withCodeExecCapture(ctx)
 	ctx, profileToolRefusal := withProfileToolCapture(ctx)
+	ctx, quarantineRefusal := withQuarantineGateCapture(ctx)
 
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
@@ -7307,6 +7340,11 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 				if refusal := profileToolRefusal.take(); refusal != nil {
 					return nil, refusal
 				}
+				// Quarantine / pending-approval / changed-tool blocks keep their
+				// typed identity so REST answers 403 with the payload, not a 500.
+				if refusal := quarantineRefusal.take(); refusal != nil {
+					return nil, refusal
+				}
 				// A code_execution refusal keeps its typed identity so the HTTP
 				// layer can answer 403/404/400 (Spec 097). The message stays the
 				// agent-readable one either way.
@@ -7343,6 +7381,16 @@ func (p *MCPProxyServer) extractIntent(request mcp.CallToolRequest) (*contracts.
 	// Extract flat intent parameters
 	dataSensitivity, _ := argumentsMap["intent_data_sensitivity"].(string)
 	reason, _ := argumentsMap["intent_reason"].(string)
+
+	// Back-compat: accept the legacy nested "intent" object when neither flat
+	// key is set (flat wins). operation_type is never read from the client; it
+	// is inferred from the call variant.
+	if dataSensitivity == "" && reason == "" {
+		if legacy, ok := argumentsMap["intent"].(map[string]interface{}); ok && isLegacyIntentObject(legacy) {
+			dataSensitivity, _ = legacy["data_sensitivity"].(string)
+			reason, _ = legacy["reason"].(string)
+		}
+	}
 
 	// If neither field is provided, return nil (intent is optional)
 	if dataSensitivity == "" && reason == "" {

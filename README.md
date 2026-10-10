@@ -213,8 +213,8 @@ The agent executes the tool through the variant matching its intent (`call_tool_
 ```json
 {
   "name": "github:create_issue",
-  "args_json": "{\"repo\": \"acme/api\", \"title\": \"Bug report\"}",
-  "intent": { "operation_type": "write", "reason": "Filing bug per user request" }
+  "args": { "repo": "acme/api", "title": "Bug report" },
+  "intent_reason": "Filing bug per user request"
 }
 ```
 

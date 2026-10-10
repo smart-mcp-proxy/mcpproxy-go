@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
@@ -420,29 +421,31 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 		knownServerSet[name] = struct{}{}
 	}
 
-	// Persist fresh snapshots for discovered servers and prune stale entries.
-	// ToolMetadata values are treated as immutable post-discovery; if that ever
-	// changes, switch to a deep copy here.
+	// Prune entries for servers removed from config. Fresh snapshots are NOT
+	// published here: each server's snapshot, capture stamp and approval
+	// records are committed together under captureSnapMu by
+	// commitDiscoveredTools, so a concurrent review never reads one
+	// generation's records with another's stamp.
 	r.lastGoodToolsMu.Lock()
-	for serverName, serverTools := range toolsByServer {
-		cp := make([]*config.ToolMetadata, len(serverTools))
-		copy(cp, serverTools)
-		r.lastGoodTools[serverName] = cp
-	}
 	for serverName := range r.lastGoodTools {
 		if _, ok := knownServerSet[serverName]; !ok {
 			delete(r.lastGoodTools, serverName)
+			delete(r.lastCaptureAt, serverName)
 		}
 	}
 	r.lastGoodToolsMu.Unlock()
 
-	// Apply differential update for each server with fallback to last-good
-	// snapshots. Both writes go through applyServerDiffIfEligible so a quarantined
-	// or disabled server is never (re)indexed by the sweep (issue #873).
+	// Commit each discovered server: publish its snapshot and apply the
+	// differential update atomically with respect to review reads. A
+	// quarantined or disabled server is never (re)indexed by the sweep
+	// (issue #873).
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		r.applyServerDiffIfEligible(ctx, serverName, serverTools)
+		if _, err := r.commitDiscoveredTools(ctx, serverName, serverTools); err != nil {
+			r.logger.Error("Failed to apply differential update for server during sweep",
+				zap.String("server", serverName), zap.Error(err))
+		}
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
@@ -468,22 +471,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			continue
 		}
 
-		r.lastGoodToolsMu.RLock()
-		snapshot, hasSnapshot := r.lastGoodTools[serverName]
-		r.lastGoodToolsMu.RUnlock()
-		if !hasSnapshot || len(snapshot) == 0 {
-			continue
-		}
-
-		// Logged at Info: this can fire repeatedly during reconnect storms and
-		// is benign self-healing, not a warning condition.
-		r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
-			zap.String("server", serverName),
-			zap.Int("snapshot_tools", len(snapshot)))
-
-		// Re-checks eligibility again immediately before the write (the check
-		// above and the connection/snapshot reads are not atomic).
-		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
+		r.reapplyLastGoodSnapshot(ctx, serverName)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -700,16 +688,111 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, 
 	return nil
 }
 
+// pruneAbsentUndecidedApprovals drops pending review records for tools
+// the upstream no longer lists, so a quarantined capture reflects the live
+// toolset rather than the union of every past capture. Operator decisions are
+// kept: approved and changed (rug-pull) records and operator-blocked (Disabled) records survive.
+func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*config.ToolMetadata) {
+	if r.storageManager == nil {
+		return
+	}
+	live := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		live[config.RawToolName(tool)] = struct{}{}
+	}
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		r.logger.Debug("Skipping review record prune", zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	undecidedAbsent := func(rec *storage.ToolApprovalRecord) bool {
+		if _, ok := live[rec.ToolName]; ok {
+			return false
+		}
+		return !rec.Disabled && rec.Status == storage.ToolApprovalStatusPending
+	}
+	for _, rec := range records {
+		if !undecidedAbsent(rec) {
+			continue
+		}
+		// Eligibility is re-checked against the stored record inside the delete
+		// transaction: a decision saved after the snapshot above (block, disable,
+		// approve) must survive the prune.
+		if hook := r.pruneAfterSnapshot; hook != nil {
+			hook(rec.ToolName)
+		}
+		if _, err := r.storageManager.DeleteToolApprovalIf(serverName, rec.ToolName, undecidedAbsent); err != nil {
+			r.logger.Debug("Failed to prune review record for absent tool", zap.String("server", serverName), zap.String("tool", rec.ToolName), zap.Error(err))
+		}
+	}
+}
+
 func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+	return r.persistToolDefinitionsLocked(serverName, tools)
+}
+
+// persistToolDefinitionsLocked records, prunes and publishes one capture.
+// Caller holds captureSnapMu for writing.
+func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*config.ToolMetadata) error {
 	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
 		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
+	}
+	r.pruneAbsentUndecidedApprovals(serverName, tools)
+	if hook := r.captureAfterPrune; hook != nil {
+		hook()
 	}
 	r.lastGoodToolsMu.Lock()
 	snapshot := make([]*config.ToolMetadata, len(tools))
 	copy(snapshot, tools)
 	r.lastGoodTools[serverName] = snapshot
+	r.noteCaptureLocked(serverName)
 	r.lastGoodToolsMu.Unlock()
 	return nil
+}
+
+// noteCaptureLocked stamps a fresh capture for the review payload. Caller
+// holds lastGoodToolsMu. The stamp is strictly increasing per server so a
+// caller can tell a new capture from a retained one without comparing clocks.
+func (r *Runtime) noteCaptureLocked(serverName string) {
+	if r.lastCaptureAt == nil {
+		r.lastCaptureAt = make(map[string]time.Time)
+	}
+	now := time.Now().UTC()
+	if prev := r.lastCaptureAt[serverName]; !now.After(prev) {
+		now = prev.Add(time.Nanosecond)
+	}
+	r.lastCaptureAt[serverName] = now
+}
+
+// commitDiscoveredTools publishes a discovery result and updates the stored
+// approval records under captureSnapMu, so GetServerReview never observes the
+// new capture stamp with the previous generation's records (or vice versa).
+// For an eligible server it publishes the snapshot and stamp, then applies the
+// differential index update (which writes the approval records). For a server
+// that is quarantined or disabled it records the definitions for review
+// without indexing. eligible reports whether the index update was attempted.
+func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, tools []*config.ToolMetadata) (eligible bool, err error) {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+	if !r.serverEligibleForIndexing(serverName) {
+		if perr := r.persistToolDefinitionsLocked(serverName, tools); perr != nil {
+			r.logger.Warn("Failed to capture review definitions for ineligible server",
+				zap.String("server", serverName), zap.Error(perr))
+		}
+		return false, nil
+	}
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.noteCaptureLocked(serverName)
+	r.lastGoodToolsMu.Unlock()
+	if hook := r.discoveryAfterPublish; hook != nil {
+		hook()
+	}
+	return true, r.applyDifferentialToolUpdate(ctx, serverName, tools)
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -837,33 +920,25 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			zap.String("server", serverName))
 	}
 
-	// Persist a last-good snapshot for this server so the approval-driven
-	// reindex (issue #873) has a source without a fresh network round-trip.
-	// The full sweep populates this map too; single-server connects otherwise
-	// would leave it empty, forcing the reindex path back through discovery.
-	// On an authoritative empty refresh this stores an empty slice, so
-	// lastGoodToolsSnapshot reports "no snapshot" and no stale set lingers.
-	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.lastGoodToolsMu.Unlock()
-
+	// Publish the last-good snapshot, capture stamp and approval records as
+	// one generation (captureSnapMu), then apply the differential index
+	// update. The snapshot gives the approval-driven reindex (issue #873) a
+	// source without a network round-trip; on an authoritative empty refresh
+	// it stores an empty slice so no stale set lingers.
+	//
 	// TOCTOU GUARD (issue #873): the eligibility check at the top of this
-	// function ran BEFORE the seconds-wide ListTools above. The server may have
-	// been quarantined in that window — in which case QuarantineServer already
-	// deleted its tools from the index — so re-check immediately before we write
-	// them back. A microsecond window remains between this check and the index
-	// mutation inside applyDifferentialToolUpdate; closing it fully would require
-	// holding a lock across the index write, which is deliberately not done.
-	if !r.serverEligibleForIndexing(serverName) {
+	// function ran BEFORE the seconds-wide ListTools above, so
+	// commitDiscoveredTools re-checks eligibility under the lock. A server
+	// quarantined in that window has its records captured for review (no index
+	// write); a microsecond window remains before the index mutation, which is
+	// deliberately not closed with a lock across the index write.
+	eligible, err := r.commitDiscoveredTools(ctx, serverName, tools)
+	if !eligible {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
 		return true, nil
 	}
-
-	// Apply differential update: compare new tools with existing indexed tools
-	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+	if err != nil {
 		return false, fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
 	}
 
@@ -2563,4 +2638,34 @@ func configsEquivalent(a, b *config.Config) bool {
 	ja, errA := json.Marshal(a)
 	jb, errB := json.Marshal(b)
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
+}
+
+// reapplyLastGoodSnapshot re-applies a server's last-good snapshot to the index
+// (the sweep fallback for a connected server missing from discovery). The
+// snapshot is selected and applied under one captureSnapMu hold: a snapshot
+// read outside the lock could be superseded by a concurrent capture that marks
+// a tool changed, and applying the stale one afterwards would look like a
+// genuine revert and clear that hold.
+func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string) {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+
+	r.lastGoodToolsMu.RLock()
+	snapshot, hasSnapshot := r.lastGoodTools[serverName]
+	r.lastGoodToolsMu.RUnlock()
+	if !hasSnapshot || len(snapshot) == 0 {
+		return
+	}
+	if hook := r.localReindexAfterSnapshot; hook != nil {
+		hook()
+	}
+
+	// Logged at Info: this can fire repeatedly during reconnect storms and
+	// is benign self-healing, not a warning condition.
+	r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
+		zap.String("server", serverName),
+		zap.Int("snapshot_tools", len(snapshot)))
+
+	// Re-checks eligibility again immediately before the write.
+	r.applyServerDiffIfEligible(ctx, serverName, snapshot)
 }

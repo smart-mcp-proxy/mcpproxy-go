@@ -122,10 +122,12 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 	// profiles is the Spec 108-h administrator tool (FR-017): registered on the
 	// default, call-tool and code-execution servers (never the direct one), and
 	// listed only to an administrator credential (visibility is per session).
+	// credentials is the Spec 115 administrator tool, registered and filtered
+	// exactly like profiles.
 	wantAdded := map[string][]string{
-		"default_server":      {"code_execution", "describe_tool", "profiles"},
-		"call_tool_mode":      {"describe_tool", "profiles"},
-		"code_execution_mode": {"profiles"},
+		"default_server":      {"code_execution", "credentials", "describe_tool", "profiles"},
+		"call_tool_mode":      {"credentials", "describe_tool", "profiles"},
+		"code_execution_mode": {"credentials", "profiles"},
 	}
 	// Nothing is removed. The two routing-mode surfaces carried a "Code
 	// Execution (Disabled)" stub in the pre-feature snapshot; a disabled

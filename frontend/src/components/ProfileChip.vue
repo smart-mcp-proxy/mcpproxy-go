@@ -27,6 +27,7 @@
         <span class="text-xs opacity-70">Locked</span>
       </div>
       <button
+        v-if="showCredentialCta"
         type="button"
         class="btn btn-xs btn-primary h-auto min-h-6 py-1 whitespace-normal"
         :data-test="`client-credential-cta-${client.id}`"
@@ -154,6 +155,10 @@ const noRecord = computed(() => {
   return credentialless && !c.installed && !c.connected
 })
 const bindable = computed(() => props.client.credential_state === 'client')
+// Spec 115 UI-005: a lease that ended or was revoked is a planned task end,
+// never a "Reconnect" call to action.
+const showCredentialCta = computed(() => !((props.client as { lease?: boolean }).lease &&
+  (props.client.credential_state === 'expired' || props.client.credential_state === 'revoked')))
 const locked = computed(() => props.client.profile_mode === 'locked' || props.client.profile_source === 'pin')
 const missing = computed(() => props.client.profile_missing === true)
 
@@ -163,7 +168,7 @@ const label = computed(() => {
   if (missing.value) return `${c.profile} (missing — deny-all)`
   const profile = profiles.byName.get(c.profile)
   const parts = [c.profile_title || profile?.title || c.profile]
-  const tier = tierPhrase(profile?.max_tier)
+  const tier = tierPhrase(profile?.max_tier, profile?.tool_counts)
   if (tier) parts.push(tier)
   parts.push(locked.value ? 'locked by credential' : 'switchable')
   return parts.join(' · ')

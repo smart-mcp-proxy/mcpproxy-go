@@ -1160,6 +1160,21 @@ export interface AgentTokenInfo {
   client_id?: string
   profile_mode?: 'locked' | 'switchable'
   legacy_scope?: boolean
+  // Spec 115 lifecycle fields: when the token was revoked, who issued it, its
+  // stated (unenforced) purpose, whether it is a task lease (<= 24 h at issue)
+  // and whether its profile still exists.
+  revoked_at?: string | null
+  issuer?: CredentialIssuer | null
+  purpose?: string
+  lease?: boolean
+  profile_state?: 'ok' | 'dangling' | 'none'
+}
+
+// Who issued a credential (Spec 115): the actor kind and the surface.
+export interface CredentialIssuer {
+  actor_kind: string
+  actor_name?: string
+  surface: string
 }
 
 export interface CreateAgentTokenRequest {
@@ -1256,6 +1271,12 @@ export type ClientPresence = Omit<ClientView, 'credential_state' | 'blocked_24h'
   last_seen?: string | null
   credential_state?: CredentialState
   blocked_24h?: number
+  // Spec 115 lifecycle fields of the client's credential record.
+  revoked_at?: string | null
+  issuer?: CredentialIssuer | null
+  purpose?: string
+  lease?: boolean
+  profile_state?: 'ok' | 'dangling' | 'none'
 }
 export interface ClientsResponse { clients: ClientPresence[]; routing?: RoutingInfo; warnings?: ClientWarning[] }
 

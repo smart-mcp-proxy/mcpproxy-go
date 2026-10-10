@@ -222,6 +222,39 @@ func TestCaptureQuarantinedToolDefinitions_RecordsPendingWithoutIndexing(t *test
 	assert.Empty(t, indexed, "capturing a quarantined definition must not publish it to search")
 }
 
+// A quarantined capture must reflect what the upstream offers now: pending
+// records for tools it no longer lists are dropped (3 -> 0 -> 1), while an
+// operator's block or approval survives and the server stays quarantined.
+func TestCaptureQuarantinedToolDefinitions_PrunesAbsentUndecidedRecords(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "github", Enabled: true, Quarantined: true}})
+	mk := func(names ...string) []*config.ToolMetadata {
+		out := make([]*config.ToolMetadata, 0, len(names))
+		for _, n := range names {
+			out = append(out, &config.ToolMetadata{ServerName: "github", Name: n, Description: "d " + n, ParamsJSON: `{"type":"object"}`})
+		}
+		return out
+	}
+	require.NoError(t, rt.captureQuarantinedToolDefinitionsFromTools("github", mk("a", "b", "c")))
+	require.NoError(t, rt.SetToolEnabled("github", "b", false, "admin"))
+
+	require.NoError(t, rt.captureQuarantinedToolDefinitionsFromTools("github", nil))
+	records, err := rt.storageManager.ListToolApprovals("github")
+	require.NoError(t, err)
+	require.Len(t, records, 1, "undecided records for absent tools are dropped; the operator block stays")
+	assert.Equal(t, "b", records[0].ToolName)
+	assert.True(t, records[0].Disabled)
+
+	require.NoError(t, rt.captureQuarantinedToolDefinitionsFromTools("github", mk("d")))
+	records, err = rt.storageManager.ListToolApprovals("github")
+	require.NoError(t, err)
+	names := map[string]bool{}
+	for _, rec := range records {
+		names[rec.ToolName] = true
+	}
+	assert.Equal(t, map[string]bool{"b": true, "d": true}, names)
+	assert.True(t, rt.serverIsQuarantined("github"), "capture never releases quarantine")
+}
+
 // TestDiscoverAndIndexToolsForServer_DisabledSkipped mirrors the above for a
 // disabled server: it has no business (re)entering the index either.
 func TestDiscoverAndIndexToolsForServer_DisabledSkipped(t *testing.T) {

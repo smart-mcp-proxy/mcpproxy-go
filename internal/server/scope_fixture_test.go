@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +99,9 @@ type countingUpstream struct {
 	URL    string
 	Tools  []stateview.ToolInfo
 	mcpSrv *mcpserver.MCPServer
+	// errBody, when set, makes every tool answer an upstream isError result
+	// carrying that text (an approved upstream failing on its own).
+	errBody atomic.Pointer[string]
 }
 
 // serve registers one more tool on the running stub upstream, for tests
@@ -123,6 +127,9 @@ func (u *countingUpstream) serve(spec toolSpec) {
 	u.mcpSrv.AddTool(tool,
 		func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			u.record(request.Params.Name)
+			if body := u.errBody.Load(); body != nil {
+				return mcp.NewToolResultError(*body), nil
+			}
 			return mcp.NewToolResultText("ok"), nil
 		})
 }

@@ -63,7 +63,11 @@ func profilesErrorBody(err error) (int, map[string]any, bool) {
 	var pre *internalRuntime.PreconditionFailedError
 	var busy *internalRuntime.ConnectInProgressError
 	var superseded *internalRuntime.CredentialSupersededError
+	var screen *internalRuntime.SecretInputError
 	switch {
+	case errors.As(err, &screen):
+		// Spec 115 FR-020b: names the field, never the value.
+		return http.StatusBadRequest, errorBody(screen.Error(), screen.Code(), screen.Field()), true
 	case errors.As(err, &guard):
 		bindings := make([]GuardBinding, 0, len(guard.Bindings))
 		for _, b := range guard.Bindings {

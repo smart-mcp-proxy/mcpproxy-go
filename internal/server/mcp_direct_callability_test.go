@@ -31,7 +31,7 @@ func TestDirectToolCallabilityBlock_ServerQuarantined(t *testing.T) {
 
 	result := proxy.directToolCallabilityBlock(context.Background(), "github", "list_repos", map[string]interface{}{"q": "x"})
 	require.NotNil(t, result)
-	assert.False(t, result.IsError)
+	assert.True(t, result.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var response map[string]interface{}
 	text := result.Content[0].(mcp.TextContent).Text
@@ -111,7 +111,7 @@ func TestDirectToolCallabilityBlock_PendingApproval(t *testing.T) {
 
 	result := proxy.directToolCallabilityBlock(context.Background(), "github", "new_tool", map[string]interface{}{})
 	require.NotNil(t, result)
-	assert.False(t, result.IsError)
+	assert.True(t, result.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var response map[string]interface{}
 	text := result.Content[0].(mcp.TextContent).Text
@@ -138,7 +138,7 @@ func TestDirectToolCallabilityBlock_ChangedApproval(t *testing.T) {
 
 	result := proxy.directToolCallabilityBlock(context.Background(), "github", "mutated_tool", map[string]interface{}{})
 	require.NotNil(t, result)
-	assert.False(t, result.IsError)
+	assert.True(t, result.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var response map[string]interface{}
 	text := result.Content[0].(mcp.TextContent).Text
@@ -422,8 +422,8 @@ func TestDirectDispatch_CollapsedOrAbsentApprovalIsPendingNotReady(t *testing.T)
 
 // assertDirectDispatchRefused accepts either refusal envelope direct mode
 // produces: an IsError result (the generic not-callable block) or the
-// TOOL_QUARANTINED review payload (pending / changed, which is deliberately
-// IsError=false so agents parse it). What it rejects is the upstream's "ok".
+// TOOL_QUARANTINED review payload (pending / changed; now also isError, but kept
+// accepted for envelopes that predate UX-05). What it rejects is the upstream's "ok".
 func assertDirectDispatchRefused(t *testing.T, result *mcp.CallToolResult) {
 	t.Helper()
 	text := directResultText(result)

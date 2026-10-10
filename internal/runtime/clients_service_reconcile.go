@@ -143,7 +143,11 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 	if active := g.BindingGuardActiveBindings(); len(active) > 0 {
 		names := make([]string, 0, len(active))
 		for _, b := range active {
-			names = append(names, b.ClientID)
+			name := b.ClientID
+			if name == "" {
+				name = "token " + b.TokenName // a guard-bound token (Spec 115)
+			}
+			names = append(names, name)
 		}
 		out = append(out, Warning{
 			Code:     profile.WarningAnonymousDeniedByBindingGuard,
@@ -151,7 +155,7 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 			Message:  fmt.Sprintf("anonymous callers are denied while %s could be bypassed without auth", strings.Join(names, ", ")),
 			Action:   &WarningAction{Kind: string(profile.FixChangeSetting), Target: "require_mcp_auth"},
 			Bindings: active,
-			Fixes:    g.BindingGuardFixes(GuardState{Config: cfg, Tokens: clientOnly(all)}, active),
+			Fixes:    g.BindingGuardFixes(GuardState{Config: cfg, Tokens: guardedOnly(all)}, active),
 		})
 	}
 	now := s.now()
@@ -159,7 +163,9 @@ func (s *ClientsService) Warnings(states map[string]profile.CredentialState) []W
 		t := &all[i]
 		switch {
 		case t.Kind == auth.KindClient && s.stateOf(t) == profile.CredentialStateClient:
-			if t.ExpiresAt.Sub(now) <= clientCredentialExpiringWindow {
+			// Spec 115 UI-005: a lease (lifetime at issue <= 24 h) running out is
+			// the planned task end, never an "expires soon; reconnect" warning.
+			if !t.IsLease() && t.ExpiresAt.Sub(now) <= clientCredentialExpiringWindow {
 				out = append(out, Warning{Code: profile.WarningClientCredentialExpiring, Severity: profile.WarningSeverityWarn, ClientID: t.ClientID,
 					Message: fmt.Sprintf("the credential of %s expires soon; reconnect it", t.ClientID),
 					Action:  &WarningAction{Kind: string(profile.FixReconnectClient), Target: t.ClientID}})

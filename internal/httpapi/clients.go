@@ -59,6 +59,16 @@ type clientPresence struct {
 	RotationPending bool       `json:"rotation_pending,omitempty"`
 	Blocked24h      int        `json:"blocked_24h"`
 
+	// Spec 115 lifecycle fields of the client's credential record (additive):
+	// when it was revoked, who issued it, its stated (unenforced) purpose,
+	// whether it is a task lease (lifetime at issue <= 24h) and whether its
+	// profile still exists (ok | dangling | none).
+	RevokedAt    *time.Time             `json:"revoked_at,omitempty"`
+	Issuer       *auth.CredentialIssuer `json:"issuer,omitempty"`
+	Purpose      string                 `json:"purpose,omitempty"`
+	Lease        bool                   `json:"lease,omitempty"`
+	ProfileState string                 `json:"profile_state,omitempty"`
+
 	// resolvedCredential is the classification of the on-demand config read of a
 	// detail request; never serialised.
 	resolvedCredential profile.CredentialState
@@ -124,7 +134,10 @@ func (s *Server) clientsListResponse(ctx context.Context, profileFilter, clientF
 	if s.clientsService != nil {
 		_ = s.clientsService.ReconcileTimeOnly(ctx)
 	}
-	rows, warnings, err := s.clientRows(ctx, false, "")
+	// An exact ?client= filter also shows that client's REVOKED custom row
+	// (Spec 115 UI-001: a deep link to a revoked worker reads "Revoked"). The
+	// detail id never opens a config here (withSessions is false).
+	rows, warnings, err := s.clientRows(ctx, false, clientFilter)
 	if err != nil {
 		return clientsResponse{}, err
 	}
@@ -353,6 +366,7 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 			if rec.ProfilePin != "" && !profileExists(rec.ProfilePin) {
 				row.ProfileMissing = true
 			}
+			decorateLifecycle(row, rec, cfg)
 			if row.CredentialState == profile.CredentialStateClient {
 				row.ProfileSource = string(profile.SourceBinding)
 				if rec.ProfileMode == auth.ProfileModeLocked {
@@ -372,8 +386,12 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 		if connect.FindClient(id) != nil || known[id] {
 			continue
 		}
-		if stateOf(rec) == profile.CredentialStateRevoked && id != detailID {
-			continue // a revoked custom row is omitted from the list (still served by detail)
+		// A legacy revoked custom row is omitted from the list (still served by
+		// detail). A credential issued through the Spec 115 lifecycle path
+		// (it records its issuer) stays listed after revocation, so an open
+		// Clients view shows "Revoked <time>" instead of the row vanishing.
+		if stateOf(rec) == profile.CredentialStateRevoked && id != detailID && rec.Issuer == nil {
+			continue
 		}
 		customIDs = append(customIDs, id)
 	}
@@ -394,6 +412,7 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 		if rec.ProfilePin != "" && !profileExists(rec.ProfilePin) {
 			row.ProfileMissing = true
 		}
+		decorateLifecycle(&row, rec, cfg)
 		active := row.CredentialState == profile.CredentialStateClient
 		row.Connected = active
 		row.State = contracts.ClientPresenceOther
@@ -622,4 +641,14 @@ func clientMatches(name string, aliases []string) bool {
 		}
 	}
 	return false
+}
+
+// decorateLifecycle copies the Spec 115 lifecycle fields of a credential record
+// onto a client row.
+func decorateLifecycle(row *clientPresence, rec *auth.AgentToken, cfg *config.Config) {
+	row.RevokedAt = rec.RevokedAt
+	row.Issuer = rec.Issuer
+	row.Purpose = rec.Purpose
+	row.Lease = rec.IsLease()
+	row.ProfileState = internalRuntime.ProfileStateOf(rec.ProfilePin, cfg)
 }

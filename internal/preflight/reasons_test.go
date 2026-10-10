@@ -34,12 +34,13 @@ var fr003Table = []fr003Row{
 	{ReasonToolDeniedByConfig, ClassPermanentConfig, false, "configure", VerdictBlocked, 11},
 	{ReasonMissingAnnotation, ClassPermanentConfig, false, "configure", VerdictBlocked, 11},
 	{ReasonPolicyFiltered, ClassPermanentConfig, false, "", VerdictBlocked, 11},
+	{ReasonToolBlockedByProfile, ClassPermanentConfig, false, "configure", VerdictBlocked, 11},
 	{ReasonNotFound, ClassPermanentConfig, false, "configure", VerdictUnknownIDs, 12},
 	{ReasonServerNotConfigured, ClassPermanentConfig, false, "configure", VerdictUnknownIDs, 12},
 }
 
 func TestFR003Table(t *testing.T) {
-	require.Len(t, fr003Table, 15, "the v1 enum is exactly 15 codes")
+	require.Len(t, fr003Table, 16, "the enum is exactly 16 codes (15 v1 + tool_blocked_by_profile, issue #1548)")
 
 	for _, row := range fr003Table {
 		t.Run(row.reason, func(t *testing.T) {
@@ -68,7 +69,7 @@ func TestReasonTable_CoversExactlyTheClosedEnum(t *testing.T) {
 	}
 	assert.Equal(t, spec, impl, "reasons.go and the FR-003 spec table must be identical sets")
 
-	assert.Len(t, AllReasons(), 15)
+	assert.Len(t, AllReasons(), 16)
 	inPrecedence := map[Reason]int{}
 	for _, r := range Precedence {
 		inPrecedence[r]++
@@ -76,7 +77,7 @@ func TestReasonTable_CoversExactlyTheClosedEnum(t *testing.T) {
 	for code := range impl {
 		assert.Equal(t, 1, inPrecedence[code], "%s must appear exactly once in the precedence chain", code)
 	}
-	assert.Len(t, Precedence, 15, "precedence covers the whole enum")
+	assert.Len(t, Precedence, 16, "precedence covers the whole enum")
 }
 
 // TestPrecedence_ExactOrder pins the FR-004 chain verbatim.
@@ -87,6 +88,7 @@ func TestPrecedence_ExactOrder(t *testing.T) {
 		"server_quarantined",
 		"server_disabled",
 		"not_found",
+		"tool_blocked_by_profile",
 		"tool_denied_by_config",
 		"tool_blocked_by_user",
 		"tool_changed",
@@ -118,6 +120,7 @@ func TestReasonWireValues(t *testing.T) {
 	assert.Equal(t, "policy_filtered", ReasonPolicyFiltered)
 	assert.Equal(t, "not_found", ReasonNotFound)
 	assert.Equal(t, "server_not_configured", ReasonServerNotConfigured)
+	assert.Equal(t, "tool_blocked_by_profile", ReasonToolBlockedByProfile)
 
 	assert.Equal(t, "ready", StatusReady)
 	assert.Equal(t, "unavailable", StatusUnavailable)
