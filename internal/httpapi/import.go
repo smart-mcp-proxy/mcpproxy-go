@@ -551,6 +551,30 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		result.Summary.Failed = len(result.Failed)
 	}
 
+	// A caller-supplied rename can land on a name that is already configured
+	// (configimport only screened the pre-rename name). Report it as skipped
+	// already_exists instead of letting it fail silently at add time.
+	if len(rename) > 0 && len(opts.ExistingServers) > 0 {
+		existing := make(map[string]struct{}, len(opts.ExistingServers))
+		for _, n := range opts.ExistingServers {
+			existing[n] = struct{}{}
+		}
+		kept := result.Imported[:0]
+		for _, imported := range result.Imported {
+			if _, taken := existing[imported.Server.Name]; taken {
+				result.Skipped = append(result.Skipped, configimport.SkippedServer{
+					Name:   imported.Server.Name,
+					Reason: "already_exists",
+				})
+				continue
+			}
+			kept = append(kept, imported)
+		}
+		result.Imported = kept
+		result.Summary.Imported = len(result.Imported)
+		result.Summary.Skipped = len(result.Skipped)
+	}
+
 	// Apply the caller's field overrides (Paste tab env/header edits)
 	// directly to the server(s) this call's own raw Content parsed to,
 	// never to a value carried over from an earlier preview response. This
@@ -579,6 +603,36 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		for _, imported := range result.Imported {
 			configimport.Reclassify(imported)
 		}
+	}
+
+	// Persist before building the response so the response reports what really
+	// happened: a server whose add fails (a concurrent create of the same name,
+	// a storage error) moves from Imported to Skipped/Failed instead of being
+	// claimed as imported.
+	if !preview && len(result.Imported) > 0 {
+		kept := result.Imported[:0]
+		for _, imported := range result.Imported {
+			err := s.controller.AddServer(r.Context(), imported.Server)
+			if err == nil {
+				logger.Info("Imported server", "server", imported.Server.Name, "format", result.Format)
+				kept = append(kept, imported)
+				continue
+			}
+			logger.Warn("Failed to add imported server", "server", imported.Server.Name, "error", err)
+			if strings.Contains(err.Error(), "already exists") {
+				result.Skipped = append(result.Skipped, configimport.SkippedServer{Name: imported.Server.Name, Reason: "already_exists"})
+			} else {
+				result.Failed = append(result.Failed, configimport.FailedServer{
+					Name:    imported.Server.Name,
+					Error:   "add_failed",
+					Details: err.Error(),
+				})
+			}
+		}
+		result.Imported = kept
+		result.Summary.Imported = len(result.Imported)
+		result.Summary.Skipped = len(result.Skipped)
+		result.Summary.Failed = len(result.Failed)
 	}
 
 	// Build response
@@ -627,18 +681,6 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 			Tags:          imported.Tags,
 			Env:           env,
 			Headers:       headers,
-		}
-	}
-
-	// If not preview, actually add the servers
-	if !preview && len(result.Imported) > 0 {
-		for _, imported := range result.Imported {
-			if err := s.controller.AddServer(r.Context(), imported.Server); err != nil {
-				logger.Warn("Failed to add imported server", "server", imported.Server.Name, "error", err)
-				// Continue with other servers
-			} else {
-				logger.Info("Imported server", "server", imported.Server.Name, "format", result.Format)
-			}
 		}
 	}
 
