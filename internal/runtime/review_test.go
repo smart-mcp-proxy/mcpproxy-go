@@ -283,3 +283,48 @@ func TestReviewUnifiedDiffUsesReadableSingleLineHunk(t *testing.T) {
 	require.Equal(t, "@@ -1 +1 @@\n-old\n+new", reviewUnifiedDiff("old", "new"))
 	require.Empty(t, reviewUnifiedDiff("same", "same"))
 }
+
+// UX-04: an ordinary pending review (filed by discovery, no ApprovedAt) is
+// dated by when it began waiting, so it sorts ahead of a later changed-tool
+// review; a record from before the stamp existed stays undated.
+func TestReviewQueue_PendingSinceFollowsWhenOwed(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "old-pending", Enabled: true},
+		{Name: "new-change", Enabled: true},
+	})
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "old-pending", ToolName: "t", Status: storage.ToolApprovalStatusPending,
+	}))
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "new-change", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: time.Now().UTC().AddDate(-1, 0, 0), DefinitionChangedAt: time.Now().UTC(),
+	}))
+	// Re-saving the still-pending record must not move its date.
+	first := reviewOwedSinceFor(t, rt, "old-pending")
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "old-pending", ToolName: "t", Status: storage.ToolApprovalStatusPending,
+	}))
+	require.True(t, first.Equal(reviewOwedSinceFor(t, rt, "old-pending")))
+
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.NotNil(t, byName["old-pending"].Since)
+	require.NotNil(t, byName["new-change"].Since)
+	require.True(t, byName["old-pending"].Since.Before(*byName["new-change"].Since))
+
+	require.True(t, reviewOwedSince(&storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending, ApprovedAt: time.Now()}).IsZero(),
+		"a legacy pending record with unknown age stays undated")
+}
+
+func reviewOwedSinceFor(t *testing.T, rt *Runtime, server string) time.Time {
+	t.Helper()
+	rec, err := rt.storageManager.GetToolApproval(server, "t")
+	require.NoError(t, err)
+	return rec.PendingSince
+}

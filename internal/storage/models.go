@@ -327,6 +327,14 @@ type ToolApprovalRecord struct {
 	// scan covers the current definition. Additive and omitted when zero.
 	DefinitionChangedAt time.Time `json:"definition_changed_at,omitzero"`
 
+	// PendingSince is when the tool began waiting as pending. BoltDB.
+	// SaveToolApproval stamps it (one seam for every writer): a pending record
+	// with no prior pending record gets now, a prior pending record's value is
+	// carried, and any other status clears it. Records filed before this field
+	// existed stay zero: their age is unknown and the review queue reports
+	// them undated. Additive and omitted when zero.
+	PendingSince time.Time `json:"pending_since,omitzero"`
+
 	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
 	// the trust_mode: scan gate hold this tool for human review (spec 086
 	// FR-018). They are set ONLY on the pass that performs the hold and cleared

@@ -707,3 +707,18 @@ func TestViewAsCountsSummary(t *testing.T) {
 	require.Equal(t, "3 allowed by profile p, 2 hidden (hidden tools are administrator-only)\n", other)
 	require.Equal(t, "held", viewAsAccessCell(map[string]interface{}{"access": map[string]interface{}{"visible": true, "callable": false}}))
 }
+
+func TestViewAsRowCountsFromAdministratorRows(t *testing.T) {
+	acc := func(v, c bool) map[string]interface{} {
+		return map[string]interface{}{"access": map[string]interface{}{"visible": v, "callable": c}}
+	}
+	// The shape GET /tools?profile= gives an administrator: rows with verdicts, no counts.
+	rows := []map[string]interface{}{acc(true, true), acc(true, true), acc(true, false), acc(false, false)}
+	counts := viewAsRowCounts(rows)
+	require.NotNil(t, counts)
+	out := viewAsCountsSummary(counts, "qa-read")
+	require.Contains(t, out, "3 allowed by profile qa-read, 1 hidden, 2 callable now, 1 held")
+	require.Contains(t, out, "mcpproxy access explain --profile qa-read")
+
+	require.Nil(t, viewAsRowCounts([]map[string]interface{}{{"name": "x"}}))
+}

@@ -434,6 +434,13 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 		return cliError("failed to get global tools from daemon", err)
 	}
 
+	// An administrator's response carries every row with its verdict and no
+	// counts (only restricted callers get counts, which must not grow); derive
+	// the summary from the rows, before the client-side filters narrow them.
+	if counts == nil && toolsProfileView != "" {
+		counts = viewAsRowCounts(tools)
+	}
+
 	// Apply client-side filters
 	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
@@ -444,6 +451,32 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 		fmt.Fprint(os.Stderr, "\n"+viewAsCountsSummary(counts, toolsProfileView))
 	}
 	return nil
+}
+
+// viewAsRowCounts derives {visible, hidden, callable} from the per-row `access`
+// verdicts an administrator's view-as response carries. It returns nil when no
+// row has a verdict (nothing to summarize).
+func viewAsRowCounts(tools []map[string]interface{}) map[string]interface{} {
+	visible, hidden, callable, seen := 0, 0, 0, false
+	for _, t := range tools {
+		access, ok := t["access"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		seen = true
+		if v, _ := access["visible"].(bool); v {
+			visible++
+		} else {
+			hidden++
+		}
+		if c, _ := access["callable"].(bool); c {
+			callable++
+		}
+	}
+	if !seen {
+		return nil
+	}
+	return map[string]interface{}{"visible": float64(visible), "hidden": float64(hidden), "callable": float64(callable)}
 }
 
 // viewAsCountsSummary is the footer of `tools --profile`: tools allowed by the

@@ -433,13 +433,22 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 // It stamps DefinitionChangedAt: when a prior record exists and its current
 // definition content differs from the incoming one the stamp is set to now,
 // otherwise the prior value is carried over. The stamp is also written back to
-// the caller's record.
+// the caller's record. PendingSince is stamped the same way (see its field doc).
 func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		now := time.Now().UTC()
+		if record.Status != ToolApprovalStatusPending {
+			record.PendingSince = time.Time{}
+		} else {
+			record.PendingSince = now
+		}
 		if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
 			prior := &ToolApprovalRecord{}
 			if err := prior.UnmarshalBinary(encoded); err == nil {
+				if record.Status == ToolApprovalStatusPending && prior.Status == ToolApprovalStatusPending {
+					record.PendingSince = prior.PendingSince
+				}
 				if toolDefinitionContentChanged(prior, record) {
 					record.DefinitionChangedAt = time.Now().UTC()
 				} else {

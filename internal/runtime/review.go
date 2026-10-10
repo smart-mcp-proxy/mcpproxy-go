@@ -554,14 +554,15 @@ func reviewFindingMatchesTool(location, serverName, toolName string) bool {
 
 // reviewOwedSince is when a pending or changed tool started waiting for review.
 // A changed tool keeps the ApprovedAt of its previous approval, so the change
-// stamp is the honest time; a tool with no stamp reports none rather than an
-// approval that predates the change.
+// stamp is the honest time; a pending tool uses PendingSince. A tool with no
+// stamp (a record filed before the stamps existed) reports none rather than an
+// approval time that predates it.
 func reviewOwedSince(record *storage.ToolApprovalRecord) time.Time {
 	switch record.Status {
 	case storage.ToolApprovalStatusChanged:
 		return record.DefinitionChangedAt
 	case storage.ToolApprovalStatusPending:
-		return record.ApprovedAt
+		return record.PendingSince
 	}
 	return time.Time{}
 }
