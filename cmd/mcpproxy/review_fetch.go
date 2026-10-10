@@ -45,7 +45,9 @@ quarantined and a disabled server is refused (enable it first). The command
 exits nonzero when the server is unknown, disabled, unreachable, or returns no
 tool definitions.`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
+			// Failures are operational, not usage mistakes: keep the error readable.
+			c.SilenceUsage = true
 			return runReviewFetch(args[0], wait, ResolveOutputFormat())
 		},
 	}
