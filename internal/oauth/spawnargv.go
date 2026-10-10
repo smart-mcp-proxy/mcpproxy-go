@@ -120,6 +120,29 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	}
 	masked := r.argvWith(tokens, spawnRules, nil)
 
+	// The flag-name rule reads token TEXT, so a shell-quoted or escaped spelling
+	// ('--password' 'a b', --pass\word, "--api"-key) is invisible to it and the
+	// value after it would survive. Run the same rules a second time over the
+	// shell-DECODED tokens and, wherever that pass masked something, take its
+	// rendering (quoting is dropped on a masked token; unmasked tokens keep
+	// their original text so the line stays readable).
+	decoded := make([]string, len(tokens))
+	differs := false
+	for i, t := range tokens {
+		decoded[i] = shellDecodeToken(t)
+		if decoded[i] != t {
+			differs = true
+		}
+	}
+	if differs {
+		maskedDecoded := r.argvWith(decoded, spawnRules, nil)
+		for i := range masked {
+			if maskedDecoded[i] != decoded[i] {
+				masked[i] = maskedDecoded[i]
+			}
+		}
+	}
+
 	var b strings.Builder
 	b.Grow(len(s))
 	next := 0
@@ -130,6 +153,36 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 		}
 		b.WriteString(masked[next])
 		next++
+	}
+	return b.String()
+}
+
+// shellDecodeToken removes shell quoting and backslash escapes from one command
+// token, the way a POSIX shell would before handing it to the program. It is used
+// only to DECIDE what to mask; the display text keeps the original spelling.
+func shellDecodeToken(t string) string {
+	if !strings.ContainsAny(t, "'\"\\") {
+		return t
+	}
+	var b strings.Builder
+	var quote byte
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		switch {
+		case c == '\\' && quote != '\'' && i+1 < len(t):
+			i++
+			b.WriteByte(t[i])
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				b.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		default:
+			b.WriteByte(c)
+		}
 	}
 	return b.String()
 }

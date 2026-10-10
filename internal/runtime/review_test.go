@@ -227,6 +227,12 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"escaped spaces eq":    {"-c", `exec npx srv --password=hunter2\ and\ more --port 80`},
 		"escaped quote dq":     {"-c", `exec npx srv --password "hunter2\" and more"`},
 		"escaped quote bare":   {"-c", `exec npx srv --password hunter2\'s\ and\ more`},
+		"quoted flag":          {"-c", "exec npx srv '--password' 'hunter2 and more'"},
+		"dq quoted flag":       {"-c", `exec npx srv "--password" "hunter2 and more"`},
+		"concatenated flag":    {"-c", `exec npx srv '--pass'"word" 'hunter2 and more'`},
+		"escaped flag":         {"-c", `exec npx srv --pass\word hunter2\ and\ more`},
+		"quoted inline flag":   {"-c", "exec npx srv '--password=hunter2 and more' --port 80"},
+		"escaped flag quoted":  {"-c", `exec npx srv \-\-password 'hunter2 and more'`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
