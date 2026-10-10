@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
@@ -452,6 +453,32 @@ func (plan directCheckPlan) restore(outcome preflight.Outcome) preflight.Outcome
 	}
 }
 
+// narrowDirectEntries keeps only the entries the session's effective preflight
+// view admits: the server is in scope and every profile policy in effect admits
+// the tool (issue #1548). It only ever removes entries.
+func narrowDirectEntries(
+	entries []*directCatalogEntry,
+	scope *preflight.Scope,
+	policies []preflightProfilePolicy,
+	annotations func(serverName, toolName string) (*config.ToolAnnotations, bool),
+) []*directCatalogEntry {
+	if scope == nil && len(policies) == 0 {
+		return entries
+	}
+	reader := &preflightToolPolicyReader{policies: policies, annotations: annotations}
+	out := make([]*directCatalogEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !scope.Allows(entry.ServerName) {
+			continue
+		}
+		if reader.ProfileToolDecision(entry.ServerName, entry.ToolName).Blocked {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // visibleDirectEntries snapshots the catalog entries this session can list, in
 // the catalog's own order.
 func (p *MCPProxyServer) visibleDirectEntriesIn(ctx context.Context, cat *directCatalog) []*directCatalogEntry {
@@ -479,18 +506,25 @@ func (p *MCPProxyServer) runDirectCheck(
 	// evaluator's index reader all resolve against the same generation, so a
 	// rebuild mid-request cannot make them disagree about what exists.
 	cat := p.loadDirectCatalog()
-	visible := p.visibleDirectEntriesIn(ctx, cat)
+
+	// The session's effective view (issue #1548) is resolved FIRST: the
+	// direct listing's own predicate decides profiles through the legacy
+	// resolver, which can name a different profile than the v3 resolution
+	// dispatch decides against (a switchable client's binding vs. its
+	// selected profile). Narrowing the visible corpus by the v3 scope and every
+	// policy in effect makes the id gate AND the did_you_mean corpus agree with
+	// dispatch, including when every id is gated below.
+	scope, policies, err := p.sessionPreflightView(ctx)
+	if err != nil {
+		return preflight.Outcome{}, err
+	}
+	visible := narrowDirectEntries(p.visibleDirectEntriesIn(ctx, cat), scope, policies, p.EffectiveAnnotations)
 	plan := p.planDirectCheck(ctx, cat, visible, rawIDs)
 
 	// Every id was gated: there is nothing to evaluate, and calling the
 	// evaluator with an empty ref set would still cost a state snapshot.
 	if len(plan.refs) == 0 {
 		return plan.restore(preflight.Outcome{}), nil
-	}
-
-	scope, policies, err := p.sessionPreflightView(ctx)
-	if err != nil {
-		return preflight.Outcome{}, err
 	}
 
 	// The visible corpus is resolved ONCE, here, and handed to the reader as a
@@ -500,10 +534,9 @@ func (p *MCPProxyServer) runDirectCheck(
 	// IndexedServerNames and ToolsByServer disagree about the same tool.
 	reader := &directCatalogIndexReader{entries: visible}
 
-	// The visible corpus already hides profile-excluded tools
-	// (directEntryVisibleToSession); the session's policies are passed too so
-	// the evaluator applies the same decision as the retrieve-mode check,
-	// which can only narrow (issue #1548).
+	// The visible corpus already hides profile-excluded tools; the session's
+	// policies are passed too so the evaluator applies the same decision as
+	// the retrieve-mode check, which can only narrow (issue #1548).
 	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, policies)
 	if err != nil {
 		return preflight.Outcome{}, err

@@ -392,3 +392,35 @@ func TestPreflightProfilePolicy_InBandAnonymousBindingGuard(t *testing.T) {
 	assert.True(t, result.IsError, "dispatch agrees: the guarded anonymous caller is refused")
 	assert.Zero(t, f.totalDispatched())
 }
+
+// Direct-surface check mode composes the v3 resolution too: a switchable
+// client bound to a permissive profile that selected a restrictive one through
+// /mcp/p/<slug> is decided by the SELECTED profile at dispatch, so the check
+// must hide what it excludes — in the verdict and in did_you_mean, including
+// when every id in the batch is gated before evaluation.
+func TestPreflightProfilePolicy_DirectCheckUsesEffectiveSelection(t *testing.T) {
+	f := newDirectCheckFixture(t)
+	switchTo := []string{"restricted"}
+	f.proxy.config.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}, {Name: "we__ird", Enabled: true}}
+	f.proxy.config.Profiles = []config.ProfileConfig{
+		{Name: "permissive", Servers: []string{"github"}, MaxTier: "destructive", SwitchableTo: &switchTo},
+		{Name: "restricted", Servers: []string{"github"}, MaxTier: "destructive", Tools: &config.ProfileToolRules{Deny: []string{"github:read_file"}}},
+	}
+	ctx := clientCtx("laptop", "permissive", auth.ProfileModeSwitchable)
+	ctx = profile.WithProfileScope(ctx, profileScopeForSlugIn(f.proxy.config, "restricted"))
+
+	// Control: under the binding alone the tool is visible and ready.
+	control := f.check(t, clientCtx("laptop", "permissive", auth.ProfileModeSwitchable), []interface{}{"github:read_file"})
+	require.Equal(t, preflight.StatusReady, control.Results[0].Status, "%+v", control.Results[0])
+
+	// All ids gated: the early return must not suggest the hidden tool.
+	payload := f.check(t, ctx, []interface{}{"github:read_fil"})
+	assert.NotContains(t, payload.Results[0].DidYouMean, "github:read_file")
+	assert.NotContains(t, payload.Results[0].DidYouMean, "github__read_file")
+
+	payload = f.check(t, ctx, []interface{}{"github:read_file", "github__read_file", "we__ird__do_thing"})
+	byID := checkResultsByID(payload)
+	assert.Equal(t, preflight.ReasonNotFound, byID["github:read_file"].Reason)
+	assert.Equal(t, preflight.ReasonNotFound, byID["github__read_file"].Reason)
+	assert.Equal(t, preflight.ReasonNotFound, byID["we__ird__do_thing"].Reason, "outside the selected profile's servers")
+}
