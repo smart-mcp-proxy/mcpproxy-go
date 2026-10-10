@@ -156,3 +156,62 @@ export const APPROVE_ALL_HINT = 'Allows every pending or changed tool. Tools you
 export function approveAllLabel(total: number): string {
   return `Approve all (${total} ${plural(total, 'tool', 'tools')})`
 }
+
+// ---------------------------------------------------------------------------
+// Scale controls (UX-03). Filtering and paging only decide which rows are
+// DRAWN. The selection and the block list are always computed from the full
+// tool list, so a filter, a page change or a refresh can never approve a tool
+// the reviewer did not check, nor drop one they did.
+// ---------------------------------------------------------------------------
+
+export const REVIEW_PAGE_SIZES = [25, 50, 100] as const
+
+export interface ReviewFilters {
+  query: string
+  tier: string // 'all' or a tier name
+  state: string // 'all' | 'pending' | 'changed' | 'approved'
+  selection: string // 'all' | 'allowed' | 'blocked'
+}
+
+export const NO_REVIEW_FILTERS: ReviewFilters = { query: '', tier: 'all', state: 'all', selection: 'all' }
+
+export function hasActiveFilters(f: ReviewFilters): boolean {
+  return f.query.trim() !== '' || f.tier !== 'all' || f.state !== 'all' || f.selection !== 'all'
+}
+
+/** Review-local filters over the FULL tool list; `allowed` is the full selection. */
+export function filterReviewTools(tools: ReviewTool[], f: ReviewFilters, allowed: ReadonlySet<string>): ReviewTool[] {
+  const q = f.query.trim().toLowerCase()
+  return tools.filter(t => {
+    if (q && !t.name.toLowerCase().includes(q) && !(t.description ?? '').toLowerCase().includes(q)) return false
+    if (f.tier !== 'all' && t.tier !== f.tier) return false
+    if (f.state !== 'all' && t.approval_status !== f.state) return false
+    if (f.selection === 'allowed' && !allowed.has(t.name)) return false
+    if (f.selection === 'blocked' && allowed.has(t.name)) return false
+    return true
+  })
+}
+
+/** Clamp a 1-based page into range for `total` rows. */
+export function clampPage(page: number, total: number, pageSize: number): number {
+  const pages = Math.max(1, Math.ceil(total / pageSize))
+  return Math.min(Math.max(1, page), pages)
+}
+
+// ---------------------------------------------------------------------------
+// Launch identity (UX-10). Only the backend-redacted review payload is shown.
+// ---------------------------------------------------------------------------
+
+const SAFE_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/
+
+/** POSIX sh single-quote an argument unless it is made only of safe characters. */
+export function posixQuote(word: string): string {
+  if (word === '') return "''"
+  if (SAFE_WORD.test(word)) return word
+  return `'${word.replace(/'/g, `'\\''`)}'`
+}
+
+/** The copyable launch line: command and arguments, POSIX-quoted. */
+export function formatLaunchCommand(command: string, args: string[] = []): string {
+  return [command, ...args].map(posixQuote).join(' ')
+}

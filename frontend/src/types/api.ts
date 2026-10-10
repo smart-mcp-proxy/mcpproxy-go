@@ -1470,6 +1470,8 @@ export interface ReviewTool {
 export interface ServerReviewResponse {
   server: {
     name: string; transport: string; command?: string; url?: string
+    /** Launch identity, already redacted by the core (UX-10); never read from the raw server config. */
+    args?: string[]; working_dir?: string
     quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
     definitions_captured: boolean
   }
