@@ -226,6 +226,18 @@ type Runtime struct {
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
 
+	// toolApprovalLocks serializes every read-modify-write of one server's
+	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
+	// operator approve/block/toggle, server-approval baseline promotion, the
+	// quarantine flip and the scanner's baseline+blocks write. Key: server
+	// name, value: *sync.Mutex. See lockToolApprovals.
+	toolApprovalLocks sync.Map
+
+	// toolApprovalReadHook, when set (tests only), runs inside
+	// checkToolApprovals right after each approval record is read, so tests
+	// can pause a pass mid-flight and drive interleavings deterministically.
+	toolApprovalReadHook func(serverName, toolName string)
+
 	// Last-good tool snapshots per server used to avoid transient tool loss during
 	// global discovery races/restarts.
 	lastGoodToolsMu sync.RWMutex
