@@ -182,6 +182,27 @@ func TestFormatReviewResponseTableWritesActionResult(t *testing.T) {
 	}
 }
 
+// UX-02: the approval outcome counts are printed, and anything still held is
+// warned about on stderr (JSON stdout stays clean).
+func TestReviewApproveReportsAppliedCountsAndWarnsOnHolds(t *testing.T) {
+	raw := []byte(`{"data":{"status":"approved","server_name":"lr","approved_count":165,"blocked_count":15,"still_pending":0,"still_changed":0}}`)
+	output := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
+	require.Contains(t, output, "Approved server lr: 165 tools approved, 15 blocked, 0 still pending, 0 changed")
+
+	var clean strings.Builder
+	warnApprovalHolds(&clean, "lr", raw)
+	require.Empty(t, clean.String(), "a complete approval prints no warning")
+
+	held := []byte(`{"data":{"status":"approved","server_name":"lr","approved_count":163,"blocked_count":15,"still_pending":2,"still_changed":1,"held_tools":["read_086","read_087","rug"]}}`)
+	var warn strings.Builder
+	warnApprovalHolds(&warn, "lr", held)
+	require.Contains(t, warn.String(), "Warning: 3 tool(s) on server 'lr' still need review (2 pending, 1 changed): read_086, read_087, rug")
+
+	var legacy strings.Builder
+	warnApprovalHolds(&legacy, "lr", []byte(`{"data":{"status":"approved","server_name":"lr"}}`))
+	require.Empty(t, legacy.String(), "an older core without counts prints nothing")
+}
+
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	raw := []byte(`{"data":{"servers":[{"server":"github","kind":"server_review","quarantined":true,"pending":2,"changed":1,"tier_counts":{"write":2},"scan":{"verdict":"warnings"}}]}}`)
 

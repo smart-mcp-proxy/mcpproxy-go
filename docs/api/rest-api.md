@@ -521,10 +521,31 @@ Or approve all pending/changed tools:
   "data": {
     "approved": 2,
     "tools": ["create_issue", "delete_repo"],
-    "message": "Approved 2 tools for server github-server"
+    "message": "Approved 2 of 2 requested tools for server github-server",
+    "approved_count": 40,
+    "blocked_count": 3,
+    "still_pending": 0,
+    "still_changed": 0
   }
 }
 ```
+
+The response is read back from the stored approval records after the write, so
+it reports what actually applied:
+
+- `approved`: requested tools whose record now reads approved (with
+  `approve_all`, the number of records approved). A requested name with no
+  record, or one that stayed held, is listed in `not_approved`.
+- `approved_count` / `blocked_count`: the server's approved tools that are
+  enabled / disabled (blocked).
+- `still_pending` / `still_changed`: tools on the server still held for review,
+  named (sorted, at most 50) in `held_tools`. A tool that changed or appeared
+  after the decision is held here by design.
+
+`POST /api/v1/servers/{id}/security/approve` returns the same four counts (and
+`held_tools`) next to `status: "approved"` and `server_name`. `status` keeps its
+meaning — the server approval is done — so check `still_pending` and
+`still_changed` to know whether every tool is usable.
 
 #### POST /api/v1/servers/{name}/tools/block
 
