@@ -591,7 +591,19 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 	if err := m.AddServerConfig(id, serverConfig); err != nil {
 		return err
 	}
+	return m.connectAdded(id, serverConfig, true)
+}
 
+// ConnectServer connects the client currently registered under id, if any. It
+// is the connect half of AddServer for a caller that registered the config
+// under its own lock (AddServerConfig) and must not hold that lock across a
+// slow dial. A client that is gone (removed by a newer commit) is skipped
+// quietly: whatever replaced or removed it owns the connection now.
+func (m *Manager) ConnectServer(id string, serverConfig *config.ServerConfig) error {
+	return m.connectAdded(id, serverConfig, false)
+}
+
+func (m *Manager) connectAdded(id string, serverConfig *config.ServerConfig, logMissing bool) error {
 	if !serverConfig.Enabled {
 		m.logger.Debug("Skipping connection for disabled server",
 			zap.String("id", id),
@@ -601,6 +613,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 
 	// Check if client exists and is already connected
 	if client, exists := m.GetClient(id); exists {
+		if cc := client.GetConfig(); cc != nil && !cc.Enabled {
+			return nil
+		}
 		if client.IsConnected() {
 			m.logger.Debug("Server is already connected, skipping connection attempt",
 				zap.String("id", id),
@@ -641,7 +656,7 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			// For non-OAuth errors, still return error
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}
-	} else {
+	} else if logMissing {
 		m.logger.Error("Client not found after AddServerConfig - this should not happen",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))

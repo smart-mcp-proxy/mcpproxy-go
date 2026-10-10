@@ -4253,6 +4253,18 @@ func (r *Runtime) ClearPendingServerRemoval(name string) {
 	delete(r.pendingServerRemovals, name)
 }
 
+// pendingServerRemovalNames returns the servers an applied config removed whose
+// cleanup has not consumed the mark yet (a copy; does not consume).
+func (r *Runtime) pendingServerRemovalNames() map[string]struct{} {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	out := make(map[string]struct{}, len(r.pendingServerRemovals))
+	for n := range r.pendingServerRemovals {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
 func (r *Runtime) takePendingServerRemoval(name string) bool {
 	r.pendingRemovalMu.Lock()
 	defer r.pendingRemovalMu.Unlock()
