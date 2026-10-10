@@ -4383,6 +4383,22 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 	return a.server.UnquarantineServer(serverName)
 }
 
+// ServerEpoch implements scanner.EpochBoundUnquarantiner.
+func (a *serverUnquarantinerAdapter) ServerEpoch(serverName string) uint64 {
+	if a.server == nil || a.server.runtime == nil {
+		return 0
+	}
+	return a.server.runtime.ServerRemovalEpoch(serverName)
+}
+
+// UnquarantineServerAtEpoch implements scanner.EpochBoundUnquarantiner.
+func (a *serverUnquarantinerAdapter) UnquarantineServerAtEpoch(serverName string, epoch uint64, beforeChange func() error) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.runtime.QuarantineServerAtEpoch(serverName, false, epoch, beforeChange)
+}
+
 // RecordToolBlocksForSecurityApproval publishes audit events for blocks that
 // the scanner service committed atomically with the approved baseline.
 func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {

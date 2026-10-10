@@ -127,6 +127,17 @@ type ServerUnquarantiner interface {
 	UnquarantineServer(serverName string) error
 }
 
+// EpochBoundUnquarantiner is an optional ServerUnquarantiner capability that
+// ties an approval to the server incarnation it reviewed. The epoch is read
+// before the approval starts; UnquarantineServerAtEpoch fails, writing nothing,
+// when the server was removed (and possibly re-added) since, and runs
+// beforeChange (the baseline write) under the owner's commit lock so a stale
+// baseline can never be written for a replacement (UX-01 r10).
+type EpochBoundUnquarantiner interface {
+	ServerEpoch(serverName string) uint64
+	UnquarantineServerAtEpoch(serverName string, epoch uint64, beforeChange func() error) error
+}
+
 type ToolBlockRecorder interface {
 	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
 }
@@ -1718,6 +1729,11 @@ func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string
 }
 
 func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock) error {
+	// The approval belongs to the server incarnation reviewed now (UX-01 r10).
+	var epoch uint64
+	if bound, ok := s.unquarantiner.(EpochBoundUnquarantiner); ok && bound != nil {
+		epoch = bound.ServerEpoch(serverName)
+	}
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
 	if err != nil {
@@ -1776,44 +1792,65 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	var saveErr error
-	if len(blocks) == 0 {
-		saveErr = s.storage.SaveIntegrityBaseline(baseline)
-	} else {
-		saveErr = s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+	saveBaseline := func() error {
+		var saveErr error
+		if len(blocks) == 0 {
+			saveErr = s.storage.SaveIntegrityBaseline(baseline)
+		} else {
+			saveErr = s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+		}
+		if saveErr != nil {
+			return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
+		}
+		return nil
 	}
-	if saveErr != nil {
-		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
-	}
-	if len(blocks) > 0 {
-		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
-			toolNames := make([]string, 0, len(blocks))
-			for _, block := range blocks {
-				toolNames = append(toolNames, block.ToolName)
+	recordBlocks := func() {
+		if len(blocks) > 0 {
+			if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+				toolNames := make([]string, 0, len(blocks))
+				for _, block := range blocks {
+					toolNames = append(toolNames, block.ToolName)
+				}
+				recorder.RecordToolBlocksForSecurityApproval(serverName, toolNames, approvedBy)
 			}
-			recorder.RecordToolBlocksForSecurityApproval(serverName, toolNames, approvedBy)
 		}
 	}
 
-	// Actually unquarantine the server: clear the flag in storage, persist
-	// config, trigger a tool (re)index, and emit the same events the normal
-	// unquarantine path emits. This is the primary user-visible effect of
-	// approval — without it, the server stays quarantined forever and the
-	// approval is cosmetic.
-	if s.unquarantiner != nil {
-		if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
-			// Report the error to the caller but keep the baseline we just
-			// saved — the caller can retry via the normal unquarantine path.
-			s.logger.Error("Failed to unquarantine server after approval",
-				zap.String("server", serverName),
-				zap.Error(err),
-			)
-			return fmt.Errorf("failed to unquarantine server %q after saving baseline: %w", serverName, err)
+	if bound, ok := s.unquarantiner.(EpochBoundUnquarantiner); ok && bound != nil {
+		// Baseline write and unquarantine happen together, for the server
+		// incarnation that was reviewed.
+		if err := bound.UnquarantineServerAtEpoch(serverName, epoch, saveBaseline); err != nil {
+			s.logger.Error("Failed to approve server after security scan",
+				zap.String("server", serverName), zap.Error(err))
+			return fmt.Errorf("failed to approve server %q: %w", serverName, err)
 		}
+		recordBlocks()
 	} else {
-		s.logger.Warn("ApproveServer: no unquarantiner configured; server will not be unquarantined automatically",
-			zap.String("server", serverName),
-		)
+		if err := saveBaseline(); err != nil {
+			return err
+		}
+		recordBlocks()
+
+		// Actually unquarantine the server: clear the flag in storage, persist
+		// config, trigger a tool (re)index, and emit the same events the normal
+		// unquarantine path emits. This is the primary user-visible effect of
+		// approval — without it, the server stays quarantined forever and the
+		// approval is cosmetic.
+		if s.unquarantiner != nil {
+			if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
+				// Report the error to the caller but keep the baseline we just
+				// saved — the caller can retry via the normal unquarantine path.
+				s.logger.Error("Failed to unquarantine server after approval",
+					zap.String("server", serverName),
+					zap.Error(err),
+				)
+				return fmt.Errorf("failed to unquarantine server %q after saving baseline: %w", serverName, err)
+			}
+		} else {
+			s.logger.Warn("ApproveServer: no unquarantiner configured; server will not be unquarantined automatically",
+				zap.String("server", serverName),
+			)
+		}
 	}
 
 	s.logger.Info("Server approved after security scan",

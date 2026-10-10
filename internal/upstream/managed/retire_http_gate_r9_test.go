@@ -71,8 +71,20 @@ func TestRetire_AfterHTTPAdmission_SendsNothingToOldEndpoint(t *testing.T) {
 
 			retired := make(chan struct{})
 			go func() { mc.Retire(); close(retired) }()
-			// Retire must not return while an admitted request is still pre-wire;
-			// it aborts it, so it completes once the request is released.
+			// Retirement must be observable (flag set, context cancelled) before
+			// the parked request resumes, and Retire must not return while the
+			// admission is held (UX-01 r10).
+			select {
+			case <-mc.retireCtx.Done():
+			case <-time.After(10 * time.Second):
+				t.Fatal("retirement context was never cancelled")
+			}
+			require.True(t, mc.IsRetired())
+			select {
+			case <-retired:
+				t.Fatal("Retire returned while an admitted request was still held")
+			case <-time.After(150 * time.Millisecond):
+			}
 			close(resume)
 			select {
 			case <-retired:

@@ -1851,6 +1851,13 @@ func (r *Runtime) registerCurrentServer(want *config.ServerConfig) *config.Serve
 func (r *Runtime) guardSupervisorAction(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error {
 	r.configCommitMu.Lock()
 	defer r.configCommitMu.Unlock()
+	// A name pending removal is gone for the supervisor even if a stale
+	// snapshot still lists it (UX-01 r10).
+	if want != nil {
+		if _, gone := r.pendingServerRemovalNames()[name]; gone {
+			return supervisor.ErrStaleAction
+		}
+	}
 	if want == nil {
 		if live := r.Config(); live != nil {
 			for _, s := range live.Servers {
@@ -1940,6 +1947,9 @@ func (r *Runtime) CommitServerUpdate(name string,
 	if CommitServerUpdateAfterReadHook != nil {
 		CommitServerUpdateAfterReadHook(name)
 	}
+	// build may edit existing in place, so capture the quarantine state it
+	// started from.
+	wasQuarantined := existing.Quarantined
 	updated, err := build(existing)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUpdateRejected, err)
@@ -1968,6 +1978,14 @@ func (r *Runtime) CommitServerUpdate(name string,
 	if apply != nil {
 		apply(updated)
 	}
+	// An update that quarantines the server is the transition the reconciliation
+	// would purge on, but storage already holds the new state by the time it
+	// runs, so it sees no transition. Purge the indexed descriptions here, in
+	// the commit, so they are never searchable once the quarantine is
+	// persisted (UX-01 r10).
+	if updated.Quarantined && !wasQuarantined {
+		r.purgeQuarantinedServerFromIndex(name)
+	}
 	// Publish the replacement into the live config first: the save below
 	// rebuilds the server list from storage, whose record cannot carry config-only
 	// state such as the "quarantine value was stated" bit, which it recovers from
@@ -1994,8 +2012,14 @@ func (r *Runtime) CommitServerUpdate(name string,
 // records of a removed server so a same-name server added later starts with a
 // fresh review and no inherited credentials. Caller holds configCommitMu.
 func (r *Runtime) purgeRemovedServerSecurityState(name string) {
+	r.bumpRemovalEpoch(name)
 	if r.storageManager == nil {
 		return
+	}
+	// The scan-approval integrity baseline is keyed by name too (UX-01 r10).
+	if err := r.storageManager.DeleteIntegrityBaseline(name); err != nil {
+		r.logger.Warn("Failed to clear integrity baseline for removed server",
+			zap.String("server", name), zap.Error(err))
 	}
 	if err := r.storageManager.ClearOAuthState(name); err != nil {
 		r.logger.Warn("Failed to clear OAuth state for removed server",
@@ -2100,6 +2124,24 @@ func (r *Runtime) saveConfigurationLocked() error {
 	configCopy := snapshot.Clone()
 	if configCopy == nil {
 		return fmt.Errorf("failed to clone configuration")
+	}
+
+	// A server an applied config removed is gone until its cleanup consumes the
+	// mark, even though its storage row still exists. Republishing that row
+	// would hand the supervisor a fresh, approved, enabled server to relaunch
+	// with its old credentials before the cleanup runs (UX-01 r10).
+	if pending := r.pendingServerRemovalNames(); len(pending) > 0 {
+		kept := latestServers[:0:0]
+		for _, s := range latestServers {
+			if s == nil {
+				continue
+			}
+			if _, gone := pending[s.Name]; gone {
+				continue
+			}
+			kept = append(kept, s)
+		}
+		latestServers = kept
 	}
 
 	// Update servers with latest from storage
@@ -2590,6 +2632,24 @@ func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
+	return r.quarantineServer(serverName, quarantined, nil, nil)
+}
+
+// ErrServerGenerationChanged is returned when an approval captured against one
+// incarnation of a server reaches a runtime where that server was removed since.
+var ErrServerGenerationChanged = fmt.Errorf("server was removed since the approval was started")
+
+// QuarantineServerAtEpoch is QuarantineServer bound to the server incarnation
+// the caller reviewed: it fails with ErrServerGenerationChanged, changing
+// nothing, if the server was removed (and possibly re-added) after epoch was
+// read from ServerRemovalEpoch. beforeChange, when non-nil, runs under the
+// commit lock after that check and before the state changes, so a record the
+// approval writes (the scan baseline) can never be written for a replacement.
+func (r *Runtime) QuarantineServerAtEpoch(serverName string, quarantined bool, epoch uint64, beforeChange func() error) error {
+	return r.quarantineServer(serverName, quarantined, &epoch, beforeChange)
+}
+
+func (r *Runtime) quarantineServer(serverName string, quarantined bool, epoch *uint64, beforeChange func() error) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
@@ -2602,6 +2662,16 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	if err := func() error {
 		r.configCommitMu.Lock()
 		defer r.configCommitMu.Unlock()
+		if epoch != nil {
+			if _, gone := r.pendingServerRemovalNames()[serverName]; gone || r.ServerRemovalEpoch(serverName) != *epoch {
+				return fmt.Errorf("%w: '%s'", ErrServerGenerationChanged, serverName)
+			}
+		}
+		if beforeChange != nil {
+			if err := beforeChange(); err != nil {
+				return err
+			}
+		}
 		if err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
 			r.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
 			return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)

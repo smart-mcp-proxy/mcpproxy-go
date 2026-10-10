@@ -110,7 +110,7 @@ func TestServerRemovalCleanup_NotCancelledBySaveResurrection(t *testing.T) {
 		return &n, nil
 	}))
 	require.NoError(t, rt.SaveConfiguration())
-	require.True(t, serverNames(rt.Config())["srv-a"], "precondition: save resurrected A into the live config")
+	require.False(t, serverNames(rt.Config())["srv-a"], "save republished a server pending removal (UX-01 r10)")
 
 	close(gate)
 	require.Eventually(t, func() bool {
@@ -293,10 +293,12 @@ func TestServerRemovalCleanup_NotCancelledByUnrelatedApplyCarryingResurrectedNam
 		return &n, nil
 	}))
 	require.NoError(t, rt.SaveConfiguration())
-	require.True(t, serverNames(rt.Config())["srv-a"], "precondition: save resurrected A")
+	// A save no longer republishes the server pending removal (UX-01 r10), so
+	// there is no resurrected entry for an unrelated write to carry forward.
+	require.False(t, serverNames(rt.Config())["srv-a"], "save republished a server pending removal (UX-01 r10)")
 
-	// Unrelated config write that carries the resurrected A (and B) forward.
-	_, err = rt.ApplyConfig(validConfigWith(rt, a, b), "")
+	// Unrelated config write that carries B.
+	_, err = rt.ApplyConfig(validConfigWith(rt, b), "")
 	require.NoError(t, err)
 
 	close(gate)

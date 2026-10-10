@@ -662,6 +662,12 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
 	cfg.Gate = c.requestGate()
+	// OAuth discovery, registration and token requests carry the client secret
+	// or refresh token; they leave through the OAuth config's own HTTP client,
+	// which must obey the same retirement gate (UX-01 r10).
+	if oauthConfig != nil && cfg.Gate != nil {
+		oauthConfig.HTTPClient = proxytransport.GateHTTPClient(oauthConfig.HTTPClient, cfg.Gate)
+	}
 	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
 	cfg.ForwardNames = func() []string {
 		if pp := c.forwardPolicy.Load(); pp != nil {

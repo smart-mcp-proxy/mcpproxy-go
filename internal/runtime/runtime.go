@@ -122,6 +122,12 @@ type Runtime struct {
 	// server added since; a deliberate re-add clears the name. Leaf lock.
 	pendingRemovalMu      sync.Mutex
 	pendingServerRemovals map[string]struct{}
+	// serverRemovalEpochs counts, per server name, how many times a removal was
+	// committed or published for it. An approval captured against one epoch
+	// must not complete after the name was removed (and possibly re-added), or
+	// the old server's review would apply to its replacement (UX-01 r10).
+	// Guarded by pendingRemovalMu.
+	serverRemovalEpochs map[string]uint64
 
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
@@ -4268,9 +4274,33 @@ func (r *Runtime) noteServerSetChange(oldCfg, next *config.Config) {
 		if s != nil {
 			if _, ok := present[s.Name]; !ok {
 				r.pendingServerRemovals[s.Name] = struct{}{}
+				r.bumpRemovalEpochLocked(s.Name)
 			}
 		}
 	}
+}
+
+// bumpRemovalEpochLocked advances name's removal epoch. Caller holds pendingRemovalMu.
+func (r *Runtime) bumpRemovalEpochLocked(name string) {
+	if r.serverRemovalEpochs == nil {
+		r.serverRemovalEpochs = make(map[string]uint64)
+	}
+	r.serverRemovalEpochs[name]++
+}
+
+func (r *Runtime) bumpRemovalEpoch(name string) {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	r.bumpRemovalEpochLocked(name)
+}
+
+// ServerRemovalEpoch returns the number of removals recorded for name. An
+// approval flow captures it before it starts and hands it back to
+// QuarantineServerAtEpoch, which refuses once the server was removed since.
+func (r *Runtime) ServerRemovalEpoch(name string) uint64 {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	return r.serverRemovalEpochs[name]
 }
 
 // ClearPendingServerRemoval forgets a pending removal for name; a deliberate

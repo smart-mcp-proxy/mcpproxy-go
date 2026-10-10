@@ -2007,49 +2007,9 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		return nil
 	}
 
-	approved := 0
-	for _, toolName := range toolNames {
-		record, err := r.storageManager.GetToolApproval(serverName, toolName)
-		if err != nil {
-			r.logger.Warn("Tool approval record not found for approval",
-				zap.String("server", serverName),
-				zap.String("tool", toolName),
-				zap.Error(err))
-			continue
-		}
-
-		if err := r.enforceInvariant(serverName, toolName, record.Status, storage.ToolApprovalStatusApproved, ReasonUserApprove); err != nil {
-			return err
-		}
-
-		// Spec 105 FR-009: an operator write on a pre-105 record must not
-		// end its legacy consult while it still restricts (saveReadToolApproval).
-		wasUnstamped := !record.IdentityKeyed
-
-		record.Status = storage.ToolApprovalStatusApproved
-		record.ApprovedHash = record.CurrentHash
-		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
-		record.ApprovedAt = time.Now().UTC()
-		record.ApprovedBy = approvedBy
-		record.PreviousDescription = ""
-		record.PreviousAnnotations = nil
-		record.PreviousSchema = ""
-		record.PreviousOutputSchema = ""
-		record.ClearScanHold()
-
-		if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
-			return err
-		}
-		approved++
-
-		r.logger.Info("Tool approved",
-			zap.String("server", serverName),
-			zap.String("tool", toolName),
-			zap.String("approved_by", approvedBy))
-
-		// Emit activity event
-		r.emitToolQuarantineEvent(serverName, toolName, "tool_approved",
-			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
+	approved, err := r.approveToolsCommitted(serverName, toolNames, approvedBy)
+	if err != nil {
+		return err
 	}
 
 	// Notify SSE subscribers that the server's tool-quarantine counts changed.
@@ -2071,6 +2031,61 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 	}
 
 	return nil
+}
+
+// approveToolsCommitted writes the approval records under the config commit
+// lock. A removal purges the server's approval records inside that lock, so an
+// approval that read a record before the removal can no longer write it back
+// afterwards and restore the removed server's baseline (UX-01 r10).
+func (r *Runtime) approveToolsCommitted(serverName string, toolNames []string, approvedBy string) (int, error) {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	approved := 0
+	for _, toolName := range toolNames {
+		record, err := r.storageManager.GetToolApproval(serverName, toolName)
+		if err != nil {
+			r.logger.Warn("Tool approval record not found for approval",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Error(err))
+			continue
+		}
+
+		if err := r.enforceInvariant(serverName, toolName, record.Status, storage.ToolApprovalStatusApproved, ReasonUserApprove); err != nil {
+			return approved, err
+		}
+
+		// Spec 105 FR-009: an operator write on a pre-105 record must not
+		// end its legacy consult while it still restricts (saveReadToolApproval).
+		wasUnstamped := !record.IdentityKeyed
+
+		record.Status = storage.ToolApprovalStatusApproved
+		record.ApprovedHash = record.CurrentHash
+		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.ApprovedAt = time.Now().UTC()
+		record.ApprovedBy = approvedBy
+		record.PreviousDescription = ""
+		record.PreviousAnnotations = nil
+		record.PreviousSchema = ""
+		record.PreviousOutputSchema = ""
+		record.ClearScanHold()
+
+		if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
+			return approved, err
+		}
+		approved++
+
+		r.logger.Info("Tool approved",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("approved_by", approvedBy))
+
+		// Emit activity event
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_approved",
+			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
+	}
+
+	return approved, nil
 }
 
 // setToolEnabledNoEmit applies the visibility toggle without firing the

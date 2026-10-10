@@ -279,7 +279,7 @@ func TestLoadConfiguredServers_DelayedRemovalSyncSurvivesResurrectingSave(t *tes
 		return &n, nil
 	}))
 	require.NoError(t, rt.SaveConfiguration())
-	require.True(t, serverNames(rt.Config())["srv-a"], "precondition: save should have resurrected A")
+	require.False(t, serverNames(rt.Config())["srv-a"], "save republished a server pending removal (UX-01 r10)")
 
 	release()
 	waitServerGone(t, rt, "srv-a")

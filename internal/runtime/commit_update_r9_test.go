@@ -97,3 +97,36 @@ func TestCommitServerUpdate_RemovedByApplyConfigIsNotFound(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	require.ErrorIs(t, rt.CommitServerUpdate("srv-a", func(e *config.ServerConfig) (*config.ServerConfig, error) { return e, nil }, nil), ErrServerNotFound)
 }
+
+// UX-01 r10: an update commit that quarantines a server purges its indexed
+// tool descriptions in the commit, and they stay absent after reconciliation.
+func TestCommitServerUpdate_QuarantinePurgesIndex(t *testing.T) {
+	rt := newPurgeTestRuntime(t)
+	a := r6Server("srv-a", "http://127.0.0.1:1/mcp", false)
+	a.Enabled = false
+	require.NoError(t, rt.StorageManager().CreateUpstreamServer(a))
+	require.NoError(t, rt.UpdateConfigFrom(func(cur *config.Config) (*config.Config, error) {
+		n := *cur
+		n.Servers = []*config.ServerConfig{a}
+		return &n, nil
+	}))
+	indexTwoTools(t, rt, "srv-a")
+
+	require.NoError(t, rt.CommitServerUpdate("srv-a", func(existing *config.ServerConfig) (*config.ServerConfig, error) {
+		existing.Quarantined = true
+		return existing, nil
+	}, nil))
+
+	indexed, err := rt.indexManager.GetToolsByServer("srv-a")
+	require.NoError(t, err)
+	require.Empty(t, indexed, "quarantined server's descriptions stayed indexed after the update commit")
+	res, err := rt.indexManager.SearchTools("ssh", 10)
+	require.NoError(t, err)
+	require.Empty(t, res)
+
+	require.NoError(t, rt.LoadConfiguredServers(rt.Config()))
+	time.Sleep(200 * time.Millisecond)
+	indexed, err = rt.indexManager.GetToolsByServer("srv-a")
+	require.NoError(t, err)
+	require.Empty(t, indexed)
+}
