@@ -206,21 +206,19 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		s.writeCredentialIssueError(w, r, err)
 		return
 	}
-	created, _ := s.tokenStore.GetAgentTokenByName(req.Name)
+	// Projected from the committed record: no post-commit store read can turn
+	// a minted token into a failure (FR-007).
+	allowed, perms := res.Scope()
 	resp := createTokenResponse{
-		Name:      req.Name,
-		Token:     res.Secret,
-		CreatedAt: res.View.CreatedAt,
+		Name:           req.Name,
+		Token:          res.Secret,
+		CreatedAt:      res.View.CreatedAt,
+		AllowedServers: allowed,
+		Permissions:    perms,
+		ProfilePin:     res.View.Profile,
 	}
 	if res.View.ExpiresAt != nil {
 		resp.ExpiresAt = *res.View.ExpiresAt
-	}
-	if created != nil {
-		resp.AllowedServers, resp.Permissions, resp.ProfilePin = created.AllowedServers, created.Permissions, created.ProfilePin
-	} else {
-		// The listing is best-effort after the commit (FR-007): fall back to the
-		// view, never fail a call whose token exists.
-		resp.ProfilePin = res.View.Profile
 	}
 
 	s.writeJSON(w, http.StatusCreated, contracts.NewSuccessResponse(resp))

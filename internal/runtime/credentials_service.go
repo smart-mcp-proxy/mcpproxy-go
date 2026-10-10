@@ -329,6 +329,15 @@ type IssuedCredentialResult struct {
 	record *auth.AgentToken
 }
 
+// Scope returns the committed token's allowed servers and permissions (the
+// REST create response echoes them without a post-commit store read).
+func (r *IssuedCredentialResult) Scope() (allowedServers, permissions []string) {
+	if r == nil || r.record == nil {
+		return nil, nil
+	}
+	return append([]string(nil), r.record.AllowedServers...), append([]string(nil), r.record.Permissions...)
+}
+
 // RevokeResult is a revoke outcome.
 type RevokeResult struct {
 	View                  CredentialView
