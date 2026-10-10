@@ -285,6 +285,8 @@ type IssueClientRequest struct {
 	Now time.Time
 	// RequireProfile and RefuseExistingRecord are both true from MCP.
 	RequireProfile, RefuseExistingRecord bool
+	// EnforceWriteGates (MCP): see CredentialRef.EnforceWriteGates.
+	EnforceWriteGates bool
 	// expiresAt is a pre-parsed expiry (ClientsService.Add's legacy entry);
 	// zero means "parse ExpiresIn".
 	expiresAt time.Time
@@ -304,6 +306,8 @@ type IssueTokenRequest struct {
 	Expiry                      ExpiryDefault
 	// RequireProfile is true from MCP; EnforceGuard (MCP) also stamps GuardBound.
 	RequireProfile, EnforceGuard bool
+	// EnforceWriteGates (MCP): see CredentialRef.EnforceWriteGates.
+	EnforceWriteGates bool
 	// ValidateServers checks REST allowed_servers against the known servers
 	// (the REST handler supplies it so its error texts are unchanged).
 	ValidateServers func([]string) error
@@ -311,7 +315,13 @@ type IssueTokenRequest struct {
 
 // CredentialRef names exactly one credential: a custom client id or an agent
 // token name (the OWNERLESS namespace only, data-model §9).
-type CredentialRef struct{ Client, Token string }
+type CredentialRef struct {
+	Client, Token string
+	// EnforceWriteGates (MCP) re-checks read_only_mode and disable_management
+	// under bindingWriteMu, so a mutation queued behind a config write that
+	// turns a gate on is refused (the handler's check alone is a TOCTOU).
+	EnforceWriteGates bool
+}
 
 // CredentialFilter narrows List.
 type CredentialFilter struct {
@@ -373,6 +383,24 @@ func profileExistsIn(cfg *config.Config, name string) bool {
 }
 
 func (s *CredentialsService) screen() *CredentialScreen { return NewCredentialScreen(s.cfg()) }
+
+// writeGateError re-reads the live MCP write gates (s.mu held). The texts are
+// byte-equal to the `profiles` and `upstream_servers` refusals.
+func (s *CredentialsService) writeGateError(enforce bool) error {
+	if !enforce {
+		return nil
+	}
+	cfg := s.cfg()
+	switch {
+	case cfg == nil:
+		return nil
+	case cfg.ReadOnlyMode:
+		return credErr(profile.CredentialErrorCodeReadOnlyMode, "", "Operation not allowed in read-only mode", 403)
+	case cfg.DisableManagement:
+		return credErr(profile.CredentialErrorCodeManagementDisabled, "", "Server management is disabled for security", 403)
+	}
+	return nil
+}
 
 // lifecycleDiff is the always-complete diff of an issue/revoke record
 // (data-model §3): no secret, no hash, no purpose text.
@@ -490,6 +518,9 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mcp := req.RequireProfile
+	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
+		return nil, err
+	}
 
 	// 1. Screen (data-model §8.2 order): every raw value, every array element.
 	if hit := s.screen().ScreenFields([]ScreenField{
@@ -737,6 +768,9 @@ func (s *CredentialsService) IssueClient(ctx context.Context, a Actor, req Issue
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mcp := req.RequireProfile
+	if err := s.writeGateError(req.EnforceWriteGates); err != nil {
+		return nil, err
+	}
 	modeText := ""
 	if req.Mode != nil {
 		modeText = *req.Mode
@@ -911,6 +945,9 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.writeGateError(ref.EnforceWriteGates); err != nil {
+		return nil, err
+	}
 	if ref.Client != "" {
 		return s.revokeClientLocked(ctx, a, ref.Client)
 	}

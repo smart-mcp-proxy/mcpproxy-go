@@ -375,7 +375,7 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		if client != "" && !clientsSupported {
 			return recorded, nil, nil, unsupported
 		}
-		ref := runtime.CredentialRef{Client: client, Token: token}
+		ref := runtime.CredentialRef{Client: client, Token: token, EnforceWriteGates: op == "revoke"}
 		if op == "get" {
 			v, err := cs.Get(ref)
 			if err != nil {
@@ -408,7 +408,7 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		res, err := cs.IssueClient(ctx, actor, runtime.IssueClientRequest{
 			ID: id, DisplayName: display, Profile: prof, ProfilePresent: hasProfile, Mode: mode,
 			ExpiresIn: exp, Expiry: runtime.ExpiryRequired, Purpose: purpose,
-			RequireProfile: true, RefuseExistingRecord: true,
+			RequireProfile: true, RefuseExistingRecord: true, EnforceWriteGates: true,
 		})
 		if err != nil {
 			return recorded, nil, nil, err
@@ -422,7 +422,7 @@ func (p *MCPProxyServer) runCredentialsOperation(ctx context.Context, args map[s
 		purpose, _ := str("purpose")
 		res, err := cs.IssueToken(ctx, actor, runtime.IssueTokenRequest{
 			Name: name, Profile: prof, ProfilePresent: hasProfile, ExpiresIn: exp, Expiry: runtime.ExpiryRequired,
-			Purpose: purpose, RequireProfile: true, EnforceGuard: true,
+			Purpose: purpose, RequireProfile: true, EnforceGuard: true, EnforceWriteGates: true,
 		})
 		if err != nil {
 			return recorded, nil, nil, err

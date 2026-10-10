@@ -738,3 +738,40 @@ func TestCredentialsService_LifecycleDiffKindsAndTokenRefSyntax(t *testing.T) {
 		assert.NotContains(t, err.Error(), bad)
 	}
 }
+
+// Review r2: the MCP write gates are re-checked under bindingWriteMu, so a
+// mutation queued behind a config write that turns a gate on is refused.
+func TestCredentialsService_WriteGatesRecheckedUnderMutex(t *testing.T) {
+	h := newCredHarness(t)
+	ctx := context.Background()
+	_, err := h.cs.IssueToken(ctx, mcpActor(), mcpTokenReq("pre", "ro", "1h"))
+	require.NoError(t, err)
+	h.svc.mu.Lock() // a config write holds the mutex...
+	done := make(chan error, 3)
+	go func() {
+		r := mcpTokenReq("queued", "ro", "1h")
+		r.EnforceWriteGates = true
+		_, err := h.cs.IssueToken(ctx, mcpActor(), r)
+		done <- err
+	}()
+	go func() {
+		r := mcpClientReq("queued-c", "ro", "1h")
+		r.EnforceWriteGates = true
+		_, err := h.cs.IssueClient(ctx, mcpActor(), r)
+		done <- err
+	}()
+	go func() {
+		_, err := h.cs.Revoke(ctx, mcpActor(), CredentialRef{Token: "pre", EnforceWriteGates: true}, false)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	h.cfg.ReadOnlyMode = true // ...and turns read_only_mode on before releasing it
+	h.svc.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, profile.CredentialErrorCodeReadOnlyMode, codeOf(<-done))
+	}
+	tok, _ := h.sm.GetAgentTokenByName("pre")
+	assert.False(t, tok.Revoked)
+	q, _ := h.sm.GetAgentTokenByName("queued")
+	assert.Nil(t, q)
+}
