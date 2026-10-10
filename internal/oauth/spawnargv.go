@@ -136,6 +136,19 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	}
 	if differs {
 		maskedDecoded := r.argvWith(decoded, spawnRules, nil)
+		// A quoted or escaped multiword env assignment (PASSWORD='a b c') decodes
+		// to one token that is not a flag, so the generic leaf rule would mask
+		// only its first whitespace-delimited fragment. The NAME decides: mask
+		// the whole decoded value.
+		for i, d := range decoded {
+			if d == tokens[i] {
+				continue
+			}
+			if name, val, ok := strings.Cut(d, "="); ok && val != "" && isShellVarName(name) &&
+				r.envAssignmentNamesSecret(name, spawnRules) {
+				maskedDecoded[i] = name + "=" + r.masker()(val)
+			}
+		}
 		for i := range masked {
 			if maskedDecoded[i] != decoded[i] {
 				masked[i] = maskedDecoded[i]
@@ -157,24 +170,62 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	return b.String()
 }
 
+// isShellVarName reports whether s is a valid shell variable name, the left
+// side of a `NAME=value` assignment.
+func isShellVarName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '_', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// envAssignmentNamesSecret applies the same name rule the flag path uses to a
+// shell variable name.
+func (r Redaction) envAssignmentNamesSecret(name string, spawnRules bool) bool {
+	if spawnRules {
+		return isSensitiveSpawnFlag(name)
+	}
+	return IsSensitiveKeyName(name)
+}
+
 // shellDecodeToken removes shell quoting and backslash escapes from one command
-// token, the way a POSIX shell would before handing it to the program. It is used
-// only to DECIDE what to mask; the display text keeps the original spelling.
+// token, the way a POSIX shell (bash) would before handing it to the program. It
+// is used only to DECIDE what to mask; the display text keeps the original
+// spelling. Bash's ANSI-C ($'...') and locale ($"...") quoting forms are decoded
+// too: $'--password' is the flag --password.
 func shellDecodeToken(t string) string {
 	if !strings.ContainsAny(t, "'\"\\") {
 		return t
 	}
 	var b strings.Builder
 	var quote byte
+	ansi := false
 	for i := 0; i < len(t); i++ {
 		c := t[i]
 		switch {
+		case quote == 0 && c == '$' && i+1 < len(t) && t[i+1] == '\'':
+			quote, ansi = '\'', true
+			i++
+		case quote == 0 && c == '$' && i+1 < len(t) && t[i+1] == '"':
+			quote = '"'
+			i++
+		case ansi && c == '\\' && i+1 < len(t):
+			i = decodeANSICEscape(t, i, &b)
 		case c == '\\' && quote != '\'' && i+1 < len(t):
 			i++
 			b.WriteByte(t[i])
 		case quote != 0:
 			if c == quote {
-				quote = 0
+				quote, ansi = 0, false
 			} else {
 				b.WriteByte(c)
 			}
@@ -185,6 +236,76 @@ func shellDecodeToken(t string) string {
 		}
 	}
 	return b.String()
+}
+
+// decodeANSICEscape decodes the backslash escape starting at t[i] inside a
+// $'...' string, writes the result to b and returns the index of its last byte.
+func decodeANSICEscape(t string, i int, b *strings.Builder) int {
+	i++ // the escape letter
+	switch c := t[i]; c {
+	case 'a':
+		b.WriteByte(7)
+	case 'b':
+		b.WriteByte(8)
+	case 'e', 'E':
+		b.WriteByte(27)
+	case 'f':
+		b.WriteByte(12)
+	case 'n':
+		b.WriteByte('\n')
+	case 'r':
+		b.WriteByte('\r')
+	case 't':
+		b.WriteByte('\t')
+	case 'v':
+		b.WriteByte(11)
+	case 'x', 'u', 'U':
+		max := map[byte]int{'x': 2, 'u': 4, 'U': 8}[c]
+		n, j := 0, i+1
+		for ; j < len(t) && j-i-1 < max; j++ {
+			d := hexVal(t[j])
+			if d < 0 {
+				break
+			}
+			n = n*16 + d
+		}
+		if j == i+1 {
+			b.WriteByte('\\')
+			b.WriteByte(c)
+			return i
+		}
+		if c == 'x' {
+			b.WriteByte(byte(n))
+		} else {
+			b.WriteRune(rune(n))
+		}
+		return j - 1
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		n, j := 0, i
+		for ; j < len(t) && j-i < 3 && t[j] >= '0' && t[j] <= '7'; j++ {
+			n = n*8 + int(t[j]-'0')
+		}
+		b.WriteByte(byte(n))
+		return j - 1
+	case '\\', '\'', '"', '?':
+		b.WriteByte(c)
+	default:
+		b.WriteByte('\\')
+		b.WriteByte(c)
+	}
+	return i
+}
+
+func hexVal(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 type commandSegment struct {
@@ -246,18 +367,24 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 		}
 		j = i
 		var quote byte // 0 when outside quotes, else the opening quote char
+		ansi := false  // inside $'...', where a backslash escapes even in single quotes
 		for j < len(s) {
 			c := s[j]
+			if quote == 0 && c == '$' && j+1 < len(s) && s[j+1] == '\'' {
+				quote, ansi = '\'', true
+				j += 2
+				continue
+			}
 			// A backslash escapes the next byte unless it sits inside single
 			// quotes (where it is literal). Without this, `hunter2\ and\ more`
 			// splits into three tokens and only the first is masked.
-			if c == '\\' && quote != '\'' && j+1 < len(s) {
+			if c == '\\' && (quote != '\'' || ansi) && j+1 < len(s) {
 				j += 2
 				continue
 			}
 			if quote != 0 {
 				if c == quote {
-					quote = 0
+					quote, ansi = 0, false
 				}
 				j++
 				continue

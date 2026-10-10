@@ -233,6 +233,21 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"escaped flag":         {"-c", `exec npx srv --pass\word hunter2\ and\ more`},
 		"quoted inline flag":   {"-c", "exec npx srv '--password=hunter2 and more' --port 80"},
 		"escaped flag quoted":  {"-c", `exec npx srv \-\-password 'hunter2 and more'`},
+		"ansi-c flag":          {"-c", `exec npx srv $'--password' 'hunter2 and more'`},
+		"ansi-c flag and val":  {"-c", `exec npx srv $'--password' $'hunter2 and more'`},
+		"ansi-c hex flag":      {"-c", `exec npx srv $'\x2d\x2dpassword' 'hunter2 and more'`},
+		"ansi-c octal flag":    {"-c", `exec npx srv $'\055\055password' 'hunter2 and more'`},
+		"ansi-c inline":        {"-c", `exec npx srv $'--password=hunter2 and more' --port 80`},
+		"locale dq flag":       {"-c", `exec npx srv $"--password" "hunter2 and more"`},
+		"ansi-c escaped quote": {"-c", `exec npx srv --password $'hunter2\' and more' --port 80`},
+		"env assign sq":        {"-c", "PASSWORD='hunter2 and more' exec npx srv"},
+		"env assign dq":        {"-c", `PASSWORD="hunter2 and more" exec npx srv`},
+		"env assign bs":        {"-c", `PASSWORD=hunter2\ and\ more exec npx srv`},
+		"env assign api key":   {"-c", "API_KEY='hunter2 and more' exec npx srv"},
+		"env assign secret":    {"-c", "CLIENT_SECRET='hunter2 and more' exec npx srv"},
+		"env assign ansi-c":    {"-c", `PASSWORD=$'hunter2 and more' exec npx srv`},
+		"env assign export":    {"-c", "export PASSWORD='hunter2 and more'; exec npx srv"},
+		"env assign concat":    {"-c", `PASSWORD='hunter2 'and" more" exec npx srv`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
