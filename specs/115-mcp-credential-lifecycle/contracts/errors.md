@@ -28,7 +28,7 @@ A refusal is an MCP tool result with `isError: true`. Its single text content is
 | `credentials_unavailable` | all | runtime or store not wired (startup) | — | `credential service not available` |
 | `binding_bypassable_without_auth` *(existing)* | create_* | FR-008a guard delta | `bindings`, `fixes` (existing body of `runtime.BindingGuardError`) | `a client bound to profile daily-research could escape it by omitting its credential while require_mcp_auth is off` |
 
-Hidden-tool refusal: callers who are not admin callers get the plain text `unknown tool: credentials`, not a JSON body. This matches `profiles`, so a hidden tool and a nonexistent one look alike.
+Hidden-tool refusal: over an MCP transport, callers who are not admin callers get a JSON-RPC "tool not found" error from mcp-go's tool filter, not a tool result (A25). The handler's own defensive refusal, seen only by a caller that reaches it without that filter, is the plain text `unknown tool: credentials`, not a JSON body. Both match `profiles`, so a hidden tool and a nonexistent one look alike.
 
 REST mapping (FR-009, FR-010): the REST token and client routes keep their existing status codes and bodies. They do not adopt these codes in this spec, with one additive exception: a secret-shaped `name`, `id`, `display_name`, `purpose`, `profile`/`profile_pin`, `mode`, `expires_in` or any element of `allowed_servers`/`permissions` is refused by the shared service screen with 400 in the route's existing envelope, naming the field and never the value (data-model §8.2). Malformed-body 400s on these two routes change text only: they use the sanitized §8.3 taxonomy and never quote a caller key or value.
 

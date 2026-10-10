@@ -2,7 +2,7 @@
 
 **Registered on** the same servers as `profiles`: the default `/mcp` server (`mcp.go`), and the call-tool (`/mcp/call`, `/mcp/p/<slug>`) and code-exec (`/mcp/code`) mode servers (`mcp_routing.go`). It is **not** registered on direct mode (`/mcp/all`) and is not callable from `code_execution` JavaScript.
 
-**Visible and callable only by** an admin caller (spec Definitions): credential kind `api_key` or `socket`, not anonymous, with an effective profile that is none or `management_tools: true`. For every other caller the tool is absent from `tools/list`, and a forged `tools/call` answers `isError: true` with the text `unknown tool: credentials`.
+**Visible and callable only by** an admin caller (spec Definitions): credential kind `api_key` or `socket`, not anonymous, with an effective profile that is none or `management_tools: true`. For every other caller the tool is absent from `tools/list`. A forged `tools/call` over an MCP transport is rejected before the handler by mcp-go's tool filter (re-run at `tools/call`) with a JSON-RPC "tool not found" error, exactly as for a nonexistent tool and for `profiles`; no tool result is returned and nothing changes (A25). The handler re-checks the same predicate as a defence in depth: a caller that reaches it without the filter (direct handler calls in unit tests) gets `isError: true` with the text `unknown tool: credentials`.
 
 ## Tool definition
 

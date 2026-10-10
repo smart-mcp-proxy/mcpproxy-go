@@ -58,7 +58,7 @@ Every mutation takes `bindingWriteMu`, which is the same `*sync.Mutex` as `Clien
 - a resolution that is none, or a policy with `management_tools: true`
 - no binding-guarded or dangling base
 
-Two consequences follow. A hidden tool and a forged call by a non-admin both get `unknown tool: credentials`. An admin whose session selected a non-management profile is refused until it calls `set_profile("")`, which the issue explicitly allows.
+Two consequences follow. A hidden tool and a forged call by a non-admin look the same as a nonexistent tool: over MCP the tool filter answers a JSON-RPC "tool not found" error, and the handler's defensive refusal is `unknown tool: credentials` (A25). An admin whose session selected a non-management profile is refused until it calls `set_profile("")`, which the issue explicitly allows.
 
 Registration mirrors `profiles`: `mcp.go` (default server) and `mcp_routing.go` (call-tool and code-exec servers). It is never registered through `buildManagementTools`, because that path returns nothing under `read_only_mode` and `list`/`get` must stay readable. The JS sandbox's `call_tool` dispatches only `server:tool` upstream identities and has no path to built-ins (verified in `mcp_code_execution.go`). A test pins that `credentials` cannot be reached from JS.
 

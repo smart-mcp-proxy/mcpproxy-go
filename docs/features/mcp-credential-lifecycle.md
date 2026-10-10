@@ -12,7 +12,7 @@ An administrator agent can delegate a task end to end over MCP:
 
 The [`profiles`](./profiles.md) tool covers the profile steps. The **`credentials`** tool covers the identity steps: it issues a credential bound to a profile, lists and shows credentials without their secrets, and revokes them. Nothing here needs the CLI, a REST call or a hand edit.
 
-`credentials` is an administrator tool. It uses exactly the same visibility rule as `profiles`: it is listed and callable only for a session authenticated with the instance API key or the tray socket, whose effective profile is none or sets `management_tools: true`. Agent tokens, client credentials and anonymous callers never see it; a forged call answers `unknown tool: credentials` and changes nothing.
+`credentials` is an administrator tool. It uses exactly the same visibility rule as `profiles`: it is listed and callable only for a session authenticated with the instance API key or the tray socket, whose effective profile is none or sets `management_tools: true`. Agent tokens, client credentials and anonymous callers never see it. A forged `tools/call credentials` over MCP is rejected by the transport with a JSON-RPC "tool not found" error, the same answer as for a tool that does not exist, and changes nothing. There is no tool result to read, so a client should treat that protocol error as the refusal. (Only a caller that reaches the handler without the MCP tool filter, such as a direct handler call in tests, gets the defensive tool result `unknown tool: credentials`.)
 
 ## Walkthrough
 

@@ -23,6 +23,17 @@ export const useClientsStore = defineStore('clients', () => {
   const error = ref<string | null>(null)
   // Client ids whose detail-resolved fields must survive a metadata-only refresh.
   const detailLoaded = new Set<string>()
+  // The credential_state each client had in the last applied roster. A change
+  // between two rosters (revoked, lease ended, reissued) invalidates the
+  // detail-derived presence fields even when active_sessions and last_seen are
+  // unchanged (Spec 115 review code-r2). It is compared roster to roster, never
+  // to the detail's own on-demand classification, so a supported client whose
+  // detail resolves a different state is not refetched on every poll.
+  const rosterCredential = new Map<string, string | undefined>()
+  function rememberRosterCredentials(rows: ClientPresence[]) {
+    rosterCredential.clear()
+    for (const row of rows) rosterCredential.set(row.id, row.credential_state)
+  }
 
   // A response is applied only while it is still the latest of its kind and the
   // scope it was asked for is still the active one: changing ?profile= / ?client=
@@ -100,6 +111,7 @@ export const useClientsStore = defineStore('clients', () => {
     applyAll(allResponse)
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
+      rememberRosterCredentials(clientResponse.data.clients)
       warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
     } else error.value = clientResponse.error || 'Unable to load clients'
@@ -146,7 +158,8 @@ export const useClientsStore = defineStore('clients', () => {
           if (!existing || !detailLoaded.has(incoming.id)) return incoming
           const presenceChanged =
             (incoming.active_sessions ?? 0) !== (existing.active_sessions ?? 0) ||
-            (incoming.last_seen ?? null) !== (existing.last_seen ?? null)
+            (incoming.last_seen ?? null) !== (existing.last_seen ?? null) ||
+            (rosterCredential.has(incoming.id) && rosterCredential.get(incoming.id) !== incoming.credential_state)
           if (presenceChanged) {
             detailLoaded.delete(incoming.id)
             stale.push(incoming.id)
@@ -168,6 +181,7 @@ export const useClientsStore = defineStore('clients', () => {
             sessions: existing.sessions,
           }
         })
+        rememberRosterCredentials(response.data.clients)
         for (const id of stale) void loadDetail(id)
         for (const id of [...detailLoaded]) {
           if (!clients.value.some(client => client.id === id)) detailLoaded.delete(id)

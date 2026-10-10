@@ -28,6 +28,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
@@ -224,18 +225,21 @@ func (e *credE2E) assertRefusedNoDispatch(label string, fn func() (bool, string,
 // assertHiddenToolRefused: a forged credentials call by a caller the tool is
 // hidden from is refused as an unknown tool (transport "tool not found" or the
 // handler's "unknown tool: credentials"), with zero dispatches.
+// assertHiddenToolRefused pins the published contract of a forged credentials
+// call over a real MCP transport: mcp-go's tool filter (re-run at tools/call)
+// answers a JSON-RPC "tool not found" error, never a tool result, so the
+// handler's defensive `unknown tool: credentials` text is not what the caller
+// sees (A25; docs/features/mcp-credential-lifecycle.md). Nothing dispatches
+// and no credential changes.
 func (e *credE2E) assertHiddenToolRefused(label string, c *client.Client, args map[string]any) {
 	e.t.Helper()
 	before := e.total()
+	listBefore := e.adminOK("credentials", map[string]any{"operation": "list", "state": "all"})["total"]
 	isErr, text, err := workerCall(c, "credentials", args)
-	switch {
-	case err != nil:
-		assert.Contains(e.t, err.Error(), "not found", label)
-	default:
-		assert.True(e.t, isErr, label)
-		assert.Contains(e.t, text, "unknown tool: credentials", label)
-	}
+	require.Error(e.t, err, "%s: a forged call must be a transport-level rejection, got tool result isError=%v %q", label, isErr, text)
+	assert.Contains(e.t, err.Error(), "not found", label)
 	assert.Equal(e.t, before, e.total(), label)
+	assert.Equal(e.t, listBefore, e.adminOK("credentials", map[string]any{"operation": "list", "state": "all"})["total"], "%s: no credential changes", label)
 }
 
 func (e *credE2E) toolNames(c *client.Client) []string {
@@ -277,6 +281,18 @@ func (e *credE2E) createResearchProfiles() {
 		"code_execution": false, "management_tools": false})
 }
 
+// assertClientUnsupported pins the server edition's answer to a client
+// credential operation: unsupported_edition, and the credential list is
+// unchanged (A32). The personal edition never calls it.
+func (e *credE2E) assertClientUnsupported(args map[string]any) {
+	e.t.Helper()
+	before := e.adminOK("credentials", map[string]any{"operation": "list"})["total"]
+	out, isErr, text := e.adminCall("credentials", args)
+	require.True(e.t, isErr, text)
+	assert.Equal(e.t, profile.CredentialErrorCodeUnsupportedEdition, out["code"], "%v", args)
+	assert.Equal(e.t, before, e.adminOK("credentials", map[string]any{"operation": "list"})["total"], "a refused client operation changes nothing")
+}
+
 // --- E2E-1 -----------------------------------------------------------------------
 
 func TestE2E_CredentialsLifecycle_FreshClient(t *testing.T) {
@@ -286,8 +302,17 @@ func TestE2E_CredentialsLifecycle_FreshClient(t *testing.T) {
 	e.createResearchProfiles()
 	e.adminOK("profiles", map[string]any{"operation": "create", "name": "other", "servers": []any{"library", "tracker"}})
 
-	out := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "delegated-worker",
-		"profile": "daily-research", "expires_in": "1h", "purpose": "Summarise today's library additions; assumes no writes needed"})
+	createArgs := map[string]any{"operation": "create_client", "client": "delegated-worker",
+		"profile": "daily-research", "expires_in": "1h", "purpose": "Summarise today's library additions; assumes no writes needed"}
+	if !clientsEdition {
+		// The server edition issues no client credential (A32); the token
+		// lifecycle is covered by TestE2E_CredentialsLifecycle_FreshToken.
+		e.assertClientUnsupported(createArgs)
+		e.assertClientUnsupported(map[string]any{"operation": "get", "client": "delegated-worker"})
+		e.assertClientUnsupported(map[string]any{"operation": "revoke", "client": "delegated-worker"})
+		return
+	}
+	out := e.adminOK("credentials", createArgs)
 	view := out["client"].(map[string]any)
 	assert.Equal(t, "locked", view["binding"])
 	assert.Equal(t, true, view["lease"])
@@ -407,13 +432,20 @@ func TestE2E_CredentialsLifecycle_LiveReassign(t *testing.T) {
 	e.adminOK("profiles", map[string]any{"operation": "create", "name": "research", "servers": []any{"tracker"}, "max_tier": "read"})
 	e.adminOK("profiles", map[string]any{"operation": "create", "name": "triage", "servers": []any{"tracker"}, "max_tier": "read",
 		"tools": map[string]any{"allow": []any{"tracker:comment_issue"}}})
-	w1 := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "w1", "profile": "research", "expires_in": "1h"})["credential"].(string)
 	t1 := e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "t1", "profile": "research", "expires_in": "1h"})["credential"].(string)
-	ws := e.session("/mcp", map[string]string{"X-API-Key": w1})
 	ts := e.session("/mcp", map[string]string{"X-API-Key": t1})
 	comment := map[string]any{"name": "tracker:comment_issue", "args": map[string]any{}}
-	e.assertRefusedNoDispatch("w1 comment before", func() (bool, string, error) { return workerCall(ws, "call_tool_write", comment) })
 	e.assertRefusedNoDispatch("t1 comment before", func() (bool, string, error) { return workerCall(ts, "call_tool_write", comment) })
+	if !clientsEdition {
+		// No client to reassign in the server edition (A32): the pinned token
+		// keeps its profile and the client issue is refused.
+		e.assertClientUnsupported(map[string]any{"operation": "create_client", "client": "w1", "profile": "research", "expires_in": "1h"})
+		e.assertRefusedNoDispatch("t1 keeps research", func() (bool, string, error) { return workerCall(ts, "call_tool_write", comment) })
+		return
+	}
+	w1 := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "w1", "profile": "research", "expires_in": "1h"})["credential"].(string)
+	ws := e.session("/mcp", map[string]string{"X-API-Key": w1})
+	e.assertRefusedNoDispatch("w1 comment before", func() (bool, string, error) { return workerCall(ws, "call_tool_write", comment) })
 
 	e.adminOK("profiles", map[string]any{"operation": "assign", "client": "w1", "profile": "triage"})
 
@@ -437,12 +469,15 @@ func TestE2E_CredentialsLifecycle_LiveReassign(t *testing.T) {
 func TestE2E_CredentialsLifecycle_Negatives(t *testing.T) {
 	e := newCredE2E(t, nil)
 	e.createResearchProfiles()
-	cli := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "neg-c", "profile": "daily-research", "expires_in": "1h"})["credential"].(string)
 	tok := e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "neg-t", "profile": "daily-research", "expires_in": "1h"})["credential"].(string)
+	workers := map[string]string{"token": tok}
+	if clientsEdition {
+		workers["client"] = e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "neg-c", "profile": "daily-research", "expires_in": "1h"})["credential"].(string)
+	}
 
 	// Non-admin kinds neither see nor can call the tool; nothing changes.
 	listBefore := e.adminOK("credentials", map[string]any{"operation": "list"})["total"]
-	for label, secret := range map[string]string{"client": cli, "token": tok} {
+	for label, secret := range workers {
 		s := e.session("/mcp", map[string]string{"X-API-Key": secret})
 		assert.NotContains(t, e.toolNames(s), "credentials", label)
 		// Over the wire mcp-go's tool filter (re-run at tools/call) answers a
@@ -482,6 +517,10 @@ func TestE2E_CredentialsLifecycle_Negatives(t *testing.T) {
 		{map[string]any{"operation": "create_token", "name": "x1", "profile": "daily-research", "expires_in": "1h", "allowed_servers": "*"}, "invalid_argument"},
 		{map[string]any{"operation": "create_token", "name": "x1", "profile": "daily-research", "expires_in": "1h", "purpose": map[string]any{"x": []any{tok}}}, "secret_in_argument"},
 	} {
+		if !clientsEdition && clientAddressed(c.args) {
+			// The edition switch answers before the identity rules (A32).
+			c.code = profile.CredentialErrorCodeUnsupportedEdition
+		}
 		out, isErr, text := e.adminCall("credentials", c.args)
 		require.True(t, isErr, "%v: %s", c.args, text)
 		assert.Equal(t, c.code, out["code"], "%v", c.args)
@@ -541,6 +580,25 @@ func TestE2E_CredentialsLifecycle_Negatives(t *testing.T) {
 	assert.Contains(t, string(raw), "neg-t")
 }
 
+// Review code-r2 (docs/contract): an anonymous caller (require_mcp_auth off,
+// anonymous_profile set) never sees credentials and a forged call is the
+// same transport-level rejection as for a restricted or agent-token caller.
+func TestE2E_CredentialsLifecycle_AnonymousForgedCall(t *testing.T) {
+	e := newCredE2E(t, func(cfg *config.Config) {
+		cfg.RequireMCPAuth = false
+		cfg.AnonymousProfile = "anon-read"
+	})
+	e.adminOK("profiles", map[string]any{"operation": "create", "name": "anon-read", "servers": []any{"library"}, "max_tier": "read"})
+	anon := e.session("/mcp", nil)
+	names := e.toolNames(anon)
+	assert.NotContains(t, names, "credentials")
+	assert.NotContains(t, names, "profiles")
+	e.assertHiddenToolRefused("anonymous create_token", anon, map[string]any{"operation": "create_token", "name": "forged-anon", "profile": "anon-read", "expires_in": "1h"})
+	e.assertHiddenToolRefused("anonymous list", anon, map[string]any{"operation": "list"})
+	_, isErr, text := e.adminCall("credentials", map[string]any{"operation": "get", "token": "forged-anon"})
+	require.True(t, isErr, text)
+}
+
 func TestE2E_CredentialsLifecycle_WriteGates(t *testing.T) {
 	e := newCredE2E(t, nil)
 	e.createResearchProfiles()
@@ -581,9 +639,15 @@ func TestE2E_CredentialsLifecycle_SurfaceParity(t *testing.T) {
 		"code_execution": true, "management_tools": false})
 	e.createResearchProfiles()
 	tok := e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "par-t", "profile": "daily-research-code", "expires_in": "1h"})["credential"].(string)
-	cli := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "par-c", "profile": "daily-research-code", "expires_in": "1h"})["credential"].(string)
+	workers := map[string]string{"token": tok}
+	parClient := map[string]any{"operation": "create_client", "client": "par-c", "profile": "daily-research-code", "expires_in": "1h"}
+	if clientsEdition {
+		workers["client"] = e.adminOK("credentials", parClient)["credential"].(string)
+	} else {
+		e.assertClientUnsupported(parClient)
+	}
 	forbidden := []string{"library:add_note", "library:read_private_notes", "library:mystery_tool", "tracker:list_issues"}
-	for label, secret := range map[string]string{"token": tok, "client": cli} {
+	for label, secret := range workers {
 		hdr := map[string]string{"X-API-Key": secret}
 		for _, route := range []string{"/mcp", "/mcp/call"} {
 			s := e.session(route, hdr)
@@ -747,10 +811,21 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		notesMu.Unlock()
 	})
 
-	cliOut := e.adminOK("credentials", map[string]any{"operation": "create_client", "client": "sink-c", "profile": "daily-research", "expires_in": "1h", "purpose": "sink test"})
 	tokOut := e.adminOK("credentials", map[string]any{"operation": "create_token", "name": "sink-t", "profile": "daily-research", "expires_in": "1h"})
-	cs, ts := cliOut["credential"].(string), tokOut["credential"].(string)
-	secrets := []string{cs, ts, credE2EAPIKey}
+	ts := tokOut["credential"].(string)
+	issued := []string{ts}
+	var cs string
+	sinkClient := map[string]any{"operation": "create_client", "client": "sink-c", "profile": "daily-research", "expires_in": "1h", "purpose": "sink test"}
+	if clientsEdition {
+		cs = e.adminOK("credentials", sinkClient)["credential"].(string)
+		issued = append(issued, cs)
+	} else {
+		// Still one recorded credentials call, refused by the edition (A32).
+		out, isErr, text := e.adminCall("credentials", sinkClient)
+		require.True(t, isErr, text)
+		assert.Equal(t, profile.CredentialErrorCodeUnsupportedEdition, out["code"])
+	}
+	secrets := append(append([]string{}, issued...), credE2EAPIKey)
 
 	var errorsSeen []string
 	// list/get/revoke and a failed duplicate for both kinds.
@@ -763,6 +838,7 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		errorsSeen = append(errorsSeen, text)
 	}
 	// Secrets fed back into every free-text and invalid-input path.
+	secretCases := 0
 	for _, s := range secrets {
 		for _, args := range []map[string]any{
 			{"operation": "create_client", "client": "x", "profile": "daily-research", "expires_in": "1h", "purpose": s},
@@ -778,22 +854,32 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 			require.True(t, isErr, text)
 			assert.Equal(t, "secret_in_argument", out["code"])
 			errorsSeen = append(errorsSeen, text)
+			secretCases++
 		}
 	}
-	e.adminOK("credentials", map[string]any{"operation": "revoke", "client": "sink-c"})
+	if clientsEdition {
+		e.adminOK("credentials", map[string]any{"operation": "revoke", "client": "sink-c"})
+	} else {
+		_, _, text := e.adminCall("credentials", map[string]any{"operation": "revoke", "client": "sink-c"})
+		errorsSeen = append(errorsSeen, text)
+	}
 	e.adminOK("credentials", map[string]any{"operation": "revoke", "token": "sink-t"})
 	// Wait for every credentials call record (asynchronously persisted) and
 	// for the last lifecycle events to reach the SSE capture before reading
 	// the sinks: a negative substring check on a sink that is not there yet
 	// would prove nothing.
-	const wantCalls = 2 + 5 + 8*3 + 2
+	// Issues of both kinds, five list/get/duplicate calls, the screened
+	// cases and both revokes (the server edition records its refused client
+	// calls too). Lifecycle events: an issue and a revoke per issued kind.
+	wantCalls := 2 + 5 + secretCases + 2
+	wantChanged := 2 * len(issued)
 	require.Eventually(t, func() bool {
 		body := e.restGet("/api/v1/activity/export?format=json&include_bodies=true&type=internal_tool_call&limit=50000")
 		return strings.Count(body, `"tool_name":"credentials"`) >= wantCalls
 	}, 20*time.Second, 200*time.Millisecond, "every credentials call must be recorded before the sinks are read")
 	require.Eventually(t, func() bool {
 		snap := sse.snapshot()
-		return strings.Count(snap, "credentials.changed") >= 4 &&
+		return strings.Count(snap, "credentials.changed") >= wantChanged &&
 			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls
 	}, 20*time.Second, 100*time.Millisecond, "the SSE capture must contain every credentials call frame and both issues and revokes")
 
@@ -803,8 +889,10 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		"export json":     e.restGet("/api/v1/activity/export?format=json&include_bodies=true&limit=50000"),
 		"export csv":      e.restGet("/api/v1/activity/export?format=csv&include_bodies=true&limit=50000"),
 		"tokens list":     e.restGet("/api/v1/tokens"),
-		"clients list":    e.restGet("/api/v1/clients"),
 		"credentials get": fmt.Sprint(e.adminOK("credentials", map[string]any{"operation": "list"})),
+	}
+	if clientsEdition {
+		sinks["clients list"] = e.restGet("/api/v1/clients")
 	}
 	notesMu.Lock()
 	sinks["notifications"] = strings.Join(notes, "\n")
@@ -846,7 +934,7 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	assert.Contains(t, sinks["sse"], "credentials.changed", "the SSE capture saw the lifecycle events")
 	assert.Contains(t, sinks["activity"], "credentials", "the activity capture is not empty")
 	for name, sink := range sinks {
-		for _, s := range []string{cs, ts} {
+		for _, s := range issued {
 			assert.NotContains(t, sink, s, "issued secret leaked into %s", name)
 		}
 		if name != "config file" {
@@ -855,8 +943,10 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	}
 
 	// A revoked credential cannot read on a fresh request.
-	status, _ := e.rawPost("/mcp", cs, "", "tools/list")
-	assert.Equal(t, http.StatusUnauthorized, status)
+	for _, s := range issued {
+		status, _ := e.rawPost("/mcp", s, "", "tools/list")
+		assert.Equal(t, http.StatusUnauthorized, status)
+	}
 }
 
 // T026a (A19): revoke wins over an in-flight connect. A supported client holds
@@ -864,6 +954,12 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 // changed:true at once, both live sessions get 401 on their next request, no
 // call dispatches afterwards, and the connect fails closed at commit.
 func TestE2E_CredentialsLifecycle_RevokeDuringConnect(t *testing.T) {
+	if !clientsEdition {
+		// The connect minter issues client credentials, which the server
+		// edition does not serve (A32); its client refusals are pinned by
+		// TestE2E_CredentialsLifecycle_FreshClient.
+		t.Skip("the server edition has no client credentials to connect")
+	}
 	e := newCredE2E(t, nil)
 	e.createResearchProfiles()
 	minter := e.env.proxyServer.runtime.ClientsService().ConnectMinter()
