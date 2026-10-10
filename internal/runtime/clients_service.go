@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -61,6 +60,7 @@ type ClientsService struct {
 type ClientCredentialStore interface {
 	MintClientCredential(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time) (*auth.AgentToken, error)
 	MintClientCredentialNamed(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time, displayName string) (*auth.AgentToken, error)
+	MintClientCredentialWith(clientID, rawToken string, hmacKey []byte, opts storage.ClientMintOptions) (*auth.AgentToken, error)
 	StageClientCredentialRotation(clientID, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	FinalizeClientCredentialRotation(clientID string) (*auth.AgentToken, error)
 	RollbackClientCredentialRotation(clientID string) (*auth.AgentToken, error)
@@ -346,18 +346,24 @@ func (s *ClientsService) profileExists(cfg *config.Config, name string) bool {
 	return false
 }
 
-// candidateTokens returns every client credential record with clientID's
-// replaced by next (nil next removes it) — the token half of a candidate
-// GuardState.
+// candidateTokens returns every guarded record (client credentials and
+// guard-bound tokens, Spec 115 data-model §5) with the record named
+// next.Name — or, when next is nil, client-<clientID> — replaced by next (nil
+// next removes it): the token half of a candidate GuardState.
 func candidateTokens(all []auth.AgentToken, clientID string, next *auth.AgentToken) []auth.AgentToken {
+	replace := auth.ClientTokenName(clientID)
+	if next != nil {
+		replace = next.Name
+	}
 	out := make([]auth.AgentToken, 0, len(all)+1)
 	for i := range all {
-		if all[i].Kind == auth.KindClient {
-			if all[i].ClientID == clientID {
-				continue
-			}
-			out = append(out, all[i])
+		if !IsGuardedRecord(&all[i]) {
+			continue
 		}
+		if all[i].Name == replace {
+			continue
+		}
+		out = append(out, all[i])
 	}
 	if next != nil {
 		out = append(out, *next)
@@ -365,10 +371,12 @@ func candidateTokens(all []auth.AgentToken, clientID string, next *auth.AgentTok
 	return out
 }
 
-func clientOnly(all []auth.AgentToken) []auth.AgentToken {
+// guardedOnly keeps the records every guard path evaluates: client
+// credentials and guard-bound tokens (Spec 115 data-model §5).
+func guardedOnly(all []auth.AgentToken) []auth.AgentToken {
 	out := make([]auth.AgentToken, 0, len(all))
 	for i := range all {
-		if all[i].Kind == auth.KindClient {
+		if IsGuardedRecord(&all[i]) {
 			out = append(out, all[i])
 		}
 	}
@@ -377,7 +385,7 @@ func clientOnly(all []auth.AgentToken) []auth.AgentToken {
 
 func (s *ClientsService) checkGuard(all []auth.AgentToken, clientID string, next *auth.AgentToken) error {
 	cfg := s.cfg()
-	current := GuardState{Config: cfg, Tokens: clientOnly(all)}
+	current := GuardState{Config: cfg, Tokens: guardedOnly(all)}
 	candidate := GuardState{Config: cfg, Tokens: candidateTokens(all, clientID, next)}
 	return CheckBindingGuard(s.guard(), current, candidate)
 }
@@ -681,6 +689,24 @@ func (s *ClientsService) forgetLocked(ctx context.Context, a Actor, clientID str
 // forgetLockedOpt is forgetLocked; restorePrior rolls the tombstone's binding
 // back to the one the revoked record replaced (an undone connect).
 func (s *ClientsService) forgetLockedOpt(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool) (*ClientCredentialView, error) {
+	return s.forgetLockedChange(ctx, a, clientID, diff, restorePrior, profile.ChangeForget)
+}
+
+// forgetLockedChange is forgetLockedOpt with the record kind: `forget` for the
+// Clients page and connect undo, `revoke` for the credentials service (Spec
+// 115 D7). Either way it publishes the credentials.changed invalidation
+// (closing G6).
+func (s *ClientsService) forgetLockedChange(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool, change profile.ChangeKind) (*ClientCredentialView, error) {
+	revoked, err := s.forgetRecordLocked(ctx, a, clientID, diff, restorePrior, change)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(revoked), nil
+}
+
+// forgetRecordLocked is forgetLockedChange returning the committed revoked
+// record, so the credentials service projects its view without a re-read.
+func (s *ClientsService) forgetRecordLocked(ctx context.Context, a Actor, clientID string, diff map[string]interface{}, restorePrior bool, change profile.ChangeKind) (*auth.AgentToken, error) {
 	forget := s.store.ForgetClientCredential
 	if restorePrior {
 		forget = s.store.ForgetClientCredentialRestoringPrior
@@ -706,10 +732,16 @@ func (s *ClientsService) forgetLockedOpt(ctx context.Context, a Actor, clientID 
 		heldPin = revoked.ProfilePin
 	}
 	s.writeChange(ctx, a, changeRecord{
-		change: profile.ChangeForget, profile: heldPin, previousProfile: heldPin,
+		change: change, profile: heldPin, previousProfile: heldPin,
 		clientID: clientID, tokenName: revoked.Name, diff: diff,
 	})
-	return s.view(revoked), nil
+	if s.publish != nil {
+		s.publish(newEvent(EventTypeCredentialsChanged, map[string]any{
+			"kind": CredentialKindClient, "id": clientID, "token_name": revoked.Name,
+			"change": string(change), "profile": heldPin,
+		}))
+	}
+	return revoked, nil
 }
 
 // Rotate stages a rotation over an active credential and returns the new
@@ -820,36 +852,28 @@ type AddRequest struct {
 	Profile     string
 	Mode        *string
 	ExpiresAt   time.Time
+	// Purpose is the stated, unenforced task brief (Spec 115).
+	Purpose string
 }
 
 // Add mints a credential for a custom client and returns the secret once.
-// Id rules are FR-021: the pattern, and never a supported-client id.
+// Id rules are FR-021: the pattern, and never a supported-client id. It is the
+// REST-mode credentials issue path (Spec 115 FR-010): the secret-shaped input
+// screen runs first, the record is `issue`, and the view is projected from the
+// committed record, so nothing after the mint can fail the call.
 func (s *ClientsService) Add(ctx context.Context, a Actor, req AddRequest) (*ClientCredentialView, string, error) {
-	if !auth.ValidClientID(req.ID) {
-		return nil, "", &ValidationError{Field: "id", Message: fmt.Sprintf(
-			"invalid client id %q: must be lower-case letters, digits, '-' or '_', start with a letter or digit, and be at most 56 characters", req.ID)}
-	}
-	if connect.FindClient(req.ID) != nil {
-		return nil, "", &ValidationError{Field: "id", Message: fmt.Sprintf("client id %q is a supported client; use connect instead", req.ID)}
-	}
-	if n := utf8.RuneCountInString(req.DisplayName); n > auth.MaxClientDisplayName {
-		return nil, "", &ValidationError{Field: "display_name", Message: fmt.Sprintf("display_name is too long (%d characters, max %d)", n, auth.MaxClientDisplayName)}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	issued, err := s.issueLocked(req.ID, &req.Profile, req.Mode, false, issueOptions{expiresAt: req.ExpiresAt, displayName: req.DisplayName})
+	cs := NewCredentialsService(CredentialsServiceDeps{
+		Clients: s, Config: s.cfg, Guard: s.guard, Activity: s.activity, Publish: s.publish,
+		Now: s.now, Logger: s.logger,
+	})
+	res, err := cs.IssueClient(ctx, a, IssueClientRequest{
+		ID: req.ID, DisplayName: req.DisplayName, Profile: req.Profile, ProfilePresent: true,
+		Mode: req.Mode, Purpose: req.Purpose, Expiry: ExpiryClientCap, expiresAt: req.ExpiresAt,
+	})
 	if err != nil {
 		return nil, "", err
 	}
-	s.recordMint(ctx, a, req.ID, issued)
-	all, err := s.records()
-	if err != nil {
-		return nil, "", err
-	}
-	if rec := clientRecord(all, req.ID); rec != nil {
-		return s.view(rec), issued.Secret, nil
-	}
-	return nil, issued.Secret, nil
+	return s.view(res.record), res.Secret, nil
 }
 
 func (s *ClientsService) recordMint(ctx context.Context, a Actor, clientID string, issued *connect.IssuedCredential) {

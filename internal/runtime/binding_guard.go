@@ -106,7 +106,7 @@ func CheckBindingGuard(g BindingGuard, current, candidate GuardState) error {
 type ConservativeBindingGuard struct{}
 
 func conservativeBypassable(state GuardState, t *auth.AgentToken, now time.Time) bool {
-	return !config.EffectiveRequireMCPAuth(state.Config) && ActiveNamedBinding(t, now)
+	return !config.EffectiveRequireMCPAuth(state.Config) && ActiveGuardedBinding(t, now)
 }
 
 // ActiveNamedBinding reports whether t is an active client credential bound
@@ -117,25 +117,54 @@ func ActiveNamedBinding(t *auth.AgentToken, now time.Time) bool {
 		(t.ProfileMode == auth.ProfileModeLocked || t.ProfileMode == auth.ProfileModeSwitchable)
 }
 
-// BindingRefOf projects a client credential record to its BindingRef.
-func BindingRefOf(t *auth.AgentToken) BindingRef {
-	return BindingRef{ClientID: t.ClientID, TokenName: t.Name, Profile: t.ProfilePin, Mode: t.ProfileMode}
+// ActiveGuardedBinding is THE "counts as a binding" predicate of every FR-008a
+// path (Spec 115 data-model §5): an active named client binding
+// (ActiveNamedBinding), or an active guard-bound agent token — one minted
+// through the MCP credentials path, which stays confined to its pin for its
+// whole life (FR-012a). A guard-bound token is evaluated as a binding LOCKED to
+// its pin. Legacy and REST/CLI tokens carry no guard_bound and never count
+// (A13), so their behaviour is unchanged.
+func ActiveGuardedBinding(t *auth.AgentToken, now time.Time) bool {
+	if ActiveNamedBinding(t, now) {
+		return true
+	}
+	return t != nil && (t.Kind == "" || t.Kind == auth.KindAgent) && t.GuardBound && !t.Revoked &&
+		t.ExpiresAt.After(now) && t.ProfilePin != ""
 }
 
-// BindingGuardDelta implements BindingGuard.
+// IsGuardedRecord reports whether t is a record kind the guard tracks at all
+// (a client credential of any state, or a guard-bound token of any state). The
+// snapshots keep such records so a delta can compare current and candidate.
+func IsGuardedRecord(t *auth.AgentToken) bool {
+	return t != nil && (t.Kind == auth.KindClient || t.GuardBound)
+}
+
+// BindingRefOf projects a guarded record to its BindingRef. A guard-bound
+// token has no client id and is reported as locked to its pin.
+func BindingRefOf(t *auth.AgentToken) BindingRef {
+	mode := t.ProfileMode
+	if t.Kind != auth.KindClient && mode == "" {
+		mode = auth.ProfileModeLocked
+	}
+	return BindingRef{ClientID: t.ClientID, TokenName: t.Name, Profile: t.ProfilePin, Mode: mode}
+}
+
+// BindingGuardDelta implements BindingGuard. Binding identity is the token
+// name, unique across both kinds (a client's is client-<id>; a guard-bound
+// token has no client id and must not collide with another token).
 func (ConservativeBindingGuard) BindingGuardDelta(current, candidate GuardState) []BindingRef {
 	now := time.Now()
 	already := make(map[string]bool)
 	for i := range current.Tokens {
 		t := &current.Tokens[i]
 		if conservativeBypassable(current, t, now) {
-			already[t.ClientID] = true
+			already[t.Name] = true
 		}
 	}
 	var out []BindingRef
 	for i := range candidate.Tokens {
 		t := &candidate.Tokens[i]
-		if conservativeBypassable(candidate, t, now) && !already[t.ClientID] {
+		if conservativeBypassable(candidate, t, now) && !already[t.Name] {
 			out = append(out, BindingRefOf(t))
 		}
 	}
@@ -162,7 +191,7 @@ func (ConservativeBindingGuard) BindingGuardActiveBindings() []BindingRef { retu
 // callers rely on) would let through.
 type StrictOfflineBindingGuard struct{}
 
-type bindingIdentity struct{ client, pin, mode string }
+type bindingIdentity struct{ name, pin, mode string }
 
 // BindingGuardDelta implements BindingGuard.
 func (StrictOfflineBindingGuard) BindingGuardDelta(current, candidate GuardState) []BindingRef {
@@ -171,13 +200,13 @@ func (StrictOfflineBindingGuard) BindingGuardDelta(current, candidate GuardState
 	for i := range current.Tokens {
 		t := &current.Tokens[i]
 		if conservativeBypassable(current, t, now) {
-			already[bindingIdentity{t.ClientID, t.ProfilePin, t.ProfileMode}] = true
+			already[bindingIdentity{t.Name, t.ProfilePin, t.ProfileMode}] = true
 		}
 	}
 	var out []BindingRef
 	for i := range candidate.Tokens {
 		t := &candidate.Tokens[i]
-		if conservativeBypassable(candidate, t, now) && !already[bindingIdentity{t.ClientID, t.ProfilePin, t.ProfileMode}] {
+		if conservativeBypassable(candidate, t, now) && !already[bindingIdentity{t.Name, t.ProfilePin, t.ProfileMode}] {
 			out = append(out, BindingRefOf(t))
 		}
 	}
@@ -193,7 +222,13 @@ func (StrictOfflineBindingGuard) BindingGuardFixes(st GuardState, delta []Bindin
 // BindingGuardActiveBindings implements BindingGuard.
 func (StrictOfflineBindingGuard) BindingGuardActiveBindings() []BindingRef { return nil }
 
-// SortBindingRefs orders refs by client id (the refusal's stable order).
+// SortBindingRefs orders refs by client id, then token name (the refusal's
+// stable order; guard-bound tokens have no client id).
 func SortBindingRefs(refs []BindingRef) {
-	sort.Slice(refs, func(i, j int) bool { return refs[i].ClientID < refs[j].ClientID })
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].ClientID != refs[j].ClientID {
+			return refs[i].ClientID < refs[j].ClientID
+		}
+		return refs[i].TokenName < refs[j].TokenName
+	})
 }

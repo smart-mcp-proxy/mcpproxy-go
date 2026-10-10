@@ -208,7 +208,18 @@ func TestBindingBypassable_FR008aReachabilityMatrix(t *testing.T) {
 			profiles: []config.ProfileConfig{{Name: "P", Servers: []string{"a"}, ManagementTools: &falseVal}, {Name: "Q", Servers: []string{"a"}, ManagementTools: &trueVal}},
 		},
 		{
-			name: "dangling bound base is already deny all", anonymous: "Q", pin: "missing", mode: auth.ProfileModeLocked,
+			// Spec 115 FR-012b (deliberate update): a dangling pin is deny-all for
+			// the credentialed request, but omitting the credential still reaches
+			// Q, which is wider. It used to read "already deny all".
+			name: "dangling bound base is bypassable while anonymous grants anything", anonymous: "Q", pin: "missing", mode: auth.ProfileModeLocked, want: true,
+			profiles: []config.ProfileConfig{{Name: "Q", Servers: []string{"a", "b"}}},
+		},
+		{
+			name: "dangling bound base with unrestricted anonymous is bypassable", anonymous: "", pin: "missing", mode: auth.ProfileModeLocked, want: true,
+			profiles: []config.ProfileConfig{{Name: "Q", Servers: []string{"a", "b"}}},
+		},
+		{
+			name: "dangling bound and dangling anonymous base is deny all both ways", anonymous: "gone", pin: "missing", mode: auth.ProfileModeLocked,
 			profiles: []config.ProfileConfig{{Name: "Q", Servers: []string{"a", "b"}}},
 		},
 		{

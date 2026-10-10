@@ -71,8 +71,10 @@ func (p *MCPProxyServer) bindingGuardActive(idx *profileIndex) bool {
 	return false
 }
 
+// activeNamedClientBinding is the guard's "counts as a binding" predicate: a
+// named client binding or a guard-bound token (Spec 115 FR-012a).
 func activeNamedClientBinding(token *auth.AgentToken, now time.Time) bool {
-	return runtime.ActiveNamedBinding(token, now)
+	return runtime.ActiveGuardedBinding(token, now)
 }
 
 // guardEvaluation evaluates FR-008a over explicit (config, tokens) states with
@@ -93,7 +95,7 @@ func (p *MCPProxyServer) newGuardEvaluation() *guardEvaluation {
 // when the state's config leaves auth off and an anonymous caller could reach
 // more than the binding. A state with no config fails closed.
 func (e *guardEvaluation) bypassable(cfg *config.Config, idx *profileIndex, token *auth.AgentToken) bool {
-	if !runtime.ActiveNamedBinding(token, e.now) || config.EffectiveRequireMCPAuth(cfg) {
+	if !runtime.ActiveGuardedBinding(token, e.now) || config.EffectiveRequireMCPAuth(cfg) {
 		return false
 	}
 	if cfg == nil || idx == nil || idx.cfg == nil {
@@ -109,7 +111,8 @@ func (e *guardEvaluation) bypassable(cfg *config.Config, idx *profileIndex, toke
 // BindingGuardDelta is the FR-008a "one condition function" (plan D2):
 // Delta = {b in bindings(candidate) : bypassable(b, candidate) and not
 // (b in bindings(current) and bypassable(b, current))}, binding identity =
-// client_id. A candidate with require_mcp_auth on yields an empty delta.
+// token name (unique across client credentials and guard-bound tokens, Spec
+// 115). A candidate with require_mcp_auth on yields an empty delta.
 // Every API path that could create the condition refuses on a non-empty
 // delta; the runtime guard and the warnings reuse the same evaluator.
 func (p *MCPProxyServer) BindingGuardDelta(current, candidate runtime.GuardState) []runtime.BindingRef {
@@ -123,13 +126,13 @@ func (p *MCPProxyServer) BindingGuardDelta(current, candidate runtime.GuardState
 	for i := range current.Tokens {
 		t := &current.Tokens[i]
 		if e.bypassable(current.Config, curIdx, t) {
-			already[t.ClientID] = true
+			already[t.Name] = true
 		}
 	}
 	var out []runtime.BindingRef
 	for i := range candidate.Tokens {
 		t := &candidate.Tokens[i]
-		if !already[t.ClientID] && e.bypassable(candidate.Config, candIdx, t) {
+		if !already[t.Name] && e.bypassable(candidate.Config, candIdx, t) {
 			out = append(out, runtime.BindingRefOf(t))
 		}
 	}
@@ -148,6 +151,13 @@ func (p *MCPProxyServer) BindingGuardFixes(candidate runtime.GuardState, delta [
 	anon := runtime.GuardFix{Kind: profile.GuardFixSetAnonymousProfile}
 	if len(delta) > 0 && candidate.Config != nil {
 		target := delta[0].Profile
+		if !configHasProfileNamed(candidate.Config, target) {
+			// Spec 115 FR-012b: a dangling pin is deny-all for its credential, so
+			// no anonymous_profile can be narrow enough and pointing anonymous at
+			// the missing profile is not a fix. Only auth on (or revoking or
+			// reassigning the binding) works.
+			return fixes
+		}
 		alt := *candidate.Config
 		alt.AnonymousProfile = target
 		altIdx := newProfileIndex(&alt)
@@ -201,8 +211,14 @@ func bindingBypassable(idx *profileIndex, cfg *config.Config, token *auth.AgentT
 	}
 	boundReach, ok := bindingReachableProfiles(idx, token.ProfilePin, token.ProfileMode == auth.ProfileModeSwitchable)
 	if !ok {
-		// A dangling bound base is already deny-all and cannot be bypassed.
-		return false
+		// Spec 115 FR-012b: a dangling bound base is deny-all for the
+		// CREDENTIALED request, but omitting the credential still yields the
+		// anonymous resolution, which is wider unless it is deny-all too. The
+		// binding is therefore bypassable whenever anonymous access grants
+		// anything (it used to read "already deny-all, cannot be bypassed",
+		// which let profiles delete force=true plus auth-off disable the
+		// standing guard).
+		return anonymousReachResolves(idx, cfg)
 	}
 	if cfg.AnonymousProfile == "" {
 		return true // anonymous currently means unrestricted access
@@ -229,7 +245,8 @@ func bindingBypassable(idx *profileIndex, cfg *config.Config, token *auth.AgentT
 		}
 	}
 	if len(boundPolicies) == 0 {
-		return false
+		// No bound-reachable profile resolves: the same dangling case as above.
+		return anonymousReachResolves(idx, cfg)
 	}
 
 	maxBoundCap, maxBoundUnannotated := 0, 0
@@ -283,6 +300,26 @@ func bindingBypassable(idx *profileIndex, cfg *config.Config, token *auth.AgentT
 			if !admittedByBinding {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// anonymousReachResolves reports whether anonymous access under cfg grants
+// anything at all: anonymous_profile unset (unrestricted), or at least one
+// anonymous-reachable profile that resolves to a policy. Only a dangling
+// anonymous base (deny-all both ways) answers false (Spec 115 data-model §5).
+func anonymousReachResolves(idx *profileIndex, cfg *config.Config) bool {
+	if cfg.AnonymousProfile == "" {
+		return true
+	}
+	reach, ok := bindingReachableProfiles(idx, cfg.AnonymousProfile, true)
+	if !ok {
+		return false
+	}
+	for _, name := range reach {
+		if pos := idx.position(name); pos >= 0 && idx.PolicyAt(pos) != nil {
+			return true
 		}
 	}
 	return false

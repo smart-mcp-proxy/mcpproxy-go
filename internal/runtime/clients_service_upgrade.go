@@ -260,8 +260,8 @@ func (s *ClientsService) upgradeGuard(rows []UpgradeRow, req UpgradeRequest) err
 		return err
 	}
 	cfg := s.cfg()
-	current := GuardState{Config: cfg, Tokens: clientOnly(all)}
-	tokens := clientOnly(all)
+	current := GuardState{Config: cfg, Tokens: guardedOnly(all)}
+	tokens := guardedOnly(all)
 	now := s.now().UTC()
 	for _, r := range rows {
 		next := auth.AgentToken{
