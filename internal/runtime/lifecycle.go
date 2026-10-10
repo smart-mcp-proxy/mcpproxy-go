@@ -1547,6 +1547,21 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	for _, serverName := range serversToRemove {
 		changed = true
 		go func(name string) {
+			// The snapshot this sync ran with may be older than the live config
+			// (an async ApplyConfig reload can start after a create-only add
+			// committed). Judge the removal against the live config under the
+			// commit lock, which create-only add also holds from storage write
+			// to publish, so a just-added server is never reaped (UX-01 r2).
+			r.configCommitMu.Lock()
+			defer r.configCommitMu.Unlock()
+			if live := r.Config(); live != nil {
+				for _, s := range live.Servers {
+					if s != nil && s.Name == name {
+						r.logger.Info("Skipping removal: server present in live config", zap.String("server", name))
+						return
+					}
+				}
+			}
 			r.logger.Info("Removing server no longer in config", zap.String("server", name))
 			r.upstreamManager.RemoveServer(name)
 			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {

@@ -27,6 +27,8 @@ describe('ReviewScreen ignores superseded review loads', () => {
   it('A response arriving after B keeps only B definitions, and approve targets B with B block list', async () => {
     const a = deferred(); const b = deferred()
     ;(api.getServerReview as any).mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise)
+      // Third load: the post-approval refresh of B.
+      .mockResolvedValueOnce(review('B', [tool('b_only'), tool('shared'), tool('post_approve_marker')]))
     const wrapper = mount(ReviewScreen, { props: { serverName: 'A' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
     await flushPromises()
     await wrapper.setProps({ serverName: 'B' }); await flushPromises()
@@ -42,6 +44,9 @@ describe('ReviewScreen ignores superseded review loads', () => {
     const [server, force, blocked] = (api.securityApprove as any).mock.calls[0]
     expect(server).toBe('B'); expect(force).toBe(false)
     expect([...blocked].sort()).toEqual(['b_only'])
+    // The post-approval refresh ran and its state is rendered.
+    expect(api.getServerReview).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('[data-test="review-tool-post_approve_marker"]').exists()).toBe(true)
   })
 
   it('an older refresh of the same server cannot restore stale definitions', async () => {
