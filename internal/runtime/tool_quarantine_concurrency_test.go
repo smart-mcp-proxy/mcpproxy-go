@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -356,4 +357,24 @@ func TestApproveTools_BatchesRecordWrites(t *testing.T) {
 	writes := pageWrites() - before
 	require.Empty(t, ux02NotApproved(t, rt, "srv"))
 	require.Less(t, writes, int64(40), "approving 40 tools must not cost one transaction per tool (got %d page writes)", writes)
+}
+
+// Review finding (Sol r1): the storage quarantine lookup must fail closed. An
+// unreadable upstream record (decode/read error, not "not found") must stop a
+// pass from auto-baselining the server even when the runtime config says
+// trusted.
+func TestCheckToolApprovals_UnreadableStorageQuarantineFailsClosed(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "lib", Enabled: true}})
+	require.NoError(t, rt.storageManager.GetDB().Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(storage.UpstreamsBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("lib"), []byte("\x00not-a-record"))
+	}))
+
+	res, err := rt.checkToolApprovals("lib", ux02Tools("lib", 3))
+	require.NoError(t, err)
+	require.Equal(t, 3, res.PendingCount, "an unreadable quarantine decision must never auto-baseline")
+	require.Len(t, ux02NotApproved(t, rt, "lib"), 3)
 }

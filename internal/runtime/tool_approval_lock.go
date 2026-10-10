@@ -1,6 +1,13 @@
 package runtime
 
-import "sync"
+import (
+	"errors"
+	"sync"
+
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+)
 
 // Per-server serialization of tool-approval read-modify-write (UX-02).
 //
@@ -52,14 +59,25 @@ func (r *Runtime) WithToolApprovalLock(serverName string, fn func() error) error
 // quarantined. QuarantineServer flips storage (under the approval lock) before
 // it republishes the runtime config, so a pass reading only the config could
 // act on a stale "trusted" decision and auto-baseline a server that was just
-// quarantined. A missing record or read error reports false: the config
-// decision then stands, unchanged from before.
+// quarantined. It fails closed: a record that cannot be read or decoded counts
+// as quarantined. Only a missing record (storage.ErrUpstreamNotFound — e.g. a
+// server known to the config before storage syncs) reports false, leaving the
+// config decision to stand.
 func (r *Runtime) serverQuarantinedInStorage(serverName string) bool {
 	if r.storageManager == nil {
 		return false
 	}
 	sc, err := r.storageManager.GetUpstreamServer(serverName)
-	return err == nil && sc != nil && sc.Quarantined
+	switch {
+	case err == nil:
+		return sc != nil && sc.Quarantined
+	case errors.Is(err, storage.ErrUpstreamNotFound):
+		return false
+	default:
+		r.logger.Warn("Cannot read server quarantine state from storage; treating the server as quarantined for tool approval",
+			zap.String("server", serverName), zap.Error(err))
+		return true
+	}
 }
 
 // deleteToolApprovalLocked deletes a removed tool's approval record under the
