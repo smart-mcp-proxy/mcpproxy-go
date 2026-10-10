@@ -534,13 +534,13 @@ func (r *Runtime) checkToolApprovalsLocked(serverName string, tools []*config.To
 	// without this, the first tool the server served afterwards was
 	// auto-approved as a "first trusted baseline" (UX-02 cross-review r5).
 	// An unreadable marker fails closed: held for review, not auto-approved.
+	baselineMarked, markerErr := r.storageManager.ToolBaselineDecided(serverName)
+	if markerErr != nil {
+		r.logger.Warn("Cannot read the server's tool-baseline decision; holding new tools for review",
+			zap.String("server", serverName), zap.Error(markerErr))
+	}
 	if !serverHasBaseline {
-		decided, decidedErr := r.storageManager.ToolBaselineDecided(serverName)
-		if decidedErr != nil {
-			r.logger.Warn("Cannot read the server's tool-baseline decision; holding new tools for review",
-				zap.String("server", serverName), zap.Error(decidedErr))
-		}
-		serverHasBaseline = decided || decidedErr != nil
+		serverHasBaseline = baselineMarked || markerErr != nil
 	}
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
@@ -1385,6 +1385,17 @@ func (r *Runtime) checkToolApprovalsLocked(serverName string, tools []*config.To
 
 	r.stampRemainingLegacyToolApprovals(serverName)
 
+	// A baseline established by discovery (trusted auto-baseline, or approved
+	// records from any earlier decision) must outlive its approved records:
+	// removing the last of them — the server replaced its whole inventory, or
+	// an authoritative empty refresh — would otherwise make the next pass
+	// treat the server as establishing its FIRST baseline and auto-approve
+	// whatever it serves now (UX-02 cross-review r6). Record it durably the
+	// first time a pass ends with an approved or changed record.
+	if !baselineMarked && markerErr == nil {
+		r.recordDiscoveredToolBaseline(serverName)
+	}
+
 	if len(result.BlockedTools) > 0 {
 		r.logger.Info("Tool-level quarantine: tools blocked",
 			zap.String("server", serverName),
@@ -1428,6 +1439,30 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 // is keyed by the exact raw tool name, and the stamp is what tells the legacy
 // consults (legacyCollapsedSibling) that a record is a genuine sibling rather
 // than a pre-105 collapsed one.
+// recordDiscoveredToolBaseline marks serverName's tool baseline as decided
+// when its approval records hold an approved or changed tool. A server with
+// no such record (a trusted server whose discovery has been empty so far, or
+// one whose tools are all still pending) has no baseline to preserve and is
+// left unmarked. The caller holds the server's tool-approval lock.
+func (r *Runtime) recordDiscoveredToolBaseline(serverName string) {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		r.logger.Warn("Cannot read tool approvals to record the server's tool baseline",
+			zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	for _, rec := range records {
+		if rec.Status != storage.ToolApprovalStatusApproved && rec.Status != storage.ToolApprovalStatusChanged {
+			continue
+		}
+		if err := r.storageManager.MarkToolBaselineDecided(serverName); err != nil {
+			r.logger.Warn("Failed to record the server's tool baseline",
+				zap.String("server", serverName), zap.Error(err))
+		}
+		return
+	}
+}
+
 func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	record.IdentityKeyed = true
 	return r.storageManager.SaveToolApproval(record)

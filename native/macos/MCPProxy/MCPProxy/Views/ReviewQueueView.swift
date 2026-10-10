@@ -221,8 +221,15 @@ enum ReviewPresentation {
     /// be approved before the server's own review is on screen.
     static func approvalDecision(server: String, review: ServerReviewResponse?, allowed: Set<String>, everything: Bool) -> ApprovalDecision? {
         guard let review, review.server.name == server else { return nil }
+        // An empty review binds to the empty snapshot [:] (UX-02 r6): a tool
+        // captured after it was shown — also while a force confirmation is
+        // open — fails the approval as out of date instead of being approved
+        // unseen. A core that predates expected_hashes ignores the field.
         if !review.server.definitionsCaptured {
-            return ApprovalDecision(server: server, block: [], expected: nil, blind: true)
+            return ApprovalDecision(server: server, block: [], expected: review.tools.isEmpty ? [:] : nil, blind: true)
+        }
+        if review.tools.isEmpty {
+            return ApprovalDecision(server: server, block: [], expected: [:], blind: false)
         }
         let block = everything ? [] : review.tools.map(\.name).filter { !allowed.contains($0) }
         return ApprovalDecision(server: server, block: block, expected: expectedHashes(review.tools), blind: false)
@@ -318,6 +325,11 @@ struct ReviewSheet: View {
                                 choices[tool.name] = ReviewPresentation.Choice(allowed: isAllowed, tool: tool)
                             }
                         )).toggleStyle(.checkbox)
+                        // The request carries the selection made at the click;
+                        // a change while it is in flight would be erased by its
+                        // success (UX-02 r6), so the toggles are locked until
+                        // it answers.
+                        .disabled(attempts.isApproving)
                     } else {
                         switch ReviewPresentation.toolState(tool, quarantined: false) {
                         case .approveReject:

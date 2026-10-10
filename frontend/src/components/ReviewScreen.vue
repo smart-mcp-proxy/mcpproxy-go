@@ -36,7 +36,7 @@
         <div class="card-body gap-3">
           <div class="flex flex-wrap justify-between gap-2">
             <div><h3 class="font-mono font-semibold">{{ tool.name }}</h3><span class="badge badge-outline mt-1">{{ tool.tier }}</span> <span class="badge badge-ghost mt-1">{{ tool.scan_verdict }}</span></div>
-            <label v-if="toolState(tool, review.server.quarantined) === 'allow-toggle'" class="label cursor-pointer gap-2"><span class="label-text">Allow this tool</span><input v-model="allowedTools" class="checkbox checkbox-primary" type="checkbox" :value="tool.name" :data-test="`review-allow-${tool.name}`" @change="recordChoice(tool, ($event.target as HTMLInputElement).checked)"></label>
+            <label v-if="toolState(tool, review.server.quarantined) === 'allow-toggle'" class="label cursor-pointer gap-2"><span class="label-text">Allow this tool</span><input v-model="allowedTools" class="checkbox checkbox-primary" type="checkbox" :value="tool.name" :disabled="approving" :data-test="`review-allow-${tool.name}`" @change="recordChoice(tool, ($event.target as HTMLInputElement).checked)"></label>
             <div v-else-if="toolState(tool, review.server.quarantined) === 'approve-reject'" class="join"><button class="btn btn-sm" @click="approveTool(tool.name)">Approve</button><button class="btn btn-sm btn-outline btn-error" @click="blockTool(tool.name)">Reject</button></div>
             <span v-else class="badge" :class="toolState(tool, review.server.quarantined) === 'blocked' ? 'badge-error badge-outline' : 'badge-success badge-outline'" :data-test="`review-tool-state-${tool.name}`">{{ toolState(tool, review.server.quarantined) === 'blocked' ? 'Blocked' : 'Approved' }}</span>
           </div>
@@ -148,12 +148,19 @@ function requestApprove(everything: boolean) { if (!review.value?.server.definit
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
 // The definitions the operator is looking at, by hash (UX-02): the core approves
 // only these and answers 409 when one changed or a new tool appeared since.
-// Undefined (an unbound request) only when the core predates current_hash, i.e.
-// no tool in the whole review carries one. A single tool without a hash on a
-// newer core is left out of the binding instead of unbinding the approval: the
-// core then refuses it as out of date unless that tool is blocked.
+// An EMPTY review (nothing captured, or a server that serves no tools) binds to
+// the empty snapshot {}: a tool captured after it was shown — including while a
+// force dialog is open — makes the approval fail as out of date instead of
+// being approved unseen (UX-02 r6). A core that predates expected_hashes
+// ignores the field. Undefined (an unbound request) only when the core
+// predates current_hash, i.e. the review lists tools and none carries one. A
+// single tool without a hash on a newer core is left out of the binding
+// instead of unbinding the approval: the core then refuses it as out of date
+// unless that tool is blocked.
 function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined {
-  if (!(review.value?.tools ?? []).some(t => t.current_hash)) return undefined
+  const shown = review.value?.tools ?? []
+  if (shown.length === 0) return {}
+  if (!shown.some(t => t.current_hash)) return undefined
   return Object.fromEntries(tools.filter(t => t.current_hash).map(t => [t.name, t.current_hash as string]))
 }
 // The force retry re-sends the decision of the attempt that triggered it (D43.5):

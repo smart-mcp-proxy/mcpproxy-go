@@ -15,11 +15,14 @@ import (
 // approved with an EMPTY reviewed inventory left no evidence of the decision:
 // the first tool it later served was auto-approved as a first trusted
 // baseline instead of being held for review (UX-02 cross-review r5). The
-// marker is that evidence. It is removed with the server's approval records.
+// marker is that evidence. Discovery records it too, the first time a pass
+// leaves an approved or changed record (a trusted auto-baseline included), so
+// the baseline outlives the removal of its last approved record (UX-02
+// cross-review r6). It is removed with the server's approval records.
 const ToolBaselineDecisionsBucket = "tool_baseline_decisions"
 
 // MarkToolBaselineDecided records that serverName's tool baseline was decided
-// by an operator approval. Idempotent.
+// (an operator approval, or a baseline established by discovery). Idempotent.
 func (b *BoltDB) MarkToolBaselineDecided(serverName string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(ToolBaselineDecisionsBucket))

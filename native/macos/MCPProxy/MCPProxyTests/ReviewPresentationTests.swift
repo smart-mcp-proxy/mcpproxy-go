@@ -277,6 +277,28 @@ final class ReviewPresentationTests: XCTestCase {
         let empty = try hashedReview(server: "A", captured: false, tools: [])
         let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))
         XCTAssertTrue(decision.blind)
-        XCTAssertNil(decision.expected)
+        // UX-02 r6: bound to the empty snapshot, so tools captured after the
+        // confirmation (or before a force retry) fail it as out of date.
+        XCTAssertEqual(decision.expected, [:])
+    }
+
+    func testCapturedEmptyInventoryIsBoundToTheEmptySnapshot() throws {
+        let empty = try hashedReview(server: "A", captured: true, tools: [])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))
+        XCTAssertFalse(decision.blind)
+        XCTAssertEqual(decision.expected, [:])
+        XCTAssertEqual(decision.block, [])
+    }
+
+    func testToolTogglesAreLockedWhileAnApprovalIsInFlight() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
+        let source = try String(contentsOf: path)
+        guard let toggle = source.range(of: "Toggle(\"Allow this tool\"") else { return XCTFail("no allow toggle") }
+        let after = source[toggle.upperBound...]
+        guard let style = after.range(of: ".toggleStyle(.checkbox)") else { return XCTFail("no checkbox style") }
+        XCTAssertTrue(after[style.upperBound...].prefix(400).contains(".disabled(attempts.isApproving)"),
+                      "the allow toggles must be disabled while an approval is in flight (UX-02 r6)")
     }
 }
