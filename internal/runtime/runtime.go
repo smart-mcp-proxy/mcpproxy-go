@@ -244,6 +244,9 @@ type Runtime struct {
 	// captureAfterPrune is a test hook run after a capture persisted and
 	// pruned records, before it publishes the stamp.
 	captureAfterPrune func()
+	// discoveryAfterPublish is a test hook run after normal discovery published
+	// live state but before approval records are updated.
+	discoveryAfterPublish func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when
