@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -137,4 +138,46 @@ func TestCallToolVariant_TrulyMissingArgStillRejected(t *testing.T) {
 	body := decodeErrorBody(t, result)
 	assert.Equal(t, "invalid_params", body["error_type"])
 	assert.Contains(t, body["error"], "url")
+}
+
+// TestCallToolVariant_ArgsJSONPrecedenceTable pins the documented precedence
+// (docs/api/mcp-protocol.md) against the actual upstream payload: a
+// non-empty args_json wins over native args, while an args_json that decodes
+// to an empty object or null contributes nothing and the native args are
+// dispatched instead.
+func TestCallToolVariant_ArgsJSONPrecedenceTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		argsJSON string
+		want     map[string]interface{}
+	}{
+		{"populated args_json wins", `{"url":"from-json"}`, map[string]interface{}{"url": "from-json"}},
+		{"empty-object args_json falls back to native args", `{}`, map[string]interface{}{"url": "native"}},
+		{"null args_json falls back to native args", `null`, map[string]interface{}{"url": "native"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := createTestMCPProxyServer(t)
+			newTestNavigateStub(t, proxy)
+
+			req := mcp.CallToolRequest{}
+			req.Params.Arguments = map[string]interface{}{
+				"name":      "stub:navigate_page",
+				"args":      map[string]interface{}{"url": "native"},
+				"args_json": tc.argsJSON,
+			}
+			result, err := proxy.handleCallToolVariant(context.Background(), req, contracts.ToolVariantRead)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.False(t, result.IsError, "%v", result.Content)
+			require.NotEmpty(t, result.Content)
+			text, ok := result.Content[0].(mcp.TextContent)
+			require.True(t, ok)
+			var echoed struct {
+				Args map[string]interface{} `json:"args"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(text.Text), &echoed), text.Text)
+			assert.Equal(t, tc.want, echoed.Args)
+		})
+	}
 }

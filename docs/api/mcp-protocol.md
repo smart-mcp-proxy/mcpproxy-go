@@ -73,7 +73,7 @@ Execute an upstream tool through the variant that matches what it does. All thre
 {
   "name": "string (required) - Tool name in server:tool format",
   "args": "object (optional, preferred) - Tool arguments as a native JSON object",
-  "args_json": "string (optional, legacy) - Tool arguments as a JSON string; wins over args if both are sent",
+  "args_json": "string (optional, legacy) - Tool arguments as a JSON string; wins over args if both are sent, unless it decodes to an empty object or null, in which case args is used",
   "intent_data_sensitivity": "string (optional) - public|internal|private|unknown",
   "intent_reason": "string (optional, max 1000 chars) - Explanation for the audit trail"
 }
