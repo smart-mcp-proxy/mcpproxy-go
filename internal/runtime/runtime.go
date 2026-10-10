@@ -230,6 +230,26 @@ type Runtime struct {
 	// global discovery races/restarts.
 	lastGoodToolsMu sync.RWMutex
 	lastGoodTools   map[string][]*config.ToolMetadata
+	// lastCaptureAt (guarded by lastGoodToolsMu) records when each server's
+	// toolset was last captured, for the review payload's fresh-capture proof.
+	lastCaptureAt map[string]time.Time
+	// pruneAfterSnapshot is a test hook run after the prune snapshot.
+	pruneAfterSnapshot func(toolName string)
+	// captureSnapMu makes "records persisted + pruned + stamp published" one
+	// unit for readers: a capture holds the write lock for all of it, a review
+	// holds the read lock while it reads records and live state.
+	captureSnapMu sync.RWMutex
+	// reviewAfterRecords is a test hook run after GetServerReview lists records.
+	reviewAfterRecords func()
+	// captureAfterPrune is a test hook run after a capture persisted and
+	// pruned records, before it publishes the stamp.
+	captureAfterPrune func()
+	// discoveryAfterPublish is a test hook run after normal discovery published
+	// live state but before approval records are updated.
+	discoveryAfterPublish func()
+	// localReindexAfterSnapshot is a test hook run by the local-snapshot
+	// reindex paths right after they selected their snapshot (lock held).
+	localReindexAfterSnapshot func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when

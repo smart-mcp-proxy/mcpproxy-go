@@ -233,12 +233,12 @@ The scan line of the review screen says whether the baseline scan describes the 
 |----------|-----------------------|
 | current | `Baseline scan: clean · risk 0/100 · covers all 5 tools`, in the colour of the verdict. The risk score appears only here |
 | stale | A warning: a tool definition changed or was added after the last scan. It names the tools and the last result, and offers **Rescan**. A rug pull after the scan therefore never reads as clean |
-| not captured | A warning that the scan was not checked against tool definitions, with **Fetch tool definitions** |
+| not captured | A warning that the scan was not checked against tool definitions, with **Fetch tool definitions** (CLI: `mcpproxy review fetch <server>`) |
 | no tools scanned | A warning that the last scan did not analyse tool definitions, with **Rescan** |
 | scanning | `Scan in progress…` |
 | none | `Not scanned yet.` with **Scan now** |
 
-Each tool's scan verdict follows the same rule: `clean` only when the scan covered that tool's current definition. After a baseline scan has listed a quarantined server's tools, MCPProxy captures the definitions itself, so the review list is not empty until someone clicks **Fetch tool definitions**. With `security.auto_baseline_scan: false` and no manual scan nothing is started automatically.
+Each tool's scan verdict follows the same rule: `clean` only when the scan covered that tool's current definition. After a baseline scan has listed a quarantined server's tools, MCPProxy captures the definitions itself, so the review list is not empty until someone clicks **Fetch tool definitions** or runs `mcpproxy review fetch <server>`. With `security.auto_baseline_scan: false` and no manual scan nothing is started automatically.
 
 Coverage is bound to the definition itself, not only to timing. When a scan exports a tool's definition it records a SHA-256 digest of the description and input schema (`tool_hashes` in the scan context). A tool counts as covered only if that digest equals the digest of its current definition, so a benign definition that was scanned and then swapped for a poisoned one inside the same timing window reads as stale. Scans stored before this field existed carry no digests and keep the earlier name-and-timing rules. Approval still re-checks the definition independently; this only keeps the review display honest.
 
@@ -304,7 +304,7 @@ mcpproxy review show github [--full]
    reads "Approve without seeing tools" and the UI asks for a separate
    confirmation before a blind approval can proceed.
 
-The review controls are deliberate: **Fetch tool definitions** uses the
+The review controls are deliberate: **Fetch tool definitions** (CLI: `mcpproxy review fetch`) uses the
 inspection-only `discover-tools` capture to store current upstream metadata
 without indexing it, **Allow this tool** selects an individual tool for
 the server decision, **Approve server** releases only the selected tools, and

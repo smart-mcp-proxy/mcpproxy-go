@@ -1967,38 +1967,52 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 
 	// Prefer the last-good snapshot so the reindex is a pure local diff with no
 	// network round-trip. It is populated by the full sweep and by
-	// DiscoverAndIndexToolsForServer.
-	snapshot := r.lastGoodToolsSnapshot(serverName)
-	if len(snapshot) == 0 {
-		// No snapshot captured yet — fall back to a full single-server
-		// rediscover, which indexes and populates the snapshot for next time.
-		// Use the authoritative path so a server now reporting zero tools has
-		// stale entries cleared rather than resurfaced (issue #873).
-		if err := r.RefreshServerTools(r.AppContext(), serverName); err != nil {
-			r.logger.Debug("Approval-driven rediscovery failed",
-				zap.String("server", serverName), zap.Error(err))
-		}
+	// DiscoverAndIndexToolsForServer. Selection and application happen under one
+	// captureSnapMu hold so a concurrent capture cannot be overwritten by a
+	// stale snapshot (which would look like a revert and clear a changed hold).
+	if r.reindexFromLastGoodSnapshot(serverName) {
 		return
 	}
 
-	// TOCTOU GUARD (issue #873): eligibility was checked above, before this
-	// (fast, local) snapshot diff. Re-check immediately before the index write
-	// so a server quarantined in the interim — whose tools QuarantineServer
-	// already deleted from the index — is not re-populated. A microsecond window
-	// remains between this check and the mutation inside applyDifferentialToolUpdate.
+	// No snapshot captured yet — fall back to a full single-server
+	// rediscover, which indexes and populates the snapshot for next time.
+	// Use the authoritative path so a server now reporting zero tools has
+	// stale entries cleared rather than resurfaced (issue #873).
+	if err := r.RefreshServerTools(r.AppContext(), serverName); err != nil {
+		r.logger.Debug("Approval-driven rediscovery failed",
+			zap.String("server", serverName), zap.Error(err))
+	}
+}
+
+// reindexFromLastGoodSnapshot re-runs the differential update from the
+// last-good snapshot under captureSnapMu. It reports false when no snapshot
+// exists yet.
+func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+
+	snapshot := r.lastGoodToolsSnapshot(serverName)
+	if len(snapshot) == 0 {
+		return false
+	}
+	if hook := r.localReindexAfterSnapshot; hook != nil {
+		hook()
+	}
+
+	// TOCTOU GUARD (issue #873): re-check eligibility immediately before the
+	// index write so a server quarantined in the interim is not re-populated.
 	if !r.serverEligibleForIndexing(serverName) {
-		return
+		return true
 	}
 
 	// Re-run the differential update against the current approval records.
-	// Approved records now pass checkToolApprovals and get indexed;
-	// blocked/disabled ones are removed. Rug-pull safety is preserved: if the
-	// tool mutated after approval, checkToolApprovals re-flags it changed and it
-	// stays blocked.
+	// Rug-pull safety is preserved: if the tool mutated after approval,
+	// checkToolApprovals re-flags it changed and it stays blocked.
 	if err := r.applyDifferentialToolUpdate(r.AppContext(), serverName, snapshot); err != nil {
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}
+	return true
 }
 
 // ApproveTools approves specific tools for a server, updating their status to approved.

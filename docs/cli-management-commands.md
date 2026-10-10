@@ -876,7 +876,7 @@ mcpproxy tools preflight <server:tool> [<server:tool>...] [flags]
 ```
 
 **Flags:**
-- `--profile <name>` - Evaluate under a named profile's server scope (unknown profile fails with exit 1)
+- `--profile <name>` - Evaluate under a named profile's server scope and tool policy (max_tier, deny/allow rules, unannotated handling); a tool the profile excludes reports `tool_blocked_by_profile` and the run exits 11. Unknown profile fails with exit 1
 - `--pin <server:tool>=sha256/v<N>:<hex>` - Pin a tool to a schema hash; a divergence reports `hash_mismatch` (repeatable; each pinned id must be in the requested list). Current pins come from `mcpproxy tools list -o json` (`hash` field, operator tier)
 - `--read-only-only` - Require tools to be annotated read-only
 - `--exclude-destructive` - Require tools to be annotated non-destructive
