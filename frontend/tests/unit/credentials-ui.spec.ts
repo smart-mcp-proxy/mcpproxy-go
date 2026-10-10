@@ -48,7 +48,7 @@ describe('CredentialLifecycle', () => {
     expect(revoked.text()).toContain('Pinned to p')
     const ended = mount(CredentialLifecycle, { props: { id: 'e', kind: 'token', profile: 'p', lease: true, expiresAt: at(-1), showState: true, now: NOW } })
     expect(ended.find('[data-test="credential-state-e"]').text()).toBe('Lease ended')
-    expect(ended.html()).not.toContain('badge-error')
+    expect(ended.html()).not.toContain('text-error')
   })
 
   it('a dangling pin is shown as deny-all', () => {

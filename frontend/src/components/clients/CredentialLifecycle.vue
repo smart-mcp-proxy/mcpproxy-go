@@ -1,16 +1,16 @@
 <template>
   <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-normal" :data-test="`credential-lifecycle-${id}`">
-    <span v-if="binding" class="badge badge-ghost badge-sm" :data-test="`credential-binding-${id}`">{{ binding }}</span>
-    <span v-if="issuer" class="opacity-70" :data-test="`credential-issuer-${id}`">{{ issuer }}</span>
-    <span v-if="lease" class="opacity-80" :data-test="`credential-lease-${id}`">{{ lease }}</span>
+    <span v-if="binding" class="font-medium whitespace-nowrap" :data-test="`credential-binding-${id}`">{{ binding }}</span>
+    <span v-if="issuer" class="opacity-70 whitespace-nowrap" :data-test="`credential-issuer-${id}`">{{ issuer }}</span>
+    <span v-if="lease && !hideLease" class="opacity-80 whitespace-nowrap" :data-test="`credential-lease-${id}`">{{ lease }}</span>
     <span
       v-if="showState"
-      class="badge badge-sm"
-      :class="state.tone === 'error' ? 'badge-error' : state.tone === 'success' ? 'badge-success' : 'badge-ghost'"
+      class="whitespace-nowrap"
+      :class="state.tone === 'error' ? 'text-error font-medium' : state.tone === 'success' ? 'text-success' : 'opacity-70'"
       :title="state.detail"
       :data-test="`credential-state-${id}`"
     >{{ state.label === 'Revoked' ? state.detail : state.label }}</span>
-    <span v-if="dangling" class="badge badge-error badge-sm badge-outline" :data-test="`credential-dangling-${id}`">Profile missing — deny-all</span>
+    <span v-if="dangling" class="text-error whitespace-nowrap" :data-test="`credential-dangling-${id}`">Profile missing — deny-all</span>
     <details v-if="purpose" class="w-full" :data-test="`credential-purpose-${id}`" @click.stop>
       <summary class="cursor-pointer opacity-70">{{ PURPOSE_LABEL }}</summary>
       <!-- Text interpolation only: the purpose is caller prose, never markup. -->
@@ -43,6 +43,8 @@ const props = defineProps<{
   purpose?: string
   profileState?: string
   showState?: boolean
+  // Tokens show the lease in their own Expires column.
+  hideLease?: boolean
   now?: number
 }>()
 

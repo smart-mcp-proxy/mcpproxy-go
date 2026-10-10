@@ -119,7 +119,7 @@
       <table class="table table-zebra w-full">
         <thead>
           <tr>
-            <th>Name</th>
+            <th class="min-w-[14rem]">Name</th>
             <th>Kind</th>
             <th class="min-w-[10rem]">Profile</th>
             <th>Mode</th>
@@ -157,6 +157,7 @@
                 :revoked-at="token.revoked_at"
                 :purpose="token.purpose"
                 :profile-state="token.profile_state"
+                :hide-lease="true"
               />
               <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
                    a client credential is filtered as a client, from Clients). -->
@@ -189,7 +190,10 @@
               <span v-else class="text-base-content/40 text-sm">Never</span>
             </td>
             <td>
-              <span v-if="token.revoked" class="badge badge-error badge-sm" :title="token.revoked_at ? `Revoked ${formatDate(token.revoked_at)}` : 'Revoked'" :data-test="`token-state-${token.name}`">{{ token.revoked_at ? `Revoked ${formatDate(token.revoked_at)}` : 'Revoked' }}</span>
+              <span v-if="token.revoked" class="flex flex-col items-start gap-0.5" :data-test="`token-state-${token.name}`">
+                <span class="badge badge-error badge-sm">Revoked</span>
+                <span v-if="token.revoked_at" class="text-xs opacity-70 whitespace-nowrap">{{ formatDate(token.revoked_at) }}</span>
+              </span>
               <span v-else-if="isExpired(token) && token.lease" class="badge badge-ghost badge-sm" :data-test="`token-state-${token.name}`">Lease ended</span>
               <span v-else-if="isExpired(token)" class="badge badge-warning badge-sm">Expired</span>
               <span v-else class="badge badge-success badge-sm">Active</span>
