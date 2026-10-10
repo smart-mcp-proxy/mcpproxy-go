@@ -629,6 +629,28 @@ Immediately invalidates the token. Revoke is a **soft delete**: the record is ke
 mcpproxy token revoke deploy-bot
 ```
 
+The record gains `revoked_at`, and the revoke writes a `profile_change` activity
+record with `change: revoke` and publishes the `credentials.changed` SSE event.
+
+### Issue and Revoke from an Agent (MCP)
+
+An administrator agent can issue a profile-pinned token, check it and revoke it
+over MCP with the `credentials` tool, without the CLI or REST. A token issued
+this way has a required profile and an explicit expiry, and it stays a standing
+binding for the binding guard. See
+[Credential lifecycle over MCP](./mcp-credential-lifecycle.md).
+
+### Issuer, Purpose and Audit
+
+Every token created through REST, the CLI or MCP records who issued it
+(`issuer: {actor_kind, actor_name, surface}`) and writes a `profile_change`
+activity record with `change: issue` (never the secret). `POST /api/v1/tokens`
+and `mcpproxy token create` accept an optional `purpose`: a short, unenforced
+note shown beside the token, at most 500 characters. The token values you send
+(name, profile, purpose, expiry, servers and permissions) are screened first: a
+credential, the API key or a detected secret in any of them is refused with
+`400` naming the field, and nothing is created.
+
 ### Delete a Token
 
 Permanently removes the token, freeing its name for reuse. Unlike revoke, delete

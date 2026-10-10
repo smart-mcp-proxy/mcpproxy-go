@@ -2,7 +2,7 @@
 
 **Feature Branch**: `115-mcp-credential-lifecycle`
 **Created**: 2026-10-10
-**Status**: Draft (design complete; implementation pending)
+**Status**: Implemented (PR for #1552); implementation decisions recorded as A24-A33
 **Input**: GitHub issue [#1552](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1552), "Expose admin client/token credential creation and revocation over MCP". The issue's capability, end-to-end and UI acceptance criteria are binding. This spec restates each one as a numbered requirement (FR/E2E/UI), and the traceability table at the end maps every issue checkbox to them.
 
 **Related**: Spec 108 (profiles v3: client credentials, bindings, the `profiles` admin MCP tool, the FR-008a binding guard, `profile_change` records), Spec 105 (agent-token scope hardening), Spec 107 (credential kinds, token expiry cap), Spec 028 (agent tokens), Spec 109 (navigation, scope URL filters, deep links). Issue #1548 (preflight/dispatch policy parity) is being fixed separately. This spec never uses preflight as evidence of a grant. Grants are verified with `effective_tools`, `explain` and real calls.
@@ -272,6 +272,19 @@ The profile editor's **Assigned to** section links to the filtered identity view
 - **A22 (raw issuance inputs; r5)**: the service, not the handler, parses `expires_in` and reconciles `profile`/`profile_pin`, because the expiry parser quotes a malformed value and the alias merge drops one raw value. REST keeps its defaults for an empty `expires_in` (30 days for tokens, 365 days for clients), its status codes, and its error texts for inputs that pass the screen; only a request whose `expires_in` or either profile alias carries a credential, the API key or a detector-flagged secret changes outcome (400 naming the field, no mint).
 - **A23 (ownerless token namespace; r5)**: per-user tokens are out of scope (A1), so the tool lists, fetches, duplicate-checks and revokes ownerless tokens only. A server-edition tenant's token of the same name is neither listed nor reachable, and a tenant name never blocks an ownerless issuance. REST `GET /api/v1/tokens` keeps listing all owners (unchanged operator view). An owner-qualified reference is a follow-up together with per-user MCP issuance.
 - **A12 (reserved ids)**: connect-registry client ids (`cursor`, `claude-code`, …) cannot be created over MCP. Those clients are provisioned through connect.
+
+Implementation decisions (recorded while implementing; the spec review reached its round cap, so these are the documented resolutions rather than review outcomes):
+
+- **A24 (API key comparison floor)**: the screen compares against the configured API key only when it is at least 8 characters long. Auto-generated keys are 64 hex characters; a hand-set key shorter than 8 would make ordinary arguments containing it false positives. Issued-credential prefixes and the detector still apply.
+- **A25 (hidden tool over the wire)**: a non-admin's forged `tools/call credentials` over a real MCP transport is answered by mcp-go's tool filter (re-run at `tools/call`) as a JSON-RPC "tool not found" error, exactly as for `profiles`; the handler's own `unknown tool: credentials` text is what a caller reaching the handler (REST `/tools/call`, unit tests) receives. Both are indistinguishable from a nonexistent tool and change nothing.
+- **A26 (revoker on the record)**: the credential record stores `revoked_at`, not who revoked it. The UI reads "Revoked <time>"; the actor is on the `profile_change{revoke}` record, which Activity shows with its actor and surface. Storing a revoker on the record is a follow-up.
+- **A27 (lease warnings)**: the server-side `client_credential_expiring` warning ("expires soon; reconnect it") is not raised for a lease client (lifetime at issue of at most 24 h), so no surface offers a reconnect prompt for a planned task end (UI-005).
+- **A28 (REST trailing data)**: per data-model §8.3 the two issuance routes refuse trailing data after the JSON object with the sanitized `invalid request body` text; before, the decoder ignored it.
+- **A29 (REST token revoke of a client record)**: `DELETE /api/v1/tokens/{name}` keeps revoking a client record addressed by its `client-<id>` token name (unchanged REST behaviour) and records `revoke` with the client id. The MCP tool refuses `token: client-<id>` with `reserved_identity` and asks for `client=<id>`.
+- **A30 (recorded arguments)**: for a call that passed the screen, the `internal_tool_call` record keeps the known arguments as received; an unknown argument is never recorded by name (only `_unknown_argument_count`), and an `operation` outside the enum is not recorded.
+- **A31 (REST view after commit)**: `POST /api/v1/clients` answers with the decorated client row; if that read-back fails after the mint, it answers 201 with a row projected from the committed record instead of a 500 (FR-007).
+- **A32 (server edition)**: the edition switch for client operations is the REST server's `ClientsSupported()`; `list` excludes client rows there.
+- **A33 (set_profile response for a pinned credential)**: `set_profile("")` from a locked client answers success with `profile_source: none` while the pin still governs every call (verified by zero dispatches outside the pin). This pre-existing response wording is not changed here and is listed as an open question in the PR.
 
 ## Out of Scope
 

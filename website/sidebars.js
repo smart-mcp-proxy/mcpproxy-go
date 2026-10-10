@@ -94,6 +94,7 @@ const sidebars = {
         'features/tools-preflight',
         'features/needs-attention',
         'features/profiles',
+        'features/mcp-credential-lifecycle',
         'features/connect-clients',
         'features/agent-instructions',
         'features/config-import',

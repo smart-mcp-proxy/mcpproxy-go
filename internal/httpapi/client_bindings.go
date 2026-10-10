@@ -162,13 +162,13 @@ type CreateClientResponse struct {
 
 // handleCreateClient godoc
 // @Summary     Add a custom client
-// @Description Creates a per-client credential for a client that is NOT in the connect registry (a script, a CI job, an editor without a connect adapter). The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that carries it in the X-API-Key header. The id follows the client-id rule (lower-case letters, digits, '-' or '_', at most 56 characters) and must not be a supported client's id. A named profile binds the credential locked unless mode says otherwise. Refused with 409 binding_bypassable_without_auth when the binding would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token when a regular token holds client-<id>. Writes one assign record. Personal edition only.
+// @Description Creates a per-client credential for a client that is NOT in the connect registry (a script, a CI job, an editor without a connect adapter). The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that carries it in the X-API-Key header. The id follows the client-id rule (lower-case letters, digits, '-' or '_', at most 56 characters) and must not be a supported client's id. A named profile binds the credential locked unless mode says otherwise. Refused with 409 binding_bypassable_without_auth when the binding would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token when a regular token holds client-<id>. Every value (id, display_name, profile, mode, expires_in, purpose) passes the shared secret-shaped input screen first: a credential, the API key or a detector-flagged secret answers 400 secret_in_argument naming the field, and nothing is minted. A malformed body answers a sanitized 400 that never echoes a caller key or value. Writes one profile_change record with change issue (Spec 115) and publishes credentials.changed. Personal edition only.
 // @Tags        clients
 // @Accept      json
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       body body CreateClientRequest true "id (required), optional display_name, profile, mode and expires_in"
+// @Param       body body CreateClientRequest true "id (required), optional display_name, profile, mode, expires_in and purpose"
 // @Success     201 {object} contracts.APIResponse{data=CreateClientResponse} "The new client row, its credential (once) and a snippet"
 // @Failure     400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"

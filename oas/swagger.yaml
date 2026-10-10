@@ -1,5 +1,14 @@
 components:
   schemas:
+    auth.CredentialIssuer:
+      properties:
+        actor_kind:
+          type: string
+        actor_name:
+          type: string
+        surface:
+          type: string
+      type: object
     config.AuditLogConfig:
       description: |-
         AuditLog configures the Spec 107 edition-neutral audit sink
@@ -3919,6 +3928,11 @@ components:
           type: string
         profile:
           type: string
+        purpose:
+          description: |-
+            Purpose is the stated, unenforced task brief (Spec 115), at most 500
+            characters; screened for secrets before anything is stored.
+          type: string
       type: object
     httpapi.CreateClientResponse:
       properties:
@@ -4618,10 +4632,14 @@ components:
           type: string
         installed:
           type: boolean
+        issuer:
+          $ref: '#/components/schemas/auth.CredentialIssuer'
         kind:
           type: string
         last_seen:
           type: string
+        lease:
+          type: boolean
         profile:
           type: string
         profile_missing:
@@ -4633,9 +4651,20 @@ components:
             profile_source is pin (locked) or binding (switchable) and is empty when
             credential_state is not client.
           type: string
+        profile_state:
+          type: string
         profile_title:
           type: string
+        purpose:
+          type: string
         reload_hint:
+          type: string
+        revoked_at:
+          description: |-
+            Spec 115 lifecycle fields of the client's credential record (additive):
+            when it was revoked, who issued it, its stated (unenforced) purpose,
+            whether it is a task lease (lifetime at issue <= 24h) and whether its
+            profile still exists (ok | dangling | none).
           type: string
         rotation_pending:
           type: boolean
@@ -6088,22 +6117,28 @@ paths:
       tags:
       - clients
     post:
-      description: Creates a per-client credential for a client that is NOT in the
+      description: 'Creates a per-client credential for a client that is NOT in the
         connect registry (a script, a CI job, an editor without a connect adapter).
         The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that
         carries it in the X-API-Key header. The id follows the client-id rule (lower-case
-        letters, digits, '-' or '_', at most 56 characters) and must not be a supported
-        client's id. A named profile binds the credential locked unless mode says
-        otherwise. Refused with 409 binding_bypassable_without_auth when the binding
-        would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token
-        when a regular token holds client-<id>. Writes one assign record. Personal
-        edition only.
+        letters, digits, ''-'' or ''_'', at most 56 characters) and must not be a
+        supported client''s id. A named profile binds the credential locked unless
+        mode says otherwise. Refused with 409 binding_bypassable_without_auth when
+        the binding would be bypassable while require_mcp_auth is off (FR-008a), and
+        409 conflicting_token when a regular token holds client-<id>. Every value
+        (id, display_name, profile, mode, expires_in, purpose) passes the shared secret-shaped
+        input screen first: a credential, the API key or a detector-flagged secret
+        answers 400 secret_in_argument naming the field, and nothing is minted. A
+        malformed body answers a sanitized 400 that never echoes a caller key or value.
+        Writes one profile_change record with change issue (Spec 115) and publishes
+        credentials.changed. Personal edition only.'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/httpapi.CreateClientRequest'
-        description: id (required), optional display_name, profile, mode and expires_in
+        description: id (required), optional display_name, profile, mode, expires_in
+          and purpose
         required: true
       responses:
         "201":
