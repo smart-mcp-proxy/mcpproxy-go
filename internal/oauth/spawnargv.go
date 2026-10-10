@@ -317,6 +317,29 @@ type commandSegment struct {
 
 func isCommandSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 
+// isControlOperator reports whether an UNQUOTED byte starts or continues a shell
+// control operator (; & | and their doubled forms). The shell ends a word at one
+// even with no whitespace around it, so `:;API_KEY='a b' cmd` assigns API_KEY.
+func isControlOperator(b byte) bool { return b == ';' || b == '&' || b == '|' }
+
+// skipCommandSpace returns the index of the first byte at or after i that is
+// neither whitespace nor a standalone backslash-newline continuation. The shell
+// deletes a continuation before tokenising, so one that sits between words is
+// plain whitespace and must not be mistaken for a word of its own.
+func skipCommandSpace(s string, i int) int {
+	for i < len(s) {
+		switch {
+		case isCommandSpace(s[i]):
+			i++
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '\n':
+			i += 2
+		default:
+			return i
+		}
+	}
+	return i
+}
+
 // splitCommandSegments splits a command string into alternating whitespace and
 // TOKEN runs so the masked tokens can be spliced back with the original spacing
 // intact.
@@ -356,16 +379,20 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 	segs = make([]commandSegment, 0, 8)
 	i := 0
 	for i < len(s) {
-		j := i
-		for j < len(s) && isCommandSpace(s[j]) {
-			j++
-		}
+		j := skipCommandSpace(s, i)
 		if j > i {
 			segs = append(segs, commandSegment{text: s[i:j]})
 			i = j
 		}
 		if i >= len(s) {
 			break
+		}
+		if isControlOperator(s[i]) {
+			for j = i; j < len(s) && isControlOperator(s[j]); j++ {
+			}
+			segs = append(segs, commandSegment{text: s[i:j]})
+			i = j
+			continue
 		}
 		j = i
 		var quote byte // 0 when outside quotes, else the opening quote char
@@ -396,7 +423,7 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 				j++
 				continue
 			}
-			if isCommandSpace(c) {
+			if isCommandSpace(c) || isControlOperator(c) {
 				break
 			}
 			j++
@@ -418,16 +445,20 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 func splitCommandSegmentsOnSpace(s string) []commandSegment {
 	segs := make([]commandSegment, 0, 8)
 	for i := 0; i < len(s); {
-		j := i
-		for j < len(s) && isCommandSpace(s[j]) {
-			j++
-		}
+		j := skipCommandSpace(s, i)
 		if j > i {
 			segs = append(segs, commandSegment{text: s[i:j]})
 			i = j
 		}
+		if i < len(s) && isControlOperator(s[i]) {
+			for j = i; j < len(s) && isControlOperator(s[j]); j++ {
+			}
+			segs = append(segs, commandSegment{text: s[i:j]})
+			i = j
+			continue
+		}
 		j = i
-		for j < len(s) && !isCommandSpace(s[j]) {
+		for j < len(s) && !isCommandSpace(s[j]) && !isControlOperator(s[j]) {
 			j++
 		}
 		if j > i {
