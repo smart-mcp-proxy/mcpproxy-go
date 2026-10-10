@@ -4457,12 +4457,13 @@ func (a *serverUnquarantinerAdapter) CommitServerApprovalDecision(serverName str
 }
 
 // UnquarantineServerKeepingToolDecisions unquarantines without re-promoting
-// pending tools; CommitServerApprovalDecision already decided them.
-func (a *serverUnquarantinerAdapter) UnquarantineServerKeepingToolDecisions(serverName string) error {
+// pending tools; CommitServerApprovalDecision already decided them. A
+// review-bound approval (expected non-nil) is revalidated at the activation.
+func (a *serverUnquarantinerAdapter) UnquarantineServerKeepingToolDecisions(serverName string, blocked []string, expected map[string]string) error {
 	if a.server == nil || a.server.runtime == nil {
 		return fmt.Errorf("server unavailable")
 	}
-	return a.server.runtime.UnquarantineServerKeepingToolDecisions(serverName)
+	return a.server.runtime.UnquarantineServerKeepingToolDecisions(serverName, blocked, expected)
 }
 
 var _ scanner.ServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)

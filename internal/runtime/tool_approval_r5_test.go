@@ -110,7 +110,7 @@ func TestServerApproval_EmptyReviewedInventoryKeepsLaterToolsHeld(t *testing.T) 
 				_, err = rt.checkToolApprovals("srv", inventory)
 				require.NoError(t, err)
 			}
-			require.NoError(t, rt.UnquarantineServerKeepingToolDecisions("srv"))
+			require.NoError(t, rt.UnquarantineServerKeepingToolDecisions("srv", nil, nil))
 			srv, err := rt.storageManager.GetUpstreamServer("srv")
 			require.NoError(t, err)
 			require.False(t, srv.Quarantined)

@@ -231,8 +231,57 @@ func (r *Runtime) commitServerApprovalLocked(serverName string, exclude map[stri
 // baseline-promote the server's pending tools: CommitServerApprovalDecision
 // already made the tool decision for the reviewed snapshot, and anything filed
 // since stays pending for review.
-func (r *Runtime) UnquarantineServerKeepingToolDecisions(serverName string) error {
-	return r.setServerQuarantine(serverName, false, false)
+//
+// With expected non-nil (the review-bound form) the activation revalidates the
+// review binding under the tool-approval lock, in the same critical section as
+// the quarantine flip (UX-02 cross-review r10): the commit released the lock,
+// and a quarantined capture in between can change a reviewed tool's safety
+// hints without leaving "approved" (annotations are not part of the approval
+// hash). Every enabled approved record named in expected (blocked ones
+// excepted) must still carry its reviewed fingerprint; otherwise the server
+// stays quarantined and a *storage.StaleToolReviewError names the changed
+// tools. Approved records outside expected were approved explicitly after the
+// commit, and pending ones stay held after the unquarantine, so neither is
+// checked here.
+func (r *Runtime) UnquarantineServerKeepingToolDecisions(serverName string, blocked []string, expected map[string]string) error {
+	var precheck func() error
+	if expected != nil && r.storageManager != nil {
+		exclude := make(map[string]bool, len(blocked))
+		for _, name := range blocked {
+			exclude[name] = true
+		}
+		precheck = func() error {
+			return r.revalidateReviewedActivationLocked(serverName, exclude, expected)
+		}
+	}
+	return r.setServerQuarantine(serverName, false, false, precheck)
+}
+
+// revalidateReviewedActivationLocked is the activation-time half of a
+// review-bound server approval (see UnquarantineServerKeepingToolDecisions).
+// The caller holds the server's tool-approval lock.
+func (r *Runtime) revalidateReviewedActivationLocked(serverName string, exclude map[string]bool, expected map[string]string) error {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return fmt.Errorf("read tool approvals for %s: %w", serverName, err)
+	}
+	current := make(map[string]*storage.ToolApprovalRecord, len(records))
+	var activated []string
+	for _, record := range records {
+		if exclude[record.ToolName] || record.Status != storage.ToolApprovalStatusApproved || record.Disabled {
+			continue
+		}
+		if _, reviewed := expected[record.ToolName]; !reviewed {
+			continue
+		}
+		current[record.ToolName] = record
+		activated = append(activated, record.ToolName)
+	}
+	if stale := staleReviewedRecords(serverName, activated, current, expected); stale != nil {
+		stale.AtActivation = true
+		return stale
+	}
+	return nil
 }
 
 // serverQuarantinedForIndexLocked reports whether the server must be kept out

@@ -139,10 +139,13 @@ type ToolBlockRecorder interface {
 // first when they are given (nothing is written on a mismatch).
 // UnquarantineServerKeepingToolDecisions then unquarantines WITHOUT the
 // generic on-unquarantine promotion, so a tool discovered after the commit
-// stays pending instead of being approved unseen.
+// stays pending instead of being approved unseen; with expected non-nil it
+// revalidates the review binding atomically with the quarantine flip and
+// leaves the server quarantined (a stale-review error) when a reviewed tool
+// changed since the commit.
 type ServerApprovalCommitter interface {
 	CommitServerApprovalDecision(serverName string, blocked []string, expected map[string]string, approvedBy string, commit func() error) (int, error)
-	UnquarantineServerKeepingToolDecisions(serverName string) error
+	UnquarantineServerKeepingToolDecisions(serverName string, blocked []string, expected map[string]string) error
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -1846,9 +1849,18 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	if s.unquarantiner != nil {
 		unquarantine := s.unquarantiner.UnquarantineServer
 		if bound {
-			unquarantine = committer.UnquarantineServerKeepingToolDecisions
+			unquarantine = func(name string) error {
+				return committer.UnquarantineServerKeepingToolDecisions(name, blockedNames, expected)
+			}
 		}
 		if err := unquarantine(serverName); err != nil {
+			// A reviewed tool changed between the commit and the activation
+			// (UX-02 cross-review r10): the server stays quarantined and the
+			// caller must fetch the review again.
+			var stale interface{ Tools() []string }
+			if errors.As(err, &stale) {
+				return err
+			}
 			// Report the error to the caller but keep the baseline we just
 			// saved — the caller can retry via the normal unquarantine path.
 			s.logger.Error("Failed to unquarantine server after approval",

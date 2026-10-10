@@ -29,6 +29,10 @@ type StaleToolReviewError struct {
 	Changed []string
 	// Unreviewed names held tools that the review did not include.
 	Unreviewed []string
+	// AtActivation reports that the review went out of date after a server
+	// approval committed but before it unquarantined the server: the server
+	// was left quarantined, so none of its tools became reachable.
+	AtActivation bool
 }
 
 func (e *StaleToolReviewError) Error() string {
@@ -39,7 +43,11 @@ func (e *StaleToolReviewError) Error() string {
 	if len(e.Unreviewed) > 0 {
 		parts = append(parts, fmt.Sprintf("not in the review: %s", strings.Join(e.Unreviewed, ", ")))
 	}
-	return fmt.Sprintf("tool review for server '%s' is out of date (%s); nothing was approved — fetch the review again", e.Server, strings.Join(parts, "; "))
+	outcome := "nothing was approved"
+	if e.AtActivation {
+		outcome = "the server stays quarantined"
+	}
+	return fmt.Sprintf("tool review for server '%s' is out of date (%s); %s — fetch the review again", e.Server, strings.Join(parts, "; "), outcome)
 }
 
 // Tools returns every stale tool name, sorted.

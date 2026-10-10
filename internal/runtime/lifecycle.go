@@ -2284,13 +2284,15 @@ func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
-	return r.setServerQuarantine(serverName, quarantined, true)
+	return r.setServerQuarantine(serverName, quarantined, true, nil)
 }
 
 // setServerQuarantine is QuarantineServer; promoteBaseline=false skips the
 // on-unquarantine baseline promotion of pending tools (see
-// UnquarantineServerKeepingToolDecisions).
-func (r *Runtime) setServerQuarantine(serverName string, quarantined, promoteBaseline bool) error {
+// UnquarantineServerKeepingToolDecisions). A non-nil precheck runs under the
+// server's tool-approval lock immediately before the storage flip; when it
+// fails nothing is changed and its error is returned.
+func (r *Runtime) setServerQuarantine(serverName string, quarantined, promoteBaseline bool, precheck func() error) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
@@ -2303,6 +2305,12 @@ func (r *Runtime) setServerQuarantine(serverName string, quarantined, promoteBas
 	// never auto-baselined. The lock is NOT held across SaveConfiguration /
 	// LoadConfiguredServers, which can start discovery.
 	unlockApprovals := r.lockToolApprovals(serverName)
+	if precheck != nil {
+		if err := precheck(); err != nil {
+			unlockApprovals()
+			return err
+		}
+	}
 	err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined)
 	unlockApprovals()
 	if err != nil {

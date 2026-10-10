@@ -1139,6 +1139,10 @@ type committingUnquarantiner struct {
 	blocked  []string
 	expected map[string]string
 	stale    error
+	// activationStale is returned by the activation (unquarantine) step.
+	activationStale    error
+	activationBlocked  []string
+	activationExpected map[string]string
 }
 
 func (u *committingUnquarantiner) UnquarantineServer(string) error {
@@ -1146,7 +1150,12 @@ func (u *committingUnquarantiner) UnquarantineServer(string) error {
 	return nil
 }
 
-func (u *committingUnquarantiner) UnquarantineServerKeepingToolDecisions(string) error {
+func (u *committingUnquarantiner) UnquarantineServerKeepingToolDecisions(_ string, blocked []string, expected map[string]string) error {
+	u.activationBlocked, u.activationExpected = blocked, expected
+	if u.activationStale != nil {
+		*u.steps = append(*u.steps, "activation-stale")
+		return u.activationStale
+	}
 	*u.steps = append(*u.steps, "unquarantine")
 	return nil
 }
@@ -1203,6 +1212,28 @@ func TestServiceApproveServerReviewedStaleKeepsQuarantine(t *testing.T) {
 		t.Fatalf("expected the stale review error, got %v", err)
 	}
 	assert.Equal(t, []string{"lock:qs-server", "unlock:qs-server"}, steps, "no commit and no unquarantine on a stale review")
+}
+
+// UX-02 cross-review r10: the activation (unquarantine) revalidates the
+// review binding. It receives the same blocked tools and reviewed
+// fingerprints as the commit, and a stale-review answer there reaches the
+// caller unwrapped (REST 409) instead of a generic unquarantine failure.
+func TestServiceApproveServerReviewedRevalidatesAtActivation(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	stale := &staleReviewErr{tools: []string{"read"}}
+	u := &committingUnquarantiner{steps: &steps, activationStale: stale}
+	svc.SetServerUnquarantiner(u)
+
+	expected := map[string]string{"read": "h1"}
+	err := svc.ApproveServerReviewed(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"}, expected)
+	if err != stale { //nolint:errorlint // the stale error must not be wrapped
+		t.Fatalf("expected the unwrapped stale review error, got %v", err)
+	}
+	assert.Equal(t, []string{"delete_issue"}, u.activationBlocked)
+	assert.Equal(t, expected, u.activationExpected)
+	assert.Equal(t, []string{"lock:qs-server", "baseline_and_blocks", "promote", "unlock:qs-server", "activation-stale"}, steps)
 }
 
 // A review-bound approval never silently degrades to an unbound one.
