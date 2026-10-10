@@ -5956,31 +5956,21 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// Save to storage
-	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
+	// Create-only: `add` must never overwrite a configured server (that would
+	// silently reset an approved server's quarantine, args and tool approvals).
+	// The check and the write are atomic and happen BEFORE any other side
+	// effect (config publish, activity, supervisor reconcile). The error names
+	// the way to modify an existing server and does not echo its config.
+	if createErr := p.createUpstreamServer(serverConfig); createErr != nil {
+		var exists *ServerExistsError
+		if errors.As(createErr, &exists) {
+			return mcp.NewToolResultError(fmt.Sprintf("%v; use operation 'update' or 'patch' to modify it, or choose another name", exists)), nil
+		}
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", createErr)), nil
 	}
 
 	// Trigger configuration save which will notify supervisor to reconcile and connect
 	if p.mainServer != nil {
-		// Update runtime's in-memory config with the new server
-		// This is CRITICAL for test environments where SaveConfiguration() might fail
-		// Without this, the ConfigService won't know about the new server
-		//
-		// Copy-on-write: runtime.Config() returns the PUBLISHED snapshot that
-		// other goroutines read lock-free — the background reconcile/index
-		// passes, the httpapi handlers, and (server edition) an
-		// AdminServersProvider call on every authenticated request. Appending
-		// to its Servers in place writes shared state under those readers.
-		// See configWithAppendedServer.
-		currentConfig := p.mainServer.runtime.Config()
-		if updatedConfig := configWithAppendedServer(currentConfig, serverConfig); updatedConfig != nil {
-			p.mainServer.runtime.UpdateConfig(updatedConfig, "")
-			p.logger.Debug("Updated runtime config with new server",
-				zap.String("server", name),
-				zap.Int("total_servers", len(updatedConfig.Servers)))
-		}
-
 		// Save configuration first to ensure servers are persisted to config file
 		// This triggers ConfigService update which notifies supervisor to reconcile
 		// Note: SaveConfiguration may fail in test environments without config file - that's OK
@@ -8511,4 +8501,21 @@ func cacheHintServerOptions() []mcpserver.ServerOption {
 		opts = append(opts, mcpserver.WithMethodCacheHints(m, mcpListCacheTTLMs, mcp.CacheScopePrivate))
 	}
 	return opts
+}
+
+// createUpstreamServer is handleAddUpstream's create-only write. With a main
+// server it shares Server.createServer (runtime-config check, atomic storage
+// create and copy-on-write publish under one mutex); a bare proxy (tests) only
+// has storage and uses the atomic create directly.
+func (p *MCPProxyServer) createUpstreamServer(sc *config.ServerConfig) error {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		return p.mainServer.createServer(sc)
+	}
+	if err := p.storage.CreateUpstreamServer(sc); err != nil {
+		if errors.Is(err, storage.ErrUpstreamExists) {
+			return &ServerExistsError{Name: sc.Name}
+		}
+		return err
+	}
+	return nil
 }

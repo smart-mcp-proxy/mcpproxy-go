@@ -228,6 +228,29 @@ func (b *BoltDB) SaveUpstream(record *UpstreamRecord) error {
 	})
 }
 
+// ErrUpstreamExists is returned by CreateUpstream when a record with the same
+// ID is already stored.
+var ErrUpstreamExists = stderrors.New("upstream server already exists")
+
+// CreateUpstream stores a new upstream record, failing with ErrUpstreamExists if
+// the ID is taken. The existence check and the Put run in one Update
+// transaction, which bbolt serializes, so the create is atomic.
+func (b *BoltDB) CreateUpstream(record *UpstreamRecord) error {
+	record.Updated = time.Now()
+
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(UpstreamsBucket))
+		if bucket.Get([]byte(record.ID)) != nil {
+			return ErrUpstreamExists
+		}
+		data, err := record.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(record.ID), data)
+	})
+}
+
 // SaveUpstreamKeepingQuarantine is SaveUpstream with the quarantine-lowering
 // guard: if a record already exists with Quarantined=true and the incoming
 // record would clear it without an explicit decision (explicit=false), the
