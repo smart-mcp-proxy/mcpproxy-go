@@ -5,28 +5,36 @@
       Browse the catalog, paste a URL or command, import a config, or fill in the fields yourself.
     </p>
 
-    <div class="tabs tabs-box mb-6" data-test="add-server-tabs">
-      <a
+    <div class="tabs tabs-box mb-6" role="tablist" aria-label="Add server method" data-test="add-server-tabs" @keydown="onTabKeydown">
+      <button
         v-for="t in tabs"
+        :id="`add-tab-${t.id}`"
         :key="t.id"
+        type="button"
+        role="tab"
         class="tab"
         :class="activeTab === t.id ? 'tab-active' : ''"
+        :aria-selected="activeTab === t.id"
+        :aria-controls="`add-panel-${t.id}`"
+        :tabindex="activeTab === t.id ? 0 : -1"
         :data-test="`add-server-tab-${t.id}`"
         @click="activeTab = t.id"
       >
         {{ t.label }}
-      </a>
+      </button>
     </div>
 
-    <CatalogSearch v-if="activeTab === 'catalog'" :source="sourceFilter" @added="handleAdded" />
-    <PasteServer v-else-if="activeTab === 'paste'" @added="handleAdded" />
-    <ImportServers v-else-if="activeTab === 'import'" @imported="handleImported" />
-    <ManualServerForm v-else-if="activeTab === 'manual'" @added="handleAdded" />
+    <div :id="`add-panel-${activeTab}`" role="tabpanel" :aria-labelledby="`add-tab-${activeTab}`" data-test="add-server-panel">
+      <CatalogSearch v-if="activeTab === 'catalog'" :source="sourceFilter" @added="handleAdded" />
+      <PasteServer v-else-if="activeTab === 'paste'" @added="handleAdded" />
+      <ImportServers v-else-if="activeTab === 'import'" @imported="handleImported" />
+      <ManualServerForm v-else-if="activeTab === 'manual'" @added="handleAdded" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import CatalogSearch from '@/components/CatalogSearch.vue'
 import PasteServer from '@/components/PasteServer.vue'
@@ -69,6 +77,24 @@ watch(
     activeTab.value = tabFromRoute()
   }
 )
+
+// WAI-ARIA tabs with automatic activation: Arrow keys, Home and End move focus
+// and selection together; only the selected tab is in the Tab order.
+function onTabKeydown(event: KeyboardEvent) {
+  const ids = tabs.map((t) => t.id)
+  const at = ids.indexOf(activeTab.value)
+  let next = -1
+  switch (event.key) {
+    case 'ArrowRight': next = (at + 1) % ids.length; break
+    case 'ArrowLeft': next = (at - 1 + ids.length) % ids.length; break
+    case 'Home': next = 0; break
+    case 'End': next = ids.length - 1; break
+    default: return
+  }
+  event.preventDefault()
+  activeTab.value = ids[next]
+  void nextTick(() => document.getElementById(`add-tab-${ids[next]}`)?.focus())
+}
 
 function handleAdded(name: string) {
   systemStore.addToast({ type: 'success', title: 'Server Added', message: `${name} has been added successfully` })

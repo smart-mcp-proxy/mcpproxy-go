@@ -1,12 +1,12 @@
 <template>
   <form data-test="manual-server-form" @submit.prevent="handleSubmit">
     <div class="form-control mb-4">
-      <label class="label"><span class="label-text font-semibold">Name</span></label>
-      <input v-model="name" type="text" class="input input-bordered" required data-test="manual-name-input" />
+      <label class="label" :for="ids.name"><span class="label-text font-semibold">Name</span></label>
+      <input :id="ids.name" v-model="name" type="text" class="input input-bordered" required autocomplete="off" data-test="manual-name-input" />
     </div>
 
-    <div class="form-control mb-4">
-      <label class="label"><span class="label-text font-semibold">Server Type</span></label>
+    <fieldset class="form-control mb-4">
+      <legend class="label"><span class="label-text font-semibold">Server Type</span></legend>
       <div class="flex gap-4">
         <label class="flex items-center gap-2 cursor-pointer">
           <input v-model="protocol" type="radio" value="stdio" class="radio radio-primary" data-test="manual-type-stdio" />
@@ -17,17 +17,17 @@
           <span>HTTP/HTTPS (Remote)</span>
         </label>
       </div>
-    </div>
+    </fieldset>
 
     <template v-if="protocol === 'http'">
       <div class="form-control mb-4">
-        <label class="label"><span class="label-text font-semibold">URL</span></label>
-        <input v-model="url" type="url" class="input input-bordered" placeholder="https://api.example.com/mcp" required data-test="manual-url-input" />
+        <label class="label" :for="ids.url"><span class="label-text font-semibold">URL</span></label>
+        <input :id="ids.url" v-model="url" type="url" class="input input-bordered" placeholder="https://api.example.com/mcp" required data-test="manual-url-input" />
       </div>
-      <div class="mb-4 space-y-2">
-        <label class="label"><span class="label-text font-semibold">Headers</span></label>
+      <div class="mb-4 space-y-2" role="group" :aria-labelledby="ids.headers">
+        <span :id="ids.headers" class="label"><span class="label-text font-semibold">Headers</span></span>
         <div v-for="(h, i) in headerRows" :key="h.id" class="flex gap-2 items-start">
-          <input v-model="h.name" type="text" class="input input-bordered input-sm flex-1" placeholder="Header name" :data-test="`manual-header-name-${i}`" />
+          <input v-model="h.name" type="text" class="input input-bordered input-sm flex-1" placeholder="Header name" :aria-label="`Header name ${i + 1}`" :data-test="`manual-header-name-${i}`" />
           <SecretToggle
             class="flex-[2]"
             :name="h.name || `header-${i}`"
@@ -39,7 +39,7 @@
             @update:model-value="(v) => (h.value = v)"
             @update:mode="(m) => (h.mode = m)"
           />
-          <button type="button" class="btn btn-ghost btn-sm" data-test="manual-header-remove" @click="headerRows.splice(i, 1)">✕</button>
+          <button type="button" class="btn btn-ghost btn-sm" :aria-label="`Remove header ${i + 1}`" data-test="manual-header-remove" @click="headerRows.splice(i, 1)">✕</button>
         </div>
         <button type="button" class="btn btn-ghost btn-sm" data-test="manual-header-add" @click="headerRows.push(newRow())">
           + Add header
@@ -49,17 +49,17 @@
 
     <template v-else>
       <div class="form-control mb-4">
-        <label class="label"><span class="label-text font-semibold">Command</span></label>
-        <input v-model="command" type="text" class="input input-bordered" placeholder="npx" required data-test="manual-command-input" />
+        <label class="label" :for="ids.command"><span class="label-text font-semibold">Command</span></label>
+        <input :id="ids.command" v-model="command" type="text" class="input input-bordered" placeholder="npx" required data-test="manual-command-input" />
       </div>
       <div class="form-control mb-4">
-        <label class="label"><span class="label-text font-semibold">Arguments (space-separated)</span></label>
-        <input v-model="argsText" type="text" class="input input-bordered" placeholder="-y @modelcontextprotocol/server-filesystem /tmp" data-test="manual-args-input" />
+        <label class="label" :for="ids.args"><span class="label-text font-semibold">Arguments (space-separated)</span></label>
+        <input :id="ids.args" v-model="argsText" type="text" class="input input-bordered" placeholder="-y @modelcontextprotocol/server-filesystem /tmp" data-test="manual-args-input" />
       </div>
-      <div class="mb-4 space-y-2">
-        <label class="label"><span class="label-text font-semibold">Environment variables</span></label>
+      <div class="mb-4 space-y-2" role="group" :aria-labelledby="ids.env">
+        <span :id="ids.env" class="label"><span class="label-text font-semibold">Environment variables</span></span>
         <div v-for="(e, i) in envRows" :key="e.id" class="flex gap-2 items-start">
-          <input v-model="e.name" type="text" class="input input-bordered input-sm flex-1" placeholder="VAR_NAME" :data-test="`manual-env-name-${i}`" />
+          <input v-model="e.name" type="text" class="input input-bordered input-sm flex-1" placeholder="VAR_NAME" :aria-label="`Environment variable name ${i + 1}`" :data-test="`manual-env-name-${i}`" />
           <SecretToggle
             class="flex-[2]"
             :name="e.name || `env-${i}`"
@@ -71,7 +71,7 @@
             @update:model-value="(v) => (e.value = v)"
             @update:mode="(m) => (e.mode = m)"
           />
-          <button type="button" class="btn btn-ghost btn-sm" data-test="manual-env-remove" @click="envRows.splice(i, 1)">✕</button>
+          <button type="button" class="btn btn-ghost btn-sm" :aria-label="`Remove environment variable ${i + 1}`" data-test="manual-env-remove" @click="envRows.splice(i, 1)">✕</button>
         </div>
         <button type="button" class="btn btn-ghost btn-sm" data-test="manual-env-add" @click="envRows.push(newRow())">
           + Add variable
@@ -79,11 +79,11 @@
       </div>
     </template>
 
-    <div v-if="props.allowTrustModeSelection" class="form-control mb-4 pt-2" data-test="manual-trust-mode">
-      <label class="label">
-        <span class="label-text font-semibold">Trust mode</span>
+    <div v-if="props.allowTrustModeSelection" class="form-control mb-4 pt-2" role="group" :aria-labelledby="ids.trust" data-test="manual-trust-mode">
+      <div class="label">
+        <span :id="ids.trust" class="label-text font-semibold">Trust mode</span>
         <span class="label-text-alt">Decides quarantine on add and tool-change approval</span>
-      </label>
+      </div>
       <TrustModeSelector
         v-model="trustMode"
         name="manual-server-trust-mode"
@@ -91,7 +91,7 @@
       />
     </div>
 
-    <div v-if="error" class="alert alert-error text-sm mb-4" data-test="manual-error">{{ error }}</div>
+    <div v-if="error" ref="errorEl" tabindex="-1" role="alert" class="alert alert-error text-sm mb-4" data-test="manual-error">{{ error }}</div>
 
     <button
       type="submit"
@@ -105,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, nextTick, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import SecretToggle from '@/components/SecretToggle.vue'
@@ -126,6 +126,15 @@ const emit = defineEmits<{ added: [name: string] }>()
 
 const router = useRouter()
 const serversStore = useServersStore()
+
+// Per-instance ids tie each visible label to its input (several forms can be
+// mounted at once, e.g. the onboarding wizard beside this page).
+const uid = useId()
+const ids = {
+  name: `${uid}-name`, url: `${uid}-url`, command: `${uid}-command`, args: `${uid}-args`,
+  headers: `${uid}-headers`, env: `${uid}-env`, trust: `${uid}-trust`,
+}
+const errorEl = ref<HTMLElement | null>(null)
 
 const name = ref('')
 const protocol = ref<'stdio' | 'http'>('stdio')
@@ -203,6 +212,9 @@ async function handleSubmit() {
     // the same ref name instead of computing a new -2-suffixed one.
     if (writtenRefs.length > 0) await rollbackSecrets(writtenRefs)
     error.value = e instanceof Error ? e.message : 'Failed to add server'
+    // Move focus to the failure so keyboard and screen-reader users hear it.
+    await nextTick()
+    errorEl.value?.focus()
   } finally {
     submitting.value = false
   }
