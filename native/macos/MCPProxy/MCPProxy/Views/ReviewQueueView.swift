@@ -179,6 +179,42 @@ enum ReviewPresentation {
         let blind: Bool
     }
 
+    /// Server-approval attempts on one review sheet (UX-02 cross-review r5):
+    /// one attempt at a time, and the force confirmation belongs to the
+    /// attempt whose request answered "dangerous findings" — a later click
+    /// can neither replace the decision the force retry re-sends nor be sent
+    /// alongside it, and a response for a decision that is not in flight
+    /// changes nothing.
+    struct ApprovalAttempts: Equatable {
+        private(set) var inFlight: ApprovalDecision?
+        private(set) var forceCandidate: ApprovalDecision?
+
+        var isApproving: Bool { inFlight != nil }
+
+        /// Starts sending `decision`; false (do not send) while another
+        /// attempt is in flight. Drops an unanswered force confirmation.
+        mutating func begin(_ decision: ApprovalDecision) -> Bool {
+            guard inFlight == nil else { return false }
+            inFlight = decision
+            forceCandidate = nil
+            return true
+        }
+
+        /// Records the answer to `decision`; `dangerous` makes it the
+        /// decision the force confirmation re-sends.
+        mutating func finish(_ decision: ApprovalDecision, dangerous: Bool) {
+            guard inFlight == decision else { return }
+            inFlight = nil
+            forceCandidate = dangerous ? decision : nil
+        }
+
+        /// The decision to force-approve, consumed once.
+        mutating func takeForceCandidate() -> ApprovalDecision? {
+            defer { forceCandidate = nil }
+            return forceCandidate
+        }
+    }
+
     /// The decision for approving `server` from `review` with the current
     /// `allowed` selection (`everything` = Approve All). Nil when no review is
     /// loaded or the loaded review belongs to another server, so nothing can
@@ -217,9 +253,12 @@ struct ReviewSheet: View {
     @State private var review: ServerReviewResponse?
     @State private var allowed = Set<String>()
     @State private var choices: [String: ReviewPresentation.Choice] = [:]
-    /// The decision of the last approval attempt, captured at the click; the
-    /// blind and force confirmations re-send exactly it (D43.5, UX-02).
+    /// The decision awaiting the blind-approval confirmation, captured at
+    /// the click; the confirmation sends exactly it (D43.5, UX-02).
     @State private var pendingDecision: ReviewPresentation.ApprovalDecision?
+    /// One approval at a time; the force confirmation re-sends the decision
+    /// of the attempt that failed (UX-02 cross-review r5).
+    @State private var attempts = ReviewPresentation.ApprovalAttempts()
     /// Orders review loads: only the newest response for this server is shown.
     @State private var loadGeneration = 0
     @State private var error: String?
@@ -305,11 +344,11 @@ struct ReviewSheet: View {
                     Text(ReviewPresentation.selectionHint).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
                 HStack {
-                    Button(ReviewPresentation.approveLabel(selected: allowed.count, total: review?.tools.count ?? 0, definitionsCaptured: review?.server.definitionsCaptured ?? false)) { requestApprove(everything: false) }.buttonStyle(.borderedProminent)
+                    Button(ReviewPresentation.approveLabel(selected: allowed.count, total: review?.tools.count ?? 0, definitionsCaptured: review?.server.definitionsCaptured ?? false)) { requestApprove(everything: false) }.buttonStyle(.borderedProminent).disabled(attempts.isApproving)
                     if let review, review.server.definitionsCaptured, !review.tools.isEmpty, allowed.count < review.tools.count {
-                        Button(ReviewPresentation.approveAllLabel(total: review.tools.count)) { requestApprove(everything: true) }.help(ReviewPresentation.approveAllHint)
+                        Button(ReviewPresentation.approveAllLabel(total: review.tools.count)) { requestApprove(everything: true) }.help(ReviewPresentation.approveAllHint).disabled(attempts.isApproving)
                     }
-                    Button("Reject Server", role: .destructive) { Task { await rejectServer() } }
+                    Button("Reject Server", role: .destructive) { Task { await rejectServer() } }.disabled(attempts.isApproving)
                 }.padding()
             } else if headline?.state == .approved {
                 HStack { Button("Quarantine to Review Again…") { showRequarantineConfirmation = true } }.padding()
@@ -329,7 +368,7 @@ struct ReviewSheet: View {
         }
         .alert("Approve without seeing tools?", isPresented: $showBlindApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Approve", role: .destructive) { if let decision = pendingDecision { Task { await approve(decision, force: false) } } } } message: { Text("No tool definitions were captured. Fetch them before approval whenever possible.") }
         .alert("Quarantine \(serverName) to review again?", isPresented: $showRequarantineConfirmation) { Button("Cancel", role: .cancel) {}; Button("Quarantine", role: .destructive) { Task { await requarantine() } } } message: { Text("Agents lose access to every tool on \(serverName) until you approve it again.") }
-        .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Force Approve", role: .destructive) { if let decision = pendingDecision { Task { await approve(decision, force: true) } } } } message: { Text("Force approval activates this server despite dangerous baseline scan findings.") }
+        .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Force Approve", role: .destructive) { if let decision = attempts.takeForceCandidate() { Task { await approve(decision, force: true) } } } } message: { Text("Force approval activates this server despite dangerous baseline scan findings.") }
     }
 
     private var headline: ReviewPresentation.Headline? { review.map(ReviewPresentation.headline) }
@@ -375,9 +414,8 @@ struct ReviewSheet: View {
     /// Captures the decision synchronously, at the click: the block list and
     /// the hashes of the review on screen now (UX-02 cross-review r4).
     private func requestApprove(everything: Bool) {
-        guard let decision = ReviewPresentation.approvalDecision(server: serverName, review: review, allowed: allowed, everything: everything) else { return }
-        pendingDecision = decision
-        if decision.blind { showBlindApprovalConfirmation = true; return }
+        guard !attempts.isApproving, let decision = ReviewPresentation.approvalDecision(server: serverName, review: review, allowed: allowed, everything: everything) else { return }
+        if decision.blind { pendingDecision = decision; showBlindApprovalConfirmation = true; return }
         Task { await approve(decision, force: false) }
     }
     /// Sends `decision` exactly as captured at the click. The force retry
@@ -395,12 +433,22 @@ struct ReviewSheet: View {
             staleNotice = "Tool definitions were captured since you chose to approve. Review them, then approve again."
             return
         }
+        // One attempt at a time (UX-02 cross-review r5): a click while one is
+        // in flight is not sent, so it can neither race it nor replace the
+        // decision its force confirmation re-sends.
+        guard attempts.begin(decision) else { return }
         error = nil; staleNotice = nil
-        do { try await client.securityApproveServer(decision.server, force: force, block: decision.block, expectedHashes: decision.expected); choices = [:]; pendingDecision = nil; await load() }
-        catch {
+        do {
+            try await client.securityApproveServer(decision.server, force: force, block: decision.block, expectedHashes: decision.expected)
+            attempts.finish(decision, dangerous: false); choices = [:]; pendingDecision = nil; await load()
+        } catch {
             // A stale review (409): reload so the operator sees what changed, keeping the message.
-            if let stale = ReviewPresentation.staleReviewMessage(error) { pendingDecision = nil; await load(); staleNotice = stale; return }
-            self.error = error.localizedDescription; if !force, case let APIClientError.httpError(status, message) = error, status == 409, message.localizedCaseInsensitiveContains("dangerous") { showForceApprovalConfirmation = true }
+            if let stale = ReviewPresentation.staleReviewMessage(error) { attempts.finish(decision, dangerous: false); pendingDecision = nil; await load(); staleNotice = stale; return }
+            var dangerous = false
+            if !force, case let APIClientError.httpError(status, message) = error, status == 409, message.localizedCaseInsensitiveContains("dangerous") { dangerous = true }
+            attempts.finish(decision, dangerous: dangerous)
+            self.error = error.localizedDescription
+            if dangerous { showForceApprovalConfirmation = true }
         }
     }
     private func fetchDefinitions() async {

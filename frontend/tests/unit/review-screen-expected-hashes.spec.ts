@@ -156,3 +156,85 @@ describe('ReviewScreen load ordering (UX-02 round 3)', () => {
     expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['remove_file'], { read_file: 'new', remove_file: 'new-rm' })
   })
 })
+
+describe('ReviewScreen approval from a discarded review session (UX-02 round 5)', () => {
+  const reviewFor = (server: string) => ({
+    success: true,
+    data: {
+      server: { name: server, transport: 'stdio', quarantined: true, definitions_captured: true },
+      tools: [
+        { name: 'read_file', description: 'read', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: true, current_hash: 'h-read' },
+        { name: 'remove_file', description: 'remove', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false, current_hash: 'h-remove' },
+      ],
+    },
+  })
+  function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(api.getServerReview as any).mockImplementation((server: string) => Promise.resolve(reviewFor(server)))
+    ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+    ;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } })
+  })
+
+  // Approve on A (deferred), navigate A -> B -> A, make a new explicit
+  // uncheck, then let the old request finish.
+  async function staleApprovalAfterRoundTrip() {
+    const old = deferred<any>()
+    ;(api.securityApprove as any).mockImplementationOnce(() => old.promise)
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'srv-a' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'srv-b' })
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'srv-a' })
+    await flushPromises()
+    const box = wrapper.get('[data-test="review-allow-read_file"]')
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    await box.setValue(false)
+    await flushPromises()
+    const loadsBefore = (api.getServerReview as any).mock.calls.length
+    return { wrapper, old, loadsBefore }
+  }
+
+  it('a successful old response leaves the new session untouched', async () => {
+    const { wrapper, old, loadsBefore } = await staleApprovalAfterRoundTrip()
+    const approvedBefore = wrapper.emitted('approved')?.length ?? 0
+    old.resolve({ success: true })
+    await flushPromises()
+    expect(wrapper.emitted('approved')?.length ?? 0).toBe(approvedBefore)
+    expect((api.getServerReview as any).mock.calls.length).toBe(loadsBefore)
+    expect((wrapper.get('[data-test="review-allow-read_file"]').element as HTMLInputElement).checked).toBe(false)
+    // A reload (e.g. an SSE refresh) still honours the new explicit uncheck.
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    expect((wrapper.get('[data-test="review-allow-read_file"]').element as HTMLInputElement).checked).toBe(false)
+    // The next approval carries the new session's decision.
+    ;(api.securityApprove as any).mockResolvedValue({ success: true })
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenLastCalledWith('srv-a', false, ['read_file', 'remove_file'], { read_file: 'h-read', remove_file: 'h-remove' })
+  })
+
+  it('a dangerous old response opens no force dialog and changes no state', async () => {
+    const showModal = vi.fn()
+    const proto = HTMLDialogElement.prototype as any
+    const original = proto.showModal
+    proto.showModal = showModal
+    let calls: number
+    const { wrapper, old, loadsBefore } = await staleApprovalAfterRoundTrip()
+    try {
+      old.resolve({ success: false, error: 'Approval blocked: dangerous findings detected; use force' })
+      await flushPromises()
+      calls = showModal.mock.calls.length
+    } finally {
+      proto.showModal = original
+    }
+    expect(calls).toBe(0)
+    expect(wrapper.text()).not.toContain('dangerous findings detected; use force')
+    expect((api.getServerReview as any).mock.calls.length).toBe(loadsBefore)
+    expect((wrapper.get('[data-test="review-allow-read_file"]').element as HTMLInputElement).checked).toBe(false)
+    expect(wrapper.get('[data-test="review-approve-server"]').attributes('disabled')).toBeUndefined()
+  })
+})

@@ -925,9 +925,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// function ran BEFORE the seconds-wide ListTools above. The server may have
 	// been quarantined in that window — in which case QuarantineServer already
 	// deleted its tools from the index — so re-check immediately before we write
-	// them back. A microsecond window remains between this check and the index
-	// mutation inside applyDifferentialToolUpdate; closing it fully would require
-	// holding a lock across the index write, which is deliberately not done.
+	// them back. The window left between this check and the index mutation is
+	// closed by applyInventoryLocked, which re-checks quarantine (config and
+	// storage) under the server's tool-approval lock (UX-02 cross-review r5).
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
@@ -1091,6 +1091,24 @@ func (r *Runtime) applyInventoryLocked(_ context.Context, serverName string, new
 	}
 	if r.inventoryIndexPhaseHook != nil {
 		r.inventoryIndexPhaseHook(serverName)
+	}
+
+	// UX-02 cross-review r5: the callers' eligibility checks read the runtime
+	// config before this pass took the lock, and a quarantine flips storage
+	// (under this lock) and purges the index before the config catches up.
+	// A pass resuming after that purge must not re-publish the server's
+	// definitions — approved ones are not in BlockedTools, so the filters
+	// below would let them through. Re-check under the lock (config OR
+	// storage, storage failing closed) and keep the server out of the index.
+	if r.serverQuarantinedForIndexLocked(serverName) {
+		r.logger.Info("Server is quarantined; keeping its tools out of the search index",
+			zap.String("server", serverName))
+		if err := r.indexManager.DeleteServerTools(serverName); err != nil {
+			r.logger.Warn("Failed to remove quarantined server tools from index",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+		return func() { r.reindexAffectedProfiles(serverName) }, nil
 	}
 
 	// Query existing tools from the index
@@ -1617,10 +1635,6 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
 				zap.Bool("oauth_changed", oauthChanged))
 
-			if newlyQuarantined {
-				r.purgeQuarantinedServerFromIndex(serverCfg.Name)
-			}
-
 			// Clear OAuth state if OAuth config changed
 			if oauthChanged && r.storageManager != nil {
 				r.logger.Info("OAuth config changed, clearing cached OAuth state",
@@ -1635,8 +1649,24 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 		// Save synchronously to ensure storage is populated for API queries
 		r.logger.Debug("Saving server to storage", zap.String("server", serverCfg.Name), zap.Bool("exists", existsInStorage))
-		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
-			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
+		// UX-02 cross-review r5: a newly quarantined server's storage flip is
+		// written under its tool-approval lock — exactly as QuarantineServer
+		// does — and the index purge follows it, so a discovery pass that
+		// takes the lock after the purge reads the quarantine and keeps the
+		// server out of the index (applyInventoryLocked) instead of
+		// re-publishing it. The purge still runs if the save fails: the
+		// server is quarantined in the config either way.
+		var unlockApprovals func()
+		if hasChanged && newlyQuarantined {
+			unlockApprovals = r.lockToolApprovals(serverCfg.Name)
+		}
+		saveErr := r.storageManager.SaveUpstreamServer(serverCfg)
+		if unlockApprovals != nil {
+			unlockApprovals()
+			r.purgeQuarantinedServerFromIndex(serverCfg.Name)
+		}
+		if saveErr != nil {
+			r.logger.Error("Failed to save/update server in storage", zap.Error(saveErr), zap.String("server", serverCfg.Name))
 			continue
 		}
 		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))

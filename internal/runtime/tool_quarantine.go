@@ -529,6 +529,19 @@ func (r *Runtime) checkToolApprovalsLocked(serverName string, tools []*config.To
 			}
 		}
 	}
+	// An operator (server) approval is a baseline decision even when the
+	// reviewed inventory was empty and so left no approved record behind;
+	// without this, the first tool the server served afterwards was
+	// auto-approved as a "first trusted baseline" (UX-02 cross-review r5).
+	// An unreadable marker fails closed: held for review, not auto-approved.
+	if !serverHasBaseline {
+		decided, decidedErr := r.storageManager.ToolBaselineDecided(serverName)
+		if decidedErr != nil {
+			r.logger.Warn("Cannot read the server's tool-baseline decision; holding new tools for review",
+				zap.String("server", serverName), zap.Error(decidedErr))
+		}
+		serverHasBaseline = decided || decidedErr != nil
+	}
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{

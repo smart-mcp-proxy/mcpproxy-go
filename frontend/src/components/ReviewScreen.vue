@@ -104,6 +104,12 @@ function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filt
 // operator is about to approve.
 let loadSeq = 0
 let reviewServer = '' // the server the review on screen was loaded for
+// Every review session (each serverName the screen switches to) is numbered.
+// A request answers only the session that sent it: after /review/A -> B -> A
+// the server name matches again, but the old request's success must not
+// clear the new session's choices, nor its dangerous-findings answer open a
+// force dialog for a decision the screen no longer holds (UX-02 r5).
+let reviewSession = 0
 async function load() {
   if (typeof api.getServerReview !== 'function') return
   const seq = ++loadSeq
@@ -157,6 +163,7 @@ function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined
 // pairing the old block list with definitions the operator never decided on.
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
+  const session = reviewSession
   // Never submit a decision made on another server's review (UX-02).
   if (review.value && reviewServer !== server) { closeConfirm(); forceDialog.value?.close?.(); return }
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; staleNotice.value = ''
@@ -166,7 +173,7 @@ async function approve(force: boolean, block?: string[]) {
   const expected = retry ? lastExpected.value : reviewedHashes(review.value?.tools ?? [])
   lastBlock.value = blocked; lastExpected.value = expected
   const res = expected ? await api.securityApprove(server, force, blocked, expected) : await api.securityApprove(server, force, blocked)
-  if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
+  if (session !== reviewSession || server !== props.serverName) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
     const message = res.error || 'Approval failed'
@@ -178,10 +185,13 @@ async function approve(force: boolean, block?: string[]) {
 }
 async function rejectServer() { approving.value = true; const res = await api.securityReject(props.serverName); approving.value = false; if (!res.success) error.value = res.error || 'Reject failed'; else await load() }
 async function approveTool(name: string) {
+  const session = reviewSession
   const expected = reviewedHashes((review.value?.tools ?? []).filter(t => t.name === name))
   const res = expected ? await api.approveTools(props.serverName, [name], expected) : await api.approveTools(props.serverName, [name])
   const message = res && !res.success ? res.error || 'Approval failed' : ''
+  if (session !== reviewSession) return // answered a review session the screen no longer shows
   await load()
+  if (session !== reviewSession) return
   if (/out of date/i.test(message)) staleNotice.value = message
   else if (message) error.value = message
 }
@@ -195,7 +205,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { review.value = null; allowedTools.value = []; choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
+watch(() => props.serverName, () => { reviewSession++; review.value = null; allowedTools.value = []; choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

@@ -644,7 +644,7 @@ func (b *BoltDB) DeleteServerToolApprovals(serverName string) error {
 				return err
 			}
 		}
-		return nil
+		return deleteToolBaselineDecisions(tx, func(server string) bool { return server != serverName })
 	})
 }
 
@@ -682,7 +682,7 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 			}
 			removed++
 		}
-		return nil
+		return deleteToolBaselineDecisions(tx, func(server string) bool { return keep[server] })
 	})
 	return removed, err
 }

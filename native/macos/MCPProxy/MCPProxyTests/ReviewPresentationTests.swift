@@ -232,6 +232,47 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertEqual(perTool, ["drop": "h1-drop"])
     }
 
+    // MARK: UX-02 cross-review r5: one approval at a time; the force
+    // confirmation re-sends the decision whose request failed
+
+    func testForceConfirmationIsBoundToTheFailedAttempt() {
+        let d1 = ReviewPresentation.ApprovalDecision(server: "A", block: ["drop"], expected: ["read": "h1", "drop": "h2"], blind: false)
+        let d2 = ReviewPresentation.ApprovalDecision(server: "A", block: [], expected: ["read": "h1", "drop": "h2"], blind: false)
+
+        // D1 in flight: a second click (Approve All, D2) is not sent.
+        var attempts = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(attempts.begin(d1))
+        XCTAssertTrue(attempts.isApproving)
+        XCTAssertFalse(attempts.begin(d2), "a second approval must not start while one is in flight")
+        // A response for a decision that is not in flight changes nothing.
+        attempts.finish(d2, dangerous: true)
+        XCTAssertTrue(attempts.isApproving)
+        XCTAssertNil(attempts.forceCandidate)
+        // D1 answers dangerous: the force retry is D1, exactly.
+        attempts.finish(d1, dangerous: true)
+        XCTAssertFalse(attempts.isApproving)
+        XCTAssertEqual(attempts.takeForceCandidate(), d1)
+        XCTAssertNil(attempts.takeForceCandidate(), "the confirmation is consumed once")
+
+        // Other order: D1 succeeds, then D2 answers dangerous -> the retry is D2.
+        var other = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(other.begin(d1))
+        other.finish(d1, dangerous: false)
+        XCTAssertNil(other.forceCandidate)
+        XCTAssertTrue(other.begin(d2))
+        other.finish(d2, dangerous: true)
+        XCTAssertEqual(other.takeForceCandidate(), d2)
+
+        // A new attempt drops an unanswered force confirmation of an older one.
+        var stale = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(stale.begin(d1))
+        stale.finish(d1, dangerous: true)
+        XCTAssertTrue(stale.begin(d2))
+        XCTAssertNil(stale.forceCandidate, "an older failure's force retry cannot outlive a newer attempt")
+        stale.finish(d2, dangerous: false)
+        XCTAssertNil(stale.takeForceCandidate())
+    }
+
     func testBlindDecisionWhenNothingWasCaptured() throws {
         let empty = try hashedReview(server: "A", captured: false, tools: [])
         let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))

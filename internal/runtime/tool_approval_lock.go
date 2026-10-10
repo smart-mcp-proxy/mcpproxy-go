@@ -145,8 +145,12 @@ func (r *Runtime) WithToolApprovalLock(serverName string, fn func() error) error
 //     tool discovered after the operator's review, or a selected tool whose
 //     definition changed since, therefore fails the approval instead of being
 //     promoted unseen.
-//  2. commit runs: the scanner's integrity baseline (+ atomic tool blocks).
-//  3. Every remaining "pending" record not in blocked is promoted to
+//  2. The server's tool-baseline decision is recorded durably
+//     (storage.ToolBaselineDecisionsBucket), so a tool first served after
+//     this approval is held for review even when the reviewed inventory was
+//     empty and no record was approved.
+//  3. commit runs: the scanner's integrity baseline (+ atomic tool blocks).
+//  4. Every remaining "pending" record not in blocked is promoted to
 //     approved (pendingOnly: a "changed" record stays held).
 //
 // Promoting here — not after the unquarantine — closes the window in which a
@@ -206,6 +210,14 @@ func (r *Runtime) commitServerApprovalLocked(serverName string, exclude map[stri
 			return nil, stale
 		}
 	}
+	// Record the baseline decision durably before anything else is written:
+	// an approval of an empty (or fully blocked) snapshot leaves no approved
+	// record, and later tools must still be held rather than auto-baselined
+	// (UX-02 cross-review r5). Marking first is fail-safe — a commit that
+	// then fails only leaves the server more conservative.
+	if err := r.storageManager.MarkToolBaselineDecided(serverName); err != nil {
+		return nil, fmt.Errorf("record tool baseline decision for %s: %w", serverName, err)
+	}
 	if commit != nil {
 		if err := commit(); err != nil {
 			return nil, err
@@ -221,6 +233,15 @@ func (r *Runtime) commitServerApprovalLocked(serverName string, exclude map[stri
 // since stays pending for review.
 func (r *Runtime) UnquarantineServerKeepingToolDecisions(serverName string) error {
 	return r.setServerQuarantine(serverName, false, false)
+}
+
+// serverQuarantinedForIndexLocked reports whether the server must be kept out
+// of the search index: quarantined in the runtime config or in storage
+// (failing closed). The caller holds the server's tool-approval lock, under
+// which every quarantine flip writes storage, so a pass cannot act on a
+// trusted view older than the flip (UX-02 cross-review r5).
+func (r *Runtime) serverQuarantinedForIndexLocked(serverName string) bool {
+	return r.resolveToolQuarantineGate(serverName).serverQuarantined || r.serverQuarantinedInStorage(serverName)
 }
 
 // serverQuarantinedInStorage reports whether the server's storage record is

@@ -137,6 +137,12 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertTrue(source.contains("decision.server == serverName"))
         XCTAssertTrue(source.contains("ReviewPresentation.staleReviewMessage(error)"))
         XCTAssertTrue(source.contains("await load(); staleNotice = stale"))
+        // UX-02 cross-review r5: approvals are serialized and the force
+        // confirmation re-sends the attempt that failed.
+        XCTAssertTrue(source.contains("guard attempts.begin(decision) else { return }"))
+        XCTAssertTrue(source.contains("attempts.takeForceCandidate()"))
+        XCTAssertTrue(source.contains(".disabled(attempts.isApproving)"))
+        XCTAssertFalse(source.contains("if let decision = pendingDecision { Task { await approve(decision, force: true) } }"))
     }
 
     func testServerDetailOnlyNavigatesToInformedReview() throws {
