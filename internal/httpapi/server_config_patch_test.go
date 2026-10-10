@@ -353,3 +353,35 @@ func TestHandlePatchConfig_MergesOntoDesiredConfig(t *testing.T) {
 		"a restart-pending routing mode the client never mentioned must survive the patch")
 	assert.Equal(t, "secret-key", ctrl.captured.APIKey, "secrets still preserved verbatim")
 }
+
+func TestHandlePatchConfig_RequireMCPAuthChangeDetected(t *testing.T) {
+	live := &config.Config{
+		APIKey:         "secret-key",
+		RequireMCPAuth: false,
+	}
+	ctrl := &mockPatchConfigController{
+		apiKey:        "secret-key",
+		live:          live,
+		detectChanges: true,
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"require_mcp_auth": true,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "secret-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	res := decodePatchResult(t, w.Body.Bytes())
+	assert.Equal(t, true, res["success"])
+	assert.Equal(t, true, res["applied_immediately"])
+	changed, ok := res["changed_fields"].([]interface{})
+	require.True(t, ok)
+	assert.ElementsMatch(t, []interface{}{"require_mcp_auth"}, changed)
+}

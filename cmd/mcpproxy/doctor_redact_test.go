@@ -150,3 +150,27 @@ func TestStatusOutput_MasksKeyInEveryFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorRedact_ApostropheURL(t *testing.T) {
+	input := "connect failed: dial https://h.example/mcp?label=Bob's&%74oken=secret-tok-123456 failed"
+	redacted := redactDoctorString(input)
+	if strings.Contains(redacted, "secret-tok-123456") {
+		t.Fatalf("credential after apostrophe leaked: %s", redacted)
+	}
+	if !strings.Contains(redacted, "Bob's") {
+		t.Fatalf("label before token should be preserved: %s", redacted)
+	}
+	if !strings.Contains(redacted, "REDACTED") {
+		t.Fatalf("expected REDACTED in output: %s", redacted)
+	}
+
+	// Enclosed in quotes
+	inQuotes := "check 'https://h.example/mcp?label=Bob's&token=mysecret' for info"
+	redactedQuotes := redactDoctorString(inQuotes)
+	if strings.Contains(redactedQuotes, "mysecret") {
+		t.Fatalf("credential in quoted URL leaked: %s", redactedQuotes)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(redactedQuotes), "' for info") {
+		t.Fatalf("trailing quote and prose should be preserved: %s", redactedQuotes)
+	}
+}
