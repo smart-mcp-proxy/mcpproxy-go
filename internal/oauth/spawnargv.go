@@ -192,6 +192,13 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 		if d == tokens[i] || IsArgvFlag(d) {
 			continue
 		}
+		// A value the flat pass already masked WHOLE (the operand of a
+		// sensitive flag that merely looks like a command) stays that way:
+		// re-parsing it as a command would replace the whole-value mask with
+		// partially redacted text that exposes the rest of the secret.
+		if mk := r.masker(); masked[i] == mk(d) || masked[i] == mk(tokens[i]) {
+			continue
+		}
 		if inner := r.commandStringTokens(d, spawnRules); inner != d {
 			masked[i] = "'" + strings.ReplaceAll(inner, "'", `'\''`) + "'"
 		}
