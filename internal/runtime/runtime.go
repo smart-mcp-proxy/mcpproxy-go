@@ -677,6 +677,26 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 	r.updateConfigLocked(cfg, cfgPath)
 }
 
+// UpdateConfigFrom runs a read-modify-publish of the runtime configuration as one
+// config-commit: fn receives the current published snapshot (treat it as
+// read-only) and returns the replacement, all under configCommitMu, so a
+// concurrent ApplyConfig/SaveConfiguration/reload cannot land between the
+// snapshot read and the publish and be silently reverted. fn returning a nil
+// config publishes nothing; a non-nil error is returned and nothing is
+// published. fn MUST NOT call back into a method that takes configCommitMu.
+func (r *Runtime) UpdateConfigFrom(fn func(current *config.Config) (*config.Config, error)) error {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	updated, err := fn(r.Config())
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		r.updateConfigLocked(updated, "")
+	}
+	return nil
+}
+
 // updateConfigLocked performs the UpdateConfig work assuming the caller already
 // holds configCommitMu (e.g. ReloadConfiguration's legacy configSvc==nil
 // fallback, which must not re-acquire the non-reentrant mutex).

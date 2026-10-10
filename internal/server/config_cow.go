@@ -71,27 +71,36 @@ func (e *ServerExistsError) Error() string {
 // additionally atomic (one bbolt tx), which covers other writers that do not
 // take this mutex. On any error nothing has been published to the runtime
 // config.
+// createServerAfterSnapshotHook is a test seam fired between reading the
+// config snapshot and publishing the clone.
+var createServerAfterSnapshotHook func()
+
 func (s *Server) createServer(sc *config.ServerConfig) error {
 	s.createMu.Lock()
 	defer s.createMu.Unlock()
 
-	if cfg := s.runtime.Config(); cfg != nil {
-		for _, existing := range cfg.Servers {
-			if existing != nil && existing.Name == sc.Name {
-				return &ServerExistsError{Name: sc.Name}
+	// The existence check, storage create, snapshot read and publish all run
+	// inside one runtime config-commit so a concurrent config apply cannot be
+	// reverted by this add's clone (UX-01 review r1).
+	return s.runtime.UpdateConfigFrom(func(cfg *config.Config) (*config.Config, error) {
+		if cfg != nil {
+			for _, existing := range cfg.Servers {
+				if existing != nil && existing.Name == sc.Name {
+					return nil, &ServerExistsError{Name: sc.Name}
+				}
 			}
 		}
-	}
-	if err := s.runtime.StorageManager().CreateUpstreamServer(sc); err != nil {
-		if errors.Is(err, storage.ErrUpstreamExists) {
-			return &ServerExistsError{Name: sc.Name}
+		if err := s.runtime.StorageManager().CreateUpstreamServer(sc); err != nil {
+			if errors.Is(err, storage.ErrUpstreamExists) {
+				return nil, &ServerExistsError{Name: sc.Name}
+			}
+			return nil, fmt.Errorf("failed to save server to storage: %w", err)
 		}
-		return fmt.Errorf("failed to save server to storage: %w", err)
-	}
-	// runtime.Config() is the live immutable snapshot; copy-on-write, see
-	// configWithAppendedServer.
-	if updated := configWithAppendedServer(s.runtime.Config(), sc); updated != nil {
-		s.runtime.UpdateConfig(updated, "")
-	}
-	return nil
+		// cfg is the live immutable snapshot; copy-on-write, see
+		// configWithAppendedServer.
+		if createServerAfterSnapshotHook != nil {
+			createServerAfterSnapshotHook()
+		}
+		return configWithAppendedServer(cfg, sc), nil
+	})
 }
