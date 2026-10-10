@@ -1,7 +1,7 @@
 <template>
   <section class="card bg-base-100 border border-base-300" data-test="scan-history">
     <div class="card-body">
-      <div class="flex items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
         <div><h2 class="card-title">Scan history</h2><p class="text-sm text-base-content/70">Security scan results remain available from the review workflow.</p></div>
         <div class="flex gap-2"><button class="btn btn-sm btn-primary" :disabled="batchRunning" data-test="scan-all-button" @click="startBatch">{{ batchRunning ? 'Scanning…' : 'Scan all servers' }}</button><button class="btn btn-ghost btn-sm" :disabled="loading" @click="load">Refresh</button></div>
       </div>
