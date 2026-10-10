@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,10 +37,11 @@ func TestCreateUpstreamServer_ConcurrentSameNameExactlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			switch err := m.CreateUpstreamServer(guardServer("race", true)); {
+			err := m.CreateUpstreamServer(guardServer("race", true))
+			switch {
 			case err == nil:
 				atomic.AddInt32(&wins, 1)
-			case err == ErrUpstreamExists:
+			case errors.Is(err, ErrUpstreamExists):
 				atomic.AddInt32(&exists, 1)
 			}
 		}()
