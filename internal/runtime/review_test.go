@@ -210,6 +210,35 @@ func TestReviewPayload_RedactsServerSecretsUnconditionally(t *testing.T) {
 	require.NotEqual(t, "client --token secret123", review.Server.Command)
 }
 
+// UX-10 round 1: a shell -c argument is ONE argv leaf to Redaction.Argv, so a
+// low-entropy secret embedded in the command line must be masked by the review
+// payload itself (the UI renders and copies exactly these args).
+func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
+	cases := map[string][]string{
+		"space separated flag": {"-c", "exec npx srv --password hunter2"},
+		"equals flag":          {"-c", "exec npx srv --password=hunter2"},
+		"single quoted value":  {"-lc", "exec npx srv --password 'hunter2 and more'"},
+		"env prefix":           {"-c", "PASSWORD=hunter2 npx srv --port 80"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
+				Name: "shellwrap", Enabled: true, Quarantined: true,
+				Protocol: "stdio", Command: "sh", Args: args,
+			}})
+			review, err := rt.GetServerReview(context.Background(), "shellwrap")
+			require.NoError(t, err)
+			encoded, err := json.Marshal(review.Server)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "hunter2")
+			require.NotContains(t, string(encoded), "and more")
+			require.Len(t, review.Server.Args, 2)
+			require.Equal(t, args[0], review.Server.Args[0])
+			require.Contains(t, review.Server.Args[1], "npx srv")
+		})
+	}
+}
+
 func TestReviewToolScanVerdict_UsesToolFindingsAndHeldFallback(t *testing.T) {
 	record := &storage.ToolApprovalRecord{ToolName: "delete", HeldVerdict: "dangerous"}
 	require.Equal(t, "warnings", reviewToolScanVerdict([]scanner.ScanFinding{{

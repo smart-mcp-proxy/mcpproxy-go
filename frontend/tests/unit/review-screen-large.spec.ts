@@ -151,6 +151,30 @@ describe('ReviewScreen at scale (UX-03)', () => {
     expect(w.get('[data-test="review-allowed-count"]').text()).toBe('Allowed 164')
   })
 
+  it('an older refresh that resolves last cannot restore an invalidated allow or replace newer definitions', async () => {
+    const w = await mountN(180)
+    await w.get('[data-test="review-allow-delete_customer_record_012"]').setValue(true)
+    expect(w.get('[data-test="review-allowed-count"]').text()).toBe('Allowed 166')
+    const older = payload(180)
+    const newer = payload(180)
+    newer.data.tools = newer.data.tools.map(t => t.name === 'delete_customer_record_012' ? { ...t, description: 'CHANGED upstream', approval_status: 'changed' } : t)
+    let resolveOlder!: (v: unknown) => void; let resolveNewer!: (v: unknown) => void
+    ;(api.getServerReview as any)
+      .mockImplementationOnce(() => new Promise(r => { resolveOlder = r }))
+      .mockImplementationOnce(() => new Promise(r => { resolveNewer = r }))
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    resolveNewer(newer); await flushPromises()
+    expect(w.get('[data-test="review-allowed-count"]').text()).toBe('Allowed 165')
+    resolveOlder(older); await flushPromises()
+    expect(w.get('[data-test="review-allowed-count"]').text()).toBe('Allowed 165')
+    expect(w.text()).toContain('CHANGED upstream')
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(blockedArg()).toContain('delete_customer_record_012')
+    expect(blockedArg().length).toBe(15)
+  })
+
   it('pure helpers: filter semantics and page clamping', () => {
     const t = tools(30)
     const allowed = new Set([t[1].name])
