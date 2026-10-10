@@ -2073,13 +2073,15 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		})
 	}
 
+	liveAtApply := r.Config()
+
 	// IMPORTANT: Pass config copy to goroutine to avoid lock dependency
 	// The goroutine will use the copied config instead of calling r.Config()
 	if serversChanged {
 		r.logger.Info("Server configuration changed, scheduling async reload")
 		// Spawn goroutine with captured config - no lock needed
-		go func(cfg *config.Config, ctx context.Context) {
-			if err := r.LoadConfiguredServers(cfg); err != nil {
+		go func(cfg, base *config.Config, ctx context.Context) {
+			if err := r.loadConfiguredServersAgainst(cfg, base); err != nil {
 				r.logger.Error("Failed to reload servers after config apply", zap.Error(err))
 				return
 			}
@@ -2096,7 +2098,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 			if err := r.DiscoverAndIndexTools(ctx); err != nil {
 				r.logger.Error("Failed to re-index tools after config apply", zap.Error(err))
 			}
-		}(&configCopy, appCtx)
+		}(&configCopy, liveAtApply, appCtx)
 	}
 
 	return result, nil

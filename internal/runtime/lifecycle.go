@@ -1323,8 +1323,21 @@ var serverRemovalCleanupHook func(name string)
 //
 //nolint:unparam // maintained for parity with previous implementation
 func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
-	return r.loadConfiguredServers(cfg, false)
+	return r.loadConfiguredServers(cfg, false, nil)
 }
+
+// loadConfiguredServersAgainst is LoadConfiguredServers for a caller that took
+// cfg from the live config at publish time (ApplyConfig's async reload). base is
+// the live config pointer at that moment: if the live config has moved on by the
+// time the sync holds the commit lock, cfg is stale and the sync reconciles
+// against the current live config instead (UX-01 r5).
+func (r *Runtime) loadConfiguredServersAgainst(cfg, base *config.Config) error {
+	return r.loadConfiguredServers(cfg, false, base)
+}
+
+// loadConfiguredServersBeforeSyncHook is a test seam fired right after the
+// commit lock is taken, so a test can park an older sync while newer commits land.
+var loadConfiguredServersBeforeSyncHook func()
 
 // loadConfiguredServersKeepSetHook is a test seam fired right after the
 // orphan-GC keep-set has been captured from the live config, before the prunes.
@@ -1333,7 +1346,25 @@ var loadConfiguredServersKeepSetHook func()
 // loadConfiguredServers is LoadConfiguredServers; commitHeld is true when the
 // caller already holds configCommitMu (ReloadConfiguration), so the orphan GC
 // must not take the non-reentrant lock again.
-func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool) error {
+func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool, base *config.Config) error {
+	// The whole sync (orphan GC, storage save, connection scheduling, removal
+	// scheduling) runs under the config commit lock, so a stale snapshot can
+	// never write storage or schedule connections for a server a newer commit
+	// removed, re-added or re-configured (UX-01 r5). A caller that already holds
+	// it (ReloadConfiguration) passes commitHeld.
+	if !commitHeld {
+		if loadConfiguredServersBeforeSyncHook != nil {
+			loadConfiguredServersBeforeSyncHook()
+		}
+		r.configCommitMu.Lock()
+		defer r.configCommitMu.Unlock()
+	}
+	if base != nil {
+		if live := r.Config(); live != nil && live != base {
+			r.logger.Info("Config moved on since this sync was scheduled; reconciling against the live config")
+			cfg = live
+		}
+	}
 	if cfg == nil {
 		cfg = r.Config()
 		if cfg == nil {
@@ -1406,9 +1437,6 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool) err
 		// server is either already in the live config (kept) or its records do
 		// not exist yet, never created between the capture and the prune
 		// (UX-01 r4).
-		if !commitHeld {
-			r.configCommitMu.Lock()
-		}
 		keep := make(map[string]struct{}, len(configuredServers))
 		for name := range configuredServers {
 			keep[name] = struct{}{}
@@ -1442,9 +1470,6 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool) err
 			r.logger.Warn("Failed to prune orphan tool-call history", zap.Error(perr))
 		} else if pruned > 0 {
 			r.logger.Info("Pruned orphan tool-call history", zap.Int("servers_removed", pruned))
-		}
-		if !commitHeld {
-			r.configCommitMu.Unlock()
 		}
 	}
 
@@ -2038,7 +2063,7 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.reconcileProfileIndexes()
 	}
 
-	if err := r.loadConfiguredServers(nil, true); err != nil {
+	if err := r.loadConfiguredServers(nil, true, nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}

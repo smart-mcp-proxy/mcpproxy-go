@@ -19,6 +19,16 @@ import (
 func TestServerAddServer_DoesNotRevertConcurrentConfigCommit(t *testing.T) {
 	srv, cfgPath := guardedApplyServer(t, nil)
 
+	// Seed "a" in storage as well as runtime config: SaveConfiguration rebuilds
+	// the server list from storage, so a runtime-only "a" is dropped whenever the
+	// add's save wins the race, which made this test scheduling-dependent.
+	for _, s := range srv.runtime.Config().Servers {
+		if s.Name == "a" {
+			seed := *s
+			require.NoError(t, srv.runtime.StorageManager().SaveUpstreamServer(&seed))
+		}
+	}
+
 	reached := make(chan struct{})
 	release := make(chan struct{})
 	createServerAfterSnapshotHook = func() {
