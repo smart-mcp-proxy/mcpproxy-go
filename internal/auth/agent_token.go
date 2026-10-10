@@ -151,6 +151,50 @@ type AgentToken struct {
 	OwnerEmail    string `json:"-"`
 	OwnerProvider string `json:"-"`
 	OwnerRole     string `json:"-"`
+
+	// RevokedAt, Issuer, Purpose and GuardBound are the Spec 115 lifecycle
+	// fields (data-model.md §1). All are additive and omitempty: a binary
+	// that predates them ignores them, and none participates in
+	// ValidateTokenInvariants except GuardBound's own shape rule.
+	//
+	// RevokedAt is stamped (UTC) the first time Revoked flips to true and is
+	// never overwritten. Legacy revoked records carry none.
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	// Issuer records who issued the credential through the credentials
+	// service. Absent on pre-115 records and on connect-minted clients.
+	Issuer *CredentialIssuer `json:"issuer,omitempty"`
+	// Purpose is the stated, UNENFORCED task brief an issuer recorded, at
+	// most MaxCredentialPurpose characters. Display-only.
+	Purpose string `json:"purpose,omitempty"`
+	// GuardBound marks an agent token minted through the MCP credentials
+	// path: its ProfilePin counts as a standing FR-008a binding in every later
+	// guard evaluation (Spec 115 FR-012a). Never set on client records or on
+	// REST/CLI tokens; immutable after mint.
+	GuardBound bool `json:"guard_bound,omitempty"`
+}
+
+// CredentialIssuer records who issued a credential, using the Actor fields of
+// the profile_change record that announced it (Spec 115 data-model §1).
+type CredentialIssuer struct {
+	ActorKind string `json:"actor_kind"`
+	ActorName string `json:"actor_name,omitempty"`
+	Surface   string `json:"surface"`
+}
+
+// MaxCredentialPurpose bounds AgentToken.Purpose (characters, Spec 115 A10).
+const MaxCredentialPurpose = 500
+
+// LeaseThreshold is the longest lifetime at issue that is presented as a task
+// lease rather than a long-lived credential (Spec 115 Definitions).
+const LeaseThreshold = 24 * time.Hour
+
+// IsLease reports whether the credential's lifetime at issue is at most
+// LeaseThreshold. A record without an expiry is never a lease.
+func (t *AgentToken) IsLease() bool {
+	if t == nil || t.ExpiresAt.IsZero() || t.CreatedAt.IsZero() {
+		return false
+	}
+	return t.ExpiresAt.Sub(t.CreatedAt) <= LeaseThreshold
 }
 
 // Token expiry rule shared by core POST /api/v1/tokens and the server
@@ -181,6 +225,12 @@ func ParseTokenExpiry(expiresIn string, now time.Time) (time.Time, error) {
 		days, err := strconv.Atoi(daysStr)
 		if err != nil || days <= 0 {
 			return time.Time{}, fmt.Errorf("invalid expiry duration: %q", expiresIn)
+		}
+		// Spec 115 A16: bound the count BEFORE multiplying. 106752d and above
+		// overflow time.Duration (int64 nanoseconds); a wrapped negative value
+		// used to pass the cap below and mint an already-expired token.
+		if days > int(MaxTokenExpiry/(24*time.Hour)) {
+			return time.Time{}, fmt.Errorf("expiry duration cannot exceed 365 days")
 		}
 		d = time.Duration(days) * 24 * time.Hour
 	} else {
@@ -387,6 +437,11 @@ func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
 		if t.ExpiresAt.Sub(t.CreatedAt) > MaxTokenExpiry {
 			return errMalformedCredential
 		}
+		// GuardBound applies to agent tokens only: a client is always a
+		// binding (Spec 115 data-model §1).
+		if t.GuardBound {
+			return errMalformedCredential
+		}
 		return nil
 	}
 	// kind == KindAgent (legacy pinned or unpinned token): none of the
@@ -394,6 +449,11 @@ func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
 	// pin) and a legacy pinned token (no mode, a pin) are both VALID and
 	// keep their exact existing semantics.
 	if t.ClientID != "" || t.ProfileMode != "" || t.PendingHash != "" || t.DisplayName != "" {
+		return errMalformedCredential
+	}
+	// Spec 115 FR-012a: a guard-bound token is a standing binding to its pin;
+	// one without a pin would bind nothing and is malformed.
+	if t.GuardBound && t.ProfilePin == "" {
 		return errMalformedCredential
 	}
 	return nil

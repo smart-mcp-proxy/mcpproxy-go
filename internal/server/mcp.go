@@ -1361,6 +1361,12 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	profilesTool := p.buildProfilesServerTool()
 	p.server.AddTool(profilesTool.Tool, profilesTool.Handler)
 
+	// credentials - Spec 115 admin tool: issue, inspect and revoke worker
+	// credentials. Registered exactly where `profiles` is, under the same
+	// visibility predicate (adminToolAccess) and per-call gates.
+	credentialsTool := p.buildCredentialsServerTool()
+	p.server.AddTool(credentialsTool.Tool, credentialsTool.Handler)
+
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
 	// that enable granular IDE permission control and require explicit intent declaration.

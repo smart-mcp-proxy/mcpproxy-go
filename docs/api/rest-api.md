@@ -1340,13 +1340,25 @@ holds and records the observation. No scope filter is honoured here.
 #### POST /api/v1/clients
 
 Adds a custom client (one not in the connect registry). Body `{id,
-display_name?, profile?, mode?, expires_in?}`; `expires_in` defaults to and is
-capped at 365 days. `201 {client, credential, snippet}`: `credential` is the
+display_name?, profile?, mode?, expires_in?, purpose?}`; `expires_in` defaults to and is
+capped at 365 days; `purpose` is an unenforced note of at most 500 characters.
+`201 {client, credential, snippet}`: `credential` is the
 `mcp_cli_` secret, shown once; `snippet.generic_http` is a paste-ready JSON
 config that carries it in the `X-API-Key` header. Refusals: `400 {error, field}`
 (the id rule, a supported client's id, profile, mode, `expires_in`,
-`display_name`), `409 binding_bypassable_without_auth`, `409` with
-`conflicting_token`.
+`display_name`, `purpose`), `409 binding_bypassable_without_auth`, `409` with
+`conflicting_token`. Every value is screened first: a credential, the API key or
+a detected secret answers `400 {code: "secret_in_argument", field}` and nothing is
+created. A malformed body answers `400` with a sanitized text that never quotes a
+caller key or value (`invalid request body: unrecognised field (its name is not
+echoed)`, `... field "<known field>" has the wrong type`, `... malformed JSON at
+byte <n>`). The add writes one `profile_change` record with `change: issue`
+(Spec 115; it used to be `assign`) and publishes `credentials.changed`.
+
+Client rows (list and detail) add the credential's `revoked_at`, `issuer
+{actor_kind, actor_name?, surface}`, `purpose`, `lease` (lifetime at issue of at
+most 24 h) and `profile_state` (`ok`, `dangling`, `none`). An exact
+`?client=<id>` filter also returns that client's revoked custom row.
 
 #### POST /api/v1/clients/{client}/rotate
 
@@ -1500,6 +1512,17 @@ name; an unknown value returns no rows. `POST /api/v1/tokens` accepts `profile`
 and `permissions` default to `["*"]` and all three). A name starting with
 `client-` is `400 {error, field: "name"}`.
 
+Spec 115: token rows add `revoked_at`, `issuer`, `purpose`, `lease` and
+`profile_state`. `POST /api/v1/tokens` accepts `purpose`, screens every value
+(including each `allowed_servers` and `permissions` element and the raw
+`expires_in`) for secrets first (`400 {code: "secret_in_argument", field}`, nothing
+created), answers malformed bodies with a sanitized text, writes a
+`profile_change` record with `change: issue` and publishes `credentials.changed`.
+`DELETE /api/v1/tokens/{name}` stamps `revoked_at`, writes `change: revoke` (only
+when the token was not already revoked) and publishes `credentials.changed`.
+Neither route enforces the binding guard; the MCP `credentials` tool does (see
+[Credential lifecycle over MCP](../features/mcp-credential-lifecycle.md)).
+
 ### Real-time Updates
 
 #### GET /events
@@ -1519,6 +1542,7 @@ Events include:
 - `activity.policy_decision` - Tool call blocked by policy
 - `profiles.changed` - A profile was created, updated, renamed, deleted or the `anonymous_profile` changed (an invalidation: refetch `GET /api/v1/profiles`)
 - `client.binding_changed` - A client's profile or mode was reassigned (an invalidation: refetch `GET /api/v1/clients`)
+- `credentials.changed` - A client credential or agent token was issued or revoked, or a client was forgotten, on any surface (`{kind, id, token_name, change, profile}`, an invalidation with no secret: refetch `GET /api/v1/clients` and `GET /api/v1/tokens`)
 - `attention.changed` - The [Needs attention](../features/needs-attention.md) list changed (`{count, ids}`, narrowed per subscriber; refetch `GET /api/v1/attention`).
 
 The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
@@ -1530,7 +1554,7 @@ published it. For an agent token limited by `allowed_servers` (issue #1166):
 | Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
 | `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
-| `profiles.changed`, `client.binding_changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
+| `profiles.changed`, `client.binding_changed`, `credentials.changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
 | Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses

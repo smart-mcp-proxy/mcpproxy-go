@@ -857,7 +857,8 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools", codeExecRetrieveOpts...)
 	tools = append(tools, p.setProfileServerTool())
-	tools = append(tools, p.buildProfilesServerTool()) // Spec 108-h admin tool
+	tools = append(tools, p.buildProfilesServerTool())    // Spec 108-h admin tool
+	tools = append(tools, p.buildCredentialsServerTool()) // Spec 115 admin tool
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
@@ -929,7 +930,8 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	// set_profile — Profiles v2 (T2): also available in call-tool mode (/mcp/call,
 	// and /mcp/p/<slug> which is served by this same server instance).
 	tools = append(tools, p.setProfileServerTool())
-	tools = append(tools, p.buildProfilesServerTool()) // Spec 108-h admin tool
+	tools = append(tools, p.buildProfilesServerTool())    // Spec 108-h admin tool
+	tools = append(tools, p.buildCredentialsServerTool()) // Spec 115 admin tool
 
 	// call_tool_read / call_tool_write / call_tool_destructive — all three
 	// built from the shared helper in mcp.go so schema stays in sync across
@@ -1047,6 +1049,8 @@ func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.T
 	// administrator credential under no profile or a management_tools: true
 	// profile only; nothing below may let it through.
 	tools = p.filterProfilesTool(ctx, tools)
+	// Spec 115: `credentials` follows the identical predicate (FR-011).
+	tools = p.filterCredentialsTool(ctx, tools)
 	idx, ok := profileRequestIndexFromContext(ctx)
 	if !ok {
 		idx = p.profileIndexCurrent(ctx)

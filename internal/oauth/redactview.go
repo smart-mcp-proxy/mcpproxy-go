@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -357,7 +358,23 @@ var detector = sync.OnceValue(func() *security.Detector {
 // inside s, leaving text it does not recognise untouched.
 func MaskDetectedSecrets(s string) string {
 	masked, _ := detector().MaskText(s)
-	return masked
+	return maskIssuedCredentials(masked)
+}
+
+// issuedCredentialPattern matches an mcpproxy-issued secret: the mcp_agt_ or
+// mcp_cli_ prefix followed by at least 8 more characters. The 12-character
+// display prefix (`mcp_agt_ab12`, 4 characters after the prefix) is not a
+// match and stays readable.
+var issuedCredentialPattern = regexp.MustCompile(`(?i)(mcp_(?:agt|cli)_)[A-Za-z0-9]{8,}`)
+
+// maskIssuedCredentials is the Spec 115 value-rule backstop (contracts
+// rest-sse-activity.md): any issued agent-token or client-credential secret in
+// a persisted or exported string is masked, whatever key encloses it.
+func maskIssuedCredentials(s string) string {
+	if !strings.Contains(strings.ToLower(s), "mcp_") {
+		return s
+	}
+	return issuedCredentialPattern.ReplaceAllString(s, "${1}••••")
 }
 
 // ScrubUpstreamText is the ONE rule for free-form text that originated OUTSIDE

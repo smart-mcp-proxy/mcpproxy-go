@@ -306,6 +306,9 @@ type Runtime struct {
 	pinStoreOverride ProfilePinStore
 	// clientsService is Spec 108's single client-credential service.
 	clientsService *ClientsService
+	// credentialsService is Spec 115's issuance/revocation facade over both
+	// credential kinds; it shares bindingWriteMu with clientsService.
+	credentialsService *CredentialsService
 	// profilesService is Spec 108-f's single profiles service; the evaluator
 	// and session hook are installed by the server.
 	profilesService    *ProfilesService
@@ -520,6 +523,22 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// state (plan D3).
 	rt.clientsService = NewClientsService(ClientsServiceDeps{
 		Store: storageManager,
+		HMACKey: func() ([]byte, error) {
+			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
+		},
+		Config:   rt.Config,
+		Guard:    rt.BindingGuard,
+		Activity: storageManager.SaveActivity,
+		Publish:  rt.publishEvent,
+		Mu:       &rt.bindingWriteMu,
+		Logger:   logger,
+	})
+
+	// Spec 115: one issuance and revocation path for client credentials and
+	// agent tokens (MCP, REST, CLI). Same mutex as the clients service.
+	rt.credentialsService = NewCredentialsService(CredentialsServiceDeps{
+		Tokens:  storageManager,
+		Clients: rt.clientsService,
 		HMACKey: func() ([]byte, error) {
 			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
 		},

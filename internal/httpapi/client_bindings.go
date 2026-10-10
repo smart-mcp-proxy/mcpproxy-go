@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -148,13 +147,9 @@ type CreateClientRequest struct {
 	Mode        *string `json:"mode,omitempty"`
 	// ExpiresIn is a duration like 30d or 720h; default and cap are 365 days.
 	ExpiresIn string `json:"expires_in,omitempty"`
-}
-
-// ClientSnippet is the paste-ready config of a custom client. The credential is
-// always a header, never a query parameter.
-type ClientSnippet struct {
-	GenericHTTP string `json:"generic_http"`
-	HeaderName  string `json:"header_name"`
+	// Purpose is the stated, unenforced task brief (Spec 115), at most 500
+	// characters; screened for secrets before anything is stored.
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // CreateClientResponse is the data of a successful POST /clients. credential is
@@ -165,51 +160,15 @@ type CreateClientResponse struct {
 	Snippet    ClientSnippet  `json:"snippet"`
 }
 
-// clientCredentialHeader is the header a client credential travels in.
-const clientCredentialHeader = "X-API-Key"
-
-// parseClientExpiry is auth.ParseTokenExpiry with the client-credential
-// default: 365 days when omitted (FR-021), capped at 365 days.
-func parseClientExpiry(now time.Time, expiresIn string) (time.Time, error) {
-	if expiresIn == "" {
-		return now.Add(auth.MaxTokenExpiry), nil
-	}
-	return auth.ParseTokenExpiry(expiresIn, now)
-}
-
-// mcpEndpointURL is this instance's MCP endpoint for a snippet.
-func (s *Server) mcpEndpointURL() string {
-	addr := "127.0.0.1:8080"
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.Listen != "" {
-		addr = cfg.Listen
-	}
-	if strings.HasPrefix(addr, ":") {
-		addr = "127.0.0.1" + addr
-	}
-	return "http://" + addr + "/mcp"
-}
-
-func (s *Server) clientSnippet(credential string) ClientSnippet {
-	type entry struct {
-		URL     string            `json:"url"`
-		Headers map[string]string `json:"headers"`
-	}
-	doc := struct {
-		MCPServers map[string]entry `json:"mcpServers"`
-	}{MCPServers: map[string]entry{"mcpproxy": {URL: s.mcpEndpointURL(), Headers: map[string]string{clientCredentialHeader: credential}}}}
-	b, _ := json.Marshal(doc)
-	return ClientSnippet{GenericHTTP: string(b), HeaderName: clientCredentialHeader}
-}
-
 // handleCreateClient godoc
 // @Summary     Add a custom client
-// @Description Creates a per-client credential for a client that is NOT in the connect registry (a script, a CI job, an editor without a connect adapter). The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that carries it in the X-API-Key header. The id follows the client-id rule (lower-case letters, digits, '-' or '_', at most 56 characters) and must not be a supported client's id. A named profile binds the credential locked unless mode says otherwise. Refused with 409 binding_bypassable_without_auth when the binding would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token when a regular token holds client-<id>. Writes one assign record. Personal edition only.
+// @Description Creates a per-client credential for a client that is NOT in the connect registry (a script, a CI job, an editor without a connect adapter). The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that carries it in the X-API-Key header. The id follows the client-id rule (lower-case letters, digits, '-' or '_', at most 56 characters) and must not be a supported client's id. A named profile binds the credential locked unless mode says otherwise. Refused with 409 binding_bypassable_without_auth when the binding would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token when a regular token holds client-<id>. Every value (id, display_name, profile, mode, expires_in, purpose) passes the shared secret-shaped input screen first: a credential, the API key or a detector-flagged secret answers 400 secret_in_argument naming the field, and nothing is minted. A malformed body answers a sanitized 400 that never echoes a caller key or value. Writes one profile_change record with change issue (Spec 115) and publishes credentials.changed. Personal edition only.
 // @Tags        clients
 // @Accept      json
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       body body CreateClientRequest true "id (required), optional display_name, profile, mode and expires_in"
+// @Param       body body CreateClientRequest true "id (required), optional display_name, profile, mode, expires_in and purpose"
 // @Success     201 {object} contracts.APIResponse{data=CreateClientResponse} "The new client row, its credential (once) and a snippet"
 // @Failure     400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"
@@ -222,20 +181,23 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateClientRequest
-	if err := decodeProfileBody(r, &req); err != nil {
-		s.badProfileBody(w, r, err)
+	if derr := decodeIssuanceBody(r, &req, true); derr != nil {
+		s.writeClientBindingError(w, r, http.StatusBadRequest, "", derr.Field, derr.Error())
 		return
 	}
-	now := time.Now().UTC()
-	expiresAt, err := parseClientExpiry(now, req.ExpiresIn)
-	if err != nil {
-		s.writeClientBindingError(w, r, http.StatusBadRequest, "", "expires_in", err.Error())
-		return
-	}
-	_, secret, err := svc.Add(r.Context(), actorFromRequest(r), internalRuntime.AddRequest{
-		ID: req.ID, DisplayName: req.DisplayName, Profile: req.Profile, Mode: req.Mode, ExpiresAt: expiresAt,
+	// Spec 115 FR-010/FR-020b: the shared issue path screens the raw values
+	// (expires_in included) before parsing anything, records `issue`, and
+	// projects the delivered view from the committed record.
+	res, err := s.credentials().IssueClient(r.Context(), actorFromRequest(r), internalRuntime.IssueClientRequest{
+		ID: req.ID, DisplayName: req.DisplayName, Profile: req.Profile, ProfilePresent: true, Mode: req.Mode,
+		ExpiresIn: req.ExpiresIn, Expiry: internalRuntime.ExpiryClientCap, Purpose: req.Purpose, Now: time.Now().UTC(),
 	})
 	if err != nil {
+		var screen *internalRuntime.SecretInputError
+		if errors.As(err, &screen) {
+			s.writeClientBindingError(w, r, http.StatusBadRequest, screen.Code(), screen.Field(), screen.Error())
+			return
+		}
 		if s.writeCredentialFailure(w, r, req.ID, err) {
 			return
 		}
@@ -244,12 +206,28 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	}
 	view, _ := s.clientViewAndWarnings(r.Context(), req.ID)
 	if view == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "failed to read the client after adding it")
-		return
+		// The credential is committed: never turn the call into a failure
+		// (FR-007). Answer with the row projected from the committed record.
+		view = customRowFromView(res.View)
 	}
 	s.writeJSON(w, http.StatusCreated, contracts.NewSuccessResponse(CreateClientResponse{
-		Client: *view, Credential: secret, Snippet: s.clientSnippet(secret),
+		Client: *view, Credential: res.Secret, Snippet: s.clientSnippet(res.Secret),
 	}))
+}
+
+// customRowFromView is the minimal custom-client row of a just-issued
+// credential, used only when the decorated row cannot be read back.
+func customRowFromView(v internalRuntime.CredentialView) *clientPresence {
+	row := &clientPresence{
+		ID: v.ID, DisplayName: v.DisplayName, Kind: "custom", CredentialState: profile.CredentialStateClient,
+		TokenName: v.TokenName, Profile: v.Profile, ProfileMode: v.Binding, ExpiresAt: v.ExpiresAt,
+		Connected: true, State: contracts.ClientPresenceConnectedNeverSeen,
+		RevokedAt: v.RevokedAt, Issuer: v.Issuer, Purpose: v.Purpose, Lease: v.Lease, ProfileState: v.ProfileState,
+	}
+	if row.DisplayName == "" {
+		row.DisplayName = v.ID
+	}
+	return row
 }
 
 // --- rotate / finalize -----------------------------------------------------------

@@ -14,6 +14,7 @@
       <select id="tool-filter-reason" v-model="reasonFilter" class="select select-bordered select-xs" data-test="tool-filter-reason">
         <option value="">Any access</option>
         <option value="visible">Visible</option>
+        <option value="callable">Callable</option>
         <option v-for="reason in REASONS" :key="reason" :value="reason">{{ reasonText(reason) }}</option>
       </select>
       <label class="sr-only" for="tool-filter-search">Search tools</label>
@@ -131,6 +132,9 @@ const props = defineProps<{
   // The draft differs from the saved profile; the counts and access column
   // are the SAVED profile's evaluation (FR-041), so say so.
   unsaved?: boolean
+  // Spec 115 UI-007: the deep link `?reason=callable` opens the table filtered
+  // to the callable (visible) tools.
+  initialReason?: string
 }>()
 const emit = defineEmits<{
   (e: 'toggle', payload: { list: 'allow' | 'deny'; key: string }): void
@@ -140,7 +144,13 @@ const emit = defineEmits<{
 
 const REASONS = ['server_not_in_profile', 'denied_by_rule', 'unannotated_hidden', 'above_tier_cap']
 const serverFilter = ref('')
-const reasonFilter = ref('')
+// `callable` is its own filter: a visible tool can still be uncallable
+// (pending approval, disabled server), and the deep link promises the
+// callable set (Spec 115 UI-007).
+const reasonFor = (r: string | undefined) => r ?? ''
+const reasonFilter = ref(reasonFor(props.initialReason))
+// A query-only navigation reuses the mounted table: follow the deep link.
+watch(() => props.initialReason, r => { reasonFilter.value = reasonFor(r) })
 const search = ref('')
 const focusedKey = ref('')
 const toggles = new Map<string, HTMLInputElement>()
@@ -151,7 +161,8 @@ const serverNames = computed(() => [...new Set(props.rows.map(row => row.server)
 const visibleRows = computed(() => props.rows.filter(row => {
   if (serverFilter.value && row.server !== serverFilter.value) return false
   if (reasonFilter.value === 'visible' && !row.access.visible) return false
-  if (reasonFilter.value && reasonFilter.value !== 'visible' && row.access.reason !== reasonFilter.value) return false
+  if (reasonFilter.value === 'callable' && !row.access.callable) return false
+  if (reasonFilter.value && reasonFilter.value !== 'visible' && reasonFilter.value !== 'callable' && row.access.reason !== reasonFilter.value) return false
   if (search.value && !`${row.server}:${row.tool}`.toLowerCase().includes(search.value.toLowerCase())) return false
   return true
 }))

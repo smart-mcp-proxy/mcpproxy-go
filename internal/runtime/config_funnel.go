@@ -87,7 +87,7 @@ func (r *Runtime) MutateConfig(
 		return nil, nil, err
 	}
 
-	current, err := r.clientCredentialSnapshot()
+	current, err := r.guardedBindingSnapshot()
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot inspect client bindings: %w", err)
 	}
@@ -189,7 +189,7 @@ func (r *Runtime) GuardedApplyConfig(newCfg *config.Config, cfgPath string) (*Co
 	unlock := r.LockBindingWrites()
 	defer unlock()
 
-	tokens, err := r.clientCredentialSnapshot()
+	tokens, err := r.guardedBindingSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect client bindings: %w", err)
 	}

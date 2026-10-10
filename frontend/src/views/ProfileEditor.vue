@@ -76,6 +76,8 @@
                 </label>
               </div>
               <span v-if="fieldErrors.max_tier" class="text-error text-xs mt-1">{{ fieldErrors.max_tier }}</span>
+              <!-- Spec 115 UI-003: what the saved profile actually admits, exceptions included. -->
+              <span v-if="saved.max_tier" class="text-xs opacity-70 mt-1" data-test="profile-tier-summary">Saved: {{ tierPhrase(saved.max_tier, saved.tool_counts) }}</span>
             </fieldset>
 
             <fieldset class="form-control" data-test="profile-unannotated">
@@ -137,6 +139,7 @@
             <ul class="space-y-1 text-sm">
               <li v-for="client in saved.used_by.clients" :key="client.id" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-client-${client.id}`">
                 <span>Client {{ clientName(client.id) }}</span><span class="badge badge-sm">{{ modeLabel(client.mode) }}</span>
+                <router-link class="link text-xs" :to="{ path: '/clients', query: { client: client.id } }" :data-test="`profile-assigned-client-open-${client.id}`">Open</router-link>
                 <button v-if="canEdit" type="button" class="btn btn-xs btn-ghost" :data-test="`profile-unassign-${client.id}`" @click="unassign(client.id)">Unassign</button>
               </li>
               <li v-for="token in saved.used_by.tokens" :key="token" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-token-${token}`">
@@ -183,6 +186,7 @@
             :editable="canEdit"
             :focus-key="focusKey"
             :unsaved="dirty"
+            :initial-reason="typeof route.query.reason === 'string' ? route.query.reason : ''"
             @toggle="toggleRule"
             @classify="classify"
             @remove-classification="removeClassification"
@@ -209,11 +213,11 @@ import ProfileDeleteDialog from '@/components/profiles/ProfileDeleteDialog.vue'
 import AssignClientDialog from '@/components/profiles/AssignClientDialog.vue'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
-import { useClientsStore, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
+import { useClientsStore, CLIENT_BINDING_CHANGED_EVENT, CREDENTIALS_CHANGED_EVENT } from '@/stores/clients'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useServersStore } from '@/stores/servers'
-import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, modeLabel, unannotatedLabel } from '@/utils/profiles'
+import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, modeLabel, tierPhrase, unannotatedLabel } from '@/utils/profiles'
 import type { EffectiveToolsResult, ProfileConfig, ProfileToolRules, ProfileView } from '@/types/api'
 import type { ApiError } from '@/services/api'
 
@@ -533,10 +537,12 @@ onMounted(() => {
   if (canEdit.value && !clients.clients.length) void clients.refreshPresence()
   window.addEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.addEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
+  window.addEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)
 })
 onBeforeUnmount(() => {
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
+  window.removeEventListener(CREDENTIALS_CHANGED_EVENT, onChangedElsewhere)
 })
 watch(() => props.name, () => { renaming.value = false; void load(true) })
 </script>

@@ -57,7 +57,7 @@ func enumFamilies() map[string][]string {
 		"explain_verdict":  strs(ExplainVerdictAllowed, ExplainVerdictBlocked, ExplainVerdictHidden),
 		"change_kind": strs(ChangeCreate, ChangeUpdate, ChangeDelete, ChangeRename,
 			ChangeClassify, ChangeAssign, ChangeLock, ChangeUnlock, ChangeForget,
-			ChangeRotate, ChangeAnonymous),
+			ChangeRotate, ChangeAnonymous, ChangeIssue, ChangeRevoke),
 		"rotation_state": {RotationFinalized, RotationRolledBack, RotationPending},
 		"surface":        strs(SurfaceWeb, SurfaceMacOS, SurfaceCLI, SurfaceMCP, SurfaceAPI),
 		"warning_code": strs(WarningAnonymousDeniedByBindingGuard, WarningClientHoldsAdminKey,
@@ -68,6 +68,15 @@ func enumFamilies() map[string][]string {
 			ErrorCodeProfileIsAnonymous, ErrorCodeProfileExists, ErrorCodeNameMismatch,
 			ErrorCodePreconditionFailed},
 		"guard_fix": {GuardFixRequireMCPAuth, GuardFixSetAnonymousProfile},
+		// Spec 115: the `credentials` admin tool's refusal codes.
+		"credential_error_code": {CredentialErrorCodeSecretInArgument, CredentialErrorCodeArgumentsTooLarge,
+			CredentialErrorCodeUnknownOperation, CredentialErrorCodeMissingArgument,
+			CredentialErrorCodeInvalidArgument, CredentialErrorCodeProfileRequired,
+			CredentialErrorCodeUnknownProfile, CredentialErrorCodeInvalidExpiry,
+			CredentialErrorCodeIdentityExists, CredentialErrorCodeReservedIdentity,
+			CredentialErrorCodeIdentityNotFound, CredentialErrorCodeTokenLimitReached,
+			CredentialErrorCodeReadOnlyMode, CredentialErrorCodeManagementDisabled,
+			CredentialErrorCodeUnsupportedEdition, CredentialErrorCodeCredentialsUnavailable},
 		// Two spellings that live outside contract.go but are labelled in the UI
 		// (Terminology table): the binding mode and the tier cap.
 		"binding_mode": {auth.ProfileModeLocked, auth.ProfileModeSwitchable},
@@ -124,9 +133,10 @@ var coveredTypes = map[string]string{
 // coveredPrefixes maps the untyped string constants of contract.go to a key by
 // name prefix.
 var coveredPrefixes = map[string]string{
-	"ErrorCode": "error_code",
-	"GuardFix":  "guard_fix",
-	"Rotation":  "rotation_state",
+	"ErrorCode":           "error_code",
+	"CredentialErrorCode": "credential_error_code",
+	"GuardFix":            "guard_fix",
+	"Rotation":            "rotation_state",
 }
 
 // TestContractEnumsCoverEveryConstant walks contract.go with go/ast: every

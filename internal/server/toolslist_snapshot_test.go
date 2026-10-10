@@ -231,10 +231,14 @@ var toolsListAllowedDelta = map[string][]string{
 //   - profiles on every surface — the Spec 108-h administrator tool (FR-017). It
 //     is registered on the three static surfaces and hidden per session from
 //     everything but an administrator credential, so the goldens carry it.
+//   - credentials on every surface — the Spec 115 administrator tool (FR-001,
+//     FR-011, FR-015): registered exactly where `profiles` is, under the same
+//     per-session visibility, so the goldens carry it too. The `profiles` entry
+//     itself is byte-equal (TestToolsList_CredentialsBesideProfiles).
 var toolsListAllowedAdditions = map[string][]string{
-	"default_server":      {"code_execution", "profiles"},
-	"retrieve_tools_mode": {"profiles"},
-	"code_execution_mode": {"profiles"},
+	"default_server":      {"code_execution", "profiles", "credentials"},
+	"retrieve_tools_mode": {"profiles", "credentials"},
+	"code_execution_mode": {"profiles", "credentials"},
 }
 
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
@@ -423,7 +427,7 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 			// TestToolsList_ProfilesPresentUnderReadOnlyMode).
 			afterNames := []string{}
 			for _, name := range sortedToolNames(after) {
-				if name != "profiles" {
+				if name != "profiles" && name != "credentials" {
 					afterNames = append(afterNames, name)
 				}
 			}

@@ -751,6 +751,14 @@
                     >
                       {{ formatPreflightSummary(row.activity.metadata) }}
                     </span>
+                    <span
+                      v-else-if="row.activity.type === 'profile_change' && credentialLifecycleSummary(row.activity.metadata)"
+                      class="text-sm truncate"
+                      :title="credentialLifecycleSummary(row.activity.metadata)"
+                      data-test="activity-credential-lifecycle"
+                    >
+                      {{ credentialLifecycleSummary(row.activity.metadata) }}
+                    </span>
                     <span v-else-if="row.activity.metadata?.action" class="text-sm">
                       {{ row.activity.metadata.action }}
                     </span>
@@ -1356,6 +1364,15 @@
               unavailable, but it is not a policy decision — it renders its own
               verdict section above.
             -->
+            <!-- Spec 115 UI-006: a credential issue/revoke record, with the actor and links. -->
+            <div v-if="selectedActivity.type === 'profile_change' && credentialLifecycleSummary(selectedActivity.metadata)" data-test="activity-credential-detail" class="space-y-1">
+              <h4 class="font-semibold">{{ profileChangeLabel(selectedActivity.metadata) }}</h4>
+              <p class="text-sm">{{ credentialLifecycleSummary(selectedActivity.metadata) }}</p>
+              <div class="flex flex-wrap gap-x-3 text-sm">
+                <router-link v-if="credentialLifecycleLinks(selectedActivity.metadata).identity" class="link" data-test="activity-credential-identity-link" :to="credentialLifecycleLinks(selectedActivity.metadata).identity!">Open identity</router-link>
+                <router-link v-if="credentialLifecycleLinks(selectedActivity.metadata).profile" class="link" data-test="activity-credential-profile-link" :to="`/profiles/${encodeURIComponent(credentialLifecycleLinks(selectedActivity.metadata).profile!)}`">Open profile</router-link>
+              </div>
+            </div>
             <div v-if="!isPreflightActivity(selectedActivity) && (selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked')">
               <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1494,6 +1511,9 @@ import {
 // are shared (and unit-tested) rather than re-derived in the template.
 import {
   ACTIVITY_TYPE_LABELS,
+  credentialLifecycleLinks,
+  credentialLifecycleSummary,
+  profileChangeLabel,
   activeFilterChips,
   activityViewTypes,
   compactSummaryParts,
