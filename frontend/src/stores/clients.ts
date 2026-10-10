@@ -6,6 +6,9 @@ import type { ClientPresence, ClientWarning, RoutingInfo } from '@/types/api'
 // Spec 108-f: a binding changed (any surface). Like profiles.changed it is an
 // invalidation; the rows and warnings are refetched, never patched from it.
 export const CLIENT_BINDING_CHANGED_EVENT = 'mcpproxy:client.binding_changed'
+// Spec 115 FR-024: a credential was issued, revoked or forgotten (any surface,
+// MCP included). An invalidation: the rows are refetched.
+export const CREDENTIALS_CHANGED_EVENT = 'mcpproxy:credentials.changed'
 
 export const useClientsStore = defineStore('clients', () => {
   const clients = ref<ClientPresence[]>([])
@@ -169,9 +172,11 @@ export const useClientsStore = defineStore('clients', () => {
   if (typeof window !== 'undefined') {
     const refresh = () => { void refreshPresence() }
     window.addEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+    window.addEventListener(CREDENTIALS_CHANGED_EVENT, refresh)
     window.addEventListener('mcpproxy:profiles.changed', refresh)
     onScopeDispose(() => {
       window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+      window.removeEventListener(CREDENTIALS_CHANGED_EVENT, refresh)
       window.removeEventListener('mcpproxy:profiles.changed', refresh)
     })
   }

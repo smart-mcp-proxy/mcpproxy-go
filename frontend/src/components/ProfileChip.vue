@@ -163,7 +163,7 @@ const label = computed(() => {
   if (missing.value) return `${c.profile} (missing — deny-all)`
   const profile = profiles.byName.get(c.profile)
   const parts = [c.profile_title || profile?.title || c.profile]
-  const tier = tierPhrase(profile?.max_tier)
+  const tier = tierPhrase(profile?.max_tier, profile?.tool_counts)
   if (tier) parts.push(tier)
   parts.push(locked.value ? 'locked by credential' : 'switchable')
   return parts.join(' · ')

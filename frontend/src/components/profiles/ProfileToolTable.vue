@@ -131,6 +131,9 @@ const props = defineProps<{
   // The draft differs from the saved profile; the counts and access column
   // are the SAVED profile's evaluation (FR-041), so say so.
   unsaved?: boolean
+  // Spec 115 UI-007: the deep link `?reason=callable` opens the table filtered
+  // to the callable (visible) tools.
+  initialReason?: string
 }>()
 const emit = defineEmits<{
   (e: 'toggle', payload: { list: 'allow' | 'deny'; key: string }): void
@@ -140,7 +143,7 @@ const emit = defineEmits<{
 
 const REASONS = ['server_not_in_profile', 'denied_by_rule', 'unannotated_hidden', 'above_tier_cap']
 const serverFilter = ref('')
-const reasonFilter = ref('')
+const reasonFilter = ref(props.initialReason === 'callable' ? 'visible' : (props.initialReason ?? ''))
 const search = ref('')
 const focusedKey = ref('')
 const toggles = new Map<string, HTMLInputElement>()

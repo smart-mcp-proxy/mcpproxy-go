@@ -853,7 +853,8 @@ const conflictProfileLabel = computed(() => profileLabelFor(appliedScope.value.p
 /** "Work · Read-only": a profile's title and what its tier cap means. */
 function profilePhrase(name: string): string {
   const title = profilesStore.titleFor(name)
-  const tier = tierPhrase(profilesStore.byName.get(name)?.max_tier)
+  const p = profilesStore.byName.get(name)
+  const tier = tierPhrase(p?.max_tier, p?.tool_counts)
   return tier ? `${title} · ${tier}` : title
 }
 

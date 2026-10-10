@@ -126,4 +126,29 @@ describe('profiles and client rows refresh on SSE events (Spec 108-i T102)', () 
     window.removeEventListener('mcpproxy:client.binding_changed', capture)
     expect(seen).toEqual(['mcpproxy:profiles.changed:{"change":"update"}', 'mcpproxy:client.binding_changed:null'])
   })
+
+  it('Spec 115: credentials.changed is relayed too, and the profiles store refetches used_by on it', async () => {
+    const { useSystemStore } = await import('@/stores/system')
+    const listeners = new Map<string, (event: MessageEvent) => void>()
+    class FakeEventSource {
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      readyState = 1
+      constructor(public url: string) {}
+      addEventListener(name: string, handler: (event: MessageEvent) => void) { listeners.set(name, handler) }
+      close() {}
+    }
+    ;(api.createEventSource as any).mockImplementation(() => new FakeEventSource('/events'))
+    const profiles = useProfilesStore()
+    await profiles.fetchProfiles()
+    const seen: string[] = []
+    const capture = (event: Event) => seen.push(`${event.type}:${JSON.stringify((event as CustomEvent).detail)}`)
+    window.addEventListener('mcpproxy:credentials.changed', capture)
+    useSystemStore().connectEventSource()
+    listeners.get('credentials.changed')!({ data: '{"kind":"token","id":"t1","change":"issue"}' } as MessageEvent)
+    window.removeEventListener('mcpproxy:credentials.changed', capture)
+    expect(seen).toEqual(['mcpproxy:credentials.changed:{"kind":"token","id":"t1","change":"issue"}'])
+    await vi.advanceTimersByTimeAsync(300)
+    expect(api.getProfiles).toHaveBeenCalledTimes(2)
+  })
 })

@@ -64,10 +64,16 @@ export const useProfilesStore = defineStore('profiles', () => {
       void fetchProfiles()
     }, REFETCH_DEBOUNCE_MS)
   }
+  // used_by (clients and tokens per profile) changes when a credential is
+  // issued, revoked or rebound: refetch on those invalidations too (Spec 115
+  // UI-004). The names are spelled here to avoid a store import cycle.
+  const USED_BY_EVENTS = ['mcpproxy:credentials.changed', 'mcpproxy:client.binding_changed']
   if (typeof window !== 'undefined') {
     window.addEventListener(PROFILES_CHANGED_EVENT, invalidate)
+    for (const name of USED_BY_EVENTS) window.addEventListener(name, invalidate)
     onScopeDispose(() => {
       window.removeEventListener(PROFILES_CHANGED_EVENT, invalidate)
+      for (const name of USED_BY_EVENTS) window.removeEventListener(name, invalidate)
       if (refetchTimer) clearTimeout(refetchTimer)
     })
   }

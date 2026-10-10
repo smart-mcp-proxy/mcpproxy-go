@@ -1319,3 +1319,59 @@ const AUTH_TYPE_ALIASES: Record<string, string[]> = { admin: ['admin', 'admin_us
 export const matchesAuthFilter = (a: ActivityAuthFields, authType: string, agentName: string): boolean =>
   (!authType || (AUTH_TYPE_ALIASES[authType] ?? [authType]).includes(a.auth_type ?? '')) &&
   (!agentName || a.agent_name === agentName)
+
+// --- Spec 115 UI-006: credential lifecycle records --------------------------
+
+// The label of a profile_change record's `change`, credential-aware for the
+// Spec 115 issue/revoke kinds: "Issued client credential", "Revoked token".
+export function profileChangeLabel(metadata: Record<string, any> | undefined | null): string {
+  if (!metadata) return ''
+  const change = String(metadata.change ?? '')
+  const kind = metadata.diff?.credential_kind ?? (metadata.client_id ? 'client' : metadata.token_name ? 'token' : '')
+  const what = kind === 'client' ? 'client credential' : kind === 'token' ? 'token' : 'credential'
+  switch (change) {
+    case 'issue': return `Issued ${what}`
+    case 'revoke': return `Revoked ${what}`
+    case 'forget': return 'Forgot client'
+    case 'assign': return 'Assigned client'
+    case 'lock': return 'Locked client'
+    case 'unlock': return 'Unlocked client'
+    case 'rotate': return 'Rotated client credential'
+    case '': return ''
+    default: return humaniseType(change)
+  }
+}
+
+const SURFACE_WORDS: Record<string, string> = { mcp: 'MCP', web: 'Web UI', cli: 'CLI', api: 'REST', macos: 'macOS app' }
+
+// "via MCP · api_key": who acted, from the record's actor metadata.
+export function profileChangeActor(metadata: Record<string, any> | undefined | null): string {
+  if (!metadata) return ''
+  const surface = SURFACE_WORDS[String(metadata.surface ?? '')] ?? String(metadata.surface ?? '')
+  const kind = String(metadata.actor_kind ?? '')
+  if (!surface && !kind) return ''
+  return [surface ? `via ${surface}` : '', kind].filter(Boolean).join(' · ')
+}
+
+// The one-line summary of a credential lifecycle record (issue/revoke), or ''
+// for any other profile_change, so the table keeps its existing rendering.
+export function credentialLifecycleSummary(metadata: Record<string, any> | undefined | null): string {
+  if (!metadata || (metadata.change !== 'issue' && metadata.change !== 'revoke')) return ''
+  const who = metadata.client_id || metadata.token_name || ''
+  const parts = [`${profileChangeLabel(metadata)} ${who}`.trim()]
+  if (metadata.profile) parts.push(`→ ${metadata.profile}`)
+  const actor = profileChangeActor(metadata)
+  if (actor) parts.push(`(${actor})`)
+  return parts.join(' ')
+}
+
+// Deep links of a lifecycle record: the identity (filtered Clients/Tokens
+// view) and the profile editor.
+export function credentialLifecycleLinks(metadata: Record<string, any> | undefined | null): { identity?: { path: string; query: Record<string, string> }; profile?: string } {
+  if (!metadata) return {}
+  const out: { identity?: { path: string; query: Record<string, string> }; profile?: string } = {}
+  if (metadata.client_id) out.identity = { path: '/clients', query: { client: String(metadata.client_id) } }
+  else if (metadata.token_name) out.identity = { path: '/clients', query: { tab: 'tokens', token: String(metadata.token_name) } }
+  if (metadata.profile) out.profile = String(metadata.profile)
+  return out
+}

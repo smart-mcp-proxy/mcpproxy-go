@@ -16,10 +16,23 @@ export const MAX_TIER_OPTIONS: Array<{ value: '' | Tier; label: string }> = [
 ]
 
 // The short form used in a chip: "Work · Read-only · locked by credential".
-export function tierPhrase(maxTier: string | undefined): string {
+// With the profile's tool counts (visible tools by the tier the profile gives
+// them), an explicit allow that admits a tool ABOVE the cap is named: a read
+// cap with one allowed write tool reads "Read-only + 1 write exception", never
+// plain "Read-only" (Spec 115 UI-003, G7).
+export function tierPhrase(maxTier: string | undefined, counts?: { write?: number; destructive?: number }): string {
+  const writes = counts?.write ?? 0
+  const destructives = counts?.destructive ?? 0
+  const plural = (n: number) => (n === 1 ? 'exception' : 'exceptions')
   switch (maxTier) {
-    case 'read': return 'Read-only'
-    case 'write': return 'Read + write'
+    case 'read': {
+      if (writes && destructives) return `Read-only + ${writes} write + ${destructives} destructive ${plural(writes + destructives)}`
+      if (writes) return `Read-only + ${writes} write ${plural(writes)}`
+      if (destructives) return `Read-only + ${destructives} destructive ${plural(destructives)}`
+      return 'Read-only'
+    }
+    case 'write':
+      return destructives ? `Read + write + ${destructives} destructive ${plural(destructives)}` : 'Read + write'
     case 'destructive': return 'Everything'
     default: return ''
   }

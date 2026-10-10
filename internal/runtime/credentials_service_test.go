@@ -688,3 +688,23 @@ func TestCredentialsService_OwnerlessNamespace(t *testing.T) {
 		assert.NoError(t, err, "tenant tokens are untouched")
 	}
 }
+
+// Spec 115 UI-005: a lease client gets no expiring-soon/reconnect warning; a
+// long-lived one close to expiry still does.
+func TestCredentialsService_LeaseHasNoExpiringWarning(t *testing.T) {
+	h := newCredHarness(t)
+	ctx := context.Background()
+	_, err := h.cs.IssueClient(ctx, mcpActor(), mcpClientReq("lease-w", "ro", "30m"))
+	require.NoError(t, err)
+	_, err = h.cs.IssueClient(ctx, mcpActor(), mcpClientReq("long-w", "ro", "25h"))
+	require.NoError(t, err)
+	h.clock = h.clock.Add(10 * time.Minute)
+	expiring := map[string]bool{}
+	for _, w := range h.svc.Warnings(nil) {
+		if w.Code == profile.WarningClientCredentialExpiring {
+			expiring[w.ClientID] = true
+		}
+	}
+	assert.False(t, expiring["lease-w"])
+	assert.True(t, expiring["long-w"])
+}
