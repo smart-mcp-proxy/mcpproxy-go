@@ -3156,7 +3156,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
+		return recordQuarantineGate(ctx, p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs)), nil
 	}
 
 	switch gate.lockStatus {
@@ -3168,7 +3168,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
 
-		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolPendingApprovalResult(serverName, actualToolName, gate.approval)), nil
 	case storage.ToolApprovalStatusChanged:
 		p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
 			zap.String("server_name", serverName),
@@ -3177,7 +3177,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
 
-		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolChangedApprovalResult(serverName, actualToolName, gate.approval)), nil
 	}
 
 	if !gate.callable() {
@@ -3778,7 +3778,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
-		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
+		return recordQuarantineGate(ctx, p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args)), nil
 	}
 
 	p.logger.Debug("handleCallTool: checking connection status",
@@ -3788,11 +3788,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	case storage.ToolApprovalStatusPending:
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
-		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolPendingApprovalResult(serverName, actualToolName, gate.approval)), nil
 	case storage.ToolApprovalStatusChanged:
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
-		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
+		return recordQuarantineGate(ctx, toolChangedApprovalResult(serverName, actualToolName, gate.approval)), nil
 	}
 
 	if !gate.callable() {
@@ -7275,6 +7275,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	// layer classifies it without re-parsing the message.
 	ctx, codeExecRefusal := withCodeExecCapture(ctx)
 	ctx, profileToolRefusal := withProfileToolCapture(ctx)
+	ctx, quarantineRefusal := withQuarantineGateCapture(ctx)
 
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
@@ -7335,7 +7336,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 				}
 				// Quarantine / pending-approval / changed-tool blocks keep their
 				// typed identity so REST answers 403 with the payload, not a 500.
-				if refusal := quarantineRefusalFromText(textContent.Text); refusal != nil {
+				if refusal := quarantineRefusal.take(); refusal != nil {
 					return nil, refusal
 				}
 				// A code_execution refusal keeps its typed identity so the HTTP

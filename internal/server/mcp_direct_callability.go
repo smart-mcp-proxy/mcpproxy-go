@@ -384,11 +384,11 @@ func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string
 func (p *MCPProxyServer) directToolCallabilityResult(ctx context.Context, decision directCallabilityDecision, args map[string]interface{}) *mcp.CallToolResult {
 	switch classifyDirectRefusal(decision) {
 	case directRefusalQuarantined:
-		return p.handleQuarantinedToolCall(ctx, decision.serverName, decision.toolName, args)
+		return recordQuarantineGate(ctx, p.handleQuarantinedToolCall(ctx, decision.serverName, decision.toolName, args))
 	case directRefusalPending:
-		return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
+		return recordQuarantineGate(ctx, toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval))
 	case directRefusalChanged:
-		return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
+		return recordQuarantineGate(ctx, toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval))
 	case directRefusalConfigDenied:
 		return mcp.NewToolResultError(blockedToolMessageFor(true))
 	default:

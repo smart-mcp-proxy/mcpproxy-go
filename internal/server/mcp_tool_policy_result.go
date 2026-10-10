@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -89,13 +91,65 @@ const (
 	blockReasonToolQuarantined   profile.BlockReason = "tool_quarantined"
 )
 
+// quarantineGateCapture carries the typed refusal from the policy gate to
+// CallToolDirect. The identity is captured where the proxy itself refuses the
+// call, never inferred from result text: an approved upstream can return any
+// body, including one shaped like a quarantine block, and that must stay an
+// ordinary upstream error.
+type quarantineGateCapture struct {
+	mu  sync.Mutex
+	err *profile.ToolBlockedError
+}
+
+type quarantineGateCaptureKeyType struct{}
+
+var quarantineGateCaptureKey quarantineGateCaptureKeyType
+
+func withQuarantineGateCapture(ctx context.Context) (context.Context, *quarantineGateCapture) {
+	box := &quarantineGateCapture{}
+	return context.WithValue(ctx, quarantineGateCaptureKey, box), box
+}
+
+func (c *quarantineGateCapture) take() *profile.ToolBlockedError {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// recordQuarantineGate registers res, a result the proxy's own quarantine /
+// approval gate just built, in the capture box on ctx (if any) and returns it
+// unchanged. Call it only on the gate's refusal result.
+func recordQuarantineGate(ctx context.Context, res *mcp.CallToolResult) *mcp.CallToolResult {
+	if ctx == nil || res == nil || len(res.Content) == 0 {
+		return res
+	}
+	box, ok := ctx.Value(quarantineGateCaptureKey).(*quarantineGateCapture)
+	if !ok || box == nil {
+		return res
+	}
+	text, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		return res
+	}
+	if refusal := quarantineRefusalFromText(text.Text); refusal != nil {
+		box.mu.Lock()
+		box.err = refusal
+		box.mu.Unlock()
+	}
+	return res
+}
+
 // quarantineRefusalFromText recognizes the QUARANTINED_SERVER_BLOCKED and
 // TOOL_QUARANTINED policy bodies built in this package and returns them as a
 // typed *profile.ToolBlockedError so the HTTP layer can answer 403 with the
 // payload instead of flattening them into a 500. The echoed request arguments
 // (requestedArgs) are dropped from the error message: they are caller data
 // that may carry secrets, and an error string ends up in logs and CLI stderr.
-// Returns nil for any other text.
+// Returns nil for any other text. Only call it on a body the proxy built
+// itself at the gate (see recordQuarantineGate), never on upstream output.
 func quarantineRefusalFromText(text string) *profile.ToolBlockedError {
 	var body map[string]interface{}
 	if err := json.Unmarshal([]byte(text), &body); err != nil {
