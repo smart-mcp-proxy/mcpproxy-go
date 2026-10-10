@@ -60,98 +60,57 @@ Search for tools across all connected servers using BM25 keyword search.
 }
 ```
 
-### call_tool_read
+### call_tool_read / call_tool_write / call_tool_destructive
 
-Execute a **read-only** tool on an upstream server. Use for operations that query data without modifying state.
+Execute an upstream tool through the variant that matches what it does. All three share one input schema; the variant itself declares the operation type.
 
-**Input Schema:**
+- `call_tool_read` - **read-only** tools that query data without modifying state.
+- `call_tool_write` - **state-modifying** tools that create or update resources.
+- `call_tool_destructive` - **destructive** tools that delete or permanently modify resources.
+
+**Input Schema (flat):**
 ```json
 {
   "name": "string (required) - Tool name in server:tool format",
-  "args_json": "string (optional) - Tool arguments as JSON string",
-  "intent": {
-    "operation_type": "read (required)",
-    "data_sensitivity": "string (optional) - public|internal|private|unknown",
-    "reason": "string (optional) - Explanation for audit trail"
-  }
+  "args": "object (optional, preferred) - Tool arguments as a native JSON object",
+  "args_json": "string (optional, legacy) - Tool arguments as a JSON string; wins over args if both are sent",
+  "intent_data_sensitivity": "string (optional) - public|internal|private|unknown",
+  "intent_reason": "string (optional, max 1000 chars) - Explanation for the audit trail"
 }
 ```
 
-**Example:**
+The operation type is **inferred from the variant you call** (`read`, `write` or `destructive`) and recorded in the activity log. It cannot be set by the client. The older nested `intent: {operation_type, data_sensitivity, reason}` object is no longer part of the schema; it is still accepted as a compatibility fallback for `reason` and `data_sensitivity` when the flat fields are absent (the flat fields win, and the object is not forwarded to the upstream tool).
+
+**Example (read):**
 ```json
 {
   "name": "github:list_repos",
-  "args_json": "{\"org\": \"myorg\"}",
-  "intent": {
-    "operation_type": "read"
-  }
+  "args": {"org": "myorg"}
 }
 ```
 
-**Validation:** Rejected if server marks tool as `destructiveHint: true`.
-
-### call_tool_write
-
-Execute a **state-modifying** tool on an upstream server. Use for operations that create or update resources.
-
-**Input Schema:**
-```json
-{
-  "name": "string (required) - Tool name in server:tool format",
-  "args_json": "string (optional) - Tool arguments as JSON string",
-  "intent": {
-    "operation_type": "write (required)",
-    "data_sensitivity": "string (optional) - public|internal|private|unknown",
-    "reason": "string (optional) - Explanation for audit trail"
-  }
-}
-```
-
-**Example:**
+**Example (write, with intent):**
 ```json
 {
   "name": "github:create_issue",
-  "args_json": "{\"repo\": \"owner/repo\", \"title\": \"Bug report\", \"body\": \"Description\"}",
-  "intent": {
-    "operation_type": "write",
-    "reason": "Creating bug report per user request"
-  }
+  "args": {"repo": "owner/repo", "title": "Bug report", "body": "Description"},
+  "intent_reason": "Creating bug report per user request"
 }
 ```
 
-**Validation:** Rejected if server marks tool as `destructiveHint: true`.
-
-### call_tool_destructive
-
-Execute a **destructive** tool on an upstream server. Use for operations that delete or permanently modify resources.
-
-**Input Schema:**
-```json
-{
-  "name": "string (required) - Tool name in server:tool format",
-  "args_json": "string (optional) - Tool arguments as JSON string",
-  "intent": {
-    "operation_type": "destructive (required)",
-    "data_sensitivity": "string (optional) - public|internal|private|unknown",
-    "reason": "string (optional) - Explanation for audit trail"
-  }
-}
-```
-
-**Example:**
+**Example (destructive, with intent, legacy `args_json`):**
 ```json
 {
   "name": "github:delete_repo",
   "args_json": "{\"repo\": \"test-repo\"}",
-  "intent": {
-    "operation_type": "destructive",
-    "data_sensitivity": "private",
-    "reason": "User confirmed deletion"
-  }
+  "intent_data_sensitivity": "private",
+  "intent_reason": "User confirmed deletion"
 }
 ```
 
-**Validation:** Most permissive - allowed regardless of server annotations.
+**Validation:** `call_tool_read` and `call_tool_write` are rejected if the server marks the tool as `destructiveHint: true`; `call_tool_destructive` is the most permissive and is allowed regardless of server annotations.
+
+**Policy blocks are errors:** a call to a tool on a quarantined server, or to a tool that is pending approval or changed since approval, returns a result with `isError: true`. The text body is still JSON (`status` is `QUARANTINED_SERVER_BLOCKED` or `TOOL_QUARANTINED`, with `reason`, `message` and `action`), and the upstream tool is never invoked. Over REST (`POST /api/v1/tools/call`) and `mcpproxy tools call` the same block is answered with HTTP `403`.
 
 :::tip Choosing the Right Tool Variant
 Use `retrieve_tools` to discover tools - each result includes a `call_with` field recommending the appropriate variant based on server annotations.
@@ -225,7 +184,7 @@ MCPProxy does not support three-way merge with conflict detection. Avoid making 
 
 ### code_execution
 
-Execute JavaScript code to orchestrate multiple tools. Disabled by default.
+Execute JavaScript/TypeScript to orchestrate multiple tools. Enabled by default since v0.66.0 (`enable_code_execution: true`); set it to `false` in the config file to remove the tool from `tools/list`. A named profile can only narrow this: with a `max_tier` of `read` or `write`, a profile that does not set `code_execution` has it off (see [Profiles](/features/profiles) and [Configuration](/configuration/config-file)).
 
 See [Code Execution](/features/code-execution) for complete documentation.
 
