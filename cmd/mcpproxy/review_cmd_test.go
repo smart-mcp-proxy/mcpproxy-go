@@ -215,7 +215,13 @@ func TestReviewApproveWarnsWhenOutcomeUnverified(t *testing.T) {
 // definitions, and stays unbound against a core that does not report hashes.
 func TestReviewExpectedHashes(t *testing.T) {
 	require.Equal(t, map[string]string{"a": "h1", "b": "h2"}, reviewExpectedHashes([]reviewToolState{{Name: "a", CurrentHash: "h1"}, {Name: "b", CurrentHash: "h2"}}))
-	require.Nil(t, reviewExpectedHashes([]reviewToolState{{Name: "a", CurrentHash: "h1"}, {Name: "b"}}))
+	// UX-02 round 3: one hashless tool must NOT unbind the whole approval.
+	// The binding keeps the tools that have a hash and omits the hashless
+	// one, so the core refuses (409, not in the review) unless it is blocked.
+	require.Equal(t, map[string]string{"a": "h1"}, reviewExpectedHashes([]reviewToolState{{Name: "a", CurrentHash: "h1"}, {Name: "b"}}))
+	// Only a core that reports no hash at all (it predates current_hash) gets
+	// an unbound, legacy request.
+	require.Nil(t, reviewExpectedHashes([]reviewToolState{{Name: "a"}, {Name: "b"}}))
 	require.Nil(t, reviewExpectedHashes(nil))
 }
 

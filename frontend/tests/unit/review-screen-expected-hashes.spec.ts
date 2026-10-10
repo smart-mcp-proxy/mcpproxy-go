@@ -87,4 +87,72 @@ describe('ReviewScreen review-bound approval (UX-02)', () => {
     // in the review, read_file changed) instead of approving it unseen.
     expect(api.securityApprove).toHaveBeenLastCalledWith('fixture', true, ['remove_file'], { read_file: 'h-read', remove_file: 'h-remove' })
   })
+
+  it('keeps the binding when one tool has no hash, so unseen definitions cannot be approved (round 3)', async () => {
+    const mixed = review(true)
+    delete (mixed.data.tools[1] as any).current_hash
+    ;(api.getServerReview as any).mockResolvedValue(mixed)
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'fixture' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    // Allow every tool, including the hashless one.
+    await wrapper.get('[data-test="review-approve-all"]').trigger('click')
+    await flushPromises()
+    // Still bound: the hashless tool is omitted (the core refuses it as not
+    // reviewed) instead of the whole approval going out unbound.
+    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, [], { read_file: 'h-read' })
+  })
+})
+
+describe('ReviewScreen load ordering (UX-02 round 3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(api.securityApprove as any).mockResolvedValue({ success: true })
+    ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+    ;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } })
+  })
+
+  const reviewFor = (server: string, hash: string) => ({
+    success: true,
+    data: {
+      server: { name: server, transport: 'stdio', quarantined: true, definitions_captured: true },
+      tools: [
+        { name: 'read_file', description: 'read', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: true, current_hash: hash },
+        { name: 'remove_file', description: 'remove', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false, current_hash: hash + '-rm' },
+      ],
+    },
+  })
+  function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
+
+  it('a late response for the previous server cannot replace the current review', async () => {
+    const a = deferred<any>(); const b = deferred<any>()
+    ;(api.getServerReview as any).mockImplementation((server: string) => (server === 'srv-a' ? a.promise : b.promise))
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'srv-a' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'srv-b' })
+    b.resolve(reviewFor('srv-b', 'hb'))
+    await flushPromises()
+    a.resolve(reviewFor('srv-a', 'ha'))
+    await flushPromises()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    expect(api.securityApprove).toHaveBeenCalledWith('srv-b', false, ['remove_file'], { read_file: 'hb', remove_file: 'hb-rm' })
+  })
+
+  it('an older reload of the same server cannot replace a newer one', async () => {
+    const first = deferred<any>(); const second = deferred<any>()
+    let calls = 0
+    ;(api.getServerReview as any).mockImplementation(() => (++calls === 1 ? first.promise : second.promise))
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'fixture' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    second.resolve(reviewFor('fixture', 'new'))
+    await flushPromises()
+    first.resolve(reviewFor('fixture', 'old'))
+    await flushPromises()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['remove_file'], { read_file: 'new', remove_file: 'new-rm' })
+  })
 })

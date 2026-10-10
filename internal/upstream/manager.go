@@ -1378,7 +1378,7 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, false)
+	tools, _, err := m.discoverTools(ctx, false, nil)
 	return tools, err
 }
 
@@ -1389,7 +1389,23 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // FR-009: the discovery-completed marker must be stamped for the former and
 // left alone for the latter).
 func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
-	return m.discoverTools(ctx, dueOnly)
+	return m.discoverTools(ctx, dueOnly, nil)
+}
+
+// DiscoverToolsReportTicketed is DiscoverToolsReport that also stamps each
+// server's capture: ticket is called immediately BEFORE that server's
+// tools/list, and tickets maps every listed server to the value it returned.
+// The sweep lists servers one after another, so one ticket taken before the
+// whole sweep would date a late server's capture too early and let a newer
+// capture be mistaken for a stale one (UX-02 cross-review).
+func (m *Manager) DiscoverToolsReportTicketed(ctx context.Context, dueOnly bool, ticket func() uint64) (tools []*config.ToolMetadata, listed []string, tickets map[string]uint64, err error) {
+	tickets = make(map[string]uint64)
+	var beforeList func(serverName string)
+	if ticket != nil {
+		beforeList = func(serverName string) { tickets[serverName] = ticket() }
+	}
+	tools, listed, err = m.discoverTools(ctx, dueOnly, beforeList)
+	return tools, listed, tickets, err
 }
 
 // DiscoverToolsDue is the periodic-sweep variant of DiscoverTools: it lists only
@@ -1399,11 +1415,13 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, true)
+	tools, _, err := m.discoverTools(ctx, true, nil)
 	return tools, err
 }
 
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+// discoverTools lists every eligible server's tools. beforeList, when set, is
+// called with the server's name immediately before its tools/list request.
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool, beforeList func(serverName string)) ([]*config.ToolMetadata, []string, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1500,6 +1518,9 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		connectedCount++
 
+		if beforeList != nil && snapshot.name != "" {
+			beforeList(snapshot.name)
+		}
 		tools, err := client.ListTools(ctx)
 		if err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the

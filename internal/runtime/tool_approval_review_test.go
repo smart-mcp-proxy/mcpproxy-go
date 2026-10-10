@@ -169,10 +169,11 @@ func TestServerApproval_ToolAddedAfterCommitStaysHeld(t *testing.T) {
 	require.Equal(t, []string{"drop_all=pending"}, ux02NotApproved(t, rt, "srv"))
 }
 
-// Finding 2: a discovery pass decides a tool was removed, then pauses; a later
-// pass rediscovers it and the operator blocks it; the stale pass resumes. Its
-// removal must not delete the fresh record, so the block survives further
-// discovery (no auto-baseline re-enables the tool).
+// Finding 2: a discovery pass captures an inventory missing a tool, then
+// pauses before applying it; a later pass rediscovers the tool and the
+// operator blocks it; the stale pass resumes. Its removal must not delete the
+// fresh record, so the block survives further discovery (no auto-baseline
+// re-enables the tool).
 func TestApplyDifferentialToolUpdate_StaleRemovalKeepsFreshDecision(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "lib", Enabled: true}})
 	ctx := context.Background()
@@ -183,7 +184,7 @@ func TestApplyDifferentialToolUpdate_StaleRemovalKeepsFreshDecision(t *testing.T
 
 	paused, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	rt.toolRemovalHook = func(_ string, _ []string) {
+	rt.inventoryApplyHook = func(_ string) {
 		once.Do(func() {
 			close(paused)
 			<-release
@@ -196,7 +197,7 @@ func TestApplyDifferentialToolUpdate_StaleRemovalKeepsFreshDecision(t *testing.T
 		// Stale pass: the upstream briefly listed no tools.
 		_ = rt.applyDifferentialToolUpdate(ctx, "lib", []*config.ToolMetadata{})
 	}()
-	require.True(t, waitOrTimeout(paused, 5*time.Second), "the stale pass never reached its removal step")
+	require.True(t, waitOrTimeout(paused, 5*time.Second), "the stale pass never reached its apply step")
 
 	// A newer pass rediscovers the tool, and the operator blocks it.
 	_, err := rt.checkToolApprovals("lib", ux02Tools("lib", 1))
@@ -372,4 +373,55 @@ func TestReviewFingerprint_NoHintsIsCurrentHash(t *testing.T) {
 	ro := reviewFingerprint(rec)
 	rec.CurrentAnnotations = &config.ToolAnnotations{ReadOnlyHint: boolP(false)}
 	require.NotEqual(t, ro, reviewFingerprint(rec))
+}
+
+// UX-02 cross-review round 3, finding 4: a hashless pending record (the
+// toggle path files one for a tool the StateView did not list) used to be
+// reported without current_hash, which made the Web UI and CLI drop the
+// expected_hashes binding for the WHOLE server. It now has a non-empty
+// fingerprint, so a mixed review stays bound: once discovery fills in the
+// tool's definition, the old review is rejected as out of date.
+func TestReviewBinding_HashlessRecordStaysBound(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true, Quarantined: true}})
+	ctx := context.Background()
+	_, err := rt.checkToolApprovals("srv", ux02Tools("srv", 1))
+	require.NoError(t, err)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "srv", ToolName: "read_001", Status: storage.ToolApprovalStatusPending,
+	}))
+
+	review, err := rt.GetServerReview(ctx, "srv")
+	require.NoError(t, err)
+	require.Len(t, review.Tools, 2)
+	reviewed := map[string]string{}
+	for _, tool := range review.Tools {
+		require.NotEmpty(t, tool.CurrentHash, "every reviewed tool carries a binding fingerprint (%s)", tool.Name)
+		reviewed[tool.Name] = tool.CurrentHash
+	}
+
+	// Discovery now serves read_001's real definition and a new destructive tool.
+	_, err = rt.checkToolApprovals("srv", append(ux02Tools("srv", 2), ux02Destructive("srv")))
+	require.NoError(t, err)
+
+	var stale *storage.StaleToolReviewError
+	committed := false
+	n, err := rt.CommitServerApprovalDecision("srv", nil, reviewed, "api", func() error { committed = true; return nil })
+	require.True(t, errors.As(err, &stale), "a review taken before the definition was captured must be stale, got %v", err)
+	require.Zero(t, n)
+	require.False(t, committed)
+	require.Equal(t, []string{"read_001"}, stale.Changed)
+	require.Equal(t, []string{"drop_all"}, stale.Unreviewed)
+	_, err = rt.ApproveToolsReviewed("srv", []string{"read_001"}, false, reviewed, "api")
+	require.True(t, errors.As(err, &stale), "tool approval must reject it too, got %v", err)
+	require.Equal(t, []string{"drop_all=pending", "read_000=pending", "read_001=pending"}, ux02NotApproved(t, rt, "srv"))
+}
+
+func TestReviewFingerprint_HashlessIsNonEmptyAndTracksDefinition(t *testing.T) {
+	rec := &storage.ToolApprovalRecord{ToolName: "t"}
+	empty := reviewFingerprint(rec)
+	require.NotEmpty(t, empty)
+	rec.CurrentDescription = "now described"
+	require.NotEqual(t, empty, reviewFingerprint(rec))
+	rec.CurrentHash = "abc"
+	require.Equal(t, "abc", reviewFingerprint(rec))
 }

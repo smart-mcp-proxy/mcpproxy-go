@@ -98,7 +98,23 @@ const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.
 function recordChoice(tool: ReviewTool, allowed: boolean) { choices.set(tool.name, { allowed, tool }) }
 function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema: tool.input_schema, output_schema: tool.output_schema, annotations: tool.annotations }, null, 2) }
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
-async function load() { if (typeof api.getServerReview !== 'function') return; loading.value = true; error.value = ''; const res = await api.getServerReview(props.serverName); loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed') }
+// Every load is numbered; only the newest one for the server on screen may
+// apply its response (UX-02). A late GET for the previous server, or an older
+// reload of this one, would otherwise replace the review and selections the
+// operator is about to approve.
+let loadSeq = 0
+let reviewServer = '' // the server the review on screen was loaded for
+async function load() {
+  if (typeof api.getServerReview !== 'function') return
+  const seq = ++loadSeq
+  const server = props.serverName
+  loading.value = true; error.value = ''
+  const res = await api.getServerReview(server)
+  if (seq !== loadSeq || server !== props.serverName) return
+  loading.value = false
+  if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }
+  review.value = res.data; reviewServer = server; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed')
+}
 async function rescan() {
   const server = props.serverName
   rescanning.value = true
@@ -126,10 +142,13 @@ function requestApprove(everything: boolean) { if (!review.value?.server.definit
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
 // The definitions the operator is looking at, by hash (UX-02): the core approves
 // only these and answers 409 when one changed or a new tool appeared since.
-// Undefined (an unbound request) when the core predates current_hash.
+// Undefined (an unbound request) only when the core predates current_hash, i.e.
+// no tool in the whole review carries one. A single tool without a hash on a
+// newer core is left out of the binding instead of unbinding the approval: the
+// core then refuses it as out of date unless that tool is blocked.
 function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined {
-  if (tools.length === 0 || tools.some(t => !t.current_hash)) return undefined
-  return Object.fromEntries(tools.map(t => [t.name, t.current_hash as string]))
+  if (!(review.value?.tools ?? []).some(t => t.current_hash)) return undefined
+  return Object.fromEntries(tools.filter(t => t.current_hash).map(t => [t.name, t.current_hash as string]))
 }
 // The force retry re-sends the decision of the attempt that triggered it (D43.5):
 // its block list AND the hashes of the review it was made on (UX-02). A review
@@ -138,6 +157,8 @@ function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined
 // pairing the old block list with definitions the operator never decided on.
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
+  // Never submit a decision made on another server's review (UX-02).
+  if (review.value && reviewServer !== server) { closeConfirm(); forceDialog.value?.close?.(); return }
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; staleNotice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
   const retry = force && block === undefined && lastBlock.value !== null
@@ -174,7 +195,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
+watch(() => props.serverName, () => { review.value = null; allowedTools.value = []; choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

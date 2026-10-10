@@ -373,11 +373,6 @@ type ToolApprovalResult struct {
 	PendingCount int
 	// ChangedCount is the number of tools whose description/schema changed since approval.
 	ChangedCount int
-	// InventoryGeneration is the server's tool-approval generation this pass
-	// ran at (0 when the pass did not take the lock). The removal step of the
-	// same discovery pass only deletes a removed tool's records while the
-	// generation is unchanged (UX-02, see lockToolApprovalsIfCurrent).
-	InventoryGeneration uint64
 	// StaleInventory is set when the pass was dropped because a
 	// later-captured inventory had already been applied for the server: the
 	// pass wrote nothing, and applyDifferentialToolUpdateCaptured makes no
@@ -471,12 +466,26 @@ func (r *Runtime) checkToolApprovalsCaptured(serverName string, tools []*config.
 	// isBaselinePass decision and every write — runs under the server's
 	// tool-approval lock, so overlapping discovery passes and operator
 	// approvals apply one after another instead of overwriting each other.
-	unlockApprovals, inventoryGen, staleInventory := r.lockToolApprovalsForInventory(serverName, ticket)
+	unlockApprovals, staleInventory := r.lockToolApprovalsForInventory(serverName, ticket)
 	defer unlockApprovals()
 	if staleInventory {
-		r.logger.Info("Dropping a stale tool inventory: a later-captured inventory was already applied for this server",
-			zap.String("server", serverName), zap.Int("tools", len(tools)))
+		r.logStaleInventory(serverName, len(tools))
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool), StaleInventory: true}, nil
+	}
+	return r.checkToolApprovalsLocked(serverName, tools)
+}
+
+func (r *Runtime) logStaleInventory(serverName string, tools int) {
+	r.logger.Info("Dropping a stale tool inventory: a later-captured inventory was already applied for this server",
+		zap.String("server", serverName), zap.Int("tools", tools))
+}
+
+// checkToolApprovalsLocked is the body of checkToolApprovalsCaptured. The
+// caller holds the server's tool-approval lock and has established (through
+// lockToolApprovalsForInventory) that the inventory is not stale.
+func (r *Runtime) checkToolApprovalsLocked(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
+	if r.storageManager == nil {
+		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
 	}
 
 	// Determine if quarantine is enforced for this server. Storage is
@@ -523,8 +532,7 @@ func (r *Runtime) checkToolApprovalsCaptured(serverName string, tools []*config.
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{
-		BlockedTools:        make(map[string]bool),
-		InventoryGeneration: inventoryGen,
+		BlockedTools: make(map[string]bool),
 	}
 
 	schemaVersion, schemaVersionErr := r.storageManager.GetSchemaVersion()
@@ -2167,9 +2175,22 @@ func reviewFingerprint(record *storage.ToolApprovalRecord) string {
 	if record == nil {
 		return ""
 	}
+	base := record.CurrentHash
+	if base == "" {
+		// A record filed without a definition hash (newToggleSynthesizedRecord
+		// for a tool the StateView did not list) still gets a non-empty
+		// fingerprint, derived from whatever definition it carries, so a
+		// review containing it stays bound: discovery that later fills in the
+		// definition changes the fingerprint and the approval is rejected as
+		// out of date, and clients never see a hashless tool and fall back to
+		// an unbound approval (UX-02 cross-review).
+		sum := sha256.Sum256([]byte(record.ToolName + "\x00" + record.CurrentDescription + "\x00" +
+			record.CurrentSchema + "\x00" + record.CurrentOutputSchema))
+		base = "nohash-" + hex.EncodeToString(sum[:16])
+	}
 	a := record.CurrentAnnotations
 	if a == nil || (a.ReadOnlyHint == nil && a.DestructiveHint == nil && a.IdempotentHint == nil && a.OpenWorldHint == nil) {
-		return record.CurrentHash
+		return base
 	}
 	hint := func(v *bool) string {
 		switch {
@@ -2183,7 +2204,7 @@ func reviewFingerprint(record *storage.ToolApprovalRecord) string {
 	}
 	sum := sha256.Sum256([]byte("ro=" + hint(a.ReadOnlyHint) + ";de=" + hint(a.DestructiveHint) +
 		";id=" + hint(a.IdempotentHint) + ";ow=" + hint(a.OpenWorldHint)))
-	return record.CurrentHash + "~" + hex.EncodeToString(sum[:8])
+	return base + "~" + hex.EncodeToString(sum[:8])
 }
 
 // uniqueNames returns names without duplicates, in first-seen order.

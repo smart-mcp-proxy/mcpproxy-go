@@ -38,22 +38,28 @@ import (
 //     cannot invert.
 
 // toolApprovalServerLock is one server's tool-approval mutex plus two
-// counters, both guarded by mu:
+// inventory tickets (see nextInventoryTicket), both guarded by mu:
 //
-//   - generation is bumped on every acquisition through lockToolApprovals
-//     (every discovery pass and every operator/system write), so a decision
-//     taken under the lock at generation g is still current exactly when the
-//     generation still reads g.
-//   - appliedInventory is the highest inventory ticket (see
-//     nextInventoryTicket) a discovery pass has applied for the server. The
-//     ticket is taken when the inventory is CAPTURED, before tools/list, so
-//     freshness follows capture order, not the order in which passes happen
-//     to reach the lock: an older inventory that acquires the lock after a
-//     newer one was applied is stale and is dropped (UX-02 cross-review).
+//   - appliedInventory is the highest ticket a discovery pass has applied for
+//     the server. The ticket is taken when the inventory is CAPTURED (right
+//     before that server's tools/list), so freshness follows capture order,
+//     not the order in which passes happen to reach the lock: an older
+//     inventory that acquires the lock after a newer one was applied is stale
+//     and is dropped (UX-02 cross-review).
+//   - publishedInventory is the highest ticket published to the StateView.
+//     A pass publishes only while its ticket is still the newest applied and
+//     published one, so a stale or overtaken inventory can never replace the
+//     tool definitions and safety hints (which set the dispatch tier) of a
+//     newer one (UX-02 cross-review).
+//
+// A discovery pass applies its inventory — the approval decisions AND the
+// search-index writes derived from them — in ONE critical section under mu
+// (applyInventory), so no operator approval, block or other pass can land
+// between the decision and the index write and be undone by it.
 type toolApprovalServerLock struct {
-	mu               sync.Mutex
-	generation       uint64
-	appliedInventory uint64
+	mu                 sync.Mutex
+	appliedInventory   uint64
+	publishedInventory uint64
 }
 
 func (r *Runtime) toolApprovalLock(serverName string) *toolApprovalServerLock {
@@ -62,49 +68,57 @@ func (r *Runtime) toolApprovalLock(serverName string) *toolApprovalServerLock {
 }
 
 // nextInventoryTicket returns a new inventory ticket. Take it immediately
-// BEFORE capturing a tool inventory (the tools/list call, or the sweep's
-// DiscoverTools), and hand it to applyDifferentialToolUpdateCaptured /
-// checkToolApprovalsCaptured with that inventory. Tickets are global and
-// strictly increasing, so a later capture always carries a larger ticket.
+// BEFORE capturing a tool inventory (the tools/list call; the sweep takes one
+// per server through DiscoverToolsReportTicketed), and hand it to
+// applyDifferentialToolUpdateCaptured / checkToolApprovalsCaptured with that
+// inventory. Tickets are global and strictly increasing, so a later capture
+// always carries a larger ticket.
 func (r *Runtime) nextInventoryTicket() uint64 {
 	return r.inventoryTickets.Add(1)
 }
 
-// lockToolApprovals acquires the per-server tool-approval lock, bumps the
-// server's inventory generation and returns the unlock function.
+// lockToolApprovals acquires the per-server tool-approval lock and returns
+// the unlock function.
 func (r *Runtime) lockToolApprovals(serverName string) func() {
 	l := r.toolApprovalLock(serverName)
 	l.mu.Lock()
-	l.generation++
 	return l.mu.Unlock
 }
 
 // lockToolApprovalsForInventory is lockToolApprovals for a discovery pass
-// applying the inventory captured under ticket. It reports the generation
-// this acquisition established and whether the inventory is stale: a
-// later-captured inventory was already applied for the server. A stale pass
-// must not write anything (its view predates one already reconciled); a
-// current one records its ticket as the newest applied inventory.
-func (r *Runtime) lockToolApprovalsForInventory(serverName string, ticket uint64) (unlock func(), gen uint64, stale bool) {
+// applying the inventory captured under ticket. It reports whether the
+// inventory is stale: a later-captured inventory was already applied for the
+// server. A stale pass must not write anything (its view predates one already
+// reconciled); a current one records its ticket as the newest applied
+// inventory. The caller must call unlock either way.
+func (r *Runtime) lockToolApprovalsForInventory(serverName string, ticket uint64) (unlock func(), stale bool) {
 	l := r.toolApprovalLock(serverName)
 	l.mu.Lock()
-	l.generation++
 	if ticket < l.appliedInventory {
 		stale = true
 	} else {
 		l.appliedInventory = ticket
 	}
-	return l.mu.Unlock, l.generation, stale
+	return l.mu.Unlock, stale
 }
 
-// lockToolApprovalsIfCurrent acquires the server's tool-approval lock WITHOUT
-// bumping the generation and reports whether the generation still equals gen,
-// i.e. no discovery pass and no approval write ran since the pass that
-// observed gen. The caller must call unlock either way.
-func (r *Runtime) lockToolApprovalsIfCurrent(serverName string, gen uint64) (unlock func(), current bool) {
+// publishInventoryIfCurrent runs publish — the StateView write of the
+// inventory captured under ticket — under the server's tool-approval lock,
+// but only while that inventory is still the newest applied and published
+// one. It reports whether publish ran. An inventory dropped as stale, or
+// overtaken by a newer applied inventory before it reached this point, is
+// not published: the newer pass publishes its own (UX-02 cross-review).
+// publish must not call back into anything that takes the same lock.
+func (r *Runtime) publishInventoryIfCurrent(serverName string, ticket uint64, publish func()) bool {
 	l := r.toolApprovalLock(serverName)
 	l.mu.Lock()
-	return l.mu.Unlock, gen != 0 && l.generation == gen
+	defer l.mu.Unlock()
+	if ticket < l.appliedInventory || ticket < l.publishedInventory {
+		return false
+	}
+	l.publishedInventory = ticket
+	publish()
+	return true
 }
 
 // WithToolApprovalLock runs fn while holding serverName's tool-approval lock.

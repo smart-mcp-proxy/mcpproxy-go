@@ -388,10 +388,12 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// whether it still describes the live connection (astra r2 C3).
 	gens := r.discoveryGenerations()
 
-	// Inventory ticket for every server this sweep lists, taken before the
-	// capture (UX-02, see nextInventoryTicket).
-	sweepTicket := r.nextInventoryTicket()
-	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
+	// One inventory ticket per server, each taken immediately before that
+	// server's tools/list: the sweep lists servers one after another, so a
+	// single ticket taken up front would date a late server's capture too
+	// early and drop a genuinely newer inventory as stale (UX-02, see
+	// nextInventoryTicket).
+	tools, listed, tickets, err := r.upstreamManager.DiscoverToolsReportTicketed(ctx, dueOnly, r.nextInventoryTicket)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
@@ -400,6 +402,13 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	toolsByServer := make(map[string][]*config.ToolMetadata)
 	for _, tool := range tools {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
+	}
+	// Every listed server was stamped right before its tools/list; one
+	// without a ticket (not expected) counts as captured now.
+	for serverName := range toolsByServer {
+		if _, ok := tickets[serverName]; !ok {
+			tickets[serverName] = r.nextInventoryTicket()
+		}
 	}
 
 	// A server whose tools/list SUCCEEDED with zero tools has completed its
@@ -428,7 +437,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// changes, switch to a deep copy here.
 	r.lastGoodToolsMu.Lock()
 	for serverName, serverTools := range toolsByServer {
-		r.storeLastGoodToolsLocked(serverName, serverTools, sweepTicket)
+		r.storeLastGoodToolsLocked(serverName, serverTools, tickets[serverName])
 	}
 	for serverName := range r.lastGoodTools {
 		if _, ok := knownServerSet[serverName]; !ok {
@@ -444,7 +453,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		r.applyServerDiffIfEligible(ctx, serverName, serverTools, sweepTicket)
+		r.applyServerDiffIfEligible(ctx, serverName, serverTools, tickets[serverName])
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
@@ -489,15 +498,34 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools
+	// Update StateView with discovered tools — per server, and only while the
+	// server's inventory is still the newest applied one: an inventory that
+	// was dropped as stale, or overtaken by a newer pass since, must not
+	// replace the newer definitions and safety hints (which set the dispatch
+	// tier) in the StateView (UX-02 cross-review).
 	if r.supervisor != nil {
-		stale, err := r.supervisor.RefreshToolsFromDiscovery(tools, gens)
-		if err != nil {
-			r.logger.Warn("Failed to refresh tools in StateView", zap.Error(err))
-			// Don't fail the entire operation if StateView update fails
-		} else {
-			r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", len(tools)))
+		var stale []string
+		published := 0
+		for serverName, serverTools := range toolsByServer {
+			var serverStale []string
+			var refreshErr error
+			if !r.publishInventoryIfCurrent(serverName, tickets[serverName], func() {
+				serverStale, refreshErr = r.supervisor.RefreshToolsFromDiscovery(serverTools, gens)
+			}) {
+				r.logger.Debug("Not publishing a superseded sweep inventory to the StateView",
+					zap.String("server", serverName))
+				continue
+			}
+			if refreshErr != nil {
+				r.logger.Warn("Failed to refresh tools in StateView",
+					zap.String("server", serverName), zap.Error(refreshErr))
+				// Don't fail the entire operation if StateView update fails
+				continue
+			}
+			published += len(serverTools)
+			stale = append(stale, serverStale...)
 		}
+		r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", published))
 		// A server whose connection changed while the sweep was listing had
 		// its result dropped: re-list it under its current connection so it
 		// does not linger in the connect→discovery window until the next
@@ -903,8 +931,16 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	}
 
 	// Apply differential update: compare new tools with existing indexed tools
-	if err := r.applyDifferentialToolUpdateCaptured(ctx, serverName, tools, ticket); err != nil {
+	applied, err := r.applyInventory(ctx, serverName, tools, ticket)
+	if err != nil {
 		return false, fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
+	}
+	if !applied {
+		// A later-captured inventory was already applied (UX-02): this one
+		// is stale and must not reach the StateView either, where its older
+		// safety hints would set the dispatch tier. The newer pass publishes
+		// its own result, so there is nothing to re-list.
+		return true, nil
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -918,7 +954,17 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// caller, which re-lists.
 	published = true
 	if r.supervisor != nil {
-		ok, err := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, gen)
+		var ok bool
+		var err error
+		if !r.publishInventoryIfCurrent(serverName, ticket, func() {
+			ok, err = r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, gen)
+		}) {
+			// Overtaken by a newer applied inventory after this one was
+			// applied: the newer pass publishes (UX-02).
+			r.logger.Debug("Not publishing a superseded inventory to the StateView",
+				zap.String("server", serverName))
+			return true, nil
+		}
 		if err != nil {
 			r.logger.Warn("Failed to refresh tools in StateView for server",
 				zap.String("server", serverName),
@@ -993,16 +1039,54 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 // server changes nothing — no approval write, no index write (UX-02
 // cross-review, see checkToolApprovalsCaptured).
 func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serverName string, newTools []*config.ToolMetadata, ticket uint64) error {
+	_, err := r.applyInventory(ctx, serverName, newTools, ticket)
+	return err
+}
+
+// applyInventory is applyDifferentialToolUpdateCaptured reporting whether the
+// inventory was applied (false: it was stale and changed nothing).
+//
+// UX-02 (cross-review): the approval decisions and the index writes derived
+// from them run in ONE critical section under the server's tool-approval
+// lock. Releasing the lock between the two let an operator approval (and its
+// reindex) or a newer pass land in between, after which this pass's stale
+// view evicted a just-approved tool from the index, or overwrote newer
+// definitions and annotations with older ones. Index operations never call
+// back into the runtime, so approval lock -> index lock cannot invert. The
+// profile reindex, signature-cache work and the servers.changed event run
+// after the lock is released.
+func (r *Runtime) applyInventory(ctx context.Context, serverName string, newTools []*config.ToolMetadata, ticket uint64) (bool, error) {
+	if r.inventoryApplyHook != nil {
+		r.inventoryApplyHook(serverName)
+	}
+	unlock, stale := r.lockToolApprovalsForInventory(serverName, ticket)
+	if stale {
+		unlock()
+		r.logStaleInventory(serverName, len(newTools))
+		return false, nil
+	}
+	after, err := r.applyInventoryLocked(ctx, serverName, newTools)
+	unlock()
+	if after != nil {
+		after()
+	}
+	return true, err
+}
+
+// applyInventoryLocked is the body of applyInventory; the caller holds the
+// server's tool-approval lock for a current inventory. It returns the work to
+// run once the lock is released.
+func (r *Runtime) applyInventoryLocked(_ context.Context, serverName string, newTools []*config.ToolMetadata) (func(), error) {
 	// Check tool-level quarantine approvals before indexing
-	approvalResult, err := r.checkToolApprovalsCaptured(serverName, newTools, ticket)
+	approvalResult, err := r.checkToolApprovalsLocked(serverName, newTools)
 	if err != nil {
 		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
 			zap.String("server", serverName),
 			zap.Error(err))
 		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
 	}
-	if approvalResult.StaleInventory {
-		return nil
+	if r.inventoryIndexPhaseHook != nil {
+		r.inventoryIndexPhaseHook(serverName)
 	}
 
 	// Query existing tools from the index
@@ -1014,13 +1098,14 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 		// Filter out blocked tools before full batch index
 		allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
 		if err := r.indexManager.BatchIndexTools(allowedTools); err != nil {
-			return err
+			return nil, err
 		}
-		r.warmSignatureCache(allowedTools)
-		// The shared index changed for this server; refresh dependent profiles.
-		r.reindexAffectedProfiles(serverName)
-		r.reconcileSignatureCache()
-		return nil
+		return func() {
+			r.warmSignatureCache(allowedTools)
+			// The shared index changed for this server; refresh dependent profiles.
+			r.reindexAffectedProfiles(serverName)
+			r.reconcileSignatureCache()
+		}, nil
 	}
 
 	// Build maps for efficient lookup, keyed by the tool's RAW upstream name
@@ -1125,37 +1210,11 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 
 	// Apply changes
 
-	// 1. Delete removed tools.
-	//
-	// UX-02 (cross-review): the removal decision above was made from this
-	// pass's inventory. An inventory captured BEFORE one already applied was
-	// dropped as stale in checkToolApprovalsCaptured (freshness follows
-	// capture order, not lock order). Even a current inventory may be
-	// overtaken while this pass runs: a later discovery pass may rediscover
-	// the tool and the operator may approve or block it. Deleting the fresh
-	// record would lose that decision and, when it was the server's only
-	// baseline record, let the next pass auto-baseline the tool as enabled.
-	// So the removal (index entry, hash and approval record together) runs
-	// under the server's tool-approval lock and only while no other pass or
-	// approval write has run since this pass's checkToolApprovals. A skipped
-	// removal leaves the tool indexed, so the next pass that still misses it
-	// removes it.
-	// The lock is released right after the loop (index deletes do not call
-	// back into the runtime, so approval lock -> index lock cannot invert).
-	unlockRemoval := func() {}
-	if len(removedTools) > 0 && r.toolRemovalHook != nil {
-		r.toolRemovalHook(serverName, removedTools)
-	}
-	if len(removedTools) > 0 && r.storageManager != nil {
-		var current bool
-		unlockRemoval, current = r.lockToolApprovalsIfCurrent(serverName, approvalResult.InventoryGeneration)
-		if !current {
-			r.logger.Info("Skipping tool removal: a newer discovery pass or approval write ran since this pass read the inventory",
-				zap.String("server", serverName),
-				zap.Int("removed", len(removedTools)))
-			removedTools = nil
-		}
-	}
+	// 1. Delete removed tools. The removal decision, the index entry, the
+	// hash and the approval record are all handled inside this pass's
+	// critical section (see applyInventory), so a newer pass that
+	// rediscovers the tool, or an operator decision on it, is ordered after
+	// this removal and is never lost to it (UX-02).
 	for _, toolName := range removedTools {
 		r.logger.Info("Removing tool from index",
 			zap.String("server", serverName),
@@ -1193,7 +1252,6 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 			}
 		}
 	}
-	unlockRemoval()
 
 	// 2. Remove blocked tools from index if previously indexed
 	for blockedToolName := range approvalResult.BlockedTools {
@@ -1219,7 +1277,7 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 			zap.Int("blocked", len(addedTools)-len(allowedAddedTools)))
 
 		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
-			return fmt.Errorf("failed to index added tools: %w", err)
+			return nil, fmt.Errorf("failed to index added tools: %w", err)
 		}
 	}
 
@@ -1240,7 +1298,7 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 		}
 
 		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
-			return fmt.Errorf("failed to re-index modified tools: %w", err)
+			return nil, fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
 	}
 
@@ -1255,9 +1313,21 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 			zap.Int("count", len(allowedAnnotationsOnlyTools)))
 
 		if err := r.indexManager.BatchIndexTools(allowedAnnotationsOnlyTools); err != nil {
-			return fmt.Errorf("failed to refresh tool annotations: %w", err)
+			return nil, fmt.Errorf("failed to refresh tool annotations: %w", err)
 		}
 	}
+
+	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
+		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0
+	allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
+	added, modified, removed := len(addedTools), len(modifiedTools), len(removedTools)
+	return func() { r.afterInventoryApplied(serverName, allowedTools, changed, added, modified, removed) }, nil
+}
+
+// afterInventoryApplied is the part of an inventory apply that runs once the
+// server's tool-approval lock is released: signature-cache warming, the
+// per-profile reindex and the servers.changed event.
+func (r *Runtime) afterInventoryApplied(serverName string, allowedTools []*config.ToolMetadata, changed bool, added, modified, removed int) {
 
 	// 5. Warm the signature cache for every tool this server still serves —
 	// deliberately the WHOLE allowed set, not just what steps 3 and 4 touched.
@@ -1275,13 +1345,11 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 	//
 	// Idempotent and cheap: Warm returns on the first cache hit, so the steady
 	// state is one map lookup per tool per discovery.
-	r.warmSignatureCache(filterBlockedTools(newTools, approvalResult.BlockedTools))
+	r.warmSignatureCache(allowedTools)
 
 	// If the shared index changed for this server, refresh the per-profile indexes
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
 	// untouched. Skipped when nothing changed to avoid churn on idle sweeps.
-	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
-		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0
 	if changed {
 		r.reindexAffectedProfiles(serverName)
 		// Evict signature-cache entries orphaned by removed/redefined tools —
@@ -1309,13 +1377,11 @@ func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serve
 		// emits nothing.
 		r.emitServersChanged("tools_changed", map[string]any{
 			"server":   serverName,
-			"added":    len(addedTools),
-			"modified": len(modifiedTools),
-			"removed":  len(removedTools),
+			"added":    added,
+			"modified": modified,
+			"removed":  removed,
 		})
 	}
-
-	return nil
 }
 
 // warmSignatureCache pre-compiles compact signatures for freshly indexed

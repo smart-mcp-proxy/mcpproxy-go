@@ -244,10 +244,14 @@ type Runtime struct {
 	// can pause a pass mid-flight and drive interleavings deterministically.
 	toolApprovalReadHook func(serverName, toolName string)
 
-	// toolRemovalHook, when set (tests only), runs in
-	// applyDifferentialToolUpdate after the pass decided which tools were
-	// removed and before it takes the lock to remove them.
-	toolRemovalHook func(serverName string, removed []string)
+	// inventoryApplyHook, when set (tests only), runs in applyInventory after
+	// the inventory was captured and before the pass takes the server's
+	// tool-approval lock.
+	inventoryApplyHook func(serverName string)
+	// inventoryIndexPhaseHook, when set (tests only), runs in applyInventory
+	// INSIDE the critical section, after the approval decisions and before the
+	// index writes derived from them.
+	inventoryIndexPhaseHook func(serverName string)
 
 	// Last-good tool snapshots per server used to avoid transient tool loss during
 	// global discovery races/restarts.

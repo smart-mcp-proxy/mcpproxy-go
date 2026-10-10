@@ -234,19 +234,21 @@ type reviewToolState struct {
 }
 
 // reviewExpectedHashes maps every reviewed tool to its definition hash. It
-// returns nil — an unbound, legacy request — when the core predates
-// current_hash (any tool without one), so an older core is not asked for a
-// binding it cannot honour.
+// returns nil — an unbound, legacy request — only when the core reports no
+// hash for ANY tool (it predates current_hash), so an older core is not asked
+// for a binding it cannot honour. A tool that lacks a hash on a core that
+// reports them is left out of the binding rather than unbinding the whole
+// approval: the core then refuses the approval as out of date (the tool is
+// not in the review) unless that tool is blocked (UX-02 cross-review).
 func reviewExpectedHashes(tools []reviewToolState) map[string]string {
-	if len(tools) == 0 {
-		return nil
-	}
 	out := make(map[string]string, len(tools))
 	for _, tool := range tools {
-		if tool.CurrentHash == "" {
-			return nil
+		if tool.CurrentHash != "" {
+			out[tool.Name] = tool.CurrentHash
 		}
-		out[tool.Name] = tool.CurrentHash
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
