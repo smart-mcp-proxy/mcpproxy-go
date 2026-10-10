@@ -809,6 +809,14 @@ see the feature page).
 | `policy_filtered` | false | — (omitted) | `blocked` | 11 |
 | `not_found` | false | `configure` | `unknown_ids` | 12 |
 | `server_not_configured` | false | `configure` | `unknown_ids` | 12 |
+| `tool_blocked_by_profile` (operator tier only) | false | `configure` | `blocked` | 11 |
+
+`tool_blocked_by_profile` (added for issue #1548) means the effective profile
+tool policy — the token's pin or client binding, plus any `profile` in the
+body, all of which must admit the tool — excludes an existing tool (tier cap,
+deny rule, unannotated handling). `detail` is the exact `blocked by profile: ...`
+text `call_tool_*` would return. A caller at the agent-token tier receives the
+scope-silent `not_found` instead, matching discovery, which hides the tool.
 
 A `tool_pending_approval` occurrence for a tool the server's discovery
 snapshot contains but that has **no stored approval record yet** carries

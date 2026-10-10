@@ -34,6 +34,7 @@ func TestContractsMirrorsTheReasonEnum(t *testing.T) {
 		contracts.PreflightReasonPolicyFiltered,
 		contracts.PreflightReasonNotFound,
 		contracts.PreflightReasonServerNotConfigured,
+		contracts.PreflightReasonToolBlockedByProfile,
 	}
 
 	wire := make(map[string]bool, len(mirrored))

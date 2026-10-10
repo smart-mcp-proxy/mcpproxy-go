@@ -1449,7 +1449,8 @@ const (
 	PreflightStatusUnavailable PreflightStatus = "unavailable"
 )
 
-// PreflightReason is the closed 15-code failure enum (Spec 098 FR-003).
+// PreflightReason is the closed 16-code failure enum (Spec 098 FR-003, plus
+// tool_blocked_by_profile from issue #1548).
 // Evolution is additive-only; consumers MUST treat an unknown code as
 // non-retryable. `server_saturated` is reserved and deliberately absent.
 type PreflightReason = string
@@ -1470,6 +1471,10 @@ const (
 	PreflightReasonPolicyFiltered      PreflightReason = "policy_filtered"
 	PreflightReasonNotFound            PreflightReason = "not_found"
 	PreflightReasonServerNotConfigured PreflightReason = "server_not_configured"
+	// PreflightReasonToolBlockedByProfile (issue #1548, additive): the
+	// effective profile tool policy excludes an existing tool. Operator tier
+	// only; the agent-token tier answers not_found (FR-013).
+	PreflightReasonToolBlockedByProfile PreflightReason = "tool_blocked_by_profile"
 )
 
 // PreflightVerdict is the set-level aggregate: the worst class present. It
@@ -1508,7 +1513,8 @@ type PreflightRequest struct {
 	// Tools is 1..100 entries BEFORE dedup; duplicates are collapsed, and
 	// duplicate ids carrying different pins are a validation error.
 	Tools []PreflightToolRef `json:"tools"`
-	// Profile evaluates under a named profile's server scope. Unknown: 400.
+	// Profile evaluates under a named profile's server scope and tool policy;
+	// it can only narrow a credential's own pin. Unknown: 400.
 	Profile string           `json:"profile,omitempty"`
 	Policy  *PreflightPolicy `json:"policy,omitempty"`
 	// WaitMS polls local state for up to this many milliseconds (cap 10000)
