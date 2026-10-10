@@ -20,7 +20,7 @@
             <option value="name">Name</option><option value="impact">Impact (active first)</option><option value="age">Oldest first</option>
           </select></label>
       </div>
-      <p v-if="effectiveView === 'active' && summary.deferred > 0 && !search.trim() && !serverFilter" class="text-xs text-base-content/60" data-test="review-deferred-note">{{ summary.deferred }} {{ summary.deferred === 1 ? 'review is' : 'reviews are' }} on disabled servers and hidden from this view. Nothing is approved by hiding it; choose All reviews to see {{ summary.deferred === 1 ? 'it' : 'them' }}.</p>
+      <p v-if="effectiveView === 'active' && summary.deferred > 0 && !search.trim() && !serverFilter && !change" class="text-xs text-base-content/60" data-test="review-deferred-note">{{ summary.deferred }} {{ summary.deferred === 1 ? 'review is' : 'reviews are' }} on disabled servers and hidden from this view. Nothing is approved by hiding it; choose All reviews to see {{ summary.deferred === 1 ? 'it' : 'them' }}.</p>
       <div v-if="!filteredRows.length" class="alert" data-test="review-no-match"><span>No reviews match this view.</span><button v-if="effectiveView === 'active' || search" type="button" class="btn btn-xs" @click="search = ''; view = 'all'">Show all reviews</button></div>
       <ReviewQueueList :rows="filteredRows" :change="change" />
     </template>

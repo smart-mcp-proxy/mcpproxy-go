@@ -108,6 +108,20 @@ describe('Review queue (T088)', () => {
       expect(names(wrapper)).toEqual(['parked'])
     })
 
+    it('the deferred-hidden notice is absent on ?change= deep links that list disabled rows', async () => {
+      const data = { count: 2, servers: [
+        { server: 'live', kind: 'tool_review', quarantined: false, enabled: true, pending: 1, changed: 1 },
+        { server: 'parked', kind: 'tool_review', quarantined: false, enabled: false, pending: 2, changed: 1 },
+      ] }
+      for (const c of ['pending', 'changed']) {
+        const { wrapper } = await open(`/review?change=${c}`, data)
+        expect(names(wrapper)).toContain('parked')
+        expect(wrapper.find('[data-test="review-deferred-note"]').exists()).toBe(false)
+      }
+      const { wrapper } = await open('/review', data)
+      expect(wrapper.find('[data-test="review-deferred-note"]').exists()).toBe(true)
+    })
+
     it('never hides the whole queue behind the Active view', async () => {
       const { wrapper } = await open()
       expect(wrapper.find('[data-test="review-view-all"]').exists()).toBe(true)
