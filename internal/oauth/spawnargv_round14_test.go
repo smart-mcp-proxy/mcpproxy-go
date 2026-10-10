@@ -14,6 +14,8 @@ func TestSpawnArgv_Round14(t *testing.T) {
 		`exec npx srv --name "$(printf %s $'it\'s ')" --password 'two hunter2xyz'`,
 		`exec sh -c 'exec npx srv --password hunter2xyz'`,
 		`exec bash -lc "exec npx srv --password hunter2xyz"`,
+		`exec sh -c 'exec npx srv --password hunter2xyz --token=othersecret'`,
+		`exec sh -c ':;API_KEY=@hunter2xyz;npx'`,
 	}
 	for _, cmd := range cases {
 		argv := []string{"sh", "-c", cmd}
@@ -26,6 +28,7 @@ func TestSpawnArgv_Round14(t *testing.T) {
 			"livesp": LiveRedaction.SpawnCommandString(cmd),
 		} {
 			assert.NotContains(t, out, "hunter2xyz", name+": "+cmd)
+			assert.NotContains(t, out, "othersecret", name+": "+cmd+" -> "+out)
 			assert.NotContains(t, out, "two", name+": "+cmd+" -> "+out)
 		}
 		assert.Equal(t, orig, argv)

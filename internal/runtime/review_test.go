@@ -261,6 +261,8 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"ansi-c in subst multiword": {"-c", `exec npx srv --name "$(printf %s $'it\'s ')" --password 'two hunter2xyz'`},
 		"nested sh -c":              {"-c", `exec sh -c 'exec npx srv --password hunter2xyz'`},
 		"nested bash -lc":           {"-c", `exec bash -lc "exec npx srv --password hunter2xyz"`},
+		"nested two secrets":        {"-c", `exec sh -c 'exec npx srv --password hunter2xyz --token=othersecret'`},
+		"nested no whitespace":      {"-c", `exec sh -c ':;API_KEY=@hunter2xyz;npx'`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -280,7 +282,7 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 			require.NotContains(t, string(encoded), `more"`)
 			require.Len(t, review.Server.Args, 2)
 			require.Equal(t, args[0], review.Server.Args[0])
-			require.Contains(t, review.Server.Args[1], "npx srv")
+			require.Contains(t, review.Server.Args[1], "npx")
 			cfg, cerr := rt.GetConfig()
 			require.NoError(t, cerr)
 			for _, sc := range cfg.Servers {

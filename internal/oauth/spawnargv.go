@@ -179,11 +179,19 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 	}
 	// A quoted word that holds a whole command line (the operand of a nested
 	// `sh -c '...'`) is one token to the argv pass; mask the command inside it.
+	// The recursion runs even when an earlier pass already masked part of the
+	// token (a second secret in the same nested command), and whether or not the
+	// operand has whitespace (`:;API_KEY=@x;npx`). It starts from the already
+	// masked text so a wholly masked token stays masked.
 	for i, d := range decoded {
-		if d == tokens[i] || masked[i] != tokens[i] || !strings.ContainsAny(d, " \t\n\r") {
+		if d == tokens[i] {
 			continue
 		}
-		if inner := r.commandStringTokens(d, spawnRules); inner != d {
+		base := d
+		if masked[i] != tokens[i] {
+			base = shellDecodeToken(masked[i])
+		}
+		if inner := r.commandStringTokens(base, spawnRules); inner != base {
 			if !strings.Contains(inner, "'") {
 				inner = "'" + inner + "'"
 			}
