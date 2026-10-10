@@ -376,29 +376,38 @@ func splitCommandSegments(s string) []commandSegment {
 // splitCommandSegmentsQuoted is the quote-aware split. It reports false when a
 // quote is never closed, in which case the caller falls back.
 func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool) {
-	segs = make([]commandSegment, 0, 8)
-	i := 0
-	for i < len(s) {
-		j := skipCommandSpace(s, i)
-		if j > i {
-			segs = append(segs, commandSegment{text: s[i:j]})
-			i = j
-		}
-		if i >= len(s) {
-			break
-		}
-		if isControlOperator(s[i]) {
-			for j = i; j < len(s) && isControlOperator(s[j]); j++ {
-			}
-			segs = append(segs, commandSegment{text: s[i:j]})
-			i = j
-			continue
-		}
-		j = i
-		var quote byte // 0 when outside quotes, else the opening quote char
-		ansi := false  // inside $'...', where a backslash escapes even in single quotes
-		for j < len(s) {
-			c := s[j]
+	return splitCommandSegmentsMode(s, true)
+}
+
+// splitCommandSegmentsOnSpace is the original whitespace-only split, kept as
+// the fallback for command strings whose quoting does not balance. It still
+// treats control operators, parentheses and redirections as the shell does,
+// but ignores quotes and backslashes.
+func splitCommandSegmentsOnSpace(s string) []commandSegment {
+	segs, _ := splitCommandSegmentsMode(s, false)
+	return segs
+}
+
+// isSubshellParen reports whether b is an UNQUOTED subshell parenthesis. The
+// shell ends a word at one, so `(API_KEY='a b' cmd)` assigns API_KEY.
+func isSubshellParen(b byte) bool { return b == '(' || b == ')' }
+
+func isRedirectChar(b byte) bool { return b == '<' || b == '>' }
+
+// isWordBreak reports whether an unquoted byte ends the current word.
+func isWordBreak(b byte) bool {
+	return isCommandSpace(b) || isControlOperator(b) || isSubshellParen(b) || isRedirectChar(b)
+}
+
+// scanShellWord returns the end of the word starting at i. With quoteAware it
+// tracks quotes and backslashes and reports false when a quote is never closed.
+func scanShellWord(s string, i int, quoteAware bool) (end int, balanced bool) {
+	j := i
+	var quote byte // 0 when outside quotes, else the opening quote char
+	ansi := false  // inside $'...', where a backslash escapes even in single quotes
+	for j < len(s) {
+		c := s[j]
+		if quoteAware {
 			if quote == 0 && c == '$' && j+1 < len(s) && s[j+1] == '\'' {
 				quote, ansi = '\'', true
 				j += 2
@@ -423,12 +432,75 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 				j++
 				continue
 			}
-			if isCommandSpace(c) || isControlOperator(c) {
-				break
-			}
-			j++
 		}
-		if quote != 0 {
+		if isWordBreak(c) {
+			break
+		}
+		j++
+	}
+	return j, quote == 0
+}
+
+// redirectionEnd reports the end of a shell redirection starting at s[i]: an
+// optional file-descriptor number, the operator (> >> < << <<< >& <& >| <>) and
+// its target word. The shell strips the whole thing before building argv, so it
+// is never an argument and must not be mistaken for the value of a sensitive
+// flag. ok is false when s[i] does not start one or its target is unbalanced.
+func redirectionEnd(s string, i int, quoteAware bool) (end int, isRedirect, balanced bool) {
+	j := i
+	for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+		j++
+	}
+	if j >= len(s) || !isRedirectChar(s[j]) {
+		return i, false, true
+	}
+	for j < len(s) && isRedirectChar(s[j]) {
+		j++
+	}
+	if j < len(s) && (s[j] == '&' || s[j] == '|') {
+		j++
+	}
+	k := skipCommandSpace(s, j)
+	if k >= len(s) || isControlOperator(s[k]) || isSubshellParen(s[k]) || isRedirectChar(s[k]) {
+		return j, true, true // no target word (e.g. `>(`, or end of string)
+	}
+	end, balanced = scanShellWord(s, k, quoteAware)
+	if end == k {
+		return j, true, balanced
+	}
+	return end, true, balanced
+}
+
+func splitCommandSegmentsMode(s string, quoteAware bool) (segs []commandSegment, balanced bool) {
+	segs = make([]commandSegment, 0, 8)
+	i := 0
+	for i < len(s) {
+		j := skipCommandSpace(s, i)
+		if j > i {
+			segs = append(segs, commandSegment{text: s[i:j]})
+			i = j
+		}
+		if i >= len(s) {
+			break
+		}
+		if isControlOperator(s[i]) || isSubshellParen(s[i]) {
+			for j = i; j < len(s) && (isControlOperator(s[j]) || isSubshellParen(s[j])); j++ {
+			}
+			segs = append(segs, commandSegment{text: s[i:j]})
+			i = j
+			continue
+		}
+		if end, isRedir, ok := redirectionEnd(s, i, quoteAware); isRedir {
+			if !ok {
+				return nil, false
+			}
+			// Operator and target are not arguments: emit them as plain text.
+			segs = append(segs, commandSegment{text: s[i:end]})
+			i = end
+			continue
+		}
+		j, ok := scanShellWord(s, i, quoteAware)
+		if !ok {
 			// Ran off the end inside a quote.
 			return nil, false
 		}
@@ -438,35 +510,6 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 		i = j
 	}
 	return segs, true
-}
-
-// splitCommandSegmentsOnSpace is the original whitespace-only split, kept as
-// the fallback for command strings whose quoting does not balance.
-func splitCommandSegmentsOnSpace(s string) []commandSegment {
-	segs := make([]commandSegment, 0, 8)
-	for i := 0; i < len(s); {
-		j := skipCommandSpace(s, i)
-		if j > i {
-			segs = append(segs, commandSegment{text: s[i:j]})
-			i = j
-		}
-		if i < len(s) && isControlOperator(s[i]) {
-			for j = i; j < len(s) && isControlOperator(s[j]); j++ {
-			}
-			segs = append(segs, commandSegment{text: s[i:j]})
-			i = j
-			continue
-		}
-		j = i
-		for j < len(s) && !isCommandSpace(s[j]) && !isControlOperator(s[j]) {
-			j++
-		}
-		if j > i {
-			segs = append(segs, commandSegment{text: s[i:j], isToken: true})
-			i = j
-		}
-	}
-	return segs
 }
 
 // URLValueDeep renders a URL for a LOG sink, masking credentials in its own
