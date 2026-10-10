@@ -164,7 +164,7 @@ Duplicate ids are deduplicated (one result per unique id, in first-occurrence or
 
 ## The reason taxonomy
 
-A per-tool result is `ready` or `unavailable` with **exactly one** reason from a closed 15-code enum. The enum only ever grows (treat unknown codes as non-retryable). `server_saturated` is reserved for a future revision.
+A per-tool result is `ready` or `unavailable` with **exactly one** reason from a closed 16-code enum. The enum only ever grows (treat unknown codes as non-retryable). `server_saturated` is reserved for a future revision.
 
 | Reason | Class | `retryable` | Default `action` | Set verdict | CLI exit |
 |---|---|---|---|---|---|
@@ -183,6 +183,7 @@ A per-tool result is `ready` or `unavailable` with **exactly one** reason from a
 | `policy_filtered` | permanent-config | false | — | blocked | 11 |
 | `not_found` | permanent-config | false | `configure` | unknown_ids | 12 |
 | `server_not_configured` | permanent-config | false | `configure` | unknown_ids | 12 |
+| `tool_blocked_by_profile` (operator tier only) | permanent-config | false | `configure` | blocked | 11 |
 
 The three classes tell a wrapper what to do without reading anything else:
 
@@ -200,7 +201,7 @@ When multiple states co-occur for one id, exactly one reason is reported — the
 
 ```
 server_not_configured → server_not_in_scope → server_quarantined → server_disabled
-→ not_found → tool_denied_by_config → tool_blocked_by_user → tool_changed
+→ not_found → tool_blocked_by_profile → tool_denied_by_config → tool_blocked_by_user → tool_changed
 → tool_pending_approval → hash_mismatch → oauth_required → server_unhealthy
 → server_initializing → annotation filters → ready
 ```
@@ -209,6 +210,7 @@ Notable consequences:
 
 - A nonexistent tool on a **quarantined server** reports `server_quarantined`, not `not_found` — quarantined servers' tools are never indexed, so existence is unknowable there.
 - On a server that is not yet Ready, the connection-state verdict (`server_initializing` / `server_unhealthy`) is returned instead of `not_found` — the proxy will not claim per-tool knowledge it doesn't have.
+- `tool_blocked_by_profile` is the effective [profile](./profiles.md) tool policy — `max_tier`, `tools.deny`/`tools.allow`, `unannotated` handling and `tools.classify` — refusing a tool that exists, decided by the same compiled policy and effective annotations dispatch uses, so a tool `call_tool_*` would refuse with `blocked by profile: ...` is never reported `ready`. Its `detail` is that exact refusal text. It sits after `not_found` (an unknown id under a profile is still `not_found`) and before the tool-level approval gates, matching dispatch. Every profile in effect must admit the tool: a token's pin (or client binding) **and** any `profile` named in the request, so naming a profile can only narrow.
 - `hash_mismatch` fires only once the tool is known to exist with a current stored hash; every earlier state wins over it.
 - Annotation filters are evaluated last, in the fixed order `read_only_only` → `exclude_destructive` → `exclude_open_world`. Within the first filter that excludes, the verdict is `missing_annotation` when the hint is absent and `policy_filtered` when the hint is explicitly unsafe.
 
@@ -241,6 +243,7 @@ Preflight answers with different candor depending on who is asking:
 |---|---|---|
 | Out-of-scope server | `server_not_in_scope` + detail explaining that a session under this profile sees `not_found` | plain `not_found` — byte-indistinguishable from a genuinely unknown id |
 | Unconfigured server | `server_not_configured` | the same plain `not_found`, so a probe cannot enumerate what exists behind a scope |
+| Tool excluded by the profile tool policy | `tool_blocked_by_profile` + the dispatch refusal text | the same plain `not_found` — discovery (`retrieve_tools`, `describe_tool`) already hides a profile-excluded tool, so the check does not confirm it |
 | Tool hashes | published on ready results | never |
 | `did_you_mean` | nearest visible ids | only within the token's own scope |
 

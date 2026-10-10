@@ -138,6 +138,26 @@ type ConfigPolicy interface {
 	QuarantineEnabled() bool
 }
 
+// ProfileToolDecision is the effective profile tool policy's verdict for one
+// existing tool (issue #1548).
+type ProfileToolDecision struct {
+	// Blocked is true when any profile in effect for the caller refuses the
+	// tool. Every profile in effect must admit it: an explicitly requested
+	// profile can only narrow a credential's pinned or bound one.
+	Blocked bool
+	// Detail is the occurrence-specific operator text — the same refusal text
+	// dispatch returns. It is never shown at the agent-token tier.
+	Detail string
+}
+
+// ToolPolicyReader reads the caller's effective Spec 108 profile tool policy.
+// Implementations MUST make the same decision dispatch makes (the compiled
+// policy's Decide over the same effective annotations), never a parallel
+// re-implementation of it; the glue layer is the only implementation.
+type ToolPolicyReader interface {
+	ProfileToolDecision(serverName, toolName string) ProfileToolDecision
+}
+
 // ---------------------------------------------------------------------------
 // Request / result types
 // ---------------------------------------------------------------------------
@@ -155,6 +175,10 @@ type EvalContext struct {
 	Approvals ApprovalReader
 	State     StateReader
 	Policy    ConfigPolicy
+	// ToolPolicy is the caller's effective profile tool policy (issue #1548).
+	// nil means no profile policy is in effect (an unprofiled operator, or a
+	// pure-unit evaluation); it is never a default-deny.
+	ToolPolicy ToolPolicyReader
 
 	// Tier selects the disclosure rules (FR-013).
 	Tier Tier
@@ -341,6 +365,30 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 			return res, nil
 		}
 		return corpus.notFoundResult(id)
+	}
+
+	// 5b. tool_blocked_by_profile (issue #1548) — the effective profile tool
+	//     policy dispatch enforces (tier cap, deny rules, unannotated
+	//     handling, classification). Evaluated only now that the tool is
+	//     known to exist, so an unknown id under a profile stays not_found,
+	//     and ahead of the tool-level gates, matching dispatch, where the
+	//     profile gate precedes server state and tool approval.
+	//     At the agent-token tier a profile-excluded tool is answered with the
+	//     ONE not_found construction: discovery (retrieve_tools, describe_tool
+	//     and the direct surface's check mode) already hides it as if absent
+	//     (Spec 108 FR-011), and the check must not confirm what discovery
+	//     withholds (FR-013).
+	if ec.ToolPolicy != nil {
+		if decision := ec.ToolPolicy.ProfileToolDecision(serverName, toolName); decision.Blocked {
+			if ec.Tier == TierAgentToken {
+				return corpus.notFoundResult(id)
+			}
+			detail := decision.Detail
+			if detail == "" {
+				detail = fmt.Sprintf("Tool %q is excluded by the profile tool policy in effect.", id)
+			}
+			return unavailable(id, ReasonToolBlockedByProfile, detail), nil
+		}
 	}
 
 	configDenied, err := ec.Policy.ToolConfigDenied(serverName, toolName)
@@ -739,6 +787,12 @@ func (c *visibleCorpus) candidates() ([]string, error) {
 				name = name[idx+1:]
 			}
 			if name == "" {
+				continue
+			}
+			// A tool the caller's profile policy excludes is hidden from
+			// discovery (Spec 108 FR-011), so a suggestion must not name it
+			// either (issue #1548).
+			if ec.ToolPolicy != nil && ec.ToolPolicy.ProfileToolDecision(server, name).Blocked {
 				continue
 			}
 			c.ids = append(c.ids, server+":"+name)

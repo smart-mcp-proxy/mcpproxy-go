@@ -500,7 +500,11 @@ func (p *MCPProxyServer) runDirectCheck(
 	// IndexedServerNames and ToolsByServer disagree about the same tool.
 	reader := &directCatalogIndexReader{entries: visible}
 
-	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader)
+	// The visible corpus already hides profile-excluded tools
+	// (directEntryVisibleToSession); the session's policies are passed too so
+	// the evaluator applies the same decision as the retrieve-mode check,
+	// which can only narrow (issue #1548).
+	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, p.sessionPreflightPolicies(ctx))
 	if err != nil {
 		return preflight.Outcome{}, err
 	}

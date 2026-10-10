@@ -187,7 +187,7 @@ export const PreflightStatusUnavailable = 'unavailable' as const;
 export type PreflightStatus = typeof PreflightStatusReady | typeof PreflightStatusUnavailable;
 
 /**
- * Closed 15-code failure enum. Additive-only: treat an unknown code as
+ * Closed 16-code failure enum. Additive-only: treat an unknown code as
  * non-retryable. 'server_saturated' is reserved and not emitted.
  */
 export type PreflightReason =
@@ -205,7 +205,8 @@ export type PreflightReason =
   | 'missing_annotation'
   | 'policy_filtered'
   | 'not_found'
-  | 'server_not_configured';
+  | 'server_not_configured'
+  | 'tool_blocked_by_profile';
 
 /** Set-level aggregate (worst class present); drives the CLI exit code 0/10/11/12. */
 export const PreflightVerdictReady = 'ready' as const;
