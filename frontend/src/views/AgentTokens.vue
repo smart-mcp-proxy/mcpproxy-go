@@ -158,6 +158,7 @@
                 :purpose="token.purpose"
                 :profile-state="token.profile_state"
                 :hide-lease="true"
+                :now="now"
               />
               <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
                    a client credential is filtered as a client, from Clients). -->
@@ -472,6 +473,7 @@ import { expiringSoon, leaseText } from '@/utils/credentials'
 import { CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
 import { PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
+import { useNow } from '@/composables/useNow'
 import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
 
@@ -557,18 +559,21 @@ const filteredTokens = computed(() => {
 })
 
 // Helper functions
+// A reactive clock: an open page advances lease countdowns and expiry states.
+const now = useNow()
+
 function isExpired(token: AgentTokenInfo): boolean {
-  return new Date(token.expires_at) < new Date()
+  return new Date(token.expires_at).getTime() < now.value
 }
 
 // A lease (<= 24 h at issue) running out is the plan, not a warning (UI-005).
 function isExpiringSoon(token: AgentTokenInfo): boolean {
   if (isExpired(token)) return false
-  return expiringSoon(token)
+  return expiringSoon(token, now.value)
 }
 
 function expiryText(token: AgentTokenInfo): string {
-  return token.revoked ? formatDate(token.expires_at) : (leaseText(token) || formatDate(token.expires_at))
+  return token.revoked ? formatDate(token.expires_at) : (leaseText(token, now.value) || formatDate(token.expires_at))
 }
 
 function formatDate(dateStr: string): string {

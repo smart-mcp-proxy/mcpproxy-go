@@ -22,6 +22,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { PURPOSE_LABEL, bindingText, issuerText, leaseText, stateBadge } from '@/utils/credentials'
+import { useNow } from '@/composables/useNow'
 import type { CredentialIssuer } from '@/types/api'
 
 // Spec 115 UI-001/UI-005: a worker credential's lifecycle on one line: how it
@@ -48,7 +49,8 @@ const props = defineProps<{
   now?: number
 }>()
 
-const nowMs = computed(() => props.now ?? Date.now())
+const clock = useNow()
+const nowMs = computed(() => props.now ?? clock.value)
 const fields = computed(() => ({
   revoked: props.revoked, revoked_at: props.revokedAt, expires_at: props.expiresAt,
   created_at: props.createdAt, lease: props.lease, credential_state: props.credentialState,

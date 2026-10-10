@@ -27,6 +27,7 @@
         <span class="text-xs opacity-70">Locked</span>
       </div>
       <button
+        v-if="showCredentialCta"
         type="button"
         class="btn btn-xs btn-primary h-auto min-h-6 py-1 whitespace-normal"
         :data-test="`client-credential-cta-${client.id}`"
@@ -154,6 +155,9 @@ const noRecord = computed(() => {
   return credentialless && !c.installed && !c.connected
 })
 const bindable = computed(() => props.client.credential_state === 'client')
+// Spec 115 UI-005: a lease that ended is a planned task end, never a
+// "Reconnect" call to action.
+const showCredentialCta = computed(() => !((props.client as { lease?: boolean }).lease && props.client.credential_state === 'expired'))
 const locked = computed(() => props.client.profile_mode === 'locked' || props.client.profile_source === 'pin')
 const missing = computed(() => props.client.profile_missing === true)
 

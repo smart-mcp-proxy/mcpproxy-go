@@ -143,7 +143,10 @@ const emit = defineEmits<{
 
 const REASONS = ['server_not_in_profile', 'denied_by_rule', 'unannotated_hidden', 'above_tier_cap']
 const serverFilter = ref('')
-const reasonFilter = ref(props.initialReason === 'callable' ? 'visible' : (props.initialReason ?? ''))
+const reasonFor = (r: string | undefined) => (r === 'callable' ? 'visible' : (r ?? ''))
+const reasonFilter = ref(reasonFor(props.initialReason))
+// A query-only navigation reuses the mounted table: follow the deep link.
+watch(() => props.initialReason, r => { reasonFilter.value = reasonFor(r) })
 const search = ref('')
 const focusedKey = ref('')
 const toggles = new Map<string, HTMLInputElement>()
