@@ -230,6 +230,11 @@ type Runtime struct {
 	// global discovery races/restarts.
 	lastGoodToolsMu sync.RWMutex
 	lastGoodTools   map[string][]*config.ToolMetadata
+	// lastCaptureAt (guarded by lastGoodToolsMu) records when each server's
+	// toolset was last captured, for the review payload's fresh-capture proof.
+	lastCaptureAt map[string]time.Time
+	// pruneAfterSnapshot is a test hook run after the prune snapshot.
+	pruneAfterSnapshot func(toolName string)
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when

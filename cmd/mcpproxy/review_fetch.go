@@ -66,31 +66,42 @@ func reviewFetchDo(ctx context.Context, client reviewDoer, method, path string) 
 	return resp.StatusCode, body, err
 }
 
+// reviewFetchState is what the review payload says about a capture.
+type reviewFetchState struct {
+	Quarantined bool
+	// LiveTools counts stored records the upstream listed in its latest
+	// capture; it is not the size of the stored-record inventory, which keeps
+	// operator decisions for tools the upstream no longer lists.
+	LiveTools     int
+	LastCaptureAt string
+}
+
 // reviewFetchReview reads the review payload and returns its capture state.
-func reviewFetchReview(ctx context.Context, client reviewDoer, server string) (quarantined, captured bool, tools int, err error) {
+func reviewFetchReview(ctx context.Context, client reviewDoer, server string) (reviewFetchState, error) {
 	status, body, err := reviewFetchDo(ctx, client, http.MethodGet, "/api/v1/servers/"+url.PathEscape(server)+"/review")
 	if err != nil {
-		return false, false, 0, err
+		return reviewFetchState{}, err
 	}
 	if status == http.StatusNotFound {
-		return false, false, 0, cliRefusalError{fmt.Errorf("server '%s' not found; list servers with: mcpproxy upstream list", server)}
+		return reviewFetchState{}, cliRefusalError{fmt.Errorf("server '%s' not found; list servers with: mcpproxy upstream list", server)}
 	}
 	if status != http.StatusOK {
-		return false, false, 0, parseAPIError(body, status, "read review")
+		return reviewFetchState{}, parseAPIError(body, status, "read review")
 	}
 	var env struct {
 		Data struct {
 			Server struct {
-				Quarantined         bool `json:"quarantined"`
-				DefinitionsCaptured bool `json:"definitions_captured"`
+				Quarantined   bool   `json:"quarantined"`
+				LiveToolCount int    `json:"live_tool_count"`
+				LastCaptureAt string `json:"last_capture_at"`
 			} `json:"server"`
-			Tools []json.RawMessage `json:"tools"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return false, false, 0, err
+		return reviewFetchState{}, err
 	}
-	return env.Data.Server.Quarantined, env.Data.Server.DefinitionsCaptured, len(env.Data.Tools), nil
+	srv := env.Data.Server
+	return reviewFetchState{Quarantined: srv.Quarantined, LiveTools: srv.LiveToolCount, LastCaptureAt: srv.LastCaptureAt}, nil
 }
 
 // reviewFetchEnabled reads the server's enabled flag from the server list; the
@@ -144,12 +155,11 @@ func runReviewFetch(server string, wait time.Duration, format string) error {
 		return err
 	}
 
-	var captured bool
-	var tools int
-	if result.Quarantined, captured, tools, err = reviewFetchReview(ctx, client, server); err != nil {
+	before, err := reviewFetchReview(ctx, client, server)
+	if err != nil {
 		return fail(err)
 	}
-	result.Captured, result.ToolCount = captured && tools > 0, tools
+	result.Quarantined = before.Quarantined
 	enabled, err := reviewFetchEnabled(ctx, client, server)
 	if err != nil {
 		return fail(err)
@@ -179,12 +189,21 @@ func runReviewFetch(server string, wait time.Duration, format string) error {
 		return fail(cliRefusalError{fmt.Errorf("server '%s' was disabled while fetching, so nothing was captured; enable it first: mcpproxy upstream enable %s", server, server)})
 	}
 	// Re-read the review: the stored records are the proof of capture.
-	if result.Quarantined, captured, tools, err = reviewFetchReview(ctx, client, server); err != nil {
+	after, err := reviewFetchReview(ctx, client, server)
+	if err != nil {
 		return fail(err)
 	}
-	result.Captured, result.ToolCount = captured && tools > 0, tools
+	result.Quarantined = after.Quarantined
+	// Fresh-capture proof: the capture stamp must have advanced past the one
+	// seen before the POST, and the upstream must have listed tools in it.
+	// Retained approval records alone are never evidence of a capture.
+	fresh := after.LastCaptureAt != "" && after.LastCaptureAt != before.LastCaptureAt
+	result.Captured, result.ToolCount = fresh && after.LiveTools > 0, 0
+	if result.Captured {
+		result.ToolCount = after.LiveTools
+	}
 	if !result.Captured {
-		return fail(cliRefusalError{fmt.Errorf("no tool definitions captured for '%s' (the server returned %d tools); check it with: mcpproxy upstream logs %s", server, tools, server)})
+		return fail(cliRefusalError{fmt.Errorf("no tool definitions captured for '%s' (the server returned %d tools); check it with: mcpproxy upstream logs %s", server, after.LiveTools, server)})
 	}
 	return formatReviewResult(format, result)
 }

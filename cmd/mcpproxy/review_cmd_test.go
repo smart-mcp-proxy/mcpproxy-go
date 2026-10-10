@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -296,7 +297,10 @@ type fetchDaemon struct {
 	quarantined       bool
 	called            bool
 	disableOnDiscover bool
-	requests          []reviewRequest
+	// retained is the count of stored approval records that exist regardless of
+	// the capture (operator decisions for tools the upstream no longer lists).
+	retained int
+	requests []reviewRequest
 }
 
 func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
@@ -315,13 +319,14 @@ func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
 				return
 			}
 			tools := []string{}
-			if f.called {
-				for i := 0; i < f.toolsAfter; i++ {
-					tools = append(tools, `{"name":"t`+string(rune('a'+i))+`"}`)
-				}
+			for i := 0; i < f.retained || (f.called && i < f.toolsAfter); i++ {
+				tools = append(tools, `{"name":"t`+string(rune('a'+i))+`"}`)
 			}
-			captured := f.called && f.capturedFlag
-			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"srv","quarantined":` + boolStr(f.quarantined) + `,"definitions_captured":` + boolStr(captured) + `},"tools":[` + strings.Join(tools, ",") + `]}}`))
+			live, stamp := "", ""
+			if f.called && f.capturedFlag {
+				live, stamp = strconv.Itoa(f.toolsAfter), `"last_capture_at":"2026-10-10T10:00:00.000000001Z",`
+			}
+			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"srv","quarantined":` + boolStr(f.quarantined) + `,` + stamp + `"live_tool_count":` + zeroIfEmpty(live) + `,"definitions_captured":` + boolStr(len(tools) > 0) + `},"tools":[` + strings.Join(tools, ",") + `]}}`))
 		case r.URL.Path == "/api/v1/servers":
 			_, _ = w.Write([]byte(`{"success":true,"data":{"servers":[{"name":"srv","enabled":` + boolStr(f.enabled) + `}]}}`))
 		case r.URL.Path == "/api/v1/servers/srv/discover-tools" && r.Method == http.MethodPost:
@@ -340,6 +345,13 @@ func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
+}
+
+func zeroIfEmpty(s string) string {
+	if s == "" {
+		return "0"
+	}
+	return s
 }
 
 func boolStr(b bool) string {
@@ -437,6 +449,27 @@ func TestReviewFetchSuccessWithoutCaptureIsNotTrusted(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
 	require.Equal(t, false, got["captured"])
 	require.NotEmpty(t, got["error"])
+}
+
+func TestReviewFetchRetainedDecisionsAreNotACapture(t *testing.T) {
+	// Operator-decided records survive an empty upstream; they are history, not
+	// a fresh capture.
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 0, capturedFlag: true, retained: 1, quarantined: true}
+	out, err := runFetch(t, d, "json")
+	require.ErrorContains(t, err, "no tool definitions captured")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, false, got["captured"])
+	require.Equal(t, float64(0), got["tool_count"])
+}
+
+func TestReviewFetchToolCountIgnoresRetainedHistory(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 1, capturedFlag: true, retained: 4, quarantined: true}
+	out, err := runFetch(t, d, "json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, float64(1), got["tool_count"])
 }
 
 func TestReviewFetchWaitIsBounded(t *testing.T) {

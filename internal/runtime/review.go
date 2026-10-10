@@ -95,6 +95,12 @@ type ReviewServer struct {
 	SourceRegistryProvenance string            `json:"source_registry_provenance,omitempty"`
 	Scan                     *ReviewScan       `json:"scan,omitempty"`
 	DefinitionsCaptured      bool              `json:"definitions_captured"`
+	// LiveToolCount and LastCaptureAt are the fresh-capture proof: how many of
+	// the stored records the upstream listed in its most recent capture, and
+	// when that capture ran. They are separate from the stored-record
+	// inventory (Tools), which retains operator decisions for absent tools.
+	LiveToolCount int        `json:"live_tool_count,omitempty"`
+	LastCaptureAt *time.Time `json:"last_capture_at,omitempty"`
 }
 
 type ReviewTool struct {
@@ -222,6 +228,21 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
 	}
 	reviewServer.DefinitionsCaptured = len(records) > 0
+	r.lastGoodToolsMu.RLock()
+	if at, ok := r.lastCaptureAt[serverName]; ok {
+		at := at
+		reviewServer.LastCaptureAt = &at
+	}
+	liveNames := make(map[string]struct{}, len(r.lastGoodTools[serverName]))
+	for _, t := range r.lastGoodTools[serverName] {
+		liveNames[config.RawToolName(t)] = struct{}{}
+	}
+	r.lastGoodToolsMu.RUnlock()
+	for _, rec := range records {
+		if _, ok := liveNames[rec.ToolName]; ok {
+			reviewServer.LiveToolCount++
+		}
+	}
 	reviewScan, scanFindings, covered := r.reviewScanFor(ctx, serverName, server.Quarantined, records)
 	reviewServer.Scan = reviewScan
 	result := &ServerReview{Server: reviewServer, Tools: make([]ReviewTool, 0, len(records))}

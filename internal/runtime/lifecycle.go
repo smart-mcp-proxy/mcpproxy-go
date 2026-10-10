@@ -429,10 +429,12 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 		cp := make([]*config.ToolMetadata, len(serverTools))
 		copy(cp, serverTools)
 		r.lastGoodTools[serverName] = cp
+		r.noteCaptureLocked(serverName)
 	}
 	for serverName := range r.lastGoodTools {
 		if _, ok := knownServerSet[serverName]; !ok {
 			delete(r.lastGoodTools, serverName)
+			delete(r.lastCaptureAt, serverName)
 		}
 	}
 	r.lastGoodToolsMu.Unlock()
@@ -718,14 +720,23 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 		r.logger.Debug("Skipping review record prune", zap.String("server", serverName), zap.Error(err))
 		return
 	}
+	undecidedAbsent := func(rec *storage.ToolApprovalRecord) bool {
+		if _, ok := live[rec.ToolName]; ok {
+			return false
+		}
+		return !rec.Disabled && rec.Status == storage.ToolApprovalStatusPending
+	}
 	for _, rec := range records {
-		if _, ok := live[rec.ToolName]; ok || rec.Disabled {
+		if !undecidedAbsent(rec) {
 			continue
 		}
-		if rec.Status != storage.ToolApprovalStatusPending {
-			continue
+		// Eligibility is re-checked against the stored record inside the delete
+		// transaction: a decision saved after the snapshot above (block, disable,
+		// approve) must survive the prune.
+		if hook := r.pruneAfterSnapshot; hook != nil {
+			hook(rec.ToolName)
 		}
-		if err := r.storageManager.DeleteToolApproval(serverName, rec.ToolName); err != nil {
+		if _, err := r.storageManager.DeleteToolApprovalIf(serverName, rec.ToolName, undecidedAbsent); err != nil {
 			r.logger.Debug("Failed to prune review record for absent tool", zap.String("server", serverName), zap.String("tool", rec.ToolName), zap.Error(err))
 		}
 	}
@@ -740,8 +751,23 @@ func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*
 	snapshot := make([]*config.ToolMetadata, len(tools))
 	copy(snapshot, tools)
 	r.lastGoodTools[serverName] = snapshot
+	r.noteCaptureLocked(serverName)
 	r.lastGoodToolsMu.Unlock()
 	return nil
+}
+
+// noteCaptureLocked stamps a fresh capture for the review payload. Caller
+// holds lastGoodToolsMu. The stamp is strictly increasing per server so a
+// caller can tell a new capture from a retained one without comparing clocks.
+func (r *Runtime) noteCaptureLocked(serverName string) {
+	if r.lastCaptureAt == nil {
+		r.lastCaptureAt = make(map[string]time.Time)
+	}
+	now := time.Now().UTC()
+	if prev := r.lastCaptureAt[serverName]; !now.After(prev) {
+		now = prev.Add(time.Nanosecond)
+	}
+	r.lastCaptureAt[serverName] = now
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -879,6 +905,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	snapshot := make([]*config.ToolMetadata, len(tools))
 	copy(snapshot, tools)
 	r.lastGoodTools[serverName] = snapshot
+	r.noteCaptureLocked(serverName)
 	r.lastGoodToolsMu.Unlock()
 
 	// TOCTOU GUARD (issue #873): the eligibility check at the top of this
