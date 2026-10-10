@@ -1,7 +1,11 @@
 package server
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // configWithAppendedServer returns a NEW *config.Config carrying every server
@@ -32,6 +36,62 @@ func configWithAppendedServer(current *config.Config, sc *config.ServerConfig) *
 		return nil
 	}
 	updated := *current
-	updated.Servers = append(append([]*config.ServerConfig(nil), current.Servers...), sc)
+	servers := append([]*config.ServerConfig(nil), current.Servers...)
+	// Replace a same-name entry instead of appending a second one: two
+	// entries under one name make every name-keyed reader ambiguous.
+	replaced := false
+	for i, existing := range servers {
+		if existing != nil && existing.Name == sc.Name {
+			servers[i] = sc
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		servers = append(servers, sc)
+	}
+	updated.Servers = servers
 	return &updated
+}
+
+// ServerExistsError is returned when a create-only add names a server that is
+// already configured. Its text is part of the contract: the REST 409 mapping,
+// cliclient, `upstream add --if-not-exists` and the registry add all match on
+// "already exists".
+type ServerExistsError struct{ Name string }
+
+func (e *ServerExistsError) Error() string {
+	return fmt.Sprintf("server '%s' already exists", e.Name)
+}
+
+// createServer is the single create-only door for new upstream servers. It
+// refuses a name that is already present in the runtime config or in storage,
+// and publishes the new server to the runtime config, all under one mutex so
+// two concurrent adds of one name cannot both succeed. The storage write is
+// additionally atomic (one bbolt tx), which covers other writers that do not
+// take this mutex. On any error nothing has been published to the runtime
+// config.
+func (s *Server) createServer(sc *config.ServerConfig) error {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+
+	if cfg := s.runtime.Config(); cfg != nil {
+		for _, existing := range cfg.Servers {
+			if existing != nil && existing.Name == sc.Name {
+				return &ServerExistsError{Name: sc.Name}
+			}
+		}
+	}
+	if err := s.runtime.StorageManager().CreateUpstreamServer(sc); err != nil {
+		if errors.Is(err, storage.ErrUpstreamExists) {
+			return &ServerExistsError{Name: sc.Name}
+		}
+		return fmt.Errorf("failed to save server to storage: %w", err)
+	}
+	// runtime.Config() is the live immutable snapshot; copy-on-write, see
+	// configWithAppendedServer.
+	if updated := configWithAppendedServer(s.runtime.Config(), sc); updated != nil {
+		s.runtime.UpdateConfig(updated, "")
+	}
+	return nil
 }
