@@ -30,6 +30,6 @@ A refusal is an MCP tool result with `isError: true`. Its single text content is
 
 Hidden-tool refusal: callers who are not admin callers get the plain text `unknown tool: credentials`, not a JSON body. This matches `profiles`, so a hidden tool and a nonexistent one look alike.
 
-REST mapping (FR-009, FR-010): the REST token and client routes keep their existing status codes and bodies. They do not adopt these codes in this spec, with one additive exception: a secret-shaped `name`, `id`, `display_name`, `purpose`, `profile`, `mode` or `expires_in` is refused by the shared service screen with 400 in the route's existing envelope, naming the field and never the value (data-model §8.2).
+REST mapping (FR-009, FR-010): the REST token and client routes keep their existing status codes and bodies. They do not adopt these codes in this spec, with one additive exception: a secret-shaped `name`, `id`, `display_name`, `purpose`, `profile`/`profile_pin`, `mode`, `expires_in` or any element of `allowed_servers`/`permissions` is refused by the shared service screen with 400 in the route's existing envelope, naming the field and never the value (data-model §8.2). Malformed-body 400s on these two routes change text only: they use the sanitized §8.3 taxonomy and never quote a caller key or value.
 
 Revoke during an in-flight connect is **not** refused (spec review r3): `connect_in_progress` is not a `credentials` code. The revoke succeeds and the connect fails closed with the existing `credential_superseded`.
