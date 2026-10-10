@@ -201,10 +201,6 @@ func workerCall(c *client.Client, name string, args map[string]any) (bool, strin
 	return res.IsError, getToolResultText(res), nil
 }
 
-func readVariant(server, tool string) (string, map[string]any) {
-	return "call_tool_read", map[string]any{"name": server + ":" + tool, "args": map[string]any{}}
-}
-
 // assertRefusedNoDispatch asserts an inner semantic refusal (isError, or a
 // transport error) and a zero total dispatch delta.
 func (e *credE2E) assertRefusedNoDispatch(label string, fn func() (bool, string, error)) {
@@ -750,7 +746,7 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	for _, entry := range e.logs.All() {
 		logBuf.WriteString(entry.Message)
 		for _, f := range entry.Context {
-			logBuf.WriteString(fmt.Sprintf(" %s=%v %s", f.Key, f.Interface, f.String))
+			fmt.Fprintf(&logBuf, " %s=%v %s", f.Key, f.Interface, f.String)
 		}
 		logBuf.WriteByte('\n')
 	}

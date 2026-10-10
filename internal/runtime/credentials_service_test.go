@@ -374,7 +374,6 @@ func TestCredentialsService_NoSilentDefaultsAndAtomicRefusals(t *testing.T) {
 func TestCredentialsService_NoFallibleStepAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	h := newCredHarnessWith(t, false, true)
-	h.svcHarness.svc = h.svc
 	res, err := h.cs.IssueClient(ctx, mcpActor(), mcpClientReq("w1", "ro", "1h"))
 	require.NoError(t, err, "a listing failure after the mint must not fail the issue")
 	require.NotEmpty(t, res.Secret)
