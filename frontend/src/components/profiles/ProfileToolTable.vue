@@ -19,10 +19,8 @@
       <select id="tool-filter-reason" v-model="reasonFilter" class="select select-bordered select-xs" data-test="tool-filter-reason">
         <option value="">Any access</option>
         <option value="visible">Allowed by profile</option>
-        <template v-if="isAdmin || reasonFilter === 'callable' || reasonFilter === 'held'">
-          <option value="callable">Callable now</option>
-          <option value="held">Held</option>
-        </template>
+        <option v-if="isAdmin || reasonFilter === 'callable'" value="callable">Callable now</option>
+        <option v-if="isAdmin || reasonFilter === 'held'" value="held">Held</option>
         <option v-for="reason in REASONS" :key="reason" :value="reason">{{ reasonText(reason) }}</option>
       </select>
       <label class="sr-only" for="tool-filter-search">Search tools</label>

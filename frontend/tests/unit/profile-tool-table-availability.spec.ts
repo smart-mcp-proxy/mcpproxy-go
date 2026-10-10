@@ -12,11 +12,11 @@ const ROWS = [
   { server: 'lib', tool: 'pending', intrinsic_tier: 'read', profile_tier: 'read', access: { visible: true, callable: false, reason: 'tool_approval' }, classification_stale: false },
   { server: 'lib', tool: 'cap', intrinsic_tier: 'write', profile_tier: 'write', access: { visible: false, callable: false, reason: 'above_tier_cap' }, classification_stale: false },
 ]
-function mountTable(counts: any, rows = ROWS) {
+function mountTable(counts: any, rows = ROWS, extra: any = {}) {
   setActivePinia(createPinia())
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div/>' } }] })
   return mount(ProfileToolTable, {
-    props: { rows, counts, draftRules: undefined, profileLabel: 'qa-read', profileName: 'qa-read', serversChosen: true, editable: false },
+    props: { rows, counts, draftRules: undefined, profileLabel: 'qa-read', profileName: 'qa-read', serversChosen: true, editable: false, ...extra },
     global: { plugins: [router] },
   })
 }
@@ -50,6 +50,13 @@ describe('ProfileToolTable availability labels (UX-07)', () => {
     expect(t(w, 'profile-tool-state-lib__pending')).toBe('Allowed by profile')
     expect(w.find('[data-test="profile-tool-reason-lib__pending"]').exists()).toBe(false)
     expect(w.find('[data-test="profile-tool-explain-lib__pending"]').exists()).toBe(false)
+    expect(w.find('option[value="held"]').exists()).toBe(false)
+  })
+
+  it('non-admin deep link ?reason=callable keeps Callable now selected and offers no Held option', () => {
+    const w = mountTable({ visible: 2, hidden: 1 }, ROWS.filter(r => r.access.visible), { initialReason: 'callable' })
+    expect((w.get('[data-test="tool-filter-reason"]').element as HTMLSelectElement).value).toBe('callable')
+    expect(w.find('option[value="callable"]').exists()).toBe(true)
     expect(w.find('option[value="held"]').exists()).toBe(false)
   })
 })
