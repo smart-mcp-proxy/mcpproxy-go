@@ -131,3 +131,51 @@ func TestUpstreamListProfile_FlagAndQueryMapping(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, gotQuery.Encode())
 }
+
+// UX-07: a non-admin view-as response is policy-only (counts carry no
+// callable). The table must not claim callable/held nor print gate reasons.
+func TestToolsViewAs_NonAdminRowsArePolicyOnly(t *testing.T) {
+	tools := []map[string]interface{}{
+		{"name": "list_issues", "server_name": "github", "tier": "read",
+			"access": map[string]interface{}{"visible": true, "callable": true}},
+		{"name": "search_docs", "server_name": "notion", "tier": "read", "approval_status": "pending",
+			"access": map[string]interface{}{"visible": true, "callable": false, "reason": "tool_approval"}},
+	}
+
+	require.True(t, viewAsPolicyOnly(map[string]interface{}{"visible": float64(2), "hidden": float64(0)}))
+	require.False(t, viewAsPolicyOnly(map[string]interface{}{"visible": float64(2), "hidden": float64(0), "callable": float64(1)}))
+	require.False(t, viewAsPolicyOnly(nil))
+
+	_, rows := globalToolRowsView(tools, true)
+	require.Len(t, rows, 2)
+	for _, row := range rows {
+		assert.Equal(t, "allowed", row[4])
+		assert.Equal(t, "-", row[5])
+	}
+
+	// Administrator rows keep the callable/held verdicts and reasons.
+	_, rows = globalToolRowsView(tools, false)
+	assert.Equal(t, []string{"callable", "-"}, []string{rows[0][4], rows[0][5]})
+	assert.Equal(t, []string{"held", "tool_approval"}, []string{rows[1][4], rows[1][5]})
+}
+
+func TestToolsViewAs_NonAdminTableOutputHasNoCallableOrHeldClaims(t *testing.T) {
+	tools := []map[string]interface{}{
+		{"name": "list_issues", "server_name": "github", "tier": "read",
+			"access": map[string]interface{}{"visible": true, "callable": true}},
+		{"name": "search_docs", "server_name": "notion", "tier": "read", "approval_status": "pending",
+			"access": map[string]interface{}{"visible": true, "callable": false, "reason": "tool_approval"}},
+	}
+	counts := map[string]interface{}{"visible": float64(2), "hidden": float64(0)}
+	out := captureToolsOutput(t, "table", func() error { return outputGlobalToolsView(tools, viewAsPolicyOnly(counts)) })
+	assert.Contains(t, out, "allowed")
+	assert.NotContains(t, out, "callable")
+	assert.NotContains(t, out, "held")
+	assert.NotContains(t, out, "tool_approval")
+
+	adminCounts := viewAsRowCounts(tools)
+	out = captureToolsOutput(t, "table", func() error { return outputGlobalToolsView(tools, viewAsPolicyOnly(adminCounts)) })
+	assert.Contains(t, out, "callable")
+	assert.Contains(t, out, "held")
+	assert.Contains(t, out, "tool_approval")
+}

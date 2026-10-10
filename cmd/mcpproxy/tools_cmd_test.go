@@ -705,7 +705,7 @@ func TestViewAsCountsSummary(t *testing.T) {
 
 	other := viewAsCountsSummary(map[string]interface{}{"visible": float64(3), "hidden": float64(2)}, "p")
 	require.Equal(t, "3 allowed by profile p, 2 hidden (hidden tools are administrator-only)\n", other)
-	require.Equal(t, "held", viewAsAccessCell(map[string]interface{}{"access": map[string]interface{}{"visible": true, "callable": false}}))
+	require.Equal(t, "held", viewAsAccessCell(map[string]interface{}{"access": map[string]interface{}{"visible": true, "callable": false}}, false))
 }
 
 func TestViewAsRowCountsFromAdministratorRows(t *testing.T) {

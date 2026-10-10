@@ -444,7 +444,7 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 	// Apply client-side filters
 	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
-	if err := outputGlobalTools(tools); err != nil {
+	if err := outputGlobalToolsView(tools, viewAsPolicyOnly(counts)); err != nil {
 		return err
 	}
 	if counts != nil && ResolveOutputFormat() == "table" {
@@ -516,13 +516,31 @@ func toolsViewAsQuery() (url.Values, error) {
 	return q, nil
 }
 
+// viewAsPolicyOnly reports whether a view-as response is policy-only: the
+// daemon sent counts without counts.callable (non-administrator callers), so
+// rows must not claim a callable or held verdict beyond the profile policy.
+func viewAsPolicyOnly(counts map[string]interface{}) bool {
+	if counts == nil {
+		return false
+	}
+	_, admin := counts["callable"]
+	return !admin
+}
+
 // viewAsAccessCell renders the ACCESS column of a view-as row: callable (a real
 // call would succeed), held (allowed by the profile but a later gate refuses it
-// or it awaits approval), hidden (not visible at all).
-func viewAsAccessCell(t map[string]interface{}) string {
+// or it awaits approval), hidden (not visible at all). For policy-only
+// responses a visible row is just "allowed" (by the profile).
+func viewAsAccessCell(t map[string]interface{}, policyOnly bool) string {
 	access, ok := t["access"].(map[string]interface{})
 	if !ok {
 		return "-"
+	}
+	if policyOnly {
+		if getBoolField(access, "visible") {
+			return "allowed"
+		}
+		return "hidden"
 	}
 	switch {
 	case getBoolField(access, "callable"):
@@ -693,6 +711,12 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 // of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
 // testable.
 func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	return globalToolRowsView(tools, false)
+}
+
+// globalToolRowsView is globalToolRows with the view-as policyOnly mode: rows
+// of a non-administrator response show "allowed" and no gate reason.
+func globalToolRowsView(tools []map[string]interface{}, policyOnly bool) (headers []string, rows [][]string) {
 	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
 	// Spec 108 FR-032: a view-as listing adds ACCESS and REASON after TIER
 	// (the intrinsic tier stays the TIER column).
@@ -737,11 +761,11 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 		if viewAs {
 			reason := "-"
 			if access, ok := t["access"].(map[string]interface{}); ok {
-				if r := getStringField(access, "reason"); r != "" {
+				if r := getStringField(access, "reason"); r != "" && (!policyOnly || !getBoolField(access, "visible")) {
 					reason = r
 				}
 			}
-			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t), reason, approval, formatToolHold(t), usage, lastUsed, desc})
+			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t, policyOnly), reason, approval, formatToolHold(t), usage, lastUsed, desc})
 			continue
 		}
 		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
@@ -751,6 +775,12 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 
 // outputGlobalTools renders the global tool list with extended columns.
 func outputGlobalTools(tools []map[string]interface{}) error {
+	return outputGlobalToolsView(tools, false)
+}
+
+// outputGlobalToolsView renders the list; policyOnly marks a non-administrator
+// view-as response whose rows carry no callable/held claim.
+func outputGlobalToolsView(tools []map[string]interface{}, policyOnly bool) error {
 	outputFormat := ResolveOutputFormat()
 	formatter, err := GetOutputFormatter()
 	if err != nil {
@@ -768,7 +798,7 @@ func outputGlobalTools(tools []map[string]interface{}) error {
 		return nil
 	}
 
-	headers, rows := globalToolRows(tools)
+	headers, rows := globalToolRowsView(tools, policyOnly)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
