@@ -4688,6 +4688,15 @@ components:
             type: string
           type: array
           uniqueItems: false
+        expected_hashes:
+          additionalProperties:
+            type: string
+          description: |-
+            ExpectedHashes (optional) binds the approval to the reviewed tool
+            definitions: tool name -> the review payload's current_hash. A pending
+            tool that is not blocked must match, or the approval fails with 409 and
+            the server stays quarantined (UX-02).
+          type: object
         force:
           type: boolean
       type: object

@@ -373,6 +373,11 @@ type ToolApprovalResult struct {
 	PendingCount int
 	// ChangedCount is the number of tools whose description/schema changed since approval.
 	ChangedCount int
+	// InventoryGeneration is the server's tool-approval generation this pass
+	// ran at (0 when the pass did not take the lock). The removal step of the
+	// same discovery pass only deletes a removed tool's records while the
+	// generation is unchanged (UX-02, see lockToolApprovalsIfCurrent).
+	InventoryGeneration uint64
 }
 
 // toolQuarantineGate is the per-server resolution of the tool-level
@@ -445,7 +450,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	// isBaselinePass decision and every write — runs under the server's
 	// tool-approval lock, so overlapping discovery passes and operator
 	// approvals apply one after another instead of overwriting each other.
-	defer r.lockToolApprovals(serverName)()
+	unlockApprovals, inventoryGen := r.lockToolApprovalsGen(serverName)
+	defer unlockApprovals()
 
 	// Determine if quarantine is enforced for this server. Storage is
 	// consulted too (fail closed): QuarantineServer flips it under this lock
@@ -491,7 +497,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{
-		BlockedTools: make(map[string]bool),
+		BlockedTools:        make(map[string]bool),
+		InventoryGeneration: inventoryGen,
 	}
 
 	schemaVersion, schemaVersionErr := r.storageManager.GetSchemaVersion()
@@ -2035,23 +2042,100 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 
 // ApproveTools approves specific tools for a server, updating their status to approved.
 func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
-	_, err := r.approveToolsAndNotify(serverName, toolNames, approvedBy, false)
+	_, err := r.ApproveToolsReviewed(serverName, toolNames, false, nil, approvedBy)
 	return err
 }
 
-// approveToolsAndNotify runs approveToolsLocked under the server's
-// tool-approval lock, then — with the lock released — emits the SSE events
-// and spawns the reindex (which re-enters checkToolApprovals and takes the
-// lock itself). Returns the number of records actually approved.
-func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+// ApproveToolsReviewed approves the named tools — or, with all, every
+// pending/changed tool — and reports what applied (UX-02). Listing,
+// validation and the write run under one hold of the server's tool-approval
+// lock.
+//
+// expected binds the approval to the definitions the operator reviewed
+// (tool name -> the review payload's current_hash). When it is non-nil, every
+// targeted record must be in it with an unchanged CurrentHash; otherwise
+// NOTHING is written and a *storage.StaleToolReviewError names the changed or
+// unreviewed tools, so a definition persisted by discovery after the review
+// (a rug pull, or a tool added since) is never approved on the strength of a
+// review that did not show it. A nil expected keeps the legacy behavior of
+// approving each record's current definition.
+func (r *Runtime) ApproveToolsReviewed(serverName string, toolNames []string, all bool, expected map[string]string, approvedBy string) (*storage.ToolApprovalApplyResult, error) {
 	if r.storageManager == nil {
-		return 0, nil
+		return &storage.ToolApprovalApplyResult{}, nil
 	}
 	unlock := r.lockToolApprovals(serverName)
-	approved, err := r.approveToolsLocked(serverName, toolNames, approvedBy, pendingOnly)
+	res, err := r.approveReviewedLocked(serverName, toolNames, all, expected, approvedBy)
 	unlock()
-	r.notifyToolsApproved(serverName, approved, approvedBy)
-	return approved, err
+	if res == nil {
+		res = &storage.ToolApprovalApplyResult{}
+	}
+	r.notifyToolsApproved(serverName, len(res.Approved), approvedBy)
+	return res, err
+}
+
+func (r *Runtime) approveReviewedLocked(serverName string, toolNames []string, all bool, expected map[string]string, approvedBy string) (*storage.ToolApprovalApplyResult, error) {
+	if all {
+		records, err := r.storageManager.ListToolApprovals(serverName)
+		if err != nil {
+			return nil, err
+		}
+		toolNames = nil
+		for _, record := range records {
+			if record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged {
+				toolNames = append(toolNames, record.ToolName)
+			}
+		}
+	}
+	if expected != nil {
+		current, err := r.storageManager.GetToolApprovals(serverName, toolNames...)
+		if err != nil {
+			return nil, fmt.Errorf("read tool approvals for %s: %w", serverName, err)
+		}
+		if stale := staleReviewedRecords(serverName, uniqueNames(toolNames), current, expected); stale != nil {
+			return nil, stale
+		}
+	}
+	return r.approveToolsLocked(serverName, toolNames, approvedBy, false)
+}
+
+// staleReviewedRecords checks the named records against the reviewed hashes.
+// Names without a record are ignored (nothing to approve). Returns nil when
+// every record matches its reviewed definition.
+func staleReviewedRecords(serverName string, names []string, current map[string]*storage.ToolApprovalRecord, expected map[string]string) *storage.StaleToolReviewError {
+	stale := &storage.StaleToolReviewError{Server: serverName}
+	for _, name := range names {
+		record := current[name]
+		if record == nil {
+			continue
+		}
+		reviewed, ok := expected[name]
+		switch {
+		case !ok || reviewed == "":
+			stale.Unreviewed = append(stale.Unreviewed, name)
+		case reviewed != record.CurrentHash:
+			stale.Changed = append(stale.Changed, name)
+		}
+	}
+	if len(stale.Changed) == 0 && len(stale.Unreviewed) == 0 {
+		return nil
+	}
+	slices.Sort(stale.Changed)
+	slices.Sort(stale.Unreviewed)
+	return stale
+}
+
+// uniqueNames returns names without duplicates, in first-seen order.
+func uniqueNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 // approveToolsLocked approves the named tools. The caller holds the server's
@@ -2060,35 +2144,35 @@ func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, a
 // With pendingOnly (server-approval baseline trust) only records still
 // "pending" are promoted: a record that turned "changed" (rug-pull) is left
 // for explicit review, and approved records are not rewritten. Missing
-// records are skipped. Returns the number of records written approved.
-func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+// records are skipped. Duplicate names count once. The result lists the
+// records written approved, the missing names and the skipped records.
+func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (*storage.ToolApprovalApplyResult, error) {
+	res := &storage.ToolApprovalApplyResult{}
+	toolNames = uniqueNames(toolNames)
 	if len(toolNames) == 0 {
-		return 0, nil
+		return res, nil
 	}
 	// One consistent read of every named record, and below one write
 	// transaction for all of them: a 165-tool approval used to cost one
 	// fsynced transaction per tool while holding the lock.
 	current, err := r.storageManager.GetToolApprovals(serverName, toolNames...)
 	if err != nil {
-		return 0, fmt.Errorf("read tool approvals for %s: %w", serverName, err)
+		return res, fmt.Errorf("read tool approvals for %s: %w", serverName, err)
 	}
 
 	var batch []*storage.ToolApprovalRecord
 	var invariantErr error
-	seen := make(map[string]struct{}, len(toolNames))
 	for _, toolName := range toolNames {
-		if _, dup := seen[toolName]; dup {
-			continue
-		}
-		seen[toolName] = struct{}{}
 		record := current[toolName]
 		if record == nil {
 			r.logger.Warn("Tool approval record not found for approval",
 				zap.String("server", serverName),
 				zap.String("tool", toolName))
+			res.Missing = append(res.Missing, toolName)
 			continue
 		}
 		if pendingOnly && record.Status != storage.ToolApprovalStatusPending {
+			res.Skipped = append(res.Skipped, toolName)
 			continue
 		}
 
@@ -2120,10 +2204,11 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 	}
 
 	if err := r.storageManager.SaveToolApprovals(batch); err != nil {
-		return 0, err
+		return &storage.ToolApprovalApplyResult{}, err
 	}
 
 	for _, record := range batch {
+		res.Approved = append(res.Approved, record.ToolName)
 		r.logger.Info("Tool approved",
 			zap.String("server", serverName),
 			zap.String("tool", record.ToolName),
@@ -2133,7 +2218,7 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 		r.emitToolQuarantineEvent(serverName, record.ToolName, "tool_approved",
 			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
 	}
-	return len(batch), invariantErr
+	return res, invariantErr
 }
 
 // notifyToolsApproved publishes the approval to SSE subscribers and reindexes.
@@ -2509,24 +2594,9 @@ func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, er
 	const approvedBy = "system:server-approval-baseline"
 
 	unlock := r.lockToolApprovals(serverName)
-	records, err := r.storageManager.ListToolApprovals(serverName)
-	if err != nil {
-		unlock()
-		return 0, err
-	}
-	var pendingTools []string
-	for _, record := range records {
-		if record.Status == storage.ToolApprovalStatusPending {
-			pendingTools = append(pendingTools, record.ToolName)
-		}
-	}
-	approved := 0
-	if len(pendingTools) > 0 {
-		// approveToolsLocked sets ApprovedHash=CurrentHash and runs
-		// enforceInvariant (pending→approved is permitted).
-		approved, err = r.approveToolsLocked(serverName, pendingTools, approvedBy, true)
-	}
+	res, err := r.approvePendingExceptLocked(serverName, nil, approvedBy)
 	unlock()
+	approved := len(res.Approved)
 	r.notifyToolsApproved(serverName, approved, approvedBy)
 	if err != nil {
 		return approved, err
@@ -2539,33 +2609,31 @@ func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, er
 	return approved, nil
 }
 
+// approvePendingExceptLocked promotes every "pending" record of the server
+// except the excluded names (pendingOnly: a "changed" record is never
+// promoted). The caller holds the server's tool-approval lock.
+func (r *Runtime) approvePendingExceptLocked(serverName string, exclude map[string]bool, approvedBy string) (*storage.ToolApprovalApplyResult, error) {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return &storage.ToolApprovalApplyResult{}, err
+	}
+	var pendingTools []string
+	for _, record := range records {
+		if record.Status == storage.ToolApprovalStatusPending && !exclude[record.ToolName] {
+			pendingTools = append(pendingTools, record.ToolName)
+		}
+	}
+	// approveToolsLocked sets ApprovedHash=CurrentHash and runs
+	// enforceInvariant (pending→approved is permitted).
+	return r.approveToolsLocked(serverName, pendingTools, approvedBy, true)
+}
+
 // ApproveAllTools approves all pending/changed tools for a server. Listing
 // and approval run under one hold of the server's tool-approval lock; the
 // count is the number of records actually approved.
 func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, error) {
-	if r.storageManager == nil {
-		return 0, nil
-	}
-
-	unlock := r.lockToolApprovals(serverName)
-	records, err := r.storageManager.ListToolApprovals(serverName)
-	if err != nil {
-		unlock()
-		return 0, err
-	}
-	var toolNames []string
-	for _, record := range records {
-		if record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged {
-			toolNames = append(toolNames, record.ToolName)
-		}
-	}
-	approved := 0
-	if len(toolNames) > 0 {
-		approved, err = r.approveToolsLocked(serverName, toolNames, approvedBy, false)
-	}
-	unlock()
-	r.notifyToolsApproved(serverName, approved, approvedBy)
-	return approved, err
+	res, err := r.ApproveToolsReviewed(serverName, nil, true, nil, approvedBy)
+	return len(res.Approved), err
 }
 
 // BlockTools atomically "blocks" the named tools for a server. A block is an

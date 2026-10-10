@@ -542,10 +542,40 @@ it reports what actually applied:
   named (sorted, at most 50) in `held_tools`. A tool that changed or appeared
   after the decision is held here by design.
 
+With a reviewed-capable core, `approved` counts the unique records this call
+wrote approved; duplicate names count once. `outcome_verified` is `false` when
+the records could not be read back after the write: the counts above are then
+absent, and the result must not be treated as complete.
+
 `POST /api/v1/servers/{id}/security/approve` returns the same four counts (and
-`held_tools`) next to `status: "approved"` and `server_name`. `status` keeps its
-meaning — the server approval is done — so check `still_pending` and
-`still_changed` to know whether every tool is usable.
+`held_tools`) next to `status: "approved"` and `server_name`. It also returns
+`outcome_verified`. `status` keeps its meaning (the server approval is done),
+so check `still_pending` and `still_changed` to know whether every tool is
+usable.
+
+**Binding an approval to the reviewed definitions.** Both endpoints accept an
+optional `expected_hashes` object: tool name to the `current_hash` that
+`GET /api/v1/servers/{id}/review` reported for it.
+
+```json
+{"tools": ["create_issue"], "expected_hashes": {"create_issue": "9f2c…"}}
+```
+
+When it is present, the core checks every targeted tool under the server's
+approval lock before it writes anything. For `tools/approve` the targets are
+the named tools, or every pending and changed tool with `approve_all`. For
+`security/approve` they are every pending tool that is not in `block`. If a
+target's definition changed since the review, or a held tool was not in the
+review, the request fails with `409` naming those tools. Nothing is approved
+and a quarantined server stays quarantined. Fetch the review again and decide
+on what it shows. The CLI (`mcpproxy review approve`) and the Web review screen
+send `expected_hashes` automatically. Requests without it keep the earlier,
+unbound behavior.
+
+A security approval promotes the reviewed pending tools in the same locked
+operation that stores the baseline and the blocks. A tool discovered after
+that point stays pending after the server is unquarantined, and is reported in
+`still_pending`.
 
 #### POST /api/v1/servers/{name}/tools/block
 

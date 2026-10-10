@@ -60,6 +60,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 			if len(tools) > 0 {
 				body = map[string]interface{}{"tools": tools}
 			}
+			if expected := reviewExpectedHashes(state.tools); expected != nil {
+				body["expected_hashes"] = expected
+			}
 			return runReviewWrite(server, "tools/approve", body)
 		}
 		body := map[string]interface{}{"force": force}
@@ -74,6 +77,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 				body["block"] = block
 			}
 			prompt, summary = reviewApproveWording(server, len(state.tools), allowed, block, all)
+			if expected := reviewExpectedHashes(state.tools); expected != nil {
+				body["expected_hashes"] = expected
+			}
 		} else if len(tools) > 0 || len(except) > 0 {
 			// Nothing to select from: dropping --tools/--except would approve blind.
 			return fmt.Errorf("no tool definitions captured for server '%s'; fetch them first (mcpproxy review show %s) before using --tools or --except", server, server)
@@ -180,15 +186,20 @@ func runReviewWrite(server, operation string, value interface{}) error {
 func warnApprovalHolds(w io.Writer, server string, raw []byte) {
 	var envelope struct {
 		Data struct {
-			StillPending int      `json:"still_pending"`
-			StillChanged int      `json:"still_changed"`
-			HeldTools    []string `json:"held_tools"`
+			StillPending    int      `json:"still_pending"`
+			StillChanged    int      `json:"still_changed"`
+			HeldTools       []string `json:"held_tools"`
+			OutcomeVerified *bool    `json:"outcome_verified"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return
 	}
 	d := envelope.Data
+	if d.OutcomeVerified != nil && !*d.OutcomeVerified {
+		fmt.Fprintf(w, "Warning: the approval on server '%s' was submitted, but the resulting tool-approval state could not be verified. Check it with: mcpproxy review show %s\n", server, server)
+		return
+	}
 	if d.StillPending+d.StillChanged == 0 {
 		return
 	}
@@ -217,6 +228,27 @@ type reviewToolState struct {
 	Name           string `json:"name"`
 	Tier           string `json:"tier"`
 	DefaultAllowed *bool  `json:"default_allowed"`
+	// CurrentHash is the reviewed definition's hash; sent back as
+	// expected_hashes so the approval applies only to what was shown (UX-02).
+	CurrentHash string `json:"current_hash"`
+}
+
+// reviewExpectedHashes maps every reviewed tool to its definition hash. It
+// returns nil — an unbound, legacy request — when the core predates
+// current_hash (any tool without one), so an older core is not asked for a
+// binding it cannot honour.
+func reviewExpectedHashes(tools []reviewToolState) map[string]string {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		if tool.CurrentHash == "" {
+			return nil
+		}
+		out[tool.Name] = tool.CurrentHash
+	}
+	return out
 }
 
 type reviewServerStateResult struct {

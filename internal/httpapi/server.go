@@ -6838,7 +6838,19 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// reviewedToolApprover is the optional controller capability behind
+// POST /tools/approve (UX-02): approval bound to reviewed definitions,
+// reporting what actually applied.
+type reviewedToolApprover interface {
+	ApproveToolsReviewed(serverName string, toolNames []string, all bool, expected map[string]string, approvedBy string) (*storage.ToolApprovalApplyResult, error)
+}
+
 // handleApproveTools handles POST /api/v1/servers/{id}/tools/approve
+//
+// Optional expected_hashes (tool name -> the review payload's current_hash)
+// binds the approval to the reviewed definitions: if a targeted tool's
+// definition changed since the review, or a held tool was not reviewed, the
+// request fails with 409 and nothing is approved.
 func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -6847,60 +6859,102 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Tools      []string `json:"tools"`
-		ApproveAll bool     `json:"approve_all"`
+		Tools          []string          `json:"tools"`
+		ApproveAll     bool              `json:"approve_all"`
+		ExpectedHashes map[string]string `json:"expected_hashes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	if !req.ApproveAll && len(req.Tools) == 0 {
+		s.writeError(w, r, http.StatusBadRequest, "Either 'tools' array or 'approve_all: true' required")
+		return
+	}
+	requested := uniqueToolNames(req.Tools)
 
-	if req.ApproveAll {
+	approver, reviewed := s.controller.(reviewedToolApprover)
+	if !reviewed && req.ExpectedHashes != nil {
+		// Never silently drop the binding the client asked for.
+		s.writeError(w, r, http.StatusServiceUnavailable, "Review-bound tool approval is unavailable")
+		return
+	}
+
+	// applied is the number of records this call wrote approved, when the
+	// controller reports it (applied >= 0); -1 means unknown (legacy
+	// controller), and the count then comes from the read-back below.
+	applied := -1
+	var appliedNames map[string]bool
+	if reviewed {
+		res, err := approver.ApproveToolsReviewed(serverID, requested, req.ApproveAll, req.ExpectedHashes, "api")
+		var stale *storage.StaleToolReviewError
+		if errors.As(err, &stale) {
+			s.writeError(w, r, http.StatusConflict, stale.Error())
+			return
+		}
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+			return
+		}
+		applied = len(res.Approved)
+		appliedNames = make(map[string]bool, len(res.Approved))
+		for _, name := range res.Approved {
+			appliedNames[name] = true
+		}
+	} else if req.ApproveAll {
 		count, err := s.controller.ApproveAllTools(serverID, "api")
 		if err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
 			return
 		}
-		response := map[string]interface{}{
-			"approved": count,
-			"message":  fmt.Sprintf("Approved %d tools for server %s", count, serverID),
+		applied = count
+	} else if err := s.controller.ApproveTools(serverID, requested, "api"); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+		return
+	}
+
+	// UX-02: report what actually applied, never the request echoed back.
+	response := map[string]interface{}{}
+	records, outcome, verified := s.toolApprovalOutcomeFor(serverID)
+	if verified {
+		outcome.addTo(response)
+	}
+	response["outcome_verified"] = verified
+
+	if req.ApproveAll {
+		approved := applied
+		if approved < 0 {
+			approved = 0
 		}
-		if _, outcome, ok := s.toolApprovalOutcomeFor(serverID); ok {
-			outcome.addTo(response)
-			if held := outcome.StillPending + outcome.StillChanged; held > 0 {
-				response["message"] = fmt.Sprintf("Approved %d tools for server %s; %d still need review", count, serverID, held)
-			}
+		response["approved"] = approved
+		switch {
+		case !verified:
+			response["message"] = fmt.Sprintf("Approved %d tools for server %s; the resulting approval state could not be verified", approved, serverID)
+		case outcome.StillPending+outcome.StillChanged > 0:
+			response["message"] = fmt.Sprintf("Approved %d tools for server %s; %d still need review", approved, serverID, outcome.StillPending+outcome.StillChanged)
+		default:
+			response["message"] = fmt.Sprintf("Approved %d tools for server %s", approved, serverID)
 		}
 		s.writeSuccess(w, response)
 		return
 	}
 
-	if len(req.Tools) == 0 {
-		s.writeError(w, r, http.StatusBadRequest, "Either 'tools' array or 'approve_all: true' required")
-		return
-	}
-
-	if err := s.controller.ApproveTools(serverID, req.Tools, "api"); err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
-		return
-	}
-
-	// UX-02: report what actually applied. "approved" counts the requested
-	// tools whose records now read approved (it used to echo the request
-	// length even for names with no record); "not_approved" lists the rest.
-	approved := len(req.Tools)
-	response := map[string]interface{}{"tools": req.Tools}
-	if records, outcome, ok := s.toolApprovalOutcomeFor(serverID); ok {
-		byName := make(map[string]*storage.ToolApprovalRecord, len(records))
+	// Per requested (unique) tool: approved by this call when the controller
+	// reports it, otherwise when its record now reads approved.
+	response["tools"] = requested
+	var notApproved []string
+	if appliedNames == nil && verified {
+		appliedNames = make(map[string]bool, len(records))
 		for _, rec := range records {
-			if rec != nil {
-				byName[rec.ToolName] = rec
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved {
+				appliedNames[rec.ToolName] = true
 			}
 		}
-		approved = 0
-		var notApproved []string
-		for _, name := range req.Tools {
-			if rec := byName[name]; rec != nil && rec.Status == storage.ToolApprovalStatusApproved {
+	}
+	approved := 0
+	if appliedNames != nil {
+		for _, name := range requested {
+			if appliedNames[name] {
 				approved++
 			} else {
 				notApproved = append(notApproved, name)
@@ -6909,11 +6963,31 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		if len(notApproved) > 0 {
 			response["not_approved"] = notApproved
 		}
-		outcome.addTo(response)
+		response["approved"] = approved
+		response["message"] = fmt.Sprintf("Approved %d of %d requested tools for server %s", approved, len(requested), serverID)
+	} else {
+		// Legacy controller and the read-back failed: the applied count is
+		// unknown and must not be claimed.
+		response["message"] = fmt.Sprintf("Approval submitted for %d tools on server %s, but the applied state could not be verified", len(requested), serverID)
 	}
-	response["approved"] = approved
-	response["message"] = fmt.Sprintf("Approved %d of %d requested tools for server %s", approved, len(req.Tools), serverID)
+	if !verified && appliedNames != nil {
+		response["message"] = fmt.Sprintf("%s; the resulting approval state could not be verified", response["message"])
+	}
 	s.writeSuccess(w, response)
+}
+
+// uniqueToolNames drops duplicate names, keeping first-seen order.
+func uniqueToolNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 // handleBlockTools handles POST /api/v1/servers/{id}/tools/block

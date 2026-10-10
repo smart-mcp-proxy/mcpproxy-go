@@ -46,6 +46,7 @@ type mockSecurityController struct {
 	approvedBy      string
 	approvedForce   bool
 	approvedBlocks  []string
+	approvedHashes  map[string]string
 
 	// What the last ConfigureScanner call carried.
 	configuredEnv   map[string]string
@@ -144,6 +145,14 @@ func (m *mockSecurityController) ApproveServerWithBlocks(_ context.Context, _ st
 	return m.approveErr
 }
 
+func (m *mockSecurityController) ApproveServerReviewed(_ context.Context, _ string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	m.approvedBlocks = append([]string(nil), blocks...)
+	m.approvedHashes = expected
+	return m.approveErr
+}
+
 func (m *mockSecurityController) RejectServer(_ context.Context, serverName string) error {
 	return m.rejectErr
 }
@@ -219,9 +228,13 @@ type secTestController struct {
 	baseController
 	servers   []map[string]interface{}
 	approvals []*storage.ToolApprovalRecord
+	listErr   error
 }
 
 func (m *secTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var out []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {
 		if a.ServerName == serverName {
@@ -929,4 +942,40 @@ func TestSecurityHandlerCancelAllNoScan(t *testing.T) {
 	srv.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+func ux02SecurityApprove(t *testing.T, ctrl *secTestController, secCtrl *mockSecurityController, body string) (int, map[string]interface{}) {
+	t.Helper()
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetSecurityController(secCtrl)
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	var resp map[string]interface{}
+	if w.Code == http.StatusOK {
+		secParseData(t, w.Body, &resp)
+	}
+	return w.Code, resp
+}
+
+// UX-02 cross-review: expected_hashes are passed to the review-bound approval.
+func TestSecurityHandlerApproveServerPassesExpectedHashes(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	code, resp := ux02SecurityApprove(t, &secTestController{}, secCtrl, `{"block":["delete_a"],"expected_hashes":{"read_a":"h1"}}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, map[string]string{"read_a": "h1"}, secCtrl.approvedHashes)
+	assert.Equal(t, []string{"delete_a"}, secCtrl.approvedBlocks)
+	assert.Equal(t, true, resp["outcome_verified"])
+}
+
+// UX-02 cross-review finding 4: when the post-approval read fails the
+// response says so instead of omitting the outcome silently.
+func TestSecurityHandlerApproveServerOutcomeReadFailure(t *testing.T) {
+	code, resp := ux02SecurityApprove(t, &secTestController{listErr: fmt.Errorf("db closed")}, &mockSecurityController{}, `{}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, false, resp["outcome_verified"])
+	assert.NotContains(t, resp, "still_pending")
 }

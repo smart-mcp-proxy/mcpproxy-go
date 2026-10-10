@@ -203,6 +203,22 @@ func TestReviewApproveReportsAppliedCountsAndWarnsOnHolds(t *testing.T) {
 	require.Empty(t, legacy.String(), "an older core without counts prints nothing")
 }
 
+// UX-02 cross-review finding 4: an approval whose resulting state could not
+// be read back warns instead of reading as complete.
+func TestReviewApproveWarnsWhenOutcomeUnverified(t *testing.T) {
+	var warn strings.Builder
+	warnApprovalHolds(&warn, "lr", []byte(`{"data":{"approved":1,"tools":["a","nope"],"not_approved":["nope"],"outcome_verified":false}}`))
+	require.Contains(t, warn.String(), "could not be verified")
+}
+
+// UX-02 cross-review finding 1: the CLI binds an approval to the reviewed
+// definitions, and stays unbound against a core that does not report hashes.
+func TestReviewExpectedHashes(t *testing.T) {
+	require.Equal(t, map[string]string{"a": "h1", "b": "h2"}, reviewExpectedHashes([]reviewToolState{{Name: "a", CurrentHash: "h1"}, {Name: "b", CurrentHash: "h2"}}))
+	require.Nil(t, reviewExpectedHashes([]reviewToolState{{Name: "a", CurrentHash: "h1"}, {Name: "b"}}))
+	require.Nil(t, reviewExpectedHashes(nil))
+}
+
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	raw := []byte(`{"data":{"servers":[{"server":"github","kind":"server_review","quarantined":true,"pending":2,"changed":1,"tier_counts":{"write":2},"scan":{"verdict":"warnings"}}]}}`)
 

@@ -123,6 +123,13 @@ async function fetchDefinitions() {
 }
 function requestApprove(everything: boolean) { if (!review.value?.server.definitions_captured) { confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
+// The definitions the operator is looking at, by hash (UX-02): the core approves
+// only these and answers 409 when one changed or a new tool appeared since.
+// Undefined (an unbound request) when the core predates current_hash.
+function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined {
+  if (tools.length === 0 || tools.some(t => !t.current_hash)) return undefined
+  return Object.fromEntries(tools.map(t => [t.name, t.current_hash as string]))
+}
 // The force retry re-sends the block list of the attempt that triggered it (D43.5).
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
@@ -130,14 +137,25 @@ async function approve(force: boolean, block?: string[]) {
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
-  const res = await api.securityApprove(server, force, blocked)
+  const expected = reviewedHashes(review.value?.tools ?? [])
+  const res = expected ? await api.securityApprove(server, force, blocked, expected) : await api.securityApprove(server, force, blocked)
   if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
   approving.value = false
-  if (!res.success) { error.value = res.error || 'Approval failed'; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return }
+  if (!res.success) {
+    const message = res.error || 'Approval failed'
+    // A stale review (409): reload so the operator sees what changed, keeping the message.
+    if (/out of date/i.test(message)) { await load(); error.value = message; return }
+    error.value = message; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return
+  }
   choices.clear(); emit('approved'); await load()
 }
 async function rejectServer() { approving.value = true; const res = await api.securityReject(props.serverName); approving.value = false; if (!res.success) error.value = res.error || 'Reject failed'; else await load() }
-async function approveTool(name: string) { await api.approveTools(props.serverName, [name]); await load() }
+async function approveTool(name: string) {
+  const expected = reviewedHashes((review.value?.tools ?? []).filter(t => t.name === name))
+  const res = expected ? await api.approveTools(props.serverName, [name], expected) : await api.approveTools(props.serverName, [name])
+  if (res && !res.success) error.value = res.error || 'Approval failed'
+  await load()
+}
 async function blockTool(name: string) { await api.blockTools(props.serverName, [name]); await load() }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {

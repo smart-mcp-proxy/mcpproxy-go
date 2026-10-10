@@ -4341,6 +4341,13 @@ func (s *Server) ApproveTools(serverName string, toolNames []string, approvedBy 
 	return s.runtime.ApproveTools(serverName, toolNames, approvedBy)
 }
 
+// ApproveToolsReviewed approves the named (or, with all, every held) tools,
+// optionally bound to the reviewed definitions, and reports what applied
+// (UX-02).
+func (s *Server) ApproveToolsReviewed(serverName string, toolNames []string, all bool, expected map[string]string, approvedBy string) (*storage.ToolApprovalApplyResult, error) {
+	return s.runtime.ApproveToolsReviewed(serverName, toolNames, all, expected, approvedBy)
+}
+
 // ApproveAllTools approves all pending/changed tools for a server (Spec 032).
 func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, error) {
 	return s.runtime.ApproveAllTools(serverName, approvedBy)
@@ -4439,17 +4446,26 @@ func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverN
 	a.server.runtime.RecordToolBlocksForSecurityApproval(serverName, toolNames, blockedBy)
 }
 
-// WithToolApprovalLock serializes the scanner's baseline+blocks commit with
-// the runtime's tool-approval writers for the server (UX-02).
-func (a *serverUnquarantinerAdapter) WithToolApprovalLock(serverName string, fn func() error) error {
+// CommitServerApprovalDecision runs the scanner's baseline+blocks commit and
+// the promotion of the reviewed pending tools as one operation under the
+// runtime's tool-approval lock (UX-02).
+func (a *serverUnquarantinerAdapter) CommitServerApprovalDecision(serverName string, blocked []string, expected map[string]string, approvedBy string, commit func() error) (int, error) {
 	if a.server == nil || a.server.runtime == nil {
-		return fn()
+		return 0, fmt.Errorf("server unavailable")
 	}
-	return a.server.runtime.WithToolApprovalLock(serverName, fn)
+	return a.server.runtime.CommitServerApprovalDecision(serverName, blocked, expected, approvedBy, commit)
 }
 
-var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
-var _ scanner.ToolApprovalLocker = (*serverUnquarantinerAdapter)(nil)
+// UnquarantineServerKeepingToolDecisions unquarantines without re-promoting
+// pending tools; CommitServerApprovalDecision already decided them.
+func (a *serverUnquarantinerAdapter) UnquarantineServerKeepingToolDecisions(serverName string) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.runtime.UnquarantineServerKeepingToolDecisions(serverName)
+}
+
+var _ scanner.ServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

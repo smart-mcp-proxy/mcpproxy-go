@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,7 @@ type mockToolQuarantineController struct {
 	approveErr             error
 	approveAllErr          error
 	approveSkip            map[string]bool
+	listErr                error
 	approvedCount          int
 	approvedTools          []string
 	approvedServer         string
@@ -63,6 +65,9 @@ func (m *mockToolQuarantineController) GetAllServers() ([]map[string]interface{}
 }
 
 func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var result []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {
 		if a.ServerName == serverName {
@@ -970,4 +975,106 @@ func TestHandleSetToolEnabled_AdminKeyAllowed(t *testing.T) {
 	srv.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// reviewedToolQuarantineController adds the runtime's review-bound approval
+// (ApproveToolsReviewed) to the legacy mock.
+type reviewedToolQuarantineController struct {
+	mockToolQuarantineController
+	result      *storage.ToolApprovalApplyResult
+	reviewedErr error
+	gotExpected map[string]string
+	gotTools    []string
+}
+
+func (m *reviewedToolQuarantineController) ApproveToolsReviewed(_ string, toolNames []string, _ bool, expected map[string]string, _ string) (*storage.ToolApprovalApplyResult, error) {
+	m.gotTools, m.gotExpected = toolNames, expected
+	if m.reviewedErr != nil {
+		return nil, m.reviewedErr
+	}
+	return m.result, nil
+}
+
+func ux02PostApprove(t *testing.T, ctrl ServerController, body string) (int, map[string]interface{}) {
+	t.Helper()
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data, _ := resp["data"].(map[string]interface{})
+	if data == nil {
+		data = resp
+	}
+	return w.Code, data
+}
+
+// UX-02 cross-review finding 4: the approval skipped a missing name and the
+// outcome read then failed. The response must not claim every requested tool
+// was approved and must say the state is unverified.
+func TestHandleApproveTools_OutcomeReadFailureIsNotReportedAsComplete(t *testing.T) {
+	ctrl := &reviewedToolQuarantineController{
+		mockToolQuarantineController: mockToolQuarantineController{apiKey: "test-key", listErr: errors.New("db closed")},
+		result:                       &storage.ToolApprovalApplyResult{Approved: []string{"read_a"}, Missing: []string{"nope"}},
+	}
+	code, data := ux02PostApprove(t, ctrl, `{"tools":["read_a","nope"]}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, float64(1), data["approved"])
+	assert.Equal(t, []interface{}{"nope"}, data["not_approved"])
+	assert.Equal(t, false, data["outcome_verified"])
+	assert.Contains(t, data["message"], "Approved 1 of 2")
+	assert.Contains(t, data["message"], "could not be verified")
+	assert.NotContains(t, data, "still_pending")
+}
+
+// Legacy controller (no applied result) + failed read-back: no count is claimed.
+func TestHandleApproveTools_LegacyOutcomeReadFailureClaimsNoCount(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", listErr: errors.New("db closed")}
+	code, data := ux02PostApprove(t, ctrl, `{"tools":["read_a","nope"]}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.NotContains(t, data, "approved")
+	assert.Equal(t, false, data["outcome_verified"])
+	assert.Contains(t, data["message"], "could not be verified")
+}
+
+// UX-02 cross-review finding 5: duplicate names count once, in the applied
+// count and in not_approved.
+func TestHandleApproveTools_DuplicateNamesCountOnce(t *testing.T) {
+	ctrl := &reviewedToolQuarantineController{
+		mockToolQuarantineController: mockToolQuarantineController{apiKey: "test-key", approvals: []*storage.ToolApprovalRecord{
+			{ServerName: "github", ToolName: "read_a", Status: storage.ToolApprovalStatusApproved},
+		}},
+		result: &storage.ToolApprovalApplyResult{Approved: []string{"read_a"}, Missing: []string{"nope"}},
+	}
+	code, data := ux02PostApprove(t, ctrl, `{"tools":["read_a","read_a","nope","nope"]}`)
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, []string{"read_a", "nope"}, ctrl.gotTools, "the runtime receives unique names")
+	assert.Equal(t, float64(1), data["approved"])
+	assert.Equal(t, []interface{}{"nope"}, data["not_approved"])
+	assert.Equal(t, []interface{}{"read_a", "nope"}, data["tools"])
+	assert.Equal(t, true, data["outcome_verified"])
+	assert.Contains(t, data["message"], "Approved 1 of 2")
+}
+
+// UX-02 cross-review finding 1: expected_hashes reach the runtime, and a stale
+// review is a 409 naming the tools.
+func TestHandleApproveTools_StaleReviewIsConflict(t *testing.T) {
+	ctrl := &reviewedToolQuarantineController{
+		mockToolQuarantineController: mockToolQuarantineController{apiKey: "test-key"},
+		reviewedErr:                  &storage.StaleToolReviewError{Server: "github", Changed: []string{"read_a"}},
+	}
+	code, data := ux02PostApprove(t, ctrl, `{"tools":["read_a"],"expected_hashes":{"read_a":"h1"}}`)
+	require.Equal(t, http.StatusConflict, code)
+	assert.Equal(t, map[string]string{"read_a": "h1"}, ctrl.gotExpected)
+	assert.Contains(t, data["error"], "read_a")
+}
+
+// A review-bound request is never silently downgraded to an unbound approval.
+func TestHandleApproveTools_ExpectedHashesNeedReviewedController(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	code, _ := ux02PostApprove(t, ctrl, `{"tools":["read_a"],"expected_hashes":{"read_a":"h1"}}`)
+	require.Equal(t, http.StatusServiceUnavailable, code)
+	assert.Nil(t, ctrl.approvedTools, "nothing may be approved")
 }

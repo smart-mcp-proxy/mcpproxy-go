@@ -258,10 +258,11 @@ func TestApproveToolsLocked_PendingOnlySkipsChanged(t *testing.T) {
 	require.NoError(t, rt.storageManager.SaveToolApproval(rec))
 
 	unlock := rt.lockToolApprovals("srv")
-	n, err := rt.approveToolsLocked("srv", ux02ToolNames(tools), "system:server-approval-baseline", true)
+	res, err := rt.approveToolsLocked("srv", ux02ToolNames(tools), "system:server-approval-baseline", true)
 	unlock()
 	require.NoError(t, err)
-	require.Equal(t, 1, n)
+	require.Equal(t, []string{"read_000"}, res.Approved)
+	require.Equal(t, []string{"read_001"}, res.Skipped)
 	got, err := rt.storageManager.GetToolApproval("srv", "read_001")
 	require.NoError(t, err)
 	require.Equal(t, storage.ToolApprovalStatusChanged, got.Status)

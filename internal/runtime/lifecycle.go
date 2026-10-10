@@ -1070,7 +1070,34 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 
 	// Apply changes
 
-	// 1. Delete removed tools
+	// 1. Delete removed tools.
+	//
+	// UX-02 (cross-review): the removal decision above was made from this
+	// pass's inventory, which may be stale by now — a later discovery pass may
+	// have rediscovered the tool and the operator may have approved or
+	// blocked it since. Deleting the fresh record would lose that decision
+	// and, when it was the server's only baseline record, let the next pass
+	// auto-baseline the tool as enabled. So the removal (index entry, hash
+	// and approval record together) runs under the server's tool-approval
+	// lock and only while no other pass or approval write has run since this
+	// pass's checkToolApprovals. A skipped removal leaves the tool indexed,
+	// so the next pass that still misses it removes it.
+	// The lock is released right after the loop (index deletes do not call
+	// back into the runtime, so approval lock -> index lock cannot invert).
+	unlockRemoval := func() {}
+	if len(removedTools) > 0 && r.toolRemovalHook != nil {
+		r.toolRemovalHook(serverName, removedTools)
+	}
+	if len(removedTools) > 0 && r.storageManager != nil {
+		var current bool
+		unlockRemoval, current = r.lockToolApprovalsIfCurrent(serverName, approvalResult.InventoryGeneration)
+		if !current {
+			r.logger.Info("Skipping tool removal: a newer discovery pass or approval write ran since this pass read the inventory",
+				zap.String("server", serverName),
+				zap.Int("removed", len(removedTools)))
+			removedTools = nil
+		}
+	}
 	for _, toolName := range removedTools {
 		r.logger.Info("Removing tool from index",
 			zap.String("server", serverName),
@@ -1101,13 +1128,14 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 				r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
 					zap.String("server", serverName),
 					zap.String("legacy_key", toolName))
-			} else if err := r.deleteToolApprovalLocked(serverName, toolName); err != nil {
+			} else if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
 				r.logger.Debug("Failed to delete tool approval for removed tool",
 					zap.String("tool", fullToolName),
 					zap.Error(err))
 			}
 		}
 	}
+	unlockRemoval()
 
 	// 2. Remove blocked tools from index if previously indexed
 	for blockedToolName := range approvalResult.BlockedTools {
@@ -2098,6 +2126,13 @@ func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
+	return r.setServerQuarantine(serverName, quarantined, true)
+}
+
+// setServerQuarantine is QuarantineServer; promoteBaseline=false skips the
+// on-unquarantine baseline promotion of pending tools (see
+// UnquarantineServerKeepingToolDecisions).
+func (r *Runtime) setServerQuarantine(serverName string, quarantined, promoteBaseline bool) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
@@ -2149,7 +2184,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	// re-index in HandleUpstreamServerChange so the newly-trusted tools become
 	// immediately searchable. Best-effort: a promotion failure must not abort
 	// the unquarantine the user already requested and that is already persisted.
-	if !quarantined {
+	if !quarantined && promoteBaseline {
 		if err := r.approveBaselineToolsForServer(serverName); err != nil {
 			r.logger.Warn("Failed to baseline-approve tools on server unquarantine",
 				zap.String("server", serverName),

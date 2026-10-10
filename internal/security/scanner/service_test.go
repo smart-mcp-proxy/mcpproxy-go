@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -1131,38 +1132,91 @@ func TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine(t *testing.T) 
 	}
 }
 
-// lockingUnquarantiner implements the optional ToolApprovalLocker capability
-// and records the order of lock/unlock/unquarantine around the storage write.
-type lockingUnquarantiner struct {
-	steps *[]string
+// committingUnquarantiner implements the optional ServerApprovalCommitter
+// capability and records the order of commit/unquarantine steps.
+type committingUnquarantiner struct {
+	steps    *[]string
+	blocked  []string
+	expected map[string]string
+	stale    error
 }
 
-func (u *lockingUnquarantiner) UnquarantineServer(string) error {
+func (u *committingUnquarantiner) UnquarantineServer(string) error {
+	*u.steps = append(*u.steps, "unquarantine+promote")
+	return nil
+}
+
+func (u *committingUnquarantiner) UnquarantineServerKeepingToolDecisions(string) error {
 	*u.steps = append(*u.steps, "unquarantine")
 	return nil
 }
 
-func (u *lockingUnquarantiner) WithToolApprovalLock(serverName string, fn func() error) error {
+func (u *committingUnquarantiner) CommitServerApprovalDecision(serverName string, blocked []string, expected map[string]string, _ string, commit func() error) (int, error) {
 	*u.steps = append(*u.steps, "lock:"+serverName)
-	err := fn()
-	*u.steps = append(*u.steps, "unlock:"+serverName)
-	return err
+	defer func() { *u.steps = append(*u.steps, "unlock:"+serverName) }()
+	u.blocked, u.expected = blocked, expected
+	if u.stale != nil {
+		return 0, u.stale
+	}
+	if err := commit(); err != nil {
+		return 0, err
+	}
+	*u.steps = append(*u.steps, "promote")
+	return 1, nil
 }
 
-// UX-02: the atomic baseline+blocks commit writes approval records directly,
-// so it must run inside the runtime's per-server tool-approval lock — and the
-// unquarantine (which reloads config and starts discovery) must run after the
-// lock is released, or it would deadlock against the discovery pass.
+type staleReviewErr struct{ tools []string }
+
+func (e *staleReviewErr) Error() string   { return "tool review is out of date" }
+func (e *staleReviewErr) Tools() []string { return e.tools }
+
+// UX-02: the baseline+blocks commit and the promotion of the reviewed pending
+// tools run as one operation under the runtime's tool-approval lock, and the
+// unquarantine (which reloads config and starts discovery) runs after it,
+// without the generic promotion of every pending tool.
 func TestServiceApproveServerWithBlocksWritesUnderToolApprovalLock(t *testing.T) {
 	svc, store, _ := newTestService(t)
 	steps := []string{}
 	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
-	svc.SetServerUnquarantiner(&lockingUnquarantiner{steps: &steps})
+	u := &committingUnquarantiner{steps: &steps}
+	svc.SetServerUnquarantiner(u)
 
-	if err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"}); err != nil {
+	if err := svc.ApproveServerReviewed(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"}, map[string]string{"read": "h1"}); err != nil {
 		t.Fatalf("approve with block failed: %v", err)
 	}
-	assert.Equal(t, []string{"lock:qs-server", "baseline_and_blocks", "unlock:qs-server", "unquarantine"}, steps)
+	assert.Equal(t, []string{"lock:qs-server", "baseline_and_blocks", "promote", "unlock:qs-server", "unquarantine"}, steps)
+	assert.Equal(t, []string{"delete_issue"}, u.blocked)
+	assert.Equal(t, map[string]string{"read": "h1"}, u.expected)
+}
+
+// A stale review fails the approval: nothing is unquarantined and the error
+// reaches the caller unwrapped (REST maps it to 409).
+func TestServiceApproveServerReviewedStaleKeepsQuarantine(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	stale := &staleReviewErr{tools: []string{"drop_all"}}
+	svc.SetServerUnquarantiner(&committingUnquarantiner{steps: &steps, stale: stale})
+
+	err := svc.ApproveServerReviewed(context.Background(), "qs-server", true, "reviewer", nil, map[string]string{"read": "h1"})
+	if !errors.Is(err, stale) {
+		t.Fatalf("expected the stale review error, got %v", err)
+	}
+	assert.Equal(t, []string{"lock:qs-server", "unlock:qs-server"}, steps, "no commit and no unquarantine on a stale review")
+}
+
+// A review-bound approval never silently degrades to an unbound one.
+func TestServiceApproveServerReviewedRequiresCommitter(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	svc.SetServerUnquarantiner(&orderedUnquarantiner{steps: &steps})
+
+	err := svc.ApproveServerReviewed(context.Background(), "qs-server", true, "reviewer", nil, map[string]string{"read": "h1"})
+	if err == nil {
+		t.Fatal("expected review-bound approval to fail without a committer")
+	}
+	assert.Empty(t, steps)
 }
 
 func TestServiceApproveServerWithBlocksKeepsBlockWhenUnquarantineFails(t *testing.T) {

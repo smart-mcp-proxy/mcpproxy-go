@@ -131,15 +131,18 @@ type ToolBlockRecorder interface {
 	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
 }
 
-// ToolApprovalLocker is an OPTIONAL capability of the ServerUnquarantiner: run
-// fn while holding the runtime's per-server tool-approval lock (UX-02). The
-// atomic baseline+blocks commit writes approval records directly in storage;
-// serializing it with discovery passes keeps a pass holding a stale pending
-// copy of a record from overwriting the operator's block (approved+disabled)
-// back to pending+enabled, which the server-approval baseline would then
-// promote to approved+enabled. fn must not unquarantine the server.
-type ToolApprovalLocker interface {
-	WithToolApprovalLock(serverName string, fn func() error) error
+// ServerApprovalCommitter is an OPTIONAL capability of the
+// ServerUnquarantiner (UX-02 cross-review). CommitServerApprovalDecision runs
+// commit (the integrity baseline + atomic tool blocks) and the promotion of
+// the server's remaining pending tools as ONE operation under the runtime's
+// per-server tool-approval lock, validating the review-bound expected hashes
+// first when they are given (nothing is written on a mismatch).
+// UnquarantineServerKeepingToolDecisions then unquarantines WITHOUT the
+// generic on-unquarantine promotion, so a tool discovered after the commit
+// stays pending instead of being approved unseen.
+type ServerApprovalCommitter interface {
+	CommitServerApprovalDecision(serverName string, blocked []string, expected map[string]string, approvedBy string, commit func() error) (int, error)
+	UnquarantineServerKeepingToolDecisions(serverName string) error
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -1706,13 +1709,23 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
-	return s.approveServer(ctx, serverName, force, approvedBy, nil)
+	return s.approveServer(ctx, serverName, force, approvedBy, nil, nil)
 }
 
 // ApproveServerWithBlocks approves a scanned server and atomically records the
 // selected tool blocks with the integrity baseline before the server can be
 // unquarantined.
 func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string) error {
+	return s.ApproveServerReviewed(ctx, serverName, force, approvedBy, toolNames, nil)
+}
+
+// ApproveServerReviewed is ApproveServerWithBlocks bound to the reviewed tool
+// definitions (UX-02 cross-review): expected maps each reviewed tool name to
+// the review payload's current_hash. When expected is non-nil, a pending tool
+// that is not blocked must match its reviewed hash, or the approval fails with
+// a *storage.StaleToolReviewError-shaped error and nothing is written — the
+// server stays quarantined. A nil expected is the legacy, unbound approval.
+func (s *Service) ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string, expected map[string]string) error {
 	seen := make(map[string]struct{}, len(toolNames))
 	blocks := make([]ToolApprovalBlock, 0, len(toolNames))
 	for _, name := range toolNames {
@@ -1725,10 +1738,10 @@ func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string
 		seen[name] = struct{}{}
 		blocks = append(blocks, ToolApprovalBlock{ToolName: name, ApprovedAt: time.Now().UTC(), ApprovedBy: approvedBy})
 	}
-	return s.approveServer(ctx, serverName, force, approvedBy, blocks)
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks, expected)
 }
 
-func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock) error {
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string) error {
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
 	if err != nil {
@@ -1787,18 +1800,32 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	var saveErr error
-	if len(blocks) == 0 {
-		saveErr = s.storage.SaveIntegrityBaseline(baseline)
-	} else {
-		save := func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
-		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok {
-			saveErr = locker.WithToolApprovalLock(serverName, save)
-		} else {
-			saveErr = save()
+	commit := func() error {
+		if len(blocks) == 0 {
+			return s.storage.SaveIntegrityBaseline(baseline)
 		}
+		return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+	}
+	blockedNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockedNames = append(blockedNames, block.ToolName)
+	}
+	committer, bound := s.unquarantiner.(ServerApprovalCommitter)
+	var saveErr error
+	switch {
+	case bound:
+		_, saveErr = committer.CommitServerApprovalDecision(serverName, blockedNames, expected, approvedBy, commit)
+	case expected != nil:
+		// A review-bound approval must never silently degrade to an unbound one.
+		return fmt.Errorf("review-bound approval is unavailable for server %q", serverName)
+	default:
+		saveErr = commit()
 	}
 	if saveErr != nil {
+		var stale interface{ Tools() []string }
+		if errors.As(saveErr, &stale) {
+			return saveErr
+		}
 		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
 	}
 	if len(blocks) > 0 {
@@ -1817,7 +1844,11 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	// approval — without it, the server stays quarantined forever and the
 	// approval is cosmetic.
 	if s.unquarantiner != nil {
-		if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
+		unquarantine := s.unquarantiner.UnquarantineServer
+		if bound {
+			unquarantine = committer.UnquarantineServerKeepingToolDecisions
+		}
+		if err := unquarantine(serverName); err != nil {
 			// Report the error to the caller but keep the baseline we just
 			// saved — the caller can retry via the normal unquarantine path.
 			s.logger.Error("Failed to unquarantine server after approval",

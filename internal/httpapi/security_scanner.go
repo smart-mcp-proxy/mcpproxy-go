@@ -335,6 +335,11 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 type securityApproveRequest struct {
 	Force bool     `json:"force"`
 	Block []string `json:"block,omitempty"`
+	// ExpectedHashes (optional) binds the approval to the reviewed tool
+	// definitions: tool name -> the review payload's current_hash. A pending
+	// tool that is not blocked must match, or the approval fails with 409 and
+	// the server stays quarantined (UX-02).
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty"`
 }
 
 // handleSecurityApprove godoc
@@ -371,7 +376,17 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 
 	// Use "api" as the approver since we don't have user context in personal edition
 	var approveErr error
-	if len(req.Block) > 0 {
+	switch {
+	case req.ExpectedHashes != nil:
+		reviewedApprover, ok := s.securityController.(interface {
+			ApproveServerReviewed(context.Context, string, bool, string, []string, map[string]string) error
+		})
+		if !ok {
+			s.writeError(w, r, http.StatusServiceUnavailable, "Review-bound security approval is unavailable")
+			return
+		}
+		approveErr = reviewedApprover.ApproveServerReviewed(r.Context(), name, req.Force, "api", req.Block, req.ExpectedHashes)
+	case len(req.Block) > 0:
 		blockApprover, ok := s.securityController.(interface {
 			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
 		})
@@ -380,7 +395,7 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		approveErr = blockApprover.ApproveServerWithBlocks(r.Context(), name, req.Force, "api", req.Block)
-	} else {
+	default:
 		approveErr = s.securityController.ApproveServer(r.Context(), name, req.Force, "api")
 	}
 	if approveErr != nil {
@@ -396,9 +411,14 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	// additively so a partial outcome — tools still pending or changed —
 	// cannot masquerade as a complete approval.
 	response := map[string]interface{}{"status": "approved", "server_name": name}
-	if _, outcome, ok := s.toolApprovalOutcomeFor(name); ok {
+	_, outcome, verified := s.toolApprovalOutcomeFor(name)
+	if verified {
 		outcome.addTo(response)
 	}
+	// outcome_verified=false: the server approval applied, but the resulting
+	// tool-approval state could not be read back; clients must not present
+	// the result as complete.
+	response["outcome_verified"] = verified
 	s.writeSuccess(w, response)
 }
 

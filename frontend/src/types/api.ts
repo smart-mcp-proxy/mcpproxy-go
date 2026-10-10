@@ -1461,6 +1461,8 @@ export interface ReviewTool {
   scan_verdict: string
   held_reason?: string
   held_signals?: string[]
+  /** Hash of the definition shown; sent back as expected_hashes so an approval applies only to what was reviewed (UX-02). Absent on an older core. */
+  current_hash?: string
   /** Fail-closed default selection computed by the core (D43); absent on an older core, which reads as false. */
   default_allowed?: boolean
   previous?: ReviewToolPrevious | null
