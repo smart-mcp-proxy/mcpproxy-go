@@ -856,17 +856,24 @@ type AddRequest struct {
 	Purpose string
 }
 
+// CredentialsServiceOver builds a CredentialsService that shares this service's
+// store wiring, clock, guard, mutex, activity sink and publisher, with tokens
+// as its token store (the REST server's fallback when the runtime's own
+// service is not wired, e.g. in unit tests).
+func (s *ClientsService) CredentialsServiceOver(tokens CredentialTokenStore) *CredentialsService {
+	return NewCredentialsService(CredentialsServiceDeps{
+		Tokens: tokens, Clients: s, HMACKey: s.hmacKey, Config: s.cfg, Guard: s.guard, Activity: s.activity,
+		Publish: s.publish, Now: s.now, Logger: s.logger,
+	})
+}
+
 // Add mints a credential for a custom client and returns the secret once.
 // Id rules are FR-021: the pattern, and never a supported-client id. It is the
 // REST-mode credentials issue path (Spec 115 FR-010): the secret-shaped input
 // screen runs first, the record is `issue`, and the view is projected from the
 // committed record, so nothing after the mint can fail the call.
 func (s *ClientsService) Add(ctx context.Context, a Actor, req AddRequest) (*ClientCredentialView, string, error) {
-	cs := NewCredentialsService(CredentialsServiceDeps{
-		Clients: s, Config: s.cfg, Guard: s.guard, Activity: s.activity, Publish: s.publish,
-		Now: s.now, Logger: s.logger,
-	})
-	res, err := cs.IssueClient(ctx, a, IssueClientRequest{
+	res, err := s.CredentialsServiceOver(nil).IssueClient(ctx, a, IssueClientRequest{
 		ID: req.ID, DisplayName: req.DisplayName, Profile: req.Profile, ProfilePresent: true,
 		Mode: req.Mode, Purpose: req.Purpose, Expiry: ExpiryClientCap, expiresAt: req.ExpiresAt,
 	})
