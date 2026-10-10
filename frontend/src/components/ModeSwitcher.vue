@@ -343,7 +343,8 @@ const codeExecNote = computed(() =>
 
 /**
  * The prerequisite text for a mode whose prerequisite is NOT met, else "".
- * Only code execution has one today, and its flag defaults to off.
+ * Only code execution has one today; its flag defaults to on (since v0.66.0), so
+ * the prerequisite only shows when it has been explicitly switched off.
  */
 function unmetPrerequisite(meta: RoutingModeMeta): string {
   if (meta.mode !== 'code_execution' || systemStore.codeExecutionEnabled) return ''
