@@ -110,12 +110,16 @@ func (r Redaction) CommandString(s string) string {
 func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 	segs := splitCommandSegments(s)
 	tokens := make([]string, 0, len(segs))
+	hasRedirect := false
 	for _, seg := range segs {
 		if seg.isToken {
 			tokens = append(tokens, seg.text)
 		}
+		if seg.isRedirect {
+			hasRedirect = true
+		}
 	}
-	if len(tokens) == 0 {
+	if len(tokens) == 0 && !hasRedirect {
 		return s
 	}
 	masked := r.maskTokens(tokens, spawnRules)
@@ -211,7 +215,8 @@ func (r Redaction) maskSubstitutions(t string, spawnRules bool) string {
 			continue
 		}
 		switch {
-		case c == '\'':
+		case c == '\'' && quote == 0:
+			// An apostrophe inside double quotes is literal.
 			quote = c
 		case c == '"':
 			if quote == '"' {

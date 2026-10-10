@@ -253,6 +253,8 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"unspaced semicolon assign": {"-c", ":;API_KEY='hunter2 and more' exec npx srv"},
 		"unspaced and assign":       {"-c", ":&&API_KEY='hunter2 and more' exec npx srv"},
 		"unspaced or assign":        {"-c", ":||API_KEY='hunter2 and more' exec npx srv"},
+		"apostrophe then subst":     {"-c", `exec npx srv --name "it's $(helper --password hunter2xyz)"`},
+		"redirect-only subst":       {"-c", `exec npx srv --name "$(<$(helper --password hunter2xyz))"`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
