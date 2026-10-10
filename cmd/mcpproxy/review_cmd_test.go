@@ -254,6 +254,7 @@ func TestFormatReviewShowPrintsScanCoverage(t *testing.T) {
 
 	notCaptured := show(`,"scan":{"verdict":"not_scanned","coverage":"not_captured"}`)
 	require.Contains(t, notCaptured, "Scan: not checked against tool definitions: they have not been captured yet")
+	require.Contains(t, notCaptured, "mcpproxy review fetch notes")
 	require.Contains(t, notCaptured, "Fetch tool definitions")
 	require.NotContains(t, notCaptured, "clean")
 
@@ -281,4 +282,161 @@ func captureReviewOutput(t *testing.T, fn func() error) string {
 	require.NoError(t, err)
 	require.NoError(t, reader.Close())
 	return strings.TrimSpace(string(output))
+}
+
+// fetchDaemon fakes the daemon routes `review fetch` touches. captureAfter is
+// what the review reports once discover-tools ran.
+type fetchDaemon struct {
+	enabled      bool
+	known        bool
+	discoverCode int
+	toolsAfter   int
+	capturedFlag bool
+	quarantined  bool
+	called       bool
+	requests     []reviewRequest
+}
+
+func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/status" {
+			_, _ = w.Write([]byte(`{"success":true,"data":{"running":true}}`))
+			return
+		}
+		f.requests = append(f.requests, reviewRequest{method: r.Method, path: r.URL.Path})
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/servers/srv/review":
+			if !f.known {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"success":false,"error":"not found"}`))
+				return
+			}
+			tools := []string{}
+			if f.called {
+				for i := 0; i < f.toolsAfter; i++ {
+					tools = append(tools, `{"name":"t`+string(rune('a'+i))+`"}`)
+				}
+			}
+			captured := f.called && f.capturedFlag
+			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"srv","quarantined":` + boolStr(f.quarantined) + `,"definitions_captured":` + boolStr(captured) + `},"tools":[` + strings.Join(tools, ",") + `]}}`))
+		case r.URL.Path == "/api/v1/servers":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"servers":[{"name":"srv","enabled":` + boolStr(f.enabled) + `}]}}`))
+		case r.URL.Path == "/api/v1/servers/srv/discover-tools" && r.Method == http.MethodPost:
+			f.called = true
+			if f.discoverCode != http.StatusOK {
+				w.WriteHeader(f.discoverCode)
+				_, _ = w.Write([]byte(`{"success":false,"error":"Failed to discover tools: client not connected"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":true,"data":{"success":true}}`))
+		default:
+			t.Errorf("unexpected fetch request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func runFetch(t *testing.T, d *fetchDaemon, format string, args ...string) (string, error) {
+	t.Helper()
+	daemon := httptest.NewServer(d.handler(t))
+	t.Cleanup(daemon.Close)
+	withReviewDaemon(t, daemon.URL)
+	setOutputGlobals(t, format, false)
+	var runErr error
+	previous := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	cmd := GetReviewCommand()
+	cmd.SetArgs(append([]string{"fetch", "srv"}, args...))
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	runErr = cmd.Execute()
+	os.Stdout = previous
+	require.NoError(t, writer.Close())
+	out, _ := io.ReadAll(reader)
+	return strings.TrimSpace(string(out)), runErr
+}
+
+func assertNoStateChange(t *testing.T, d *fetchDaemon) {
+	t.Helper()
+	for _, r := range d.requests {
+		require.NotContains(t, r.path, "approve")
+		require.NotContains(t, r.path, "unquarantine")
+		require.NotContains(t, r.path, "enable")
+		require.NotContains(t, r.path, "security")
+	}
+}
+
+func TestReviewFetchCapturesAndKeepsQuarantine(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 3, capturedFlag: true, quarantined: true}
+	out, err := runFetch(t, d, "table")
+	require.NoError(t, err)
+	require.Contains(t, out, "Captured 3 tool definitions for srv")
+	require.Contains(t, out, "remains quarantined")
+	require.Contains(t, out, "mcpproxy review show srv")
+	assertNoStateChange(t, d)
+}
+
+func TestReviewFetchJSON(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 2, capturedFlag: true, quarantined: true}
+	out, err := runFetch(t, d, "json")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, map[string]any{"server": "srv", "captured": true, "tool_count": float64(2), "quarantined": true}, got)
+}
+
+func TestReviewFetchUnknownServer(t *testing.T) {
+	d := &fetchDaemon{known: false}
+	_, err := runFetch(t, d, "table")
+	require.ErrorContains(t, err, "not found")
+	require.False(t, d.called)
+}
+
+func TestReviewFetchDisabledServerNeverEnables(t *testing.T) {
+	d := &fetchDaemon{enabled: false, known: true, quarantined: true}
+	_, err := runFetch(t, d, "table")
+	require.ErrorContains(t, err, "disabled")
+	require.ErrorContains(t, err, "enable it first")
+	require.False(t, d.called, "no discover-tools request for a disabled server")
+	assertNoStateChange(t, d)
+}
+
+func TestReviewFetchUnreachableIsActionable(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 500, quarantined: true}
+	_, err := runFetch(t, d, "table")
+	require.ErrorContains(t, err, "client not connected")
+	require.ErrorContains(t, err, "mcpproxy upstream logs srv")
+}
+
+func TestReviewFetchEmptyCaptureFails(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 0, capturedFlag: false, quarantined: true}
+	_, err := runFetch(t, d, "table")
+	require.ErrorContains(t, err, "no tool definitions captured")
+}
+
+func TestReviewFetchSuccessWithoutCaptureIsNotTrusted(t *testing.T) {
+	// discover-tools answers 200 even when it skipped the server.
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 0, capturedFlag: false, quarantined: true}
+	out, err := runFetch(t, d, "json")
+	require.Error(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, false, got["captured"])
+	require.NotEmpty(t, got["error"])
+}
+
+func TestReviewFetchWaitIsBounded(t *testing.T) {
+	d := &fetchDaemon{enabled: true, known: true}
+	_, err := runFetch(t, d, "table", "--wait", "10m")
+	require.ErrorContains(t, err, "--wait")
+	require.False(t, d.called)
 }
