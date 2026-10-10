@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -24,11 +25,11 @@ type reviewDoer interface {
 
 // reviewFetchResult is the -o json/yaml shape of `review fetch`.
 type reviewFetchResult struct {
-	Server      string `json:"server"`
-	Captured    bool   `json:"captured"`
-	ToolCount   int    `json:"tool_count"`
-	Quarantined bool   `json:"quarantined"`
-	Error       string `json:"error,omitempty"`
+	Server      string `json:"server" yaml:"server"`
+	Captured    bool   `json:"captured" yaml:"captured"`
+	ToolCount   int    `json:"tool_count" yaml:"tool_count"`
+	Quarantined bool   `json:"quarantined" yaml:"quarantined"`
+	Error       string `json:"error,omitempty" yaml:"error,omitempty"`
 }
 
 func newReviewFetchCommand() *cobra.Command {
@@ -169,7 +170,15 @@ func runReviewFetch(server string, wait time.Duration, format string) error {
 		return fail(cliRefusalError{fmt.Errorf("%w; check connectivity with: mcpproxy upstream logs %s", apiErr, server)})
 	}
 
-	// A 200 is not proof: the daemon reports success for servers it skipped.
+	// A 200 is not proof: the daemon reports success for servers it skipped,
+	// and a disable between the precheck and the POST must not read as success.
+	if stillEnabled, err := reviewFetchEnabled(ctx, client, server); err != nil {
+		return fail(err)
+	} else if !stillEnabled {
+		result.Captured = false
+		return fail(cliRefusalError{fmt.Errorf("server '%s' was disabled while fetching, so nothing was captured; enable it first: mcpproxy upstream enable %s", server, server)})
+	}
+	// Re-read the review: the stored records are the proof of capture.
 	if result.Quarantined, captured, tools, err = reviewFetchReview(ctx, client, server); err != nil {
 		return fail(err)
 	}
@@ -189,10 +198,11 @@ func formatReviewResult(format string, result reviewFetchResult) error {
 		}
 		fmt.Println(string(encoded))
 	case "yaml":
-		fmt.Printf("server: %s\ncaptured: %t\ntool_count: %d\nquarantined: %t\n", result.Server, result.Captured, result.ToolCount, result.Quarantined)
-		if result.Error != "" {
-			fmt.Printf("error: %q\n", result.Error)
+		encoded, err := yaml.Marshal(result)
+		if err != nil {
+			return err
 		}
+		fmt.Print(string(encoded))
 	default:
 		state := "server remains quarantined; nothing was approved"
 		if !result.Quarantined {

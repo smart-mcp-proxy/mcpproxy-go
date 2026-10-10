@@ -13,6 +13,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // TestReviewCommandGoldens exercises the CLI's complete review workflow against
@@ -287,14 +288,15 @@ func captureReviewOutput(t *testing.T, fn func() error) string {
 // fetchDaemon fakes the daemon routes `review fetch` touches. captureAfter is
 // what the review reports once discover-tools ran.
 type fetchDaemon struct {
-	enabled      bool
-	known        bool
-	discoverCode int
-	toolsAfter   int
-	capturedFlag bool
-	quarantined  bool
-	called       bool
-	requests     []reviewRequest
+	enabled           bool
+	known             bool
+	discoverCode      int
+	toolsAfter        int
+	capturedFlag      bool
+	quarantined       bool
+	called            bool
+	disableOnDiscover bool
+	requests          []reviewRequest
 }
 
 func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
@@ -324,6 +326,9 @@ func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
 			_, _ = w.Write([]byte(`{"success":true,"data":{"servers":[{"name":"srv","enabled":` + boolStr(f.enabled) + `}]}}`))
 		case r.URL.Path == "/api/v1/servers/srv/discover-tools" && r.Method == http.MethodPost:
 			f.called = true
+			if f.disableOnDiscover {
+				f.enabled = false
+			}
 			if f.discoverCode != http.StatusOK {
 				w.WriteHeader(f.discoverCode)
 				_, _ = w.Write([]byte(`{"success":false,"error":"Failed to discover tools: client not connected"}`))
@@ -439,4 +444,26 @@ func TestReviewFetchWaitIsBounded(t *testing.T) {
 	_, err := runFetch(t, d, "table", "--wait", "10m")
 	require.ErrorContains(t, err, "--wait")
 	require.False(t, d.called)
+}
+
+func TestReviewFetchDisabledDuringFetchFails(t *testing.T) {
+	// Stale records remain (3) but the server was disabled after the precheck.
+	d := &fetchDaemon{enabled: true, known: true, discoverCode: 200, toolsAfter: 3, capturedFlag: true, quarantined: true, disableOnDiscover: true}
+	out, err := runFetch(t, d, "json")
+	require.ErrorContains(t, err, "disabled")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	require.Equal(t, false, got["captured"])
+}
+
+func TestReviewFetchYAMLRoundTripsServerName(t *testing.T) {
+	for _, name := range []string{"true", "null", "line1\nextra: injected", "a: b", "123"} {
+		out := captureReviewOutput(t, func() error {
+			return formatReviewResult("yaml", reviewFetchResult{Server: name, Captured: true, ToolCount: 2, Quarantined: true})
+		})
+		var got map[string]any
+		require.NoError(t, yaml.Unmarshal([]byte(out), &got), name)
+		require.Equal(t, name, got["server"], name)
+		require.Len(t, got, 4, "no extra fields for %q", name)
+	}
 }

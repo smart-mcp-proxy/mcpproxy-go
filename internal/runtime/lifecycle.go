@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
@@ -700,10 +701,41 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, 
 	return nil
 }
 
+// pruneAbsentUndecidedApprovals drops pending review records for tools
+// the upstream no longer lists, so a quarantined capture reflects the live
+// toolset rather than the union of every past capture. Operator decisions are
+// kept: approved and changed (rug-pull) records and operator-blocked (Disabled) records survive.
+func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*config.ToolMetadata) {
+	if r.storageManager == nil {
+		return
+	}
+	live := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		live[config.RawToolName(tool)] = struct{}{}
+	}
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		r.logger.Debug("Skipping review record prune", zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	for _, rec := range records {
+		if _, ok := live[rec.ToolName]; ok || rec.Disabled {
+			continue
+		}
+		if rec.Status != storage.ToolApprovalStatusPending {
+			continue
+		}
+		if err := r.storageManager.DeleteToolApproval(serverName, rec.ToolName); err != nil {
+			r.logger.Debug("Failed to prune review record for absent tool", zap.String("server", serverName), zap.String("tool", rec.ToolName), zap.Error(err))
+		}
+	}
+}
+
 func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
 	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
 		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
+	r.pruneAbsentUndecidedApprovals(serverName, tools)
 	r.lastGoodToolsMu.Lock()
 	snapshot := make([]*config.ToolMetadata, len(tools))
 	copy(snapshot, tools)
