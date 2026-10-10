@@ -573,8 +573,8 @@ the named tools, or every pending and changed tool with `approve_all`. For
 target's definition changed since the review, or a held tool was not in the
 review, the request fails with `409` naming those tools. Nothing is approved
 and a quarantined server stays quarantined. Fetch the review again and decide
-on what it shows. The CLI (`mcpproxy review approve`) and the Web review screen
-send `expected_hashes` automatically. Requests without it keep the earlier,
+on what it shows. The CLI (`mcpproxy review approve`), the Web review screen and the macOS
+review sheet send `expected_hashes` automatically. Requests without it keep the earlier,
 unbound behavior.
 
 A security approval promotes the reviewed pending tools in the same locked
