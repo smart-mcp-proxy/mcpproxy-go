@@ -141,6 +141,14 @@ func (r Redaction) commandStringTokens(s string, spawnRules bool) string {
 // maskTokens applies the flag-name and value-shape rules to a token list, plus
 // a second pass over the shell-decoded spelling of each token.
 func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
+	// A command substitution is a command of its own: mask the sensitive
+	// flag/value pairs INSIDE it first, so grouping it into one word (as the
+	// value of a benign outer flag, a positional arg or a redirect target) does
+	// not hide them. Copies; the caller's tokens are never mutated.
+	tokens = append([]string(nil), tokens...)
+	for i, t := range tokens {
+		tokens[i] = r.maskSubstitutions(t, spawnRules)
+	}
 	masked := r.argvWith(tokens, spawnRules, nil)
 
 	// The flag-name rule reads token TEXT, so a shell-quoted or escaped spelling
@@ -179,6 +187,62 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 		}
 	}
 	return masked
+}
+
+// maskSubstitutions masks the command text inside every `$(...)` and backtick
+// substitution of one token (outside single quotes), recursively.
+func (r Redaction) maskSubstitutions(t string, spawnRules bool) string {
+	if !strings.ContainsAny(t, "$`") {
+		return t
+	}
+	var b strings.Builder
+	var quote byte
+	last := 0
+	for j := 0; j < len(t); j++ {
+		c := t[j]
+		if c == '\\' && quote != '\'' && j+1 < len(t) {
+			j++
+			continue
+		}
+		if quote == '\'' {
+			if c == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'':
+			quote = c
+		case c == '"':
+			if quote == '"' {
+				quote = 0
+			} else {
+				quote = '"'
+			}
+		case c == '`' || (c == '$' && j+1 < len(t) && t[j+1] == '('):
+			open, bodyStart, closer := j, j+1, byte('`')
+			if c == '$' {
+				open, bodyStart, closer = j+1, j+2, ')'
+			}
+			e, ok := scanSubstitution(t, open, closer, true)
+			if !ok {
+				e, ok = scanSubstitution(t, open, closer, false)
+			}
+			if !ok {
+				// Never closes: mask the rest as a command string.
+				b.WriteString(t[last:bodyStart])
+				b.WriteString(r.commandStringTokens(t[bodyStart:], spawnRules))
+				return b.String()
+			}
+			b.WriteString(t[last:bodyStart])
+			b.WriteString(r.commandStringTokens(t[bodyStart:e-1], spawnRules))
+			b.WriteByte(closer)
+			last = e
+			j = e - 1
+		}
+	}
+	b.WriteString(t[last:])
+	return b.String()
 }
 
 // maskRedirect redacts the TARGET word of a shell redirection (a filename or a
@@ -452,6 +516,23 @@ func scanShellWord(s string, i int, quoteAware bool) (end int, balanced bool) {
 				j += 2
 				continue
 			}
+			// A substitution inside double quotes has its OWN quote context: the
+			// quotes within it do not close the outer one.
+			if quote == '"' && (c == '`' || (c == '$' && j+1 < len(s) && s[j+1] == '(')) {
+				open := j
+				closer := byte(')')
+				if c == '`' {
+					closer = '`'
+				} else {
+					open = j + 1
+				}
+				e, ok := scanSubstitution(s, open, closer, true)
+				if !ok {
+					return len(s), false
+				}
+				j = e
+				continue
+			}
 			if quote != 0 {
 				if c == quote {
 					quote, ansi = 0, false
@@ -509,6 +590,20 @@ func scanSubstitution(s string, i int, closer byte, quoteAware bool) (end int, o
 			continue
 		}
 		if quoteAware && quote != 0 {
+			if quote == '"' && (c == '`' || (c == '$' && j+1 < len(s) && s[j+1] == '(')) {
+				open, cl := j, byte(')')
+				if c == '`' {
+					cl = '`'
+				} else {
+					open = j + 1
+				}
+				e, ok := scanSubstitution(s, open, cl, true)
+				if !ok {
+					return len(s), false
+				}
+				j = e - 1
+				continue
+			}
 			if c == quote {
 				quote = 0
 			}

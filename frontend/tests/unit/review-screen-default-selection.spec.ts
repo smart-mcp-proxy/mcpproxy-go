@@ -215,6 +215,29 @@ describe('ReviewScreen default selection (D43)', () => {
     expect(api.securityApprove).toHaveBeenLastCalledWith('other', false, ['write_x'])
   })
 
+  it('a late approval success from an earlier visit does not clear the current visit (A -> B -> A)', async () => {
+    let resolveOld: (v: { success: boolean }) => void = () => {}
+    ;(api.securityApprove as any).mockReturnValueOnce(new Promise(r => { resolveOld = r }))
+    const wrapper = await mountScreen()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'fixture' })
+    await flushPromises()
+    await wrapper.get('[data-test="review-allow-read_file"]').setValue(false)
+    resolveOld({ success: true })
+    await flushPromises()
+    expect(checked(wrapper, 'read_file')).toBe(false)
+    expect(wrapper.emitted('approved')).toBeUndefined()
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: true })
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    const last = (api.securityApprove as any).mock.calls.at(-1)
+    expect(last[0]).toBe('fixture')
+    expect(last[2]).toContain('read_file')
+  })
+
   it('a late rescan failure for the previous server does not set an error on the next one', async () => {
     let resolveScan: (v: { success: boolean; error?: string }) => void = () => {}
     ;(api.startScan as any).mockReturnValueOnce(new Promise(r => { resolveScan = r }))

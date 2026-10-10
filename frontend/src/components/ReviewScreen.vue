@@ -210,12 +210,15 @@ function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filt
 function invalidateForceRetry() { if (lastBlock.value === null) return; lastBlock.value = null; if (forceDialog.value?.open) { forceDialog.value.close?.(); notice.value = STALE_FORCE_NOTICE } }
 // Each load takes a generation; only the newest response may replace the review, so an older refresh that resolves late cannot resurrect an allow the newer definitions invalidated.
 let loadGeneration = 0
+// Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
+let visitGeneration = 0
 async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); emit('refreshed') }
 async function rescan() {
   const server = props.serverName
+  const visit = visitGeneration
   rescanning.value = true
   const res = await api.startScan(server)
-  if (server !== props.serverName) return // late response for a server the screen no longer shows
+  if (server !== props.serverName || visit !== visitGeneration) return // late response for a server the screen no longer shows
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
 }
 function requestRequarantine() { requarantineDialog.value?.showModal?.() }
@@ -241,12 +244,13 @@ async function approve(force: boolean, block?: string[]) {
   if (refreshing.value) return // never derive a block list from a list a refresh is about to replace
   if (force && !lastBlock.value) { notice.value = STALE_FORCE_NOTICE; return } // stale force retry: needs a fresh decision
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
+  const visit = visitGeneration
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
   const res = await api.securityApprove(server, force, blocked)
-  if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
+  if (server !== props.serverName || visit !== visitGeneration) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
     const message = res.error || 'Approval failed'
@@ -270,7 +274,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); lastBlock.value = null; notice.value = ''; approving.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); lastBlock.value = null; notice.value = ''; approving.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
