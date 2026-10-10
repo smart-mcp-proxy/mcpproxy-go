@@ -135,22 +135,40 @@ Compatibility rule for legacy REST/CLI tokens (Assumption A13): tokens without `
 ## 6. Requests (runtime layer)
 
 ```go
+// ExpiryDefault says what an EMPTY raw ExpiresIn means. It never applies to a
+// non-empty value, which is always parsed by auth.ParseTokenExpiry AFTER the
+// screen (spec review r5).
+type ExpiryDefault int
+const (
+    ExpiryRequired  ExpiryDefault = iota // MCP: empty → missing_argument
+    ExpiryTokenDefault                   // REST/CLI tokens: empty → 30 days (auth.DefaultTokenExpiry, today's parseExpiry)
+    ExpiryClientCap                      // REST/CLI clients: empty → 365 days (today's parseClientExpiry)
+)
+
 type IssueClientRequest struct {
     ID, DisplayName, Profile, Purpose string
-    Mode      *string   // nil → locked
-    ExpiresAt time.Time // required (zero → refused with invalid_expiry when RequireExplicitExpiry)
-    RequireProfile, RequireExplicitExpiry, RefuseExistingRecord bool // all true from MCP
+    Mode      *string       // nil → locked
+    ExpiresIn string        // RAW caller text; parsed by the service after the screen (r5)
+    Expiry    ExpiryDefault // ExpiryRequired from MCP, ExpiryClientCap from REST
+    Now       time.Time     // the handler's clock reading, so REST keeps one "now" for expiry and view
+    RequireProfile, RefuseExistingRecord bool // both true from MCP
 }
 
 type IssueTokenRequest struct {
-    Name, Profile, Purpose string
+    Name      string
+    Profile   string // RAW `profile` alias as the caller sent it
+    ProfilePin string // RAW `profile_pin` alias (REST only; MCP has no such argument, passes "")
+    Purpose   string
     AllowedServers, Permissions []string // REST legacy path only; MCP passes nil
-    ExpiresAt    time.Time
+    ExpiresIn string        // RAW caller text; parsed after the screen (r5)
+    Expiry    ExpiryDefault // ExpiryRequired from MCP, ExpiryTokenDefault from REST
     RequireProfile, EnforceGuard bool // true from MCP; EnforceGuard also stamps GuardBound
 }
 
-type CredentialRef struct{ Client, Token string } // exactly one set
+type CredentialRef struct{ Client, Token string } // exactly one set; Token addresses the OWNERLESS namespace only (§9)
 ```
+
+**Raw inputs, not pre-parsed ones (spec review r5).** The requests carry the caller's raw `expires_in` text and, for tokens, both raw profile aliases. No handler may parse expiry (`parseExpiry`, `parseClientExpiry`, `auth.ParseTokenExpiry`) or reconcile `profile`/`profile_pin` before calling the service, because `auth.ParseTokenExpiry` quotes a malformed value (`invalid expiry duration: %q`, `internal/auth/agent_token.go:183,191`) and the alias merge discards one of the two raw values. Today `handleCreateClient` parses expiry before `svc.Add` (`client_bindings.go:230-233`) and `handleCreateToken` merges the aliases (`tokens.go:186-193`) and parses expiry (`tokens.go:212`) in the handler; T023/T024 move all three into the service, behind the screen. The resulting `time.Time` and the merged pin are internal to the service.
 
 ## 7. State transitions
 
@@ -211,7 +229,7 @@ The screen is one function, `runtime.ScreenCredentialInput(values ScreenInput) *
 
 REST mapping: a `*SecretInputError` answers **400 Bad Request** in the route's existing error envelope with the text `argument "<known field>" looks like a credential or secret; it was not stored. Remove it and retry`. The text names the field and never the value. This is the only new REST refusal in this spec and is additive: no request that succeeds today and does not carry a secret-shaped value changes outcome. The REST handlers do not log request bodies (verified: no `io.ReadAll(r.Body)` or body field in `internal/httpapi`), and a test pins that the refusal path logs only the field name.
 
-Validation order inside `IssueToken` (spec review r4): screen (all fields above, all array elements) → name syntax → reserved `client-` prefix → permissions → expiry → allowed servers → profile. Every existing validator therefore only ever sees values that already passed the screen, so the existing error texts that quote a value (T023 keeps them) can quote only a non-secret value.
+Validation order inside `IssueToken` (spec review r4, r5): screen (all fields above, all array elements, the raw `expires_in` text, and **both** raw profile aliases `profile` and `profile_pin` separately) → name syntax → reserved `client-` prefix → profile-alias reconciliation (`"profile" and "profile_pin" name different profiles; send one of them`, unchanged text, never quoting either value) → permissions → expiry parse (`auth.ParseTokenExpiry` on the raw text, or the `ExpiryDefault` when it is empty) → allowed servers → profile. Inside `IssueClient` (r5): screen (`id`, `display_name`, `profile`, `mode`, raw `expires_in`, `purpose`) → the existing order, with the expiry parse where `handleCreateClient` used to run it, now after the screen. Every existing validator, the alias reconciliation and the expiry parser therefore only ever see values that already passed the screen, so the existing error texts that quote a value (T023/T024 keep them, including `invalid expiry duration: %q`) can quote only a non-secret value. The handlers pass the raw text and do no parsing or merging of their own (§6).
 
 ### 8.3 REST request decoding (spec review r4)
 
@@ -230,3 +248,17 @@ The service screen runs only on a decoded request. A JSON decoding error happens
 Connect-minted clients (`ConnectMinter`) are not covered by §8.2: their `display_name` comes from the server-side connect registry, not from the caller.
 
 Independently of the screen, error texts echo only values that already passed it **and** passed their syntax check (an id or name matching its regex, or an enum value). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`) are never echoed.
+
+## 9. Token namespace: ownerless only (spec review r5)
+
+Agent-token names are unique **per owner** (`CreateAgentToken` returns `ErrAgentTokenNameExists` only for the same owner; the server edition stores tenant-owned tokens with `UserID != ""`). `ListAgentTokens` returns every owner's tokens, while the bare-name helpers `GetAgentTokenByName` and `RevokeAgentToken` resolve only the ownerless namespace (`internal/storage/agent_tokens.go:324-325,401,432-433`). Per-user tokens are out of scope (A1), so every token operation of this spec addresses the **ownerless** namespace, explicitly and in one place:
+
+| Operation | Storage call | Owned (`UserID != ""`) tokens |
+|---|---|---|
+| `list` (MCP and the `CredentialsService.List` that backs it) | `ListAgentTokens()` filtered to `UserID == ""` | never listed, never counted in `total` |
+| `get` | `GetAgentTokenByOwnerAndName("", name)` | `identity_not_found` (same text as a missing name; no hint that a tenant holds it) |
+| `create_token` duplicate precheck (`identity_exists`) | `GetAgentTokenByOwnerAndName("", name)` | not a conflict: a tenant's token of the same name does not block an ownerless one; the mint still relies on `CreateAgentToken`'s per-owner check and the legacy owner-blind index rule (`claimAgentTokenNameSlot`) unchanged |
+| `create_client` conflicting-token precheck (`client-<id>`) | `GetAgentTokenByOwnerAndName("", "client-"+id)` | not a conflict (clients are personal-edition only anyway) |
+| `revoke` | `RevokeAgentTokenForOwner("", name)` | `identity_not_found`; the owned token and its sessions are untouched |
+
+`identity_exists` therefore means "an ownerless record holds the id/name" (contracts/errors.md). REST `GET /api/v1/tokens` keeps listing every owner exactly as today (no REST behaviour change; it is the operator's view), but the `credentials` tool and every `CredentialView` returned by `CredentialsService.List/Get` never include an owned token, so every row the tool lists can be addressed by `get` and `revoke` with its name. REST `DELETE /api/v1/tokens/{name}` already targets only ownerless tokens via `RevokeAgentToken` and keeps doing so through `RevokeAgentTokenForOwner("", name)`.

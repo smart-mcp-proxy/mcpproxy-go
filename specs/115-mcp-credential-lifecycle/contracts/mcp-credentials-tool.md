@@ -52,7 +52,7 @@ Args: `kind?`, `profile?`, `state?`. Allowed under read_only_mode and disable_ma
 { "credentials": [ CredentialView, ... ], "total": 2 }
 ```
 
-Rows are sorted by `kind`, then `id`. `CredentialView` is defined in data-model.md §2. Server edition: `kind=client` answers `{"credentials":[],"total":0}`, and `kind=all` lists tokens only.
+Rows are sorted by `kind`, then `id`. `CredentialView` is defined in data-model.md §2. Tokens are listed from the **ownerless** namespace only (`UserID == ""`, data-model §9, spec review r5): a server-edition tenant-owned token is never listed or counted, so every listed name is addressable by `get` and `revoke`. Server edition: `kind=client` answers `{"credentials":[],"total":0}`, and `kind=all` lists ownerless tokens only.
 
 ### `get`
 
@@ -62,7 +62,7 @@ Args: exactly one of `client` or `token`. If both or neither are given, the call
 { "credential": CredentialView, "links": Links }
 ```
 
-An unknown identity answers `identity_not_found`.
+An unknown identity answers `identity_not_found`. `token` resolves in the ownerless namespace only (`GetAgentTokenByOwnerAndName("", name)`); a name held only by a tenant-owned token answers `identity_not_found` with the same text.
 
 ### `create_client`
 
@@ -77,7 +77,7 @@ Checks run in order under `bindingWriteMu`. The first one that fails is returned
 4. `profile` missing (`missing_argument`), empty (`profile_required`), unknown (`unknown_profile`)
 5. `expires_in` missing (`missing_argument`), invalid (`invalid_expiry`)
 6. `mode` and `display_name` and `purpose` length (`invalid_argument`)
-7. an existing record of any state (`identity_exists` with `state`), or a regular token holding `client-<id>` (`identity_exists`, `state: "conflicting_token"`)
+7. an existing ownerless record of any state (`identity_exists` with `state`), or a regular ownerless token holding `client-<id>` (`identity_exists`, `state: "conflicting_token"`); tenant-owned tokens are outside this namespace (data-model §9)
 8. binding guard (`binding_bypassable_without_auth`)
 9. mint (one bbolt tx). This is the commit point. The `CredentialView` is projected from the committed record returned by the mint, with no further store read. Then, best-effort and unable to fail the call: `profile_change{change: issue}`, `credentials.changed`, `client.binding_changed`. After the commit the call always returns the delivery response
 
@@ -90,6 +90,7 @@ Args: `name` (required), `profile` (required), `expires_in` (required), `purpose
 The checks are the same as for `create_client`, with these differences:
 - name syntax per `tokenNameRegex`. A `client-` prefix answers `reserved_identity`.
 - the token cap answers `token_limit_reached`
+- the duplicate precheck looks up the name in the ownerless namespace only (`GetAgentTokenByOwnerAndName("", name)`); a tenant-owned token of the same name is not a conflict (data-model §9)
 - the guard runs with the candidate as a locked binding, and the minted token is stored with `guard_bound: true`, so it stays a binding in every later guard evaluation (FR-012a, data-model §5)
 
 The token is minted with `allowed_servers: ["*"]`, `permissions: [read, write, destructive]` and `profile_pin: <profile>`.
@@ -104,7 +105,7 @@ Args: exactly one of `client` or `token`. Refused under read_only_mode and disab
 { "credential": CredentialView, "changed": true, "client_config_untouched": true }
 ```
 
-`client_config_untouched` is present for clients only. If the identity is already revoked, the call answers `changed: false` and writes no record. An unknown identity answers `identity_not_found`. A connect in flight for that client does **not** block revocation (spec review r3): revoke goes through the existing `forgetLockedOpt` path, which succeeds immediately and invalidates both the current secret and any secret staged by the in-flight connect. The outstanding connect then fails closed at commit with the existing `credential_superseded` error and cannot restore access. This preserves the deliberate behaviour pinned by `TestConnectMinter_ForgetDuringConnectFailsCommitClosed` (`internal/runtime/clients_service_inflight_test.go`).
+`client_config_untouched` is present for clients only. `token` is revoked through `RevokeAgentTokenForOwner("", name)`, so it can only ever revoke the ownerless token of that name; a name held only by tenant-owned tokens answers `identity_not_found` and revokes nothing (data-model §9). If the identity is already revoked, the call answers `changed: false` and writes no record. An unknown identity answers `identity_not_found`. A connect in flight for that client does **not** block revocation (spec review r3): revoke goes through the existing `forgetLockedOpt` path, which succeeds immediately and invalidates both the current secret and any secret staged by the in-flight connect. The outstanding connect then fails closed at commit with the existing `credential_superseded` error and cannot restore access. This preserves the deliberate behaviour pinned by `TestConnectMinter_ForgetDuringConnectFailsCommitClosed` (`internal/runtime/clients_service_inflight_test.go`).
 
 ## One-time delivery response
 
