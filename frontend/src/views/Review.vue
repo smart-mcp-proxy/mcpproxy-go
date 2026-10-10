@@ -52,7 +52,7 @@ const sort = ref<ReviewSort>('name')
 const effectiveView = computed<'active' | 'all'>(() => view.value ?? (summary.value.active > 0 ? 'active' : 'all'))
 const filteredRows = computed(() => {
   const q = search.value.trim().toLowerCase()
-  const scoped = effectiveView.value === 'active' && !q && !serverFilter.value
+  const scoped = effectiveView.value === 'active' && !q && !serverFilter.value && !change.value
   const rows = (queue.value?.servers ?? []).filter(r =>
     (!serverFilter.value || r.server === serverFilter.value) &&
     (!change.value || (change.value === 'pending' ? (r.pending ?? 0) > 0 : (r.changed ?? 0) > 0)) &&

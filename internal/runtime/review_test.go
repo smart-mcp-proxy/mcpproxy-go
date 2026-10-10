@@ -213,6 +213,35 @@ func TestReviewQueue_ReportsServerEnabledState(t *testing.T) {
 	require.Contains(t, string(raw), `"enabled":false`)
 }
 
+// UX-04: "Oldest first" must order by when the review was owed, not by the
+// previous approval. A changed tool keeps its old ApprovedAt, so since comes
+// from DefinitionChangedAt; a changed tool with no change stamp reports none.
+func TestReviewQueue_SinceIgnoresPriorApprovalOfChangedTool(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "stamped", Enabled: true},
+		{Name: "unstamped", Enabled: true},
+	})
+	lastYear := time.Now().UTC().AddDate(-1, 0, 0)
+	changedAt := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "stamped", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: lastYear, DefinitionChangedAt: changedAt,
+	}))
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "unstamped", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: lastYear,
+	}))
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.NotNil(t, byName["stamped"].Since)
+	require.True(t, byName["stamped"].Since.After(lastYear.AddDate(0, 6, 0)), "since must not be the old approval time: %v", byName["stamped"].Since)
+	require.Nil(t, byName["unstamped"].Since)
+}
+
 func TestReviewPayload_RedactsServerSecretsUnconditionally(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
 		Name: "private", Enabled: true, Quarantined: true,

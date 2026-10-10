@@ -169,8 +169,7 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 			case storage.ToolApprovalStatusChanged:
 				row.Changed++
 			}
-			if (record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged) && !record.ApprovedAt.IsZero() && (row.Since == nil || record.ApprovedAt.Before(*row.Since)) {
-				since := record.ApprovedAt
+			if since := reviewOwedSince(record); !since.IsZero() && (row.Since == nil || since.Before(*row.Since)) {
 				row.Since = &since
 			}
 		}
@@ -551,4 +550,18 @@ func reviewToolScanVerdict(findings []scanner.ScanFinding, serverName string, re
 
 func reviewFindingMatchesTool(location, serverName, toolName string) bool {
 	return location == "tool:"+toolName || location == serverName+":"+toolName
+}
+
+// reviewOwedSince is when a pending or changed tool started waiting for review.
+// A changed tool keeps the ApprovedAt of its previous approval, so the change
+// stamp is the honest time; a tool with no stamp reports none rather than an
+// approval that predates the change.
+func reviewOwedSince(record *storage.ToolApprovalRecord) time.Time {
+	switch record.Status {
+	case storage.ToolApprovalStatusChanged:
+		return record.DefinitionChangedAt
+	case storage.ToolApprovalStatusPending:
+		return record.ApprovedAt
+	}
+	return time.Time{}
 }

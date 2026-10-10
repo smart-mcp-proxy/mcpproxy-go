@@ -99,6 +99,15 @@ describe('Review queue (T088)', () => {
       expect(names(wrapper)).toEqual(['team-06-customer-data'])
     })
 
+    it('a ?change= deep link lists a disabled server with pending or changed tools', async () => {
+      const data = { count: 2, servers: [
+        { server: 'live', kind: 'server_review', quarantined: true, enabled: true, tools_captured: 5 },
+        { server: 'parked', kind: 'tool_review', quarantined: false, enabled: false, pending: 2 },
+      ] }
+      const { wrapper } = await open('/review?change=pending', data)
+      expect(names(wrapper)).toEqual(['parked'])
+    })
+
     it('never hides the whole queue behind the Active view', async () => {
       const { wrapper } = await open()
       expect(wrapper.find('[data-test="review-view-all"]').exists()).toBe(true)
