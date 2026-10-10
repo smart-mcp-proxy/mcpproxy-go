@@ -45,9 +45,11 @@ type Client struct {
 	// connection was created even after a config hot-reload. Updated via
 	// SetExposePrompts, mirroring managed.Client's cfg pointer swap.
 	exposePrompts atomic.Pointer[bool]
-	globalConfig  *config.Config
-	storage       *storage.BoltDB
-	logger        *zap.Logger
+	// dialGate is the owner's launch/dial admission (see DialGate).
+	dialGate     atomic.Pointer[DialGate]
+	globalConfig *config.Config
+	storage      *storage.BoltDB
+	logger       *zap.Logger
 
 	// Upstream server specific logger for debugging
 	upstreamLogger *zap.Logger

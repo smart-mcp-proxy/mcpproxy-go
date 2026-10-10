@@ -120,6 +120,15 @@ func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStr
 	evidence := &authEvidence{}
 	ctx = withAuthEvidence(ctx, evidence)
 	for i, strategy := range authStrategies {
+		// A retired client opens no new connection. An HTTP request cannot be
+		// made atomic with retirement the way a process spawn is (it would
+		// hold the gate across network I/O), so this is the tightest check
+		// possible; the owner's post-dial checks discard any result.
+		releaseDial, gateErr := c.admitDial()
+		if gateErr != nil {
+			return gateErr
+		}
+		releaseDial()
 		c.logger.Debug("🔐 Trying "+transportLabel+"authentication strategy",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategy.name))

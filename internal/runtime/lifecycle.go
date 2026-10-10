@@ -1610,8 +1610,15 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool, bas
 				if cur == nil {
 					return
 				}
+				if connectAfterRegisterHook != nil {
+					connectAfterRegisterHook(cur.Name)
+				}
 				// Dial outside the commit lock: the config is registered, only
-				// the slow handshake remains.
+				// the slow handshake remains. A commit that publishes a removal
+				// or a changed connection state in the meantime has already
+				// retired this client (retireStaleClients), so the dial below
+				// is refused even though the manager reconciliation for that
+				// commit has not run yet.
 				if err := r.upstreamManager.ConnectServer(cur.Name, cur); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 				} else {
@@ -1713,6 +1720,13 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool, bas
 			} else {
 				r.logger.Info("Removed server tools from search index", zap.String("server", name))
 			}
+			// Config-driven removal must forget the same security state an
+			// explicit removal does: a later same-name create-only add may not
+			// inherit the removed server's approval baseline or credentials.
+			// The orphan prune cannot be relied on for this (it is skipped for
+			// an empty configured set and keeps a name a save resurrected)
+			// (UX-01 r8).
+			r.purgeRemovedServerSecurityState(name)
 			if resurrected {
 				// Storage no longer holds the server, so re-deriving the live
 				// config and the file from it drops the resurrected entry in
@@ -1832,6 +1846,10 @@ func (r *Runtime) registerServerIdentityIfCurrent(cfg *config.ServerConfig, cfgP
 	}
 }
 
+// connectAfterRegisterHook is a test seam fired after a sync's connect goroutine
+// registered the live entry with the manager and before it dials.
+var connectAfterRegisterHook func(name string)
+
 // removeServerAfterStorageDeleteHook is a test seam fired inside
 // RemoveServerCommitted right after the storage row is deleted, while the
 // commit lock is held.
@@ -1839,6 +1857,100 @@ var removeServerAfterStorageDeleteHook func(name string)
 
 // ErrServerNotFound is returned by RemoveServerCommitted for an unknown server.
 var ErrServerNotFound = fmt.Errorf("server not found")
+
+// ErrUpdateRejected wraps an error returned by a CommitServerUpdate build
+// callback, so callers can tell a refused edit from a failed commit.
+var ErrUpdateRejected = fmt.Errorf("server update rejected")
+
+// CommitServerUpdateAfterReadHook is a test seam (set by internal/server tests) fired inside CommitServerUpdate
+// right after the server was re-read under the commit lock.
+var CommitServerUpdateAfterReadHook func(name string)
+
+// CommitServerUpdate performs a read-modify-write of an existing server as ONE
+// config commit under configCommitMu, with the same exclusion RemoveServerCommitted
+// has. The server is re-read from storage INSIDE the lock, so an update or patch
+// that computed its edit before a concurrent removal finished cannot upsert the
+// removed server back into storage, the live config, the file or the manager
+// (UX-01 r8). It returns ErrServerNotFound when the server is gone.
+//
+// build receives the freshly read stored server and returns the replacement (a
+// nil replacement commits nothing); an error from it aborts the commit and is
+// returned wrapped in ErrUpdateRejected. apply, if set, runs under the lock after
+// the storage write and before the republish, to swap the manager's client; it
+// must not dial (dial after the commit with Manager.ConnectServer: a client a
+// later commit removed is retired, so that dial is refused).
+func (r *Runtime) CommitServerUpdate(name string,
+	build func(existing *config.ServerConfig) (*config.ServerConfig, error),
+	apply func(updated *config.ServerConfig),
+) error {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
+	if r.storageManager == nil {
+		return fmt.Errorf("runtime storage not initialized")
+	}
+	existing, err := r.storageManager.GetUpstreamServer(name)
+	if err != nil || existing == nil {
+		return fmt.Errorf("%w: '%s'", ErrServerNotFound, name)
+	}
+	if CommitServerUpdateAfterReadHook != nil {
+		CommitServerUpdateAfterReadHook(name)
+	}
+	updated, err := build(existing)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrUpdateRejected, err)
+	}
+	if updated == nil {
+		return nil
+	}
+	updated.Name = name
+	if err := r.storageManager.SaveUpstreamServer(updated); err != nil {
+		return fmt.Errorf("failed to save server: %w", err)
+	}
+	if apply != nil {
+		apply(updated)
+	}
+	// Publish the replacement into the live config first: the save below
+	// rebuilds the server list from storage, whose record cannot carry config-only
+	// state such as the "quarantine value was stated" bit, which it recovers from
+	// the live entry.
+	if live := r.Config(); live != nil {
+		next := (&configsvc.Snapshot{Config: live}).Clone()
+		for i, sc := range next.Servers {
+			if sc != nil && sc.Name == name {
+				next.Servers[i] = updated
+				break
+			}
+		}
+		r.updateConfigLocked(next, "")
+	}
+	// The save rebuilds the server list from storage, publishing the update to
+	// the live config and the file in the same commit.
+	if err := r.saveConfigurationLocked(); err != nil {
+		r.logger.Warn("Failed to save configuration after updating server", zap.Error(err))
+	}
+	return nil
+}
+
+// purgeRemovedServerSecurityState deletes the OAuth state and tool-approval
+// records of a removed server so a same-name server added later starts with a
+// fresh review and no inherited credentials. Caller holds configCommitMu.
+func (r *Runtime) purgeRemovedServerSecurityState(name string) {
+	if r.storageManager == nil {
+		return
+	}
+	if err := r.storageManager.ClearOAuthState(name); err != nil {
+		r.logger.Warn("Failed to clear OAuth state for removed server",
+			zap.String("server", name), zap.Error(err))
+	}
+	if r.refreshManager != nil {
+		r.refreshManager.OnTokenCleared(name)
+	}
+	if err := r.storageManager.DeleteServerToolApprovals(name); err != nil {
+		r.logger.Warn("Failed to clear tool approvals for removed server",
+			zap.String("server", name), zap.Error(err))
+	}
+}
 
 // RemoveServerCommitted removes a server (client, storage row, OAuth state,
 // search index, tool approvals) and republishes the configuration as ONE commit
@@ -1867,22 +1979,12 @@ func (r *Runtime) RemoveServerCommitted(name string) error {
 		removeServerAfterStorageDeleteHook(name)
 	}
 
-	if err := r.storageManager.ClearOAuthState(name); err != nil {
-		r.logger.Warn("Failed to clear OAuth state for removed server",
-			zap.String("server", name), zap.Error(err))
-	}
-	if r.refreshManager != nil {
-		r.refreshManager.OnTokenCleared(name)
-	}
+	r.purgeRemovedServerSecurityState(name)
 	if r.indexManager != nil {
 		if err := r.indexManager.DeleteServerTools(name); err != nil {
 			r.logger.Warn("Failed to remove server tools from index",
 				zap.String("server", name), zap.Error(err))
 		}
-	}
-	if err := r.storageManager.DeleteServerToolApprovals(name); err != nil {
-		r.logger.Warn("Failed to clear tool approvals for removed server",
-			zap.String("server", name), zap.Error(err))
 	}
 
 	// The save rebuilds the server list from storage, so it drops the removed
@@ -2088,6 +2190,7 @@ func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig
 	if r.configSvc != nil {
 		_ = r.configSvc.Update(updatedCfg, configsvc.UpdateTypeModify, "sync_servers")
 	}
+	r.retireStaleClients(updatedCfg)
 	return oldServerCount
 }
 
@@ -2211,6 +2314,7 @@ func (r *Runtime) ReloadConfiguration() error {
 			r.cfgPath = newSnapshot.Path
 		}
 		r.mu.Unlock()
+		r.retireStaleClients(pinned)
 	}
 
 	r.noteServerSetChange(oldSnapshot.Config, running)

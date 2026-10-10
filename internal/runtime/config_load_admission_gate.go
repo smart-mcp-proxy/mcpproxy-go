@@ -431,6 +431,7 @@ func (r *Runtime) gateInitialConfig() {
 		r.cfg = gated
 		r.setDesiredLocked(gated)
 		r.mu.Unlock()
+		r.retireStaleClients(gated)
 	}
 }
 
@@ -486,11 +487,15 @@ func (r *Runtime) publishAdmissionGatedConfig(previous, gated *config.Config) {
 		return
 	}
 	r.mu.Lock()
-	if r.cfg == previous {
+	published2 := r.cfg == previous
+	if published2 {
 		r.cfg = gated
 		r.setDesiredLocked(gated)
 	}
 	r.mu.Unlock()
+	if published2 {
+		r.retireStaleClients(gated)
+	}
 }
 
 // hasApprovalBaseline reports whether serverName has ever had a tool approved:

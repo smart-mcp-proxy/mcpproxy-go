@@ -70,6 +70,10 @@ func (p *ActorPoolSimple) GuardServerAction(name string, want *config.ServerConf
 	return apply(want)
 }
 
+// connectAfterCaptureHook is a test seam fired after ConnectServerIfCurrent
+// captured its client under the guard, before it dials.
+var connectAfterCaptureHook func(name string)
+
 // ConnectServerIfCurrent connects the client registered under name only while
 // the live config still holds want's connection state. The client is looked up
 // inside the guard, and a client a later commit replaces is retired, so a delayed
@@ -86,6 +90,13 @@ func (p *ActorPoolSimple) ConnectServerIfCurrent(ctx context.Context, name strin
 	}); err != nil {
 		return err
 	}
+	if connectAfterCaptureHook != nil {
+		connectAfterCaptureHook(name)
+	}
+	// A commit published after the capture above has already retired this
+	// client (Runtime.retireStaleClients runs in the publishing critical
+	// section), so Connect refuses to launch even though the manager
+	// reconciliation for that commit has not run yet.
 	if err := client.Connect(ctx); err != nil {
 		p.logger.Debug("Connect returned error (may be already connecting/connected)",
 			zap.String("server", name),

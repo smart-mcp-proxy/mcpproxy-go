@@ -6111,67 +6111,19 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
+	merged, configDiff, redactedDiff, toolErr := p.commitServerPatch(request, name, "updated")
+	if toolErr != nil {
+		return toolErr, nil, nil
 	}
+	mergedServer := merged
+	serverID := name
 
-	var serverID string
-	var existingServer *config.ServerConfig
-	for _, server := range servers {
-		if server.Name == name {
-			serverID = server.Name
-			existingServer = server
-			break
-		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
-	}
-
-	// Build patch config from request parameters
-	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil, nil
-	}
-
-	// Use smart merge to preserve existing config fields (Fix for #239, #240)
-	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
-	}
-	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
-	// static headers, so a headers change cannot introduce a collision either.
-	if patch.ForwardHeaders != nil || patch.Headers != nil {
-		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil, nil
-		}
-	}
-
-	// Log the config diff for audit trail (FR-006). Issue #1146: config.FieldChange
-	// carries raw before/after VALUES, so logging Modified verbatim wrote env
-	// values, Authorization headers and oauth.client_secret to main.log in the
-	// clear. Render through the shared redactor instead.
-	redactedDiff := redactedConfigDiff(configDiff)
-	if redactedDiff != nil {
-		p.logger.Info("Server config updated via MCP tool",
-			zap.String("server", name),
-			zap.Any("modified", redactedDiff["modified"]),
-			zap.Strings("removed", configDiff.Removed))
-	}
-
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-
-	// Update in upstream manager with connection monitoring
-	p.upstreamManager.RemoveServer(serverID)
+	// Dial AFTER the commit, outside the config commit lock (a handshake can
+	// take a minute). The client was registered inside the commit; a removal
+	// that landed since has retired it, so this connect is refused then.
 	var connectionStatus, connectionMessage string
 	if mergedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
+		if err := p.upstreamManager.ConnectServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 			connectionStatus = statusError
 			connectionMessage = scrubUpstreamText(fmt.Sprintf("Failed to update server config: %v", err))
@@ -6184,12 +6136,8 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		connectionMessage = messageServerDisabled
 	}
 
-	// Trigger configuration save and update
+	// The configuration was saved inside the commit; announce the change.
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after updating server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -6231,73 +6179,20 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
+	mergedServer, configDiff, redactedDiff, toolErr := p.commitServerPatch(request, name, "patched")
+	if toolErr != nil {
+		return toolErr, nil, nil
 	}
+	serverID := name
 
-	var serverID string
-	var existingServer *config.ServerConfig
-	for _, server := range servers {
-		if server.Name == name {
-			serverID = server.Name
-			existingServer = server
-			break
-		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
-	}
-
-	// Build patch config from request parameters
-	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil, nil
-	}
-
-	// Use smart merge to preserve existing config fields (Fix for #239, #240)
-	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
-	}
-	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
-	// static headers, so a headers change cannot introduce a collision either.
-	if patch.ForwardHeaders != nil || patch.Headers != nil {
-		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil, nil
-		}
-	}
-
-	// Log the config diff for audit trail (FR-006), values masked (issue #1146).
-	redactedDiff := redactedConfigDiff(configDiff)
-	if redactedDiff != nil {
-		p.logger.Info("Server config patched via MCP tool",
-			zap.String("server", name),
-			zap.Any("modified", redactedDiff["modified"]),
-			zap.Strings("removed", configDiff.Removed))
-	}
-
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-
-	// Update in upstream manager
-	p.upstreamManager.RemoveServer(serverID)
 	if mergedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
+		if err := p.upstreamManager.ConnectServer(serverID, mergedServer); err != nil {
 			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
 		}
 	}
 
-	// Trigger configuration save and update
+	// The configuration was saved inside the commit; announce the change.
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
@@ -6326,6 +6221,94 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	}
 
 	return mcp.NewToolResultText(string(jsonResult)), configDiff, nil
+}
+
+// errServerPatchRefused marks a patch the handler refused with a tool error.
+var errServerPatchRefused = errors.New("server patch refused")
+
+// commitServerPatch is the shared core of upstream_servers update/patch: it
+// re-reads the stored server, merges the request into it, validates, writes
+// storage, swaps the manager's client (no dial) and republishes the
+// configuration, all as ONE config commit (Runtime.CommitServerUpdate), so an
+// edit computed before a concurrent removal finished cannot recreate the
+// removed server in storage, the live config, the file or the manager
+// (UX-01 r8). It returns a tool error result when the edit was refused.
+func (p *MCPProxyServer) commitServerPatch(request mcp.CallToolRequest, name, verb string) (merged *config.ServerConfig, diff *config.ConfigDiff, redacted map[string]interface{}, toolErr *mcp.CallToolResult) {
+	var refusal *mcp.CallToolResult
+	refuse := func(msg string) (*config.ServerConfig, error) {
+		refusal = mcp.NewToolResultError(msg)
+		return nil, errServerPatchRefused
+	}
+	build := func(existing *config.ServerConfig) (*config.ServerConfig, error) {
+		// Build patch config from request parameters
+		patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existing)
+		if err != nil {
+			return refuse(err.Error())
+		}
+
+		// Use smart merge to preserve existing config fields (Fix for #239, #240)
+		mergedServer, configDiff, err := config.MergeServerConfig(existing, patch, mergeOpts)
+		if err != nil {
+			return refuse(fmt.Sprintf("Failed to merge config: %v", err))
+		}
+		// Spec 112 FR-005a: validate the resulting allowlist against the resulting
+		// static headers, so a headers change cannot introduce a collision either.
+		if patch.ForwardHeaders != nil || patch.Headers != nil {
+			if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
+				return refuse(err.Error())
+			}
+		}
+
+		// Log the config diff for audit trail (FR-006). Issue #1146:
+		// config.FieldChange carries raw before/after VALUES, so logging Modified
+		// verbatim wrote env values, Authorization headers and
+		// oauth.client_secret to main.log in the clear. Render through the
+		// shared redactor instead.
+		redactedDiff := redactedConfigDiff(configDiff)
+		if redactedDiff != nil {
+			p.logger.Info("Server config "+verb+" via MCP tool",
+				zap.String("server", name),
+				zap.Any("modified", redactedDiff["modified"]),
+				zap.Strings("removed", configDiff.Removed))
+		}
+		merged, diff, redacted = mergedServer, configDiff, redactedDiff
+		return mergedServer, nil
+	}
+	// Swap the client for the new config. Dialing is the caller's job, after
+	// the commit: a handshake must not run under the config commit lock.
+	apply := func(updated *config.ServerConfig) {
+		p.upstreamManager.RemoveServer(name)
+		if updated.Enabled {
+			if err := p.upstreamManager.AddServerConfig(name, updated); err != nil {
+				p.logger.Warn("Failed to register updated upstream", zap.String("id", name), zap.Error(err))
+			}
+		}
+	}
+
+	var err error
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		err = p.mainServer.runtime.CommitServerUpdate(name, build, apply)
+	} else {
+		// No runtime (unit-test construction): same steps, nothing to lock against.
+		var existing *config.ServerConfig
+		if existing, err = p.storage.GetUpstreamServer(name); err != nil || existing == nil {
+			err = fmt.Errorf("%w: '%s'", runtime.ErrServerNotFound, name)
+		} else if updated, berr := build(existing); berr != nil {
+			err = berr
+		} else if err = p.storage.UpdateUpstream(name, updated); err == nil {
+			apply(updated)
+		}
+	}
+	switch {
+	case err == nil:
+		return merged, diff, redacted, nil
+	case refusal != nil:
+		return nil, nil, nil, refusal
+	case errors.Is(err, runtime.ErrServerNotFound):
+		return nil, nil, nil, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+	default:
+		return nil, nil, nil, mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err))
+	}
 }
 
 // buildPatchConfigFromRequest constructs a partial ServerConfig from request parameters

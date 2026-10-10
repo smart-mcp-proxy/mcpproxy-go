@@ -7,3 +7,7 @@ import "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 func (s *Supervisor) ExecuteActionForTest(name string, action ReconcileAction, snap *configsvc.Snapshot) error {
 	return s.executeAction(name, action, snap)
 }
+
+// SetConnectAfterCaptureHookForTest installs a hook fired between the guarded
+// client capture and the dial of ConnectServerIfCurrent.
+func SetConnectAfterCaptureHookForTest(h func(name string)) { connectAfterCaptureHook = h }

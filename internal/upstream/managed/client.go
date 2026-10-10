@@ -67,7 +67,9 @@ type Client struct {
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
-	retired       atomic.Bool
+	retired atomic.Bool
+	// launchMu orders Retire against launch admission (see admitLaunch).
+	launchMu      sync.RWMutex
 	connectMu     sync.Mutex
 	connectCancel context.CancelFunc
 
@@ -370,6 +372,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	// atomically swapped configs on each call, so a hot reload takes effect on
 	// the next tools/call with no reconnect.
 	coreClient.SetForwardPolicyProvider(mc.forwardPolicy)
+	coreClient.SetDialGate(mc.admitLaunch)
 	mc.warnForwardHeaders()
 
 	// Set up state change callback
@@ -430,6 +433,10 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// connectAfterRetiredCheckHook is a test seam fired right after Connect's last
+// pre-dial retired check, before the transport is launched.
+var connectAfterRetiredCheckHook func(mc *Client)
+
 // ErrClientRetired is returned by Connect on a client the manager has removed or
 // replaced. Retirement is permanent: unlike Disconnect, which resets the client
 // to a connectable state, a retired client never dials again, so a goroutine
@@ -442,7 +449,24 @@ var ErrClientRetired = errors.New("client retired: removed or replaced by the ma
 // closed instead of launching a process or handshake for an upstream the
 // manager no longer owns.
 func (mc *Client) Retire() {
+	// The write lock waits for every launch admission currently inside its
+	// spawn (admitDial holds the read side across the process start). After
+	// Retire returns, no further child can start, and one that did start
+	// before is visible to the Disconnect that follows (UX-01 r8).
+	mc.launchMu.Lock()
 	mc.retired.Store(true)
+	mc.launchMu.Unlock()
+}
+
+// admitLaunch is the core client's dial gate: it admits a launch only while the
+// client is not retired, holding the read side until the spawn is issued.
+func (mc *Client) admitLaunch() (func(), bool) {
+	mc.launchMu.RLock()
+	if mc.retired.Load() {
+		mc.launchMu.RUnlock()
+		return nil, false
+	}
+	return mc.launchMu.RUnlock, true
 }
 
 // IsRetired reports whether Retire was called.
@@ -537,6 +561,10 @@ func (mc *Client) Connect(ctx context.Context) error {
 		mc.StateManager.Reset()
 		mc.mu.Unlock()
 		return ErrClientRetired
+	}
+
+	if connectAfterRetiredCheckHook != nil {
+		connectAfterRetiredCheckHook(mc)
 	}
 
 	// Phase 3: Execute the actual connection (potentially slow - OAuth, MCP initialize)

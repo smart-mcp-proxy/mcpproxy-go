@@ -86,7 +86,15 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		RedactArgs: logSafeArgs,
 	}
 
+	releaseDial, gateErr := c.admitSpawn()
+	if gateErr != nil {
+		if cidFile != "" {
+			_ = os.Remove(cidFile)
+		}
+		return gateErr
+	}
 	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	releaseDial()
 	if err != nil {
 		if cidFile != "" {
 			_ = os.Remove(cidFile)

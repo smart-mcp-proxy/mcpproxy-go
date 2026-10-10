@@ -729,6 +729,20 @@ func (r *Runtime) updateConfigLocked(cfg *config.Config, cfgPath string) {
 		r.cfgPath = cfgPath
 	}
 	r.mu.Unlock()
+	r.retireStaleClients(cfg)
+}
+
+// retireStaleClients bars every upstream client the just-published
+// configuration invalidates (server removed, or its connection state changed)
+// from dialing. It runs in the same configCommitMu critical section as the
+// publication, so a connect that captured its client under an earlier
+// config-guard cannot launch the old endpoint while the manager
+// reconciliation for the new config is still queued (UX-01 r8).
+func (r *Runtime) retireStaleClients(cfg *config.Config) {
+	if cfg == nil || r.upstreamManager == nil {
+		return
+	}
+	r.upstreamManager.RetireStaleClients(cfg.Servers)
 }
 
 // UpdateListenAddress mutates the in-memory listen address used by the runtime.
@@ -2057,6 +2071,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {
 		r.logger.Error("Failed to update config service", zap.Error(err))
 	}
+	r.retireStaleClients(&configCopy)
 
 	// Issue #1458: a profile edit is live the moment the apply returns, so its
 	// per-profile search index must be too, not after the next discovery pass.

@@ -450,7 +450,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		existingConfig := existingClient.GetConfig()
 
 		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
+		// A client retired at config publication (RetireStaleClients) is
+		// permanently barred from dialing, so it must be replaced even when the
+		// config it is now compared with looks unchanged (a revert).
+		configChanged := existingClient.IsRetired() ||
+			existingConfig.URL != serverConfig.URL ||
 			existingConfig.Protocol != serverConfig.Protocol ||
 			existingConfig.Command != serverConfig.Command ||
 			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
@@ -587,6 +591,34 @@ func equalStringMaps(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// RetireStaleClients permanently bars every registered client whose server the
+// newly published configuration removed, or whose connection state it changed,
+// from dialing. The runtime calls it under its config commit lock, in the same
+// critical section that publishes the configuration, so a connect that
+// captured a client before the publication cannot launch the old endpoint
+// while the (asynchronous) manager reconciliation is still queued. The
+// reconciliation later removes the client or replaces it; AddServerConfig
+// replaces any retired client it finds, so a revert cannot strand a server.
+func (m *Manager) RetireStaleClients(servers []*config.ServerConfig) {
+	desired := make(map[string]*config.ServerConfig, len(servers))
+	for _, s := range servers {
+		if s != nil {
+			desired[s.Name] = s
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, client := range m.clients {
+		if client == nil || client.IsRetired() {
+			continue
+		}
+		want, ok := desired[id]
+		if !ok || !config.ConnectionEquivalent(client.GetConfig(), want) {
+			client.Retire()
+		}
+	}
 }
 
 // AddServer adds a new upstream server and connects to it (legacy method)
@@ -1907,6 +1939,11 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			zap.Bool("is_connecting", client.IsConnecting()),
 			zap.String("current_state", client.GetState().String()),
 			zap.Bool("quarantined", client.GetConfig().Quarantined))
+
+		if client.IsRetired() {
+			// Removed or replaced by a newer commit; the reconciliation owns it.
+			continue
+		}
 
 		if !client.GetConfig().Enabled {
 			m.logger.Debug("Skipping disabled client",

@@ -3,6 +3,7 @@ package supervisor_test
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // UX-01 r7: a delayed supervisor action carries the config snapshot it was
@@ -104,4 +106,42 @@ func TestStaleSupervisorAction_AfterQuarantine_KeepsQuarantine(t *testing.T) {
 	require.True(t, c.GetConfig().Quarantined, "stale action replaced the quarantined client with the old unquarantined config")
 	time.Sleep(200 * time.Millisecond)
 	require.NoFileExists(t, marker, "stale action connected a quarantined server")
+}
+
+// UX-01 r8 (finding 2): a connect that captured its client under the guard and
+// is parked before the dial must not launch the old endpoint once a newer
+// commit has been published, even though the manager reconciliation for that
+// commit has not run.
+func TestSupervisorConnect_CapturedClient_NewerCommitPublished_NeverLaunches(t *testing.T) {
+	rt := staleActionRuntime(t)
+	marker := filepath.Join(t.TempDir(), "m")
+	old := markerServer(marker, "old", false)
+	commitServers(t, rt, old)
+	snap := rt.ConfigSnapshot()
+
+	var launches atomic.Int32
+	core.AfterLaunchHook = func(string) { launches.Add(1) }
+	t.Cleanup(func() { core.AfterLaunchHook = nil })
+
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	supervisor.SetConnectAfterCaptureHookForTest(func(string) {
+		close(reached)
+		<-resume
+	})
+	t.Cleanup(func() { supervisor.SetConnectAfterCaptureHookForTest(nil) })
+
+	done := make(chan error, 1)
+	go func() { done <- rt.Supervisor().ExecuteActionForTest("stale-x", supervisor.ActionConnect, snap) }()
+	<-reached
+
+	commitServers(t, rt) // publishes the removal; manager reconciliation not run
+	_, held := rt.UpstreamManager().GetClient("stale-x")
+	require.True(t, held, "test premise: the manager still holds the captured client")
+
+	close(resume)
+	require.NoError(t, <-done)
+	time.Sleep(700 * time.Millisecond)
+	require.Zero(t, launches.Load(), "the removed server's command was started")
+	require.NoFileExists(t, marker)
 }

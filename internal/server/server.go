@@ -2013,117 +2013,102 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 }
 
 // UpdateServer applies partial updates to an existing upstream server configuration.
+// The read-modify-write is one config commit (Runtime.CommitServerUpdate): the
+// stored server is re-read under the commit lock, so an update racing a removal
+// cannot recreate the removed server (UX-01 r8).
 func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error {
 	s.logger.Info("Updating upstream server", zap.String("name", serverName))
 
-	storageManager := s.runtime.StorageManager()
-	existing, err := storageManager.GetUpstreamServer(serverName)
-	if err != nil || existing == nil {
-		return fmt.Errorf("server '%s' not found", serverName)
-	}
-
-	// Apply non-zero/non-nil fields from updates
-	if updates.URL != "" {
-		existing.URL = updates.URL
-	}
-	if updates.Command != "" {
-		existing.Command = updates.Command
-	}
-	if updates.Args != nil {
-		existing.Args = updates.Args
-	}
-	if updates.Env != nil {
-		existing.Env = updates.Env
-	}
-	if updates.Headers != nil {
-		existing.Headers = updates.Headers
-	}
-	if updates.WorkingDir != "" {
-		existing.WorkingDir = updates.WorkingDir
-	}
-	if updates.Protocol != "" {
-		existing.Protocol = updates.Protocol
-	}
-	// Enabled and ReconnectOnUse are always applied: the REST handler resolves
-	// them against the existing server before calling UpdateServer.
-	existing.Enabled = updates.Enabled
-	existing.ReconnectOnUse = updates.ReconnectOnUse
-	// Quarantine is applied only when the caller stated it (the REST PATCH
-	// handler marks the explicit bit when the body carries `quarantined`).
-	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
-	// false copied from a config snapshot, which must never un-quarantine.
-	if updates.QuarantineExplicitlySet() {
-		existing.Quarantined = updates.Quarantined
-		existing.MarkQuarantineExplicitlySet(true)
-	}
-
-	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
-	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
-	// don't reset it. A non-nil pointer (including a pointer to false) is
-	// applied. The PATCH handler preserves the existing pointer when the
-	// request omits the field, so this nil-guard is the second half of the
-	// nil-preserve contract.
-	if updates.AutoApproveToolChanges != nil {
-		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
-	}
-
-	// ForwardHeaders (Spec 112): nil means "leave unchanged"; a non-nil slice
-	// replaces the allowlist and an empty one clears it. The PATCH handler
-	// preserves the existing slice when the request omits the field.
-	if updates.ForwardHeaders != nil {
-		existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
-	}
-
-	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
-	// non-empty value is applied. The PATCH handler preserves the existing value
-	// when the request omits the field, so this empty-guard is the second half of
-	// the leave-unchanged contract.
-	if updates.TrustMode != "" {
-		existing.TrustMode = updates.TrustMode
-	}
-
-	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
-	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
-	// existing pointer when the request omits the field, so this nil-guard is
-	// the second half of the nil-preserve contract.
-	if updates.InitTimeout != nil {
-		existing.InitTimeout = updates.InitTimeout
-	}
-
-	// Isolation is PATCH-semantic: nil means "leave unchanged"; a present
-	// struct REPLACES the override set wholesale.
-	//
-	// The old field-by-field non-zero merge here could not express a clear —
-	// an empty image or a nil `enabled` was indistinguishable from "not
-	// supplied" — which is half of why an inheriting server could never be
-	// restored once something wrote an explicit opt-out (GH #1142). The REST
-	// handler now resolves the patch against the persisted overrides
-	// (IsolationRequest.resolve) and hands over a complete struct, so replacing
-	// is both correct and the only way clears can work.
-	if updates.Isolation != nil {
-		existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
-	}
-
-	// Save to storage
-	if err := storageManager.SaveUpstreamServer(existing); err != nil {
-		return fmt.Errorf("failed to save server: %w", err)
-	}
-
-	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
-		for i, sc := range currentConfig.Servers {
-			if sc.Name == serverName {
-				currentConfig.Servers[i] = existing
-				break
-			}
+	err := s.runtime.CommitServerUpdate(serverName, func(existing *config.ServerConfig) (*config.ServerConfig, error) {
+		// Apply non-zero/non-nil fields from updates
+		if updates.URL != "" {
+			existing.URL = updates.URL
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
-	}
+		if updates.Command != "" {
+			existing.Command = updates.Command
+		}
+		if updates.Args != nil {
+			existing.Args = updates.Args
+		}
+		if updates.Env != nil {
+			existing.Env = updates.Env
+		}
+		if updates.Headers != nil {
+			existing.Headers = updates.Headers
+		}
+		if updates.WorkingDir != "" {
+			existing.WorkingDir = updates.WorkingDir
+		}
+		if updates.Protocol != "" {
+			existing.Protocol = updates.Protocol
+		}
+		// Enabled and ReconnectOnUse are always applied: the REST handler resolves
+		// them against the existing server before calling UpdateServer.
+		existing.Enabled = updates.Enabled
+		existing.ReconnectOnUse = updates.ReconnectOnUse
+		// Quarantine is applied only when the caller stated it (the REST PATCH
+		// handler marks the explicit bit when the body carries `quarantined`).
+		// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+		// false copied from a config snapshot, which must never un-quarantine.
+		if updates.QuarantineExplicitlySet() {
+			existing.Quarantined = updates.Quarantined
+			existing.MarkQuarantineExplicitlySet(true)
+		}
 
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))
+		// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
+		// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
+		// don't reset it. A non-nil pointer (including a pointer to false) is
+		// applied. The PATCH handler preserves the existing pointer when the
+		// request omits the field, so this nil-guard is the second half of the
+		// nil-preserve contract.
+		if updates.AutoApproveToolChanges != nil {
+			existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
+		}
+
+		// ForwardHeaders (Spec 112): nil means "leave unchanged"; a non-nil slice
+		// replaces the allowlist and an empty one clears it. The PATCH handler
+		// preserves the existing slice when the request omits the field.
+		if updates.ForwardHeaders != nil {
+			existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
+		}
+
+		// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
+		// non-empty value is applied. The PATCH handler preserves the existing value
+		// when the request omits the field, so this empty-guard is the second half of
+		// the leave-unchanged contract.
+		if updates.TrustMode != "" {
+			existing.TrustMode = updates.TrustMode
+		}
+
+		// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
+		// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
+		// existing pointer when the request omits the field, so this nil-guard is
+		// the second half of the nil-preserve contract.
+		if updates.InitTimeout != nil {
+			existing.InitTimeout = updates.InitTimeout
+		}
+
+		// Isolation is PATCH-semantic: nil means "leave unchanged"; a present
+		// struct REPLACES the override set wholesale.
+		//
+		// The old field-by-field non-zero merge here could not express a clear —
+		// an empty image or a nil `enabled` was indistinguishable from "not
+		// supplied" — which is half of why an inheriting server could never be
+		// restored once something wrote an explicit opt-out (GH #1142). The REST
+		// handler now resolves the patch against the persisted overrides
+		// (IsolationRequest.resolve) and hands over a complete struct, so replacing
+		// is both correct and the only way clears can work.
+		if updates.Isolation != nil {
+			existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
+		}
+
+		return existing, nil
+	}, nil)
+	if err != nil {
+		if errors.Is(err, runtime.ErrServerNotFound) {
+			return fmt.Errorf("server '%s' not found", serverName)
+		}
+		return err
 	}
 
 	// Notify about change
