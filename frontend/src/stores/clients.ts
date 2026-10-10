@@ -48,6 +48,11 @@ export const useClientsStore = defineStore('clients', () => {
   // has settled, so the retry is never older than the rows it lands on.
   let rosterGeneration = 0
   let settledGeneration = 0
+  // Bumped whenever roster rows are applied. A detail started while a roster
+  // fetch was already in flight shares that fetch's generation, so the
+  // generation alone cannot tell whether the detail predates the rows applied
+  // under it (Spec 115 review code-r3): the detail also checks this counter.
+  let rosterApplied = 0
   const deferredDetails = new Set<string>()
   function rosterSettled(generation: number) {
     if (generation !== rosterGeneration) return
@@ -111,6 +116,7 @@ export const useClientsStore = defineStore('clients', () => {
     applyAll(allResponse)
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
+      rosterApplied++
       rememberRosterCredentials(clientResponse.data.clients)
       warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
@@ -181,6 +187,7 @@ export const useClientsStore = defineStore('clients', () => {
             sessions: existing.sessions,
           }
         })
+        rosterApplied++
         rememberRosterCredentials(response.data.clients)
         for (const id of stale) void loadDetail(id)
         for (const id of [...detailLoaded]) {
@@ -209,12 +216,13 @@ export const useClientsStore = defineStore('clients', () => {
 
   async function loadDetail(id: string): Promise<void> {
     const generation = rosterGeneration
+    const applied = rosterApplied
     const response = await api.getClient(id)
     if (!response.success || !response.data) return
     const index = clients.value.findIndex(client => client.id === id)
     if (index < 0) return
-    if (generation !== rosterGeneration) {
-      // A roster refresh started while this detail was in flight (an SSE
+    if (generation !== rosterGeneration || applied !== rosterApplied) {
+      // A roster refresh started (or one already in flight was applied) while this detail was in flight (an SSE
       // invalidation such as credentials.changed). Every field of this
       // response may predate it, presence included (a revoked worker would
       // read connected again), so none is applied (Spec 115 UI-004). The
