@@ -241,6 +241,11 @@ func TestCredentialsTool_ArgumentDecoding(t *testing.T) {
 	}
 	before := f.tokenNames()
 	for _, c := range cases {
+		if !clientsEdition && clientAddressed(c.args) && (c.code == "reserved_identity" || c.code == "identity_not_found") {
+			// The server edition has no client credentials: the edition switch
+			// answers before the identity rules (A32).
+			c.code = profile.CredentialErrorCodeUnsupportedEdition
+		}
 		body := f.crefused(c.args)
 		assert.Equal(t, c.code, body["code"], "%v", c.args)
 		assert.Equal(t, c.field, body["field"], "%v", c.args)
@@ -252,10 +257,120 @@ func TestCredentialsTool_ArgumentDecoding(t *testing.T) {
 	assert.Equal(t, before, f.tokenNames(), "no refusal leaves a credential")
 }
 
+// clientAddressed reports whether a credentials call names a client credential.
+func clientAddressed(args map[string]any) bool {
+	if args["operation"] == "create_client" {
+		return true
+	}
+	c, ok := args["client"].(string)
+	return ok && c != ""
+}
+
+// TestCredentialsTool_ServerEditionRefusesClientOps: in the server edition every
+// client operation answers unsupported_edition and changes nothing, while
+// token operations keep working (A32). In the personal edition the same calls
+// succeed (covered by the delivery test below).
+func TestCredentialsTool_ServerEditionRefusesClientOps(t *testing.T) {
+	if clientsEdition {
+		t.Skip("personal edition serves client credentials")
+	}
+	f := newCredentialsToolFixture(t, nil)
+	f.cok(map[string]any{"operation": "create_token", "name": "edition-t", "profile": "work-readonly", "expires_in": "1h"})
+	before := f.tokenNames()
+	nChanges := len(f.changes())
+	for _, args := range []map[string]any{
+		{"operation": "create_client", "client": "edition-c", "profile": "work-readonly", "expires_in": "1h"},
+		{"operation": "get", "client": "edition-c"},
+		{"operation": "revoke", "client": "edition-c"},
+	} {
+		body := f.crefused(args)
+		assert.Equal(t, profile.CredentialErrorCodeUnsupportedEdition, body["code"], "%v", args)
+		assert.Equal(t, "client", body["field"], "%v", args)
+	}
+	assert.Equal(t, before, f.tokenNames(), "storage unchanged")
+	assert.Len(t, f.changes(), nChanges, "nothing audited")
+	list := f.cok(map[string]any{"operation": "list", "kind": "all"})
+	assert.EqualValues(t, 1, list["total"], "list holds the token only")
+}
+
 // --- the whole lifecycle at unit level, delivery and activity (T041, T042) --------
 
 func TestCredentialsTool_DeliveryAndActivityBody(t *testing.T) {
 	f := newCredentialsToolFixture(t, nil)
+	var secret string
+	nKinds := 1 // credentials issued (and revoked) by this test
+	if clientsEdition {
+		nKinds = 2
+		secret = deliverClient(t, f)
+	}
+
+	tok := f.cok(map[string]any{"operation": "create_token", "name": "research-task-42", "profile": "work-readonly", "expires_in": "30m"})
+	tsecret := tok["credential"].(string)
+	assert.Regexp(t, `^mcp_agt_[0-9a-f]{64}$`, tsecret)
+	assert.Equal(t, "pinned", tok["token"].(map[string]any)["binding"])
+	assert.Contains(t, tok["links"].(map[string]any)["identity"], "/ui/clients?tab=tokens&token=research-task-42")
+	tdelivery := tok["delivery"].(map[string]any)
+	assert.Equal(t, true, tdelivery["shown_once"])
+
+	// list/get/revoke carry no secret.
+	list := f.cok(map[string]any{"operation": "list"})
+	assert.EqualValues(t, nKinds, list["total"])
+	got := f.cok(map[string]any{"operation": "get", "token": "research-task-42"})
+	rev := f.cok(map[string]any{"operation": "revoke", "token": "research-task-42"})
+	assert.Equal(t, true, rev["changed"])
+	again := f.cok(map[string]any{"operation": "revoke", "token": "research-task-42"})
+	assert.Equal(t, false, again["changed"])
+	bodies := []map[string]any{list, got, rev, again}
+	calls := 5 // create_token, list, get, revoke, revoke
+	if clientsEdition {
+		cgot := f.cok(map[string]any{"operation": "get", "client": "delegated-worker"})
+		crev := f.cok(map[string]any{"operation": "revoke", "client": "delegated-worker"})
+		assert.Equal(t, true, crev["client_config_untouched"])
+		bodies = append(bodies, cgot, crev)
+		calls += 3 // create_client, get, revoke
+	}
+	for _, body := range bodies {
+		raw, _ := json.Marshal(body)
+		if secret != "" {
+			assert.NotContains(t, string(raw), secret)
+		}
+		assert.NotContains(t, string(raw), tsecret)
+	}
+
+	// The activity records carry the server-built summary, never the secret.
+	recs := f.internalCalls(calls)
+	sawRedacted := 0
+	for _, r := range recs {
+		raw, _ := json.Marshal(r)
+		if secret != "" {
+			assert.NotContains(t, string(raw), secret)
+		}
+		assert.NotContains(t, string(raw), tsecret)
+		if strings.Contains(r.Response, credentialRedactedMarker) {
+			sawRedacted++
+		}
+	}
+	assert.Equal(t, nKinds, sawRedacted, "every create stores the redacted delivery")
+	for _, r := range f.changes() {
+		raw, _ := json.Marshal(r)
+		if secret != "" {
+			assert.NotContains(t, string(raw), secret)
+		}
+		assert.NotContains(t, string(raw), tsecret)
+		assert.NotContains(t, string(raw), "Summarise today", "the purpose text never reaches profile_change")
+	}
+	kinds := map[string]int{}
+	for _, r := range f.changes() {
+		kinds[fmt.Sprint(r.Metadata["change"])]++
+	}
+	assert.Equal(t, nKinds, kinds["issue"])
+	assert.Equal(t, nKinds, kinds["revoke"], "an idempotent revoke writes no record")
+}
+
+// deliverClient issues the personal-edition client of the delivery test and
+// checks its one-time delivery; it returns the raw secret.
+func deliverClient(t *testing.T, f *credentialsToolFixture) string {
+	t.Helper()
 	out := f.cok(map[string]any{"operation": "create_client", "client": "delegated-worker", "profile": "work-readonly",
 		"expires_in": "1h", "purpose": "Summarise today's issues; assumes no writes"})
 	secret := out["credential"].(string)
@@ -285,52 +400,7 @@ func TestCredentialsTool_DeliveryAndActivityBody(t *testing.T) {
 	u, err := url.Parse(links["activity"].(string))
 	require.NoError(t, err)
 	assert.Equal(t, "delegated-worker", u.Query().Get("client"))
-
-	tok := f.cok(map[string]any{"operation": "create_token", "name": "research-task-42", "profile": "work-readonly", "expires_in": "30m"})
-	tsecret := tok["credential"].(string)
-	assert.Regexp(t, `^mcp_agt_[0-9a-f]{64}$`, tsecret)
-	assert.Equal(t, "pinned", tok["token"].(map[string]any)["binding"])
-	assert.Contains(t, tok["links"].(map[string]any)["identity"], "/ui/clients?tab=tokens&token=research-task-42")
-
-	// list/get/revoke carry no secret.
-	list := f.cok(map[string]any{"operation": "list"})
-	assert.EqualValues(t, 2, list["total"])
-	got := f.cok(map[string]any{"operation": "get", "client": "delegated-worker"})
-	rev := f.cok(map[string]any{"operation": "revoke", "token": "research-task-42"})
-	assert.Equal(t, true, rev["changed"])
-	again := f.cok(map[string]any{"operation": "revoke", "token": "research-task-42"})
-	assert.Equal(t, false, again["changed"])
-	crev := f.cok(map[string]any{"operation": "revoke", "client": "delegated-worker"})
-	assert.Equal(t, true, crev["client_config_untouched"])
-	for _, body := range []map[string]any{list, got, rev, again, crev} {
-		raw, _ := json.Marshal(body)
-		assert.NotContains(t, string(raw), secret)
-		assert.NotContains(t, string(raw), tsecret)
-	}
-
-	// The activity records carry the server-built summary, never the secret.
-	recs := f.internalCalls(7)
-	sawRedacted := 0
-	for _, r := range recs {
-		raw, _ := json.Marshal(r)
-		assert.NotContains(t, string(raw), secret)
-		assert.NotContains(t, string(raw), tsecret)
-		if strings.Contains(r.Response, credentialRedactedMarker) {
-			sawRedacted++
-		}
-	}
-	assert.Equal(t, 2, sawRedacted, "both creates store the redacted delivery")
-	for _, r := range f.changes() {
-		raw, _ := json.Marshal(r)
-		assert.NotContains(t, string(raw), secret)
-		assert.NotContains(t, string(raw), "Summarise today", "the purpose text never reaches profile_change")
-	}
-	kinds := map[string]int{}
-	for _, r := range f.changes() {
-		kinds[fmt.Sprint(r.Metadata["change"])]++
-	}
-	assert.Equal(t, 2, kinds["issue"])
-	assert.Equal(t, 2, kinds["revoke"], "an idempotent revoke writes no record")
+	return secret
 }
 
 // --- the secret-shaped input screen (T038a, T038c) ---------------------------------
@@ -339,8 +409,15 @@ func TestCredentialsTool_SecretInputScreen(t *testing.T) {
 	f := newCredentialsToolFixture(t, nil)
 	issued := f.cok(map[string]any{"operation": "create_token", "name": "seed", "profile": "work-readonly", "expires_in": "1h"})
 	agentSecret := issued["credential"].(string)
-	cl := f.cok(map[string]any{"operation": "create_client", "client": "seed-c", "profile": "work-readonly", "expires_in": "1h"})
-	clientSecret := cl["credential"].(string)
+	// The server edition issues no client credential (A32); a client-shaped
+	// secret is still refused by its prefix, so the cases run unchanged.
+	clientSecret := "mcp_cli_" + strings.Repeat("ab", 32)
+	seedCalls := 1
+	if clientsEdition {
+		cl := f.cok(map[string]any{"operation": "create_client", "client": "seed-c", "profile": "work-readonly", "expires_in": "1h"})
+		clientSecret = cl["credential"].(string)
+		seedCalls = 2
+	}
 	apiKey := f.rt.Config().APIKey
 	require.NotEmpty(t, apiKey)
 	aws := "AKIA" + "IOSFODNN7REALKEY"
@@ -397,7 +474,7 @@ func TestCredentialsTool_SecretInputScreen(t *testing.T) {
 	assert.Len(t, f.changes(), nChanges, "nothing audited")
 
 	// The stored records hold only the server summary.
-	recs := f.internalCalls(len(cases) + 5)
+	recs := f.internalCalls(len(cases) + 3 + seedCalls)
 	sawScreened, sawOversized := 0, 0
 	for _, r := range recs {
 		raw, _ := json.Marshal(r)
@@ -461,4 +538,33 @@ func TestCredentialsTool_DanglingPinReported(t *testing.T) {
 		return tok.Kind
 	}())
 	_ = profile.CredentialErrorCodeIdentityExists
+}
+
+// Review code-r1 (A24 revised): a short configured API key (here 6 characters,
+// below the old 8-character floor) is screened over MCP like any other key:
+// refused before minting, and absent from the stored activity and metadata.
+func TestCredentialsTool_SecretInputScreen_ShortAPIKey(t *testing.T) {
+	const shortKey = "k7Z2q9"
+	f := newCredentialsToolFixture(t, func(cfg *config.Config) { cfg.APIKey = shortKey })
+	before := f.tokenNames()
+	cases := []map[string]any{
+		{"operation": "create_token", "name": "x", "profile": "work-readonly", "expires_in": "1h", "purpose": shortKey},
+		{"operation": "create_token", "name": "x", "profile": "work-readonly", "expires_in": "1h", "purpose": "brief " + shortKey + " end"},
+		{"operation": "create_token", "name": "x", "profile": "work-readonly", "expires_in": shortKey + "d"},
+		{"operation": "create_client", "client": "x", "profile": "work-readonly", "expires_in": "1h", "purpose": "w " + shortKey},
+	}
+	for _, args := range cases {
+		body := f.crefused(args)
+		assert.Equal(t, "secret_in_argument", body["code"], "%v", args)
+		raw, _ := json.Marshal(body)
+		assert.NotContains(t, string(raw), shortKey)
+	}
+	assert.Equal(t, before, f.tokenNames(), "nothing minted")
+	for _, r := range f.internalCalls(len(cases)) {
+		raw, _ := json.Marshal(r)
+		assert.NotContains(t, string(raw), shortKey, "the key never reaches the activity record")
+	}
+	list := f.cok(map[string]any{"operation": "list"})
+	raw, _ := json.Marshal(list)
+	assert.NotContains(t, string(raw), shortKey)
 }

@@ -68,7 +68,7 @@ describe('callable deep link on a mounted table', () => {
 
 describe('a stale client detail cannot undo a lifecycle refresh but still delivers its sessions', () => {
   beforeEach(() => setActivePinia(createPinia()))
-  it('discards a detail answered after a newer roster fetch started', async () => {
+  it('discards a detail answered after a newer roster fetch and re-requests it after that roster applied', async () => {
     const api = (await import('@/services/api')).default as any
     const { useClientsStore } = await import('@/stores/clients')
     const row = { id: 'w1', display_name: 'w1', kind: 'custom', state: 'other', installed: false, connected: true, active_sessions: 0, calls_24h: 0 }
@@ -81,10 +81,42 @@ describe('a stale client detail cannot undo a lifecycle refresh but still delive
     api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [{ ...row, credential_state: 'revoked' }] } })
     await store.refreshPresence()
     expect(store.clients[0].credential_state).toBe('revoked')
-    // The superseded detail contributes only its detail-only fields.
-    resolveDetail({ success: true, data: { ...row, credential_state: 'client', sessions: [{ id: 's1' }] } })
+    // The superseded detail is discarded whole; the re-request answers fresh.
+    api.getClient = vi.fn().mockResolvedValue({ success: true, data: { ...row, credential_state: 'revoked', sessions: [{ id: 's1' }] } })
+    resolveDetail({ success: true, data: { ...row, credential_state: 'client', sessions: [{ id: 'old' }] } })
     await pending
+    await vi.waitFor(() => expect(store.clients[0].sessions).toEqual([{ id: 's1' }]))
+    expect(api.getClient).toHaveBeenCalledTimes(1)
     expect(store.clients[0].credential_state).toBe('revoked')
-    expect(store.clients[0].sessions).toEqual([{ id: 's1' }])
+  })
+
+  // Review code-r1 (UI chunk): the superseded detail must not restore its
+  // pre-revocation presence (state/connected), which a later poll with
+  // unchanged session count and last_seen would then preserve indefinitely.
+  it('keeps a revoked worker disconnected after a stale connected detail and a later poll', async () => {
+    const api = (await import('@/services/api')).default as any
+    const { useClientsStore } = await import('@/stores/clients')
+    const base = { id: 'w2', display_name: 'w2', kind: 'custom', installed: false, active_sessions: 1, last_seen: '2026-10-10T10:00:00Z', calls_24h: 0 }
+    const connectedRow = { ...base, state: 'connected', connected: true, credential_state: 'client' }
+    const revokedRoster = { ...base, state: 'other', connected: false, credential_state: 'revoked' }
+    api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [connectedRow] } })
+    const store = useClientsStore()
+    await store.refreshPresence()
+    let resolveStale: (v: any) => void = () => {}
+    api.getClient = vi.fn(() => new Promise(r => { resolveStale = r }))
+    const pending = store.loadDetail('w2')
+    // The revocation lands with unchanged active_sessions and last_seen.
+    api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [revokedRoster] } })
+    await store.refreshPresence()
+    const fresh = { ...revokedRoster, sessions: [] }
+    api.getClient = vi.fn().mockResolvedValue({ success: true, data: fresh })
+    resolveStale({ success: true, data: { ...connectedRow, sessions: [{ id: 's-old' }] } })
+    await pending
+    await vi.waitFor(() => expect(api.getClient).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(store.clients[0].sessions).toEqual([]))
+    await store.refreshPresence()
+    expect(store.clients[0].credential_state).toBe('revoked')
+    expect(store.clients[0].connected).toBe(false)
+    expect(store.clients[0].state).toBe('other')
   })
 })

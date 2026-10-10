@@ -20,16 +20,25 @@ type ClientSnippet struct {
 // clientCredentialHeader is the header a client credential travels in.
 const clientCredentialHeader = "X-API-Key"
 
-// mcpEndpointURL is this instance's MCP endpoint for a snippet.
+// mcpEndpointURL is this instance's MCP endpoint for a snippet. The scheme
+// follows the listener: with TLS enabled the same listener serves only HTTPS,
+// so a delivered snippet must never point a worker (and its credential
+// header) at plain HTTP.
 func (s *Server) mcpEndpointURL() string {
 	addr := "127.0.0.1:8080"
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.Listen != "" {
-		addr = cfg.Listen
+	scheme := "http"
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		if cfg.Listen != "" {
+			addr = cfg.Listen
+		}
+		if cfg.TLS != nil && cfg.TLS.Enabled {
+			scheme = "https"
+		}
 	}
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	return "http://" + addr + "/mcp"
+	return scheme + "://" + addr + "/mcp"
 }
 
 func (s *Server) clientSnippet(credential string) ClientSnippet {

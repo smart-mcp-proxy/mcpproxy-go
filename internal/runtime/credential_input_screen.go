@@ -31,12 +31,6 @@ const MaxCredentialArgumentsBytes = 16 * 1024
 // caller-supplied key (FR-020a): a key is never echoed.
 const UnknownArgumentField = "(unknown argument)"
 
-// minScreenAPIKeyLen is the shortest configured API key the screen compares
-// against. Auto-generated keys are 64 hex characters; a hand-set key shorter
-// than this would turn every argument containing it into a false positive,
-// so it is skipped (documented assumption in spec.md).
-const minScreenAPIKeyLen = 8
-
 // SecretInputError is the `secret_in_argument` refusal. Fields are the KNOWN
 // offending argument names (sorted, deduplicated); UnknownCount counts the
 // offending arguments whose names are not known (never named).
@@ -126,7 +120,10 @@ func (c *CredentialScreen) SecretShaped(s string) bool {
 	if strings.Contains(lower, auth.TokenPrefixStr) || strings.Contains(lower, auth.ClientTokenPrefixStr) {
 		return true
 	}
-	if len(c.apiKey) >= minScreenAPIKeyLen && containsConstantTime(s, c.apiKey) {
+	// Every nonempty configured key is compared, whatever its length (A24):
+	// authentication accepts any nonempty key, so a short one is still the
+	// administrator secret and must never reach stored metadata.
+	if c.apiKey != "" && containsConstantTime(s, c.apiKey) {
 		return true
 	}
 	if c.detector == nil {

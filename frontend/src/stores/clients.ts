@@ -32,8 +32,21 @@ export const useClientsStore = defineStore('clients', () => {
   // flag, so a load superseded by a presence poll still clears it.
   let fetchTicket = 0
   // Bumped by every roster fetch; a client detail answered after a newer
-  // roster fetch started is discarded.
+  // roster fetch started is discarded whole (its presence and credential
+  // fields predate that roster) and re-requested once the newest roster fetch
+  // has settled, so the retry is never older than the rows it lands on.
   let rosterGeneration = 0
+  let settledGeneration = 0
+  const deferredDetails = new Set<string>()
+  function rosterSettled(generation: number) {
+    if (generation !== rosterGeneration) return
+    settledGeneration = generation
+    const ids = [...deferredDetails]
+    deferredDetails.clear()
+    for (const id of ids) {
+      if (clients.value.some(client => client.id === id)) void loadDetail(id)
+    }
+  }
   let loadTicket = 0
   const scopeKey = () => JSON.stringify(scope)
   const isUnscoped = () => !scope.profile && !scope.client
@@ -59,7 +72,15 @@ export const useClientsStore = defineStore('clients', () => {
   }
 
   async function load(nextScope?: { profile?: string; client?: string }) {
-    rosterGeneration++
+    const generation = ++rosterGeneration
+    try {
+      await loadRoster(nextScope)
+    } finally {
+      rosterSettled(generation)
+    }
+  }
+
+  async function loadRoster(nextScope?: { profile?: string; client?: string }) {
     if (nextScope) scope = nextScope
     const ticket = ++fetchTicket
     const mine = ++loadTicket
@@ -92,7 +113,15 @@ export const useClientsStore = defineStore('clients', () => {
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
-    rosterGeneration++
+    const generation = ++rosterGeneration
+    try {
+      await refreshRoster()
+    } finally {
+      rosterSettled(generation)
+    }
+  }
+
+  async function refreshRoster() {
     const ticket = ++fetchTicket
     const asked = scopeKey()
     try {
@@ -172,19 +201,16 @@ export const useClientsStore = defineStore('clients', () => {
     if (index < 0) return
     if (generation !== rosterGeneration) {
       // A roster refresh started while this detail was in flight (an SSE
-      // invalidation such as credentials.changed): its credential and binding
-      // fields are newer, so only the detail-only fields are taken from this
-      // response (Spec 115 UI-004). The row still gets its sessions.
-      const d = response.data
-      clients.value[index] = {
-        ...clients.value[index],
-        state: d.state, installed: d.installed, connected: d.connected,
-        connection_unverified: d.connection_unverified, config_path: d.config_path,
-        display_path: d.display_path, sessions: d.sessions,
-      }
-    } else {
-      clients.value[index] = response.data
+      // invalidation such as credentials.changed). Every field of this
+      // response may predate it, presence included (a revoked worker would
+      // read connected again), so none is applied (Spec 115 UI-004). The
+      // detail is re-requested once the newest roster fetch has settled, so
+      // the row still gets its sessions from a response at least as new.
+      if (settledGeneration === rosterGeneration) void loadDetail(id)
+      else deferredDetails.add(id)
+      return
     }
+    clients.value[index] = response.data
     detailLoaded.add(id)
   }
 

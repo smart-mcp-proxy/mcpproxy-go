@@ -793,3 +793,42 @@ func TestCredentialsService_ScreenPrecedesWriteGate(t *testing.T) {
 	_, err = h.cs.IssueToken(context.Background(), mcpActor(), r)
 	assert.Equal(t, profile.CredentialErrorCodeReadOnlyMode, codeOf(err))
 }
+
+// Review code-r1 (A24 revised): a configured API key of ANY nonempty length is
+// screened. Keys of 1-7 characters used to skip the comparison, so a short key
+// pasted into issuance metadata was persisted and echoed. The 8-character key
+// is the boundary control.
+func TestCredentialsService_InputScreen_ShortAPIKey(t *testing.T) {
+	ctx := context.Background()
+	const base = "Q7Z2q9XW" // no character of it occurs in the other request fields
+	for n := 1; n <= len(base); n++ {
+		key := base[:n]
+		h := newCredHarness(t)
+		h.cfg.APIKey = key
+		creates, mints, gen := h.store.creates.Load(), h.store.mints.Load(), h.generated.Load()
+		nChanges := len(h.changes())
+		for _, purpose := range []string{key, "brief " + key + " end"} {
+			r := mcpTokenReq("t-ok", "ro", "1h")
+			r.Purpose = purpose
+			_, err := h.cs.IssueToken(ctx, mcpActor(), r)
+			var se *SecretInputError
+			require.ErrorAs(t, err, &se, "token purpose with a %d-char API key", n)
+			assert.Equal(t, []string{"purpose"}, se.Fields)
+			assert.NotContains(t, err.Error(), key)
+
+			c := mcpClientReq("c-ok", "ro", "1h")
+			c.DisplayName = purpose
+			_, err = h.cs.IssueClient(ctx, mcpActor(), c)
+			require.ErrorAs(t, err, &se, "client display_name with a %d-char API key", n)
+			assert.Equal(t, []string{"display_name"}, se.Fields)
+		}
+		assert.Equal(t, creates, h.store.creates.Load(), "no token stored (key len %d)", n)
+		assert.Equal(t, mints, h.store.mints.Load(), "no client minted (key len %d)", n)
+		assert.Equal(t, gen, h.generated.Load(), "no secret generated (key len %d)", n)
+		assert.Len(t, h.changes(), nChanges)
+		for _, tok := range h.listing() {
+			raw, _ := json.Marshal(tok)
+			assert.NotContains(t, string(raw), "brief "+key, "no stored metadata carries the key")
+		}
+	}
+}
