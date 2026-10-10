@@ -359,7 +359,9 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 	// Built once per call from the catalog, filtered by this session's own
 	// visibility predicate — the same snapshot the evaluator's index reader
 	// gets, so a gated id and an evaluated one suggest from one corpus.
+	listed := make(map[*directCatalogEntry]struct{}, len(visible))
 	for _, entry := range visible {
+		listed[entry] = struct{}{}
 		plan.suggestions = append(plan.suggestions,
 			entry.DisplayName,
 			entry.ServerName+":"+entry.ToolName)
@@ -379,6 +381,15 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 
 		entry, ok := p.resolveDirectDescribeIDIn(ctx, cat, id)
 		if !ok {
+			plan.gated[id] = struct{}{}
+			continue
+		}
+		// An entry the caller's effective view excludes (issue #1548: the
+		// visible set runDirectCheck narrows by the v3 session view) is gated
+		// exactly like an absent one, BEFORE evaluation — otherwise a hidden
+		// id on a not-Ready server would answer the evaluator's connection
+		// verdict where an absent id answers the planner's not_found.
+		if _, ok := listed[entry]; !ok {
 			plan.gated[id] = struct{}{}
 			continue
 		}

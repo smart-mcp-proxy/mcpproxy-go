@@ -424,3 +424,34 @@ func TestPreflightProfilePolicy_DirectCheckUsesEffectiveSelection(t *testing.T) 
 	assert.Equal(t, preflight.ReasonNotFound, byID["github__read_file"].Reason)
 	assert.Equal(t, preflight.ReasonNotFound, byID["we__ird__do_thing"].Reason, "outside the selected profile's servers")
 }
+
+// On the direct surface a selection-hidden exact id must answer what an absent
+// id answers in every server state — the planner's not_found — never the
+// evaluator's connection verdict, in both id grammars.
+func TestPreflightProfilePolicy_DirectCheckHiddenEqualsAbsentInEveryState(t *testing.T) {
+	f := newDirectCheckFixture(t)
+	switchTo := []string{"restricted"}
+	f.proxy.config.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}}
+	f.proxy.config.Profiles = []config.ProfileConfig{
+		{Name: "permissive", Servers: []string{"github"}, MaxTier: "destructive", SwitchableTo: &switchTo},
+		{Name: "restricted", Servers: []string{"github"}, MaxTier: "destructive", Tools: &config.ProfileToolRules{Deny: []string{"github:read_file"}}},
+	}
+	ctx := clientCtx("laptop", "permissive", auth.ProfileModeSwitchable)
+	ctx = profile.WithProfileScope(ctx, profileScopeForSlugIn(f.proxy.config, "restricted"))
+
+	for _, state := range []preflight.ServerRuntimeState{preflight.RuntimeStateReady, preflight.RuntimeStateError, preflight.RuntimeStateConnecting, preflight.RuntimeStatePendingAuth} {
+		t.Run(string(state), func(t *testing.T) {
+			f.proxy.preflightStateSource = func() (preflight.StateReader, func(serverName, toolName string) *config.ToolAnnotations, error) {
+				return stubState{state: state}, func(string, string) *config.ToolAnnotations { return nil }, nil
+			}
+			t.Cleanup(func() { f.proxy.preflightStateSource = nil })
+
+			payload := f.check(t, ctx, []interface{}{"github:read_file", "github__read_file", "github:no_such_tool", "github__no_such_tool"})
+			byID := checkResultsByID(payload)
+			norm := func(r describeCheckResult) describeCheckResult { r.ID = ""; r.DidYouMean = nil; return r }
+			assert.Equal(t, norm(byID["github:no_such_tool"]), norm(byID["github:read_file"]), "canonical grammar")
+			assert.Equal(t, norm(byID["github__no_such_tool"]), norm(byID["github__read_file"]), "display grammar")
+			assert.Equal(t, preflight.ReasonNotFound, byID["github:read_file"].Reason)
+		})
+	}
+}
