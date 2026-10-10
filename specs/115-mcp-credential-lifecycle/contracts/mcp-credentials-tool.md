@@ -38,9 +38,9 @@
 }
 ```
 
-**Secret-shaped input screen (FR-020a).** Before anything else, including operation dispatch and the unknown-key check, every string value in the arguments (known or unknown keys) is screened as in data-model §8. A hit answers `secret_in_argument` with `field` = the first offending key in sorted order, writes nothing, and never echoes the value.
+**Secret-shaped input screen (FR-020a).** Before anything else, including operation dispatch, the type check and the unknown-key check, the whole argument payload is screened as in data-model §8: every key and every value at every depth, whatever its JSON type, and every hit is collected. A hit answers `secret_in_argument` with `field` = the first offending known argument name in sorted order, or `"(unknown argument)"` when only unknown arguments offend, writes nothing, and never echoes a caller-supplied key or value.
 
-Arguments not listed for an operation are refused with `invalid_argument` and `field` naming the first offending key in sorted order. Every argument is a string. A non-string value answers `invalid_argument` with `"must be a string"`.
+Arguments not listed for an operation are refused with `invalid_argument`. `field` names the first offending key in sorted order only when it is a known argument name of the tool (listed for another operation); for any other key it is the fixed placeholder `"(unknown argument)"`, so a caller-supplied key is never echoed. Every argument is a string. A non-string value answers `invalid_argument` with `"must be a string"`.
 
 ## Operations
 
@@ -147,7 +147,7 @@ Tokens use `identity: …/ui/clients?tab=tokens&token=<name>` and `activity: …
 
 `internal_tool_call` record:
 
-- `arguments`: the request arguments after the handler's substitution. A value refused by the secret-shaped input screen is stored as `"[REDACTED: secret-shaped input]"`. Every other value already passed the screen. The record is built only after this substitution.
+- `arguments`: for a call that passed the screen, the request arguments as received (every key and value at every depth already passed it). For a call refused by the screen, the arguments are **replaced wholesale** by the server-built summary of data-model §8 (`_screened`, `operation` only when it is a known enum value, `offending_fields`, `unknown_offending_count`); no caller key or value is kept, so a second, nested or key-borne secret cannot survive. The record is built only from that form.
 - `response` on a successful create: the delivery object with `credential` and `snippet` replaced by the string `"[REDACTED: one-time credential]"`, and `delivery` reduced to `{shown_once, endpoint, header_name}`. This body is built by the server, not derived by key-name redaction.
 - `response` on list, get or revoke: the result as-is, which contains no secret.
 - `status: error` with the structured error text on refusal.

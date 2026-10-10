@@ -10,13 +10,13 @@ A refusal is an MCP tool result with `isError: true`. Its single text content is
 
 | Code | Operations | When | Extra keys | Example `error` |
 |---|---|---|---|---|
-| `secret_in_argument` | all | an argument value is secret-shaped (data-model §8); checked first | `field` | `argument "purpose" looks like a credential or secret; it was not stored. Remove it and retry` |
+| `secret_in_argument` | all | any key or value at any depth of the arguments is secret-shaped (data-model §8); checked first; all hits collected | `field` (known name or `"(unknown argument)"`), `offending_fields`, `unknown_offending_count` | `argument "purpose" looks like a credential or secret; it was not stored. Remove it and retry` |
 | `unknown_operation` | all | `operation` is not in the enum | `field: operation` | `unknown operation; valid: list, get, create_client, create_token, revoke` |
 | `missing_argument` | all | required argument absent | `field` | `create_token: missing required argument "expires_in"` |
-| `invalid_argument` | all | wrong type, bad syntax, both/neither of client/token, unknown key, length over limit | `field` | `invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters` (the value is not quoted) |
+| `invalid_argument` | all | wrong type, bad syntax, both/neither of client/token, unknown key, length over limit | `field` (an unknown key is reported as `"(unknown argument)"`, never by name) | `invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters` (the value is not quoted) |
 | `profile_required` | create_* | `profile: ""` (All servers) | `field: profile` | `a worker credential must name a profile; All servers is not allowed here` |
 | `unknown_profile` | create_* | profile does not exist | `field: profile` | `unknown profile "daily-reserch"` |
-| `invalid_expiry` | create_* | unparseable, ≤0 or >365d | `field: expires_in` | `invalid argument "expires_in": use a duration such as 30m, 4h or 7d` / `expiry duration cannot exceed 365 days` |
+| `invalid_expiry` | create_* | unparseable, ≤0, >365d, or a day count whose duration would overflow (checked before multiplying, A16) | `field: expires_in` | `invalid argument "expires_in": use a duration such as 30m, 4h or 7d` / `expiry duration cannot exceed 365 days` |
 | `identity_exists` | create_* | any record holds the id/name | `field`, `state: active\|expired\|revoked\|conflicting_token` | `client delegated-worker already exists (revoked); choose a new id` |
 | `reserved_identity` | create_* | connect-registry client id; token name `client-…` | `field` | `client id "cursor" is a supported client; connect it from the Web UI or CLI instead` |
 | `identity_not_found` | get, revoke | no record | `field` | `token "research-task-42" not found` |

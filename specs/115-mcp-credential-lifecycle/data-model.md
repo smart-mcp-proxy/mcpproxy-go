@@ -119,6 +119,17 @@ Consequences:
 - A hand edit or hot reload that does the same is not refused (existing rule), but `bindingGuardActive` then denies **every anonymous request** while the token stays an active guarded binding, so omitting the credential yields no access. The `anonymous_denied_by_binding_guard` warning names the token.
 - The binding stops counting once the token is revoked or expired, exactly like a client.
 
+**Dangling pins (spec review r2, FR-012b).** Today `bindingBypassable` (`profile_binding_guard.go:202-205`) returns `false` when the bound profile does not resolve ("a dangling bound base is already deny-all and cannot be bypassed"), and again when no bound-reachable profile resolves (`len(boundPolicies) == 0`). That reasoning covers the credentialed request only: omitting the credential still yields anonymous access, which is wider than deny-all. So `profiles delete force=true` followed by turning auth off disabled the standing guard. Spec 115 changes the predicate:
+
+| Bound reach | Anonymous reach | Verdict (today → Spec 115) |
+|---|---|---|
+| dangling (base missing, or no reachable profile resolves) | `anonymous_profile` empty (unrestricted) | false → **true** |
+| dangling | at least one anonymous-reachable profile resolves | false → **true** |
+| dangling | anonymous base dangling too (deny-all both ways) | false → false |
+| resolves | any | unchanged |
+
+This is evaluated by the one predicate, so it applies in every path: the API funnel delta (`BindingGuardDelta`), the per-request anonymous guard (`bindingGuardActive`, which covers file-watcher hot reloads), `BindingGuardActiveBindings`, and both binding kinds (a locked client and a guard-bound token). `ConservativeBindingGuard` already counts any active named binding regardless of whether its pin resolves, so it needs no change. `BindingGuardFixes` must not offer the `anonymous_profile = <pin>` fix when the pin is dangling (that would point anonymous at a missing profile); the offered fixes are `require_mcp_auth: true`, revoke, or reassign to an existing profile. A force-delete of the pinned profile while auth is already off and `anonymous_profile` grants anything is itself a config write through `MutateConfig`, so the funnel refuses it with `binding_bypassable_without_auth` too.
+
 Compatibility rule for legacy REST/CLI tokens (Assumption A13): tokens without `guard_bound` (all pre-115 tokens, and every token created through REST/CLI after 115) are not guarded bindings, so their behaviour is byte-identical to today. A test pins that a REST-created token with `profile_pin` set does not change any guard verdict.
 
 ## 6. Requests (runtime layer)
@@ -163,6 +174,26 @@ A value is secret-shaped when any of these holds:
 2. it contains the daemon's configured `api_key` value (compared in constant time; skipped when the key is empty);
 3. the existing sensitive-data detector (`internal/security.Detector`, built from the live `sensitive_data_detection` config with every category enabled regardless of user toggles) reports a finding in it.
 
-Outcome: `secret_in_argument` with `field` = the first offending key in sorted order. The error text names the field only and never echoes any argument value. The `internal_tool_call` activity record of that call stores the offending value as `"[REDACTED: secret-shaped input]"` (built by the handler, as for the delivery audit body), and the record is written only after this substitution, so the value never reaches the activity store, SSE, export, logs or `sensitive_data.detected` rows.
+Coverage (spec review r2): the screen runs over the **whole payload**, not only the known string arguments. It walks the decoded `arguments` object recursively and screens:
+- every value at every depth, whatever its JSON type: strings as-is; numbers and booleans as their JSON text (a numeric API key is still caught); arrays and objects element by element;
+- every key at every depth, known or unknown (an argument whose **name** is the credential is caught);
+- additionally the canonical JSON serialization of each top-level argument, so a secret split across adjacent structure in one argument is caught by the detector as it would be in an upstream payload.
+
+It collects **all** hits, it does not stop at the first.
+
+Outcome: `secret_in_argument`. `field` is the first offending top-level argument in sorted order when that argument name is one of the known names listed above; otherwise it is the fixed placeholder `"(unknown argument)"`. A caller-supplied key is never echoed, in `field`, the error text, or anywhere else. `offending_fields` lists the known offending argument names (sorted, deduplicated) and the count of unknown offending arguments, never their names. The error text names the known field (or says "an unrecognised argument") and never echoes any argument value.
+
+Recording: on a hit the handler does **not** record the caller's arguments with substitutions. It replaces the `arguments` of the `internal_tool_call` record **wholesale** with a server-built summary:
+
+```json
+{ "_screened": "secret-shaped input; arguments not stored",
+  "operation": "<only when it is one of the five enum values, else omitted>",
+  "offending_fields": ["purpose", "display_name"],
+  "unknown_offending_count": 1 }
+```
+
+No other caller key or value is kept, so a second secret, a nested secret, or a secret used as a key cannot survive into activity, export, SSE, `sensitive_data.detected` rows, logs or the DB. The record is built only from this summary. The handler's own logging (any level) uses the same summary; the generic upstream `handleCallTool` debug line (`mcp.go:3710`) is not on this path because `credentials` is a built-in tool with its own handler, and a test pins that.
+
+Passing calls: because the screen covered every key and value, the arguments of a call that passes are stored as-is. Unknown keys of a passing call are still refused with `invalid_argument` and `field: "(unknown argument)"`, never their name.
 
 Independently of the screen, error texts echo only values that already passed it **and** passed their syntax check (an id or name matching its regex, or an enum value). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`) are never echoed.
