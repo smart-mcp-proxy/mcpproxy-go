@@ -1378,7 +1378,7 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, false, nil)
+	tools, _, err := m.discoverTools(ctx, false, nil, nil)
 	return tools, err
 }
 
@@ -1389,22 +1389,20 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // FR-009: the discovery-completed marker must be stamped for the former and
 // left alone for the latter).
 func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
-	return m.discoverTools(ctx, dueOnly, nil)
+	return m.discoverTools(ctx, dueOnly, nil, nil)
 }
 
 // DiscoverToolsReportTicketed is DiscoverToolsReport that also stamps each
-// server's capture: ticket is called immediately BEFORE that server's
-// tools/list, and tickets maps every listed server to the value it returned.
+// server's capture: ticket is called by the caller that leads that server's
+// actual upstream tools/list, once it owns the list and before the request
+// is sent (managed.Client.ListToolsTicketed), and tickets maps every listed
+// server to its capture's ticket.
 // The sweep lists servers one after another, so one ticket taken before the
 // whole sweep would date a late server's capture too early and let a newer
 // capture be mistaken for a stale one (UX-02 cross-review).
 func (m *Manager) DiscoverToolsReportTicketed(ctx context.Context, dueOnly bool, ticket func() uint64) (tools []*config.ToolMetadata, listed []string, tickets map[string]uint64, err error) {
 	tickets = make(map[string]uint64)
-	var beforeList func(serverName string)
-	if ticket != nil {
-		beforeList = func(serverName string) { tickets[serverName] = ticket() }
-	}
-	tools, listed, err = m.discoverTools(ctx, dueOnly, beforeList)
+	tools, listed, err = m.discoverTools(ctx, dueOnly, ticket, tickets)
 	return tools, listed, tickets, err
 }
 
@@ -1415,13 +1413,15 @@ func (m *Manager) DiscoverToolsReportTicketed(ctx context.Context, dueOnly bool,
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, true, nil)
+	tools, _, err := m.discoverTools(ctx, true, nil, nil)
 	return tools, err
 }
 
-// discoverTools lists every eligible server's tools. beforeList, when set, is
-// called with the server's name immediately before its tools/list request.
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool, beforeList func(serverName string)) ([]*config.ToolMetadata, []string, error) {
+// discoverTools lists every eligible server's tools. With ticket set, each
+// server's list is ListToolsTicketed: the capture ticket is taken by the
+// caller that leads that server's actual upstream tools/list (so it follows
+// capture order, UX-02) and recorded in tickets under the server's name.
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool, ticket func() uint64, tickets map[string]uint64) ([]*config.ToolMetadata, []string, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1518,10 +1518,14 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool, beforeList fu
 
 		connectedCount++
 
-		if beforeList != nil && snapshot.name != "" {
-			beforeList(snapshot.name)
+		var tools []*config.ToolMetadata
+		var captured uint64
+		var err error
+		if ticket != nil && snapshot.name != "" {
+			tools, captured, err = client.ListToolsTicketed(ctx, ticket)
+		} else {
+			tools, err = client.ListTools(ctx)
 		}
-		tools, err := client.ListTools(ctx)
 		if err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
@@ -1540,6 +1544,9 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool, beforeList fu
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
+			if tickets != nil && captured != 0 {
+				tickets[snapshot.name] = captured
+			}
 		}
 
 		if tools != nil {

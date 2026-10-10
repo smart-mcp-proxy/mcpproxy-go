@@ -3,7 +3,9 @@ package managed
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -211,4 +213,68 @@ func TestListTools_AcquireContextResetsCachedResult(t *testing.T) {
 	defer mc.listToolsMu.Unlock()
 	assert.Nil(t, mc.listToolsLastResult, "leader acquisition must clear stale results")
 	assert.Nil(t, mc.listToolsLastErr, "leader acquisition must clear stale error")
+}
+
+// UX-02 cross-review r4: a caller coalesced onto a ticketed list receives the
+// LEADER's capture ticket (the ticket of the list that produced the answer),
+// not one it took itself.
+func TestListToolsTicketed_WaiterGetsLeaderTicket(t *testing.T) {
+	mc := newTestReadyClient(t)
+	shared := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a"}}
+
+	mc.listToolsInProgress = true
+	mc.listToolsWaitCh = make(chan struct{})
+	mc.listToolsLastResult = shared
+	mc.listToolsTicket = 7
+	close(mc.listToolsWaitCh)
+
+	called := false
+	tools, ticket, err := mc.ListToolsTicketed(context.Background(), func() uint64 { called = true; return 99 })
+	require.NoError(t, err)
+	assert.Equal(t, shared, tools)
+	assert.Equal(t, uint64(7), ticket)
+	assert.False(t, called, "a coalesced caller must not take its own ticket")
+}
+
+// A ticketed caller never adopts an unticketed list (a health check or the
+// tool-count refresh leads those): it becomes the leader of a new list and
+// takes its ticket once it owns that list.
+func TestListToolsTicketed_DoesNotJoinUnticketedList(t *testing.T) {
+	mc := newTestReadyClient(t)
+	_, release, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var taken atomic.Int32
+	ledNew := make(chan bool, 1)
+	returned := make(chan struct{}, 1)
+	go func() {
+		_, _, _ = mc.ListToolsTicketed(ctx, func() uint64 {
+			taken.Add(1)
+			mc.listToolsMu.Lock()
+			owns := mc.listToolsInProgress && mc.listToolsWaitCh != nil
+			mc.listToolsMu.Unlock()
+			ledNew <- owns
+			// This client has no transport: stop here, once the ticket was
+			// taken as the new list's leader, instead of sending the list.
+			runtime.Goexit()
+			return 0
+		})
+		returned <- struct{}{}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	require.Zero(t, taken.Load(), "no ticket is taken while waiting on another caller's list")
+	mc.publishListToolsResult([]*config.ToolMetadata{{ServerName: "test-server", Name: "unticketed"}}, nil)
+	release()
+
+	select {
+	case owns := <-ledNew:
+		require.True(t, owns, "the ticket is taken by the leader of a new list")
+	case <-returned:
+		t.Fatal("the caller returned the unticketed list's answer")
+	case <-time.After(5 * time.Second):
+		t.Fatal("ticketed caller did not lead a new list")
+	}
+	require.Equal(t, int32(1), taken.Load())
 }

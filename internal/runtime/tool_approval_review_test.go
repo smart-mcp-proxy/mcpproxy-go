@@ -425,3 +425,58 @@ func TestReviewFingerprint_HashlessIsNonEmptyAndTracksDefinition(t *testing.T) {
 	rec.CurrentHash = "abc"
 	require.Equal(t, "abc", reviewFingerprint(rec))
 }
+
+// UX-02 cross-review r4 finding 2: an APPROVED tool on a quarantined server
+// is activated by the server approval just like a promoted pending one, so it
+// must be bound to the review too. Reviewed read-only, it turns destructive
+// (annotations are not part of the approval hash, so it stays "approved")
+// before the operator submits: the stale approval is rejected, the commit
+// does not run and the server stays quarantined.
+func TestCommitServerApprovalDecision_RejectsApprovedToolChangedSinceReview(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true, Quarantined: true}})
+	readOnly := ux02Tools("srv", 2)
+	for _, tl := range readOnly {
+		tl.Annotations = &config.ToolAnnotations{ReadOnlyHint: boolP(true)}
+	}
+	_, err := rt.checkToolApprovals("srv", readOnly)
+	require.NoError(t, err)
+	res, err := rt.ApproveToolsReviewed("srv", []string{"read_000"}, false, nil, "api")
+	require.NoError(t, err)
+	require.Equal(t, []string{"read_000"}, res.Approved)
+
+	// The operator's review: both tools with their fingerprints.
+	review, err := rt.GetServerReview(context.Background(), "srv")
+	require.NoError(t, err)
+	reviewed := map[string]string{}
+	for _, tl := range review.Tools {
+		reviewed[tl.Name] = tl.CurrentHash
+	}
+	require.Len(t, reviewed, 2)
+
+	// After the review the approved tool turns destructive; its definition
+	// (and so its approval hash) is unchanged.
+	later := ux02Tools("srv", 2)
+	later[0].Annotations = &config.ToolAnnotations{ReadOnlyHint: boolP(false), DestructiveHint: boolP(true)}
+	later[1].Annotations = &config.ToolAnnotations{ReadOnlyHint: boolP(true)}
+	_, err = rt.checkToolApprovals("srv", later)
+	require.NoError(t, err)
+	rec := ux02Record(t, rt, "srv", "read_000")
+	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+	require.NotEqual(t, reviewed["read_000"], reviewFingerprint(rec), "the safety hints changed the fingerprint")
+
+	committed := false
+	n, err := rt.CommitServerApprovalDecision("srv", nil, reviewed, "api", func() error { committed = true; return nil })
+	var stale *storage.StaleToolReviewError
+	require.True(t, errors.As(err, &stale), "a stale review must be rejected, got %v", err)
+	require.Equal(t, []string{"read_000"}, stale.Changed)
+	require.Zero(t, n)
+	require.False(t, committed, "the baseline commit must not run on a stale review")
+	require.Equal(t, storage.ToolApprovalStatusPending, ux02Record(t, rt, "srv", "read_001").Status, "nothing is promoted")
+	require.True(t, rt.serverIsQuarantined("srv"), "the server stays quarantined")
+
+	// Blocking the changed tool makes the same review acceptable.
+	n, err = rt.CommitServerApprovalDecision("srv", []string{"read_000"}, reviewed, "api", func() error { committed = true; return nil })
+	require.NoError(t, err)
+	require.True(t, committed)
+	require.Equal(t, 1, n)
+}

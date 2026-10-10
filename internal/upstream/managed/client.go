@@ -64,6 +64,10 @@ type Client struct {
 	listToolsWaitCh     chan struct{}
 	listToolsLastResult []*config.ToolMetadata
 	listToolsLastErr    error
+	// listToolsTicket is the caller-supplied capture ticket of the in-flight
+	// (or last) upstream ListTools, taken by its leader once it owns the
+	// list and before the request is sent; 0 when the leader took none.
+	listToolsTicket uint64
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -980,6 +984,7 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	mc.listToolsWaitCh = make(chan struct{})
 	mc.listToolsLastResult = nil
 	mc.listToolsLastErr = nil
+	mc.listToolsTicket = 0
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
 	mc.listToolsMu.Unlock()
@@ -1015,6 +1020,27 @@ func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	tools, _, err := mc.listTools(ctx, nil)
+	return tools, err
+}
+
+// ListToolsTicketed is ListTools that also reports the capture ticket of the
+// upstream tools/list whose answer it returns. The ticket is taken with next
+// by the caller that LEADS that tools/list, once it owns the list and before
+// the request is sent; a caller coalesced onto it receives the same ticket.
+// Upstream lists on one client are serialized, so tickets follow the order
+// in which the inventories were actually captured — a caller that stalls
+// before reaching the list cannot carry an older ticket than a list that
+// started after it (UX-02 cross-review r4). A coalesced caller never joins
+// an unticketed list (health check, tool-count refresh): it lists again.
+func (mc *Client) ListToolsTicketed(ctx context.Context, next func() uint64) ([]*config.ToolMetadata, uint64, error) {
+	if next == nil {
+		return nil, 0, fmt.Errorf("ListToolsTicketed requires a ticket source")
+	}
+	return mc.listTools(ctx, next)
+}
+
+func (mc *Client) listTools(ctx context.Context, next func() uint64) ([]*config.ToolMetadata, uint64, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1024,13 +1050,21 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, 0, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
 	for {
 		listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
 		if ok {
-			return mc.runListToolsAsLeader(listCtx, release)
+			var ticket uint64
+			if next != nil {
+				ticket = next()
+				mc.listToolsMu.Lock()
+				mc.listToolsTicket = ticket
+				mc.listToolsMu.Unlock()
+			}
+			tools, err := mc.runListToolsAsLeader(listCtx, release)
+			return tools, ticket, err
 		}
 
 		mc.listToolsMu.Lock()
@@ -1047,7 +1081,7 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			// Defensive fallback: every leader path is supposed to allocate a
 			// wait channel via acquireListToolsContext, so this should be
 			// unreachable. Fail fast rather than block forever on a nil channel.
-			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
+			return nil, 0, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
@@ -1055,16 +1089,29 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-waitCh:
 			mc.listToolsMu.Lock()
 			res := mc.listToolsLastResult
 			err := mc.listToolsLastErr
+			ticket := mc.listToolsTicket
+			superseded := mc.listToolsWaitCh != nil && mc.listToolsWaitCh != waitCh
 			mc.listToolsMu.Unlock()
-			if err != nil {
-				return nil, fmt.Errorf("ListTools failed: %w", err)
+			if superseded {
+				// A new leader already claimed the next list and reset the
+				// shared result: what we read is not the list we waited
+				// on. Join (or lead) the current one instead.
+				continue
 			}
-			return res, nil
+			if next != nil && ticket == 0 {
+				// The shared list carried no capture ticket: list again
+				// rather than date its inventory after the fact.
+				continue
+			}
+			if err != nil {
+				return nil, 0, fmt.Errorf("ListTools failed: %w", err)
+			}
+			return res, ticket, nil
 		}
 	}
 }

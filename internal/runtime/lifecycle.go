@@ -666,8 +666,7 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 			// flight, replacing the managed client. Capturing an old client's
 			// untrusted definition under the replacement connection would make
 			// the review record lie about what is currently offered.
-			ticket := r.nextInventoryTicket()
-			if tools, err := client.ListTools(ctx); err == nil {
+			if tools, ticket, err := client.ListToolsTicketed(ctx, r.nextInventoryTicket); err == nil {
 				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
 					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
@@ -859,9 +858,14 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 		}
 
 		// Discover tools from this server. The inventory ticket is taken
-		// right before the capture so freshness follows capture order (UX-02).
-		ticket = r.nextInventoryTicket()
-		tools, err = client.ListTools(ctx)
+		// by whichever caller leads the actual upstream tools/list, once it
+		// owns the list (ListToolsTicketed), so freshness follows capture
+		// order even when this pass stalls before reaching the list or is
+		// coalesced onto another caller's (UX-02 cross-review r4).
+		if r.inventoryListHook != nil {
+			r.inventoryListHook(serverName)
+		}
+		tools, ticket, err = client.ListToolsTicketed(ctx, r.nextInventoryTicket)
 		if err == nil {
 			break // Success!
 		}

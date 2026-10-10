@@ -41,8 +41,8 @@ import (
 // inventory tickets (see nextInventoryTicket), both guarded by mu:
 //
 //   - appliedInventory is the highest ticket a discovery pass has applied for
-//     the server. The ticket is taken when the inventory is CAPTURED (right
-//     before that server's tools/list), so freshness follows capture order,
+//     the server. The ticket is taken when the inventory is CAPTURED (by the
+//     leader of that server's tools/list), so freshness follows capture order,
 //     not the order in which passes happen to reach the lock: an older
 //     inventory that acquires the lock after a newer one was applied is stale
 //     and is dropped (UX-02 cross-review).
@@ -67,12 +67,17 @@ func (r *Runtime) toolApprovalLock(serverName string) *toolApprovalServerLock {
 	return v.(*toolApprovalServerLock)
 }
 
-// nextInventoryTicket returns a new inventory ticket. Take it immediately
-// BEFORE capturing a tool inventory (the tools/list call; the sweep takes one
-// per server through DiscoverToolsReportTicketed), and hand it to
-// applyDifferentialToolUpdateCaptured / checkToolApprovalsCaptured with that
-// inventory. Tickets are global and strictly increasing, so a later capture
-// always carries a larger ticket.
+// nextInventoryTicket returns a new inventory ticket. Discovery passes do not
+// call it themselves before listing: they pass it to
+// managed.Client.ListToolsTicketed (the sweep through
+// DiscoverToolsReportTicketed), which calls it from the caller that LEADS the
+// actual upstream tools/list, once that caller owns the list — so a pass that
+// stalls before reaching the list, or is coalesced onto another caller's list,
+// carries the ticket of the capture it really returns (UX-02 cross-review r4).
+// Hand the ticket to applyDifferentialToolUpdateCaptured /
+// checkToolApprovalsCaptured with that inventory. Tickets are global and
+// strictly increasing, and one client's lists are serialized, so a later
+// capture always carries a larger ticket.
 func (r *Runtime) nextInventoryTicket() uint64 {
 	return r.inventoryTickets.Add(1)
 }
@@ -133,8 +138,9 @@ func (r *Runtime) WithToolApprovalLock(serverName string, fn func() error) error
 // lock (UX-02 cross-review):
 //
 //  1. With expected non-nil (the review-bound form), every "pending" record
-//     that is not in blocked must be in expected with an unchanged
-//     CurrentHash; otherwise nothing is written and a
+//     and every enabled "approved" record that is not in blocked must be in
+//     expected with an unchanged review fingerprint (definition hash + safety
+//     hints); otherwise nothing is written and a
 //     *storage.StaleToolReviewError names the changed or unreviewed tools. A
 //     tool discovered after the operator's review, or a selected tool whose
 //     definition changed since, therefore fails the approval instead of being
@@ -180,7 +186,18 @@ func (r *Runtime) commitServerApprovalLocked(serverName string, exclude map[stri
 		current := make(map[string]*storage.ToolApprovalRecord, len(records))
 		var held []string
 		for _, record := range records {
-			if record.Status == storage.ToolApprovalStatusPending && !exclude[record.ToolName] {
+			if exclude[record.ToolName] {
+				continue
+			}
+			// Pending tools are promoted by this approval; approved, enabled
+			// ones are activated by the unquarantine that follows it. Both
+			// must still be what the operator reviewed — an approved tool
+			// whose safety hints changed since (annotations are not part of
+			// the approval hash, so it stays "approved") is out of date too
+			// (UX-02 cross-review r4).
+			activates := record.Status == storage.ToolApprovalStatusPending ||
+				(record.Status == storage.ToolApprovalStatusApproved && !record.Disabled)
+			if activates {
 				current[record.ToolName] = record
 				held = append(held, record.ToolName)
 			}

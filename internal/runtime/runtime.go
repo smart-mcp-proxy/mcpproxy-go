@@ -244,6 +244,11 @@ type Runtime struct {
 	// can pause a pass mid-flight and drive interleavings deterministically.
 	toolApprovalReadHook func(serverName, toolName string)
 
+	// inventoryListHook, when set (tests only), runs in the single-server
+	// discovery pass immediately before its tools/list call, so tests can
+	// stall a pass between "decided to list" and the actual capture.
+	inventoryListHook func(serverName string)
+
 	// inventoryApplyHook, when set (tests only), runs in applyInventory after
 	// the inventory was captured and before the pass takes the server's
 	// tool-approval lock.
