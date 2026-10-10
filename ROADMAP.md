@@ -1041,4 +1041,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [111-personal-docker-image](./specs/111-personal-docker-image/) | — | — |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
 | [113-upstream-resilience](./specs/113-upstream-resilience/) | `drafted` | 0/100 (0%) |
-| [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `drafted` | 0/87 (0%) |
+| [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |

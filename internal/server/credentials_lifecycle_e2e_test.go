@@ -26,6 +26,8 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // Spec 115 Phase 5 (quickstart.md §3): end-to-end proof of the credential
@@ -773,4 +775,55 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	// A revoked credential cannot read on a fresh request.
 	status, _ := e.rawPost("/mcp", cs, "", "tools/list")
 	assert.Equal(t, http.StatusUnauthorized, status)
+}
+
+// T026a (A19): revoke wins over an in-flight connect. A supported client holds
+// a current secret and, mid-reconnect, a staged secret; an MCP revoke answers
+// changed:true at once, both live sessions get 401 on their next request, no
+// call dispatches afterwards, and the connect fails closed at commit.
+func TestE2E_CredentialsLifecycle_RevokeDuringConnect(t *testing.T) {
+	e := newCredE2E(t, nil)
+	e.createResearchProfiles()
+	minter := e.env.proxyServer.runtime.ClientsService().ConnectMinter()
+	prof := "daily-research"
+	intent := connect.CredentialIntent{Profile: &prof, ActorKind: "api_key", Surface: "api"}
+	first, err := minter.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.NoError(t, minter.Commit("cursor", intent, first))
+	current := e.session("/mcp", map[string]string{"X-API-Key": first.Secret})
+	isErr, text, err := workerCall(current, "call_tool_read", map[string]any{"name": "library:search_books", "args": map[string]any{}})
+	require.NoError(t, err)
+	require.False(t, isErr, text)
+
+	// A reconnect stages a second secret and holds the in-flight claim.
+	staged, err := minter.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.True(t, staged.Rotating)
+	stagedSession := e.session("/mcp", map[string]string{"X-API-Key": staged.Secret})
+
+	rev := e.adminOK("credentials", map[string]any{"operation": "revoke", "client": "cursor"})
+	assert.Equal(t, true, rev["changed"], "a held connect claim never blocks a revoke")
+	assert.Equal(t, true, rev["client_config_untouched"])
+
+	before := e.total()
+	for label, c := range map[string]struct {
+		secret string
+		sess   *client.Client
+	}{"current": {first.Secret, current}, "staged": {staged.Secret, stagedSession}} {
+		status, body := e.rawPost("/mcp", c.secret, c.sess.GetSessionId(), "tools/list")
+		assert.Equal(t, http.StatusUnauthorized, status, label)
+		assert.Contains(t, body, "revoked", label)
+		_, _, err := workerCall(c.sess, "call_tool_read", map[string]any{"name": "library:search_books", "args": map[string]any{}})
+		assert.Error(t, err, label)
+	}
+	assert.Equal(t, before, e.total(), "nothing dispatches after the revoke")
+
+	var superseded *runtime.CredentialSupersededError
+	require.ErrorAs(t, minter.Commit("cursor", intent, staged), &superseded)
+	for _, secret := range []string{first.Secret, staged.Secret} {
+		status, _ := e.rawPost("/mcp", secret, "", "tools/list")
+		assert.Equal(t, http.StatusUnauthorized, status, "the failed commit restores nothing")
+	}
+	got := e.adminOK("credentials", map[string]any{"operation": "get", "client": "cursor"})
+	assert.Equal(t, "revoked", got["credential"].(map[string]any)["state"])
 }
