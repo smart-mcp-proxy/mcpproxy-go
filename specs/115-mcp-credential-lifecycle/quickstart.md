@@ -46,6 +46,7 @@ The daemon must have `require_mcp_auth: true` or a confining `anonymous_profile`
 
 ### E2E-1 Fresh client path (`TestE2E_CredentialsLifecycle_FreshClient`)
 1. The admin initializes and checks that `tools/list` contains `credentials` and `profiles`.
+   (Unit-level companion, not E2E: a fault-injection store whose `ListAgentTokens` fails after a successful mint still yields the secret and view; a failing mint yields no record and no `issue` record. See T015a.)
 2. The admin runs `profiles create daily-research` (servers `[library]`, `max_tier: read`, deny `library:read_private*`, `unannotated: deny`, code/management off).
 3. The admin runs `credentials create_client delegated-worker profile=daily-research expires_in=1h`. Assert `binding=locked`, `lease=true`, `state=active`, a credential with prefix `mcp_cli_`, a snippet header `X-API-Key`, and links with no `apikey`.
 4. The worker initializes with the credential. Its `tools/list` contains neither `credentials` nor `profiles`.
@@ -76,7 +77,9 @@ The daemon must have `require_mcp_auth: true` or a confining `anonymous_profile`
 6. `profiles effective_tools name=triage` lists `tracker:comment_issue` as admitted with its write tier, and the UI label check in T065 covers the "exception" wording.
 
 ### E2E-4 Parity and negative paths (`TestE2E_CredentialsLifecycle_Negatives`, `…_SurfaceParity`)
-- **Surface parity**: for a token and a client, check every fixture tool via (a) `/mcp` `call_tool_*`, (b) `/mcp/call`, (c) `/mcp/code` `code_execution` nested `call_tool`, and (d) `/mcp/all` direct `library__search_books`. Each outcome must equal the `explain` decision, and refusals must dispatch zero times.
+- **Surface parity** uses two profiles, because `/mcp/code` hides `code_execution` from a profile with `code_execution: false` (`mcp_routing.go:1076-1078`), so nested policy cannot be exercised under `daily-research`:
+  - `daily-research-code`: the same policy as `daily-research` (servers `[library]`, `max_tier: read`, deny `library:read_private*`, `unannotated: deny`) but `code_execution: true`. For a token and a client issued to it, check every fixture tool via (a) `/mcp` `call_tool_*`, (b) `/mcp/call`, (c) `/mcp/code` `code_execution` with a nested `call_tool`, and (d) `/mcp/all` direct `library__search_books`. Each outcome must equal the `explain` decision. Admitted nested reads (`library:search_books`) dispatch exactly once per call; forbidden nested calls (`add_note`, `read_private_notes`, `mystery_tool`, `tracker:list_issues`) dispatch zero times and the script sees a policy refusal.
+  - `daily-research` (code off): for a token and a client issued to it, `/mcp/code` `tools/list` lacks `code_execution`, and a forged `tools/call code_execution` whose script calls `library:search_books` is refused before the script runs, with zero dispatches for every fixture tool.
 - **Deleted pin fails closed**: run `profiles delete daily-research force=true` while worker token X is pinned to it. X's next call is refused with zero dispatches. `credentials get` reports `profile_state=dangling`.
 - **Non-admin cannot mutate**: for a worker client, a worker token, an anonymous caller (a second daemon config with `require_mcp_auth: false` and `anonymous_profile` set), and an admin session after `set_profile` into a non-management profile: `tools/list` lacks `credentials`, and a forged `tools/call credentials create_token …` returns `unknown tool: credentials`. A `credentials list` (admin, afterwards) shows no new identity. After the admin runs `set_profile("")`, the tool is visible again.
 - **Write-disabled management**: with `read_only_mode: true` (hot reload), `create_client`, `create_token` and `revoke` each return `code=read_only_mode`, and `list`/`get` still work. Repeat with `disable_management: true` → `management_disabled`. Check with list that no identity was created or revoked.
@@ -92,12 +95,19 @@ The daemon must have `require_mcp_auth: true` or a confining `anonymous_profile`
 
   After each failure: `credentials list` and the raw REST list (read-only verification, not management) show no new record, and no orphan credential authenticates. Each would-be secret from a failed call is absent, because none was returned.
 - **Guard**: with a daemon at `require_mcp_auth: false` and no `anonymous_profile`, `create_client`/`create_token` return `binding_bypassable_without_auth` with `fixes`, and nothing is minted.
+- **Guard persistence (FR-012a)** (`TestE2E_CredentialsLifecycle_GuardPersists`): with `require_mcp_auth: true`, the admin issues token `confined-1` (profile `daily-research`) over MCP. Then:
+  1. a config write through the API funnel (`PATCH /api/v1/config` and `POST /api/v1/config/apply`, used here only as the attack vector, not for administration) setting `require_mcp_auth: false` is refused with `binding_bypassable_without_auth` whose `bindings[].token_name = "confined-1"`; the live config is unchanged;
+  2. the same write with `require_mcp_auth: false` plus an `anonymous_profile` wider than `daily-research` (or with the confining `anonymous_profile` removed, starting from a daemon confined by `anonymous_profile: daily-research`) is refused the same way;
+  3. the same change applied as a hand edit of the config file (file-watcher hot reload) is applied, and then an anonymous session (no credential) gets a refusal on every fixture tool (`tools/call` refused, `anonymous_denied_by_binding_guard` warning naming `confined-1`) with zero dispatches across the ledger;
+  4. after `credentials revoke token=confined-1`, the anonymous session's access follows the plain config again (the guard released), proving the binding is tied to the active token;
+  5. compatibility: a token created with REST `POST /api/v1/tokens` with `profile_pin` does not block step 1 (A13).
 
 ### E2E-5 Secret handling (`TestE2E_CredentialsLifecycle_SecretSinks`)
 1. Capture these sinks: a zap observer at debug for core logs, the per-server log files, `/api/v1/activity` with `limit=1000`, `/api/v1/activity/export` (JSON and CSV), the SSE `/events` stream for the whole run, MCP notifications received by all sessions, every error text, the config file bytes, and the `config.db` bytes.
 2. Run issue, list, get, revoke, and a failed duplicate issue for both kinds.
-3. For each delivered secret `S`: `strings.Contains(sink, S)` is false for every sink. It is true only for the one create result. The `profile_change{issue}` record carries `token_prefix` (12 characters) and `purpose_set` but neither `S` nor the purpose text.
-4. After revoke, the revoked credential cannot get metadata or tools on its existing session: `tools/list`, `credentials list` and `retrieve_tools` all return 401.
+3. Secret fed back as input (FR-020a): for each delivered secret `S`, call `create_client`/`create_token` with `S` (and with `S` embedded in other text) as `purpose`, `display_name`, `client`, `name`, `profile`, `expires_in`, `operation`, and an unknown key's value. Each call answers `secret_in_argument` naming the field, the error text does not contain `S`, nothing is minted, and the call's activity record stores `[REDACTED: secret-shaped input]`. Repeat with the daemon's API key as the value.
+4. For each delivered secret `S`: `strings.Contains(sink, S)` is false for every sink, including credential metadata from `list`/`get` and the REST token/client lists. It is true only for the one create result. The `profile_change{issue}` record carries `token_prefix` (12 characters) and `purpose_set` but neither `S` nor the purpose text.
+5. After revoke, the revoked credential cannot get metadata or tools on its existing session: `tools/list`, `credentials list` and `retrieve_tools` all return 401.
 
 ### E2E-6 Dispatch proof (cross-cutting)
 Every denied or revoked call in E2E-1 to E2E-5 asserts a dispatch delta of 0 **and** an inner semantic refusal: `isError: true` with a policy reason, or HTTP 401 with the agent-token error. The live harness repeats this with the ledger file. EVIDENCE.md lists every call with the expected and observed ledger delta.

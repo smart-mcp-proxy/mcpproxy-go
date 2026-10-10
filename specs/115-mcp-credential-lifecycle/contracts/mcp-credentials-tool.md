@@ -38,6 +38,8 @@
 }
 ```
 
+**Secret-shaped input screen (FR-020a).** Before anything else, including operation dispatch and the unknown-key check, every string value in the arguments (known or unknown keys) is screened as in data-model §8. A hit answers `secret_in_argument` with `field` = the first offending key in sorted order, writes nothing, and never echoes the value.
+
 Arguments not listed for an operation are refused with `invalid_argument` and `field` naming the first offending key in sorted order. Every argument is a string. A non-string value answers `invalid_argument` with `"must be a string"`.
 
 ## Operations
@@ -68,6 +70,7 @@ Args: `client` (required), `profile` (required), `expires_in` (required), `mode?
 
 Checks run in order under `bindingWriteMu`. The first one that fails is returned, and nothing is written:
 
+0. secret-shaped input screen (`secret_in_argument`), run by the handler before the service is called
 1. read_only_mode, then disable_management
 2. edition supports clients (`unsupported_edition`)
 3. `client` id syntax (`invalid_argument`), then a connect-registry id (`reserved_identity`)
@@ -76,7 +79,7 @@ Checks run in order under `bindingWriteMu`. The first one that fails is returned
 6. `mode` and `display_name` and `purpose` length (`invalid_argument`)
 7. an existing record of any state (`identity_exists` with `state`), or a regular token holding `client-<id>` (`identity_exists`, `state: "conflicting_token"`)
 8. binding guard (`binding_bypassable_without_auth`)
-9. mint (one bbolt tx). Then `profile_change{change: issue}`, then `credentials.changed`, then `client.binding_changed`
+9. mint (one bbolt tx). This is the commit point. The `CredentialView` is projected from the committed record returned by the mint, with no further store read. Then, best-effort and unable to fail the call: `profile_change{change: issue}`, `credentials.changed`, `client.binding_changed`. After the commit the call always returns the delivery response
 
 Result: see [One-time delivery response](#one-time-delivery-response), with key `client`.
 
@@ -87,7 +90,7 @@ Args: `name` (required), `profile` (required), `expires_in` (required), `purpose
 The checks are the same as for `create_client`, with these differences:
 - name syntax per `tokenNameRegex`. A `client-` prefix answers `reserved_identity`.
 - the token cap answers `token_limit_reached`
-- the guard runs with the candidate as a locked binding
+- the guard runs with the candidate as a locked binding, and the minted token is stored with `guard_bound: true`, so it stays a binding in every later guard evaluation (FR-012a, data-model §5)
 
 The token is minted with `allowed_servers: ["*"]`, `permissions: [read, write, destructive]` and `profile_pin: <profile>`.
 
@@ -144,7 +147,7 @@ Tokens use `identity: …/ui/clients?tab=tokens&token=<name>` and `activity: …
 
 `internal_tool_call` record:
 
-- `arguments`: the request arguments as given. They never contain a secret.
+- `arguments`: the request arguments after the handler's substitution. A value refused by the secret-shaped input screen is stored as `"[REDACTED: secret-shaped input]"`. Every other value already passed the screen. The record is built only after this substitution.
 - `response` on a successful create: the delivery object with `credential` and `snippet` replaced by the string `"[REDACTED: one-time credential]"`, and `delivery` reduced to `{shown_once, endpoint, header_name}`. This body is built by the server, not derived by key-name redaction.
 - `response` on list, get or revoke: the result as-is, which contains no secret.
 - `status: error` with the structured error text on refusal.

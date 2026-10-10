@@ -10,7 +10,8 @@ Existing fields are unchanged: `name`, `token_hash`, `token_prefix`, `allowed_se
 |---|---|---|---|---|
 | `RevokedAt` | `revoked_at` | `*time.Time` | `RevokeAgentToken*`, `ForgetClientCredential*` | Stamped (UTC) the first time `Revoked` flips to true, and never overwritten. Absent on legacy revoked records. |
 | `Issuer` | `issuer` | `*CredentialIssuer` | `CredentialsService.Issue*` | Absent on records minted before 115, and on connect-minted clients (connect is not an issue). |
-| `Purpose` | `purpose` | `string` | `CredentialsService.Issue*` | At most 500 characters (`MaxCredentialPurpose`). Display-only and never enforced. Never copied into activity metadata. |
+| `Purpose` | `purpose` | `string` | `CredentialsService.Issue*` | At most 500 characters (`MaxCredentialPurpose`). Display-only and never enforced. Never copied into activity metadata. Passes the secret-shaped input screen (§8) before it is stored. |
+| `GuardBound` | `guard_bound` | `bool` | `CredentialsService.IssueToken` with `EnforceGuard` | Set on agent tokens minted through the MCP path. Marks the token's `profile_pin` as a **standing** FR-008a binding: every later guard evaluation (config writes, hot reload, the anonymous request guard, warnings) includes it, not only its issuance (§5). Never set on client records (they are always bindings) or on REST/CLI tokens (Assumption A13). Immutable after mint. |
 
 ```go
 // CredentialIssuer records who issued a credential, using the Actor fields
@@ -24,6 +25,7 @@ type CredentialIssuer struct {
 
 Invariants (checked in the `auth` package tests):
 - `RevokedAt != nil` ⇒ `Revoked`.
+- `GuardBound` ⇒ `Kind == agent` and `ProfilePin != ""`.
 - `Issuer`, `Purpose` and `RevokedAt` never participate in `ValidateTokenInvariants`. They cannot make a valid record invalid, or the reverse.
 - The secret is never stored. `token_hash` remains the HMAC and is never projected to any view (§2).
 
@@ -91,12 +93,33 @@ Filters already supported apply: `/api/v1/activity?type=profile_change&client=<i
 
 The event is an invalidation only. It carries no secret, prefix, purpose or expiry, and subscribers refetch. It is published after the storage write and after the `profile_change` record.
 
-## 5. `runtime.GuardState` (extended)
+## 5. Guarded bindings: `runtime.GuardState` and `ActiveGuardedBinding`
 
-| Field | New | Meaning |
+`GuardState` keeps its shape (`Config`, `Tokens`). What changes is **which records count as bindings** in every guard path. A single predicate replaces `ActiveNamedBinding` at each call site:
+
+```go
+// ActiveGuardedBinding is an active named client binding (today's
+// ActiveNamedBinding) OR an active guard-bound agent token:
+// Kind=agent, GuardBound, !Revoked, ExpiresAt after now, ProfilePin != "".
+// A guard-bound token is evaluated as a locked binding to its pin.
+func ActiveGuardedBinding(t *auth.AgentToken, now time.Time) bool
+```
+
+| Call site (origin/main 8282c3865) | Today | Spec 115 |
 |---|---|---|
-| `Config`, `Tokens` | — | as today, holding client credentials |
-| `PinnedTokens` | ✓ | Candidate profile-pinned agent tokens evaluated as locked bindings. Only `CredentialsService.IssueToken` sets it, and only when `EnforceGuard` is set |
+| `runtime.clientCredentialSnapshot` (`binding_guard_wiring.go:44`), used by `MutateConfig` and `GuardedApplyConfig` (`config_funnel.go:90,192`) | client records only | renamed `guardedBindingSnapshot`; returns clients **and** guard-bound tokens. A store error still fails closed |
+| `MCPProxyServer.bindingGuardActive` (`profile_binding_guard.go:23-70`), the per-request anonymous guard that also covers file-watcher hot reloads (`server.go:3681`) | `activeNamedClientBinding` | `ActiveGuardedBinding` in both the coherent and the publication-gap branch |
+| `guardEvaluation.bypassable`, `BindingGuardActiveBindings`, `ConservativeBindingGuard` | `ActiveNamedBinding` | `ActiveGuardedBinding` |
+| `BindingGuardDelta` / conservative delta `already` map | keyed by `ClientID` | keyed by `TokenName`, which is unique across both kinds (a client's is `client-<id>`); a token has an empty `ClientID` and must not collide |
+| `ClientsService.checkGuard` and `CredentialsService.IssueToken` | — | candidate state = `guardedBindingSnapshot` plus the candidate record (a client, or a token with `GuardBound: true`) |
+| `runtime.BindingRefOf` | `{ClientID, TokenName, Profile, Mode}` | unchanged; for a token `ClientID` is empty and `Mode` is reported as `locked` |
+
+Consequences:
+- After an MCP-issued token exists, a config write that turns `require_mcp_auth` off, removes a confining `anonymous_profile` or widens it, is **refused** by `MutateConfig`/`GuardedApplyConfig` with `binding_bypassable_without_auth` naming the token (`bindings[].token_name`).
+- A hand edit or hot reload that does the same is not refused (existing rule), but `bindingGuardActive` then denies **every anonymous request** while the token stays an active guarded binding, so omitting the credential yields no access. The `anonymous_denied_by_binding_guard` warning names the token.
+- The binding stops counting once the token is revoked or expired, exactly like a client.
+
+Compatibility rule for legacy REST/CLI tokens (Assumption A13): tokens without `guard_bound` (all pre-115 tokens, and every token created through REST/CLI after 115) are not guarded bindings, so their behaviour is byte-identical to today. A test pins that a REST-created token with `profile_pin` set does not change any guard verdict.
 
 ## 6. Requests (runtime layer)
 
@@ -112,7 +135,7 @@ type IssueTokenRequest struct {
     Name, Profile, Purpose string
     AllowedServers, Permissions []string // REST legacy path only; MCP passes nil
     ExpiresAt    time.Time
-    RequireProfile, EnforceGuard bool // true from MCP
+    RequireProfile, EnforceGuard bool // true from MCP; EnforceGuard also stamps GuardBound
 }
 
 type CredentialRef struct{ Client, Token string } // exactly one set
@@ -130,3 +153,16 @@ profile deleted with force: active → active + profile_state=dangling (deny-all
 ```
 
 Revoked and expired states are terminal for MCP. Re-issuing the same id or name is refused (`identity_exists`).
+
+## 8. Secret-shaped input screen
+
+Runs first, before any other check and before anything is persisted or echoed, over **every** string argument of every `credentials` operation (`operation`, `client`, `token`, `name`, `display_name`, `profile`, `mode`, `expires_in`, `purpose`, `kind`, `state`), and over unknown keys' values too.
+
+A value is secret-shaped when any of these holds:
+1. it contains `mcp_agt_` or `mcp_cli_` (the issued-credential prefixes), case-insensitive;
+2. it contains the daemon's configured `api_key` value (compared in constant time; skipped when the key is empty);
+3. the existing sensitive-data detector (`internal/security.Detector`, built from the live `sensitive_data_detection` config with every category enabled regardless of user toggles) reports a finding in it.
+
+Outcome: `secret_in_argument` with `field` = the first offending key in sorted order. The error text names the field only and never echoes any argument value. The `internal_tool_call` activity record of that call stores the offending value as `"[REDACTED: secret-shaped input]"` (built by the handler, as for the delivery audit body), and the record is written only after this substitution, so the value never reaches the activity store, SSE, export, logs or `sensitive_data.detected` rows.
+
+Independently of the screen, error texts echo only values that already passed it **and** passed their syntax check (an id or name matching its regex, or an enum value). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`) are never echoed.

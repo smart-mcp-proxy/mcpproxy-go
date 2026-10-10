@@ -159,7 +159,7 @@ The profile editor's **Assigned to** section links to the filtered identity view
 
   They MUST never return the raw secret, its HMAC hash, or the pending-rotation hash or prefix.
 - **FR-006**: `revoke` MUST take exactly one of `client` or `token`. It marks the credential revoked through the existing store (`ClientsService` for clients, `RevokeAgentToken` for tokens) and stamps `revoked_at`. Revocation MUST make every later request with that secret fail with 401, including requests on MCP sessions initialized before the revocation.
-- **FR-007**: No operation may silently widen scope. A missing or invalid profile, a malformed expiry, a duplicate or reserved identity, or a guard refusal MUST fail before anything is written, and leave no credential behind. Each check runs under `bindingWriteMu`, and the mint is a single storage transaction.
+- **FR-007**: No operation may silently widen scope. A missing or invalid profile, a malformed expiry, a duplicate or reserved identity, or a guard refusal MUST fail before anything is written, and leave no credential behind. Each check runs under `bindingWriteMu`, and the mint is a single storage transaction. Nothing after the commit may turn the call into a failure: the delivered view is projected from the committed record (no post-commit store read), and audit, events and links are best-effort. A call either delivers the secret or leaves no active credential and no issuance record (research D6).
 - **FR-008**: `CredentialsService` MUST serialize every create and revoke on the runtime's `bindingWriteMu`. `ClientsService` and the guarded config apply already share this mutex, so a profile delete or rename cannot interleave with an issue.
 - **FR-009**: Token create and revoke on REST (`POST/DELETE /api/v1/tokens`) and the CLI (`mcpproxy token create|revoke`, which call REST) MUST go through `CredentialsService` and keep their existing request and response shapes. They gain the audit record (FR-021) and the live event (FR-024). They do **not** gain the FR-012 guard refusal (see Assumption A9).
 - **FR-010**: REST `POST /api/v1/clients` (custom client add, and CLI `client add`) MUST go through the same `CredentialsService` issue path and write `change: issue` instead of today's `change: assign`. This contract change is deliberate, so that every surface records issuance the same way.
@@ -168,6 +168,7 @@ The profile editor's **Assigned to** section links to the filtered identity view
 
 - **FR-011**: Only an admin caller (see Definitions) may see and call the `credentials` tool. The tool filter hides it from everyone else, and the handler re-checks the same predicate on every call. A refused call gets `unknown tool: credentials`, the uniform hidden-tool text. When the refused caller is an attributable administrator credential hidden only by its profile, the handler records a management refusal exactly as `profiles` does.
 - **FR-012**: `create_client` and `create_token` MUST run the FR-008a binding guard over the candidate state. For `create_token`, the candidate token counts as a locked named binding to its pin. If the guard reports a delta, the call answers `binding_bypassable_without_auth` with fixes and nothing is minted.
+- **FR-012a**: The confinement MUST persist after issuance. An MCP-issued token is stored with `guard_bound: true` and counts as a locked named binding in **every** later guard evaluation, exactly like a client binding: config writes through the API funnel (`MutateConfig`, `GuardedApplyConfig`) that would turn `require_mcp_auth` off or remove or widen a confining `anonymous_profile` are refused with `binding_bypassable_without_auth` naming the token; a file-watcher hot reload doing the same is applied but the per-request anonymous guard then denies every anonymous request while the token is active. The binding stops counting when the token is revoked or expired (data-model §5).
 - **FR-013**: `create_client`, `create_token` and `revoke` MUST be refused per call, reading the live config, in two cases. Under `read_only_mode` the refusal is `code: read_only_mode` with the text `Operation not allowed in read-only mode`. Under `disable_management` it is `code: management_disabled` with the text `Server management is disabled for security`. Both texts are byte-equal to those of `profiles` and `upstream_servers`. `list` and `get` remain available.
 - **FR-014**: `require_mcp_auth` and anonymous handling MUST stay unchanged. An anonymous caller is never an admin caller for this tool, whether `require_mcp_auth` is on or off.
 - **FR-015**: The tool MUST NOT be reachable from `code_execution` JavaScript or from direct mode (`/mcp/all`). It is registered on exactly the servers that register `profiles`.
@@ -181,7 +182,8 @@ The profile editor's **Assigned to** section links to the filtered identity view
 ### Functional Requirements: Errors
 
 - **FR-019**: Every refusal MUST be a tool result with `isError: true`. Its text is a JSON object `{code, error, field?, ...}` whose code comes from the catalog in [contracts/errors.md](contracts/errors.md). Existing codes (`binding_bypassable_without_auth`, `connect_in_progress`, `no_client_credential`) keep their bodies. New codes are added to `internal/profile/contract.go` and to the enums golden.
-- **FR-020**: Error texts MUST NOT include secrets, hashes, storage internals or stack traces.
+- **FR-020**: Error texts MUST NOT include secrets, hashes, storage internals or stack traces. They echo an argument value only when it passed the secret-shaped input screen and its own syntax or enum check; free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`) are never echoed.
+- **FR-020a**: Every string argument of every `credentials` call MUST pass a secret-shaped input screen before any other check (data-model §8): it rejects values containing an issued-credential prefix (`mcp_agt_`, `mcp_cli_`), the configured API key, or anything the existing `internal/security` detector flags. A hit answers `secret_in_argument` with the field name only, persists nothing, and the call's activity record stores the value as `"[REDACTED: secret-shaped input]"`.
 
 ### Functional Requirements: Audit and Secret Handling
 
@@ -200,7 +202,7 @@ The profile editor's **Assigned to** section links to the filtered identity view
   - the config file
   - `config.db`, where only its HMAC hash may be stored
 
-  A test MUST search each of these sinks for the full secret.
+  A test MUST search each of these sinks for the full secret, including after the secret has been fed back as input to every free-text argument and to each invalid-input path (FR-020a).
 
 ### Functional Requirements: Live Updates
 
@@ -228,7 +230,7 @@ The profile editor's **Assigned to** section links to the filtered identity view
 
 ### Key Entities
 
-- **Credential record** (`auth.AgentToken`): adds the fields `revoked_at`, `issuer {actor_kind, actor_name, surface}` and `purpose` (data-model.md §1).
+- **Credential record** (`auth.AgentToken`): adds the fields `revoked_at`, `issuer {actor_kind, actor_name, surface}`, `purpose` and, for MCP-issued tokens, `guard_bound` (data-model.md §1, §5).
 - **Credential view**: the safe projection that `list`, `get` and REST return (data-model.md §2).
 - **Lifecycle record**: a `profile_change` with `change ∈ {issue, revoke}` (data-model.md §3).
 - **credentials.changed event**: data-model.md §4.
@@ -253,8 +255,10 @@ The profile editor's **Assigned to** section links to the filtered identity view
 - **A7 (header)**: the snippet uses `X-API-Key`, the existing custom-client convention, and never a query parameter. `/mcp` also accepts `Authorization: Bearer`, and the docs say so.
 - **A8 (macOS)**: this spec makes no macOS UI change. The tray reads the same REST fields, and showing issuer, lease and purpose there is a follow-up.
 - **A9 (REST guard unchanged)**: under `require_mcp_auth: false`, REST/CLI `token create` keeps today's behaviour and issues without the guard. Enforcing the guard there would refuse token creation on most default installs. The MCP path, which issues worker identities for agents, does enforce it, because the issue requires server-enforced grants.
-- **A10 (purpose)**: `purpose` is optional, at most 500 characters, stored as given and shown as unenforced prose. Activity metadata records only `purpose_set: true`, never the text.
+- **A10 (purpose)**: `purpose` is optional, at most 500 characters, stored as given once it passes the secret-shaped input screen (FR-020a), and shown as unenforced prose. Activity metadata records only `purpose_set: true`, never the text.
 - **A11 (verification without preflight)**: the E2E suite never asserts on `preflight` or required-tools readiness (issue #1548).
+- **A13 (legacy and REST tokens are not standing bindings)**: only tokens minted through the MCP path carry `guard_bound`. Pre-115 tokens and REST/CLI tokens (even with `profile_pin`) do not participate in the guard, consistent with A9, so no existing install changes behaviour or starts refusing config writes on upgrade. A REST/CLI caller that wants the standing guarantee issues the token over MCP. A downgraded pre-115 binary ignores `guard_bound`; that is acceptable because downgrade already drops every Spec 115 guarantee.
+- **A14 (secret screen reuses the detector)**: the screen calls the existing `internal/security.Detector` with all categories enabled, independent of the user's `sensitive_data_detection` toggles, because the input is admin-tool metadata rather than upstream traffic. A false positive (for example a high-entropy display name) is refused with `secret_in_argument`; the agent can rephrase. No new dependency or redaction model is introduced.
 - **A12 (reserved ids)**: connect-registry client ids (`cursor`, `claude-code`, …) cannot be created over MCP. Those clients are provisioned through connect.
 
 ## Out of Scope
@@ -273,9 +277,9 @@ The profile editor's **Assigned to** section links to the filtered identity view
 | Native admin MCP operations create a client or token with profile, binding, expiry and name, reusing existing services | FR-001 to FR-003, FR-008 to FR-010 | T010–T024, E2E-1, E2E-2 |
 | List/show safe metadata; revoke either kind; same-session invalidation; secret shown once | FR-004 to FR-006, FR-022, FR-023 | T025–T031, E2E-1, E2E-2, E2E-5 |
 | Restricted and unconfined callers cannot discover or invoke; check at execution; require_mcp_auth, guard, read_only, disable_management | FR-011 to FR-015 | T032–T037, E2E-4 |
-| Server-enforced grants; no silent All-servers default | FR-007, FR-012, FR-016 to FR-018 | T014, T038–T040, E2E-1 to E2E-4 |
-| Duplicate, invalid, malformed or conflicting requests get structured errors and leave no partial grant | FR-007, FR-019, FR-020 | T015–T018, E2E-4 |
-| Delivery separated from audit; redaction; audit metadata | FR-021 to FR-023 | T041–T046, E2E-5 |
+| Server-enforced grants; no silent All-servers default | FR-007, FR-012, FR-012a, FR-016 to FR-018 | T012–T014, T013a, T038–T040, E2E-1 to E2E-4 |
+| Duplicate, invalid, malformed or conflicting requests get structured errors and leave no partial grant | FR-007, FR-019, FR-020, FR-020a | T015–T018, T015a, T038a, E2E-4 |
+| Delivery separated from audit; redaction; audit metadata | FR-020a, FR-021 to FR-023 | T038a, T041–T046, E2E-5 |
 | Provisioning versus installing client config | FR-025 | T047, docs |
 | E2E: fresh client, fresh token with expiry, live reassignment, parity and negatives, secret handling, dispatch proof | E2E-1 to E2E-6 | T050–T056 (quickstart.md) |
 | UI: identity, profile, lock or pin, expiry, state; Used by and Assigned to links | UI-001, UI-002 | T060–T063 |

@@ -73,11 +73,12 @@ internal/profile/testdata/contract/enums.json
 internal/runtime/credentials_service.go      # NEW: CredentialsService, CredentialView, requests, errors
 internal/runtime/credentials_service_test.go # NEW
 internal/runtime/clients_service.go          # Add → issue path; forget publishes credentials.changed; change kind param
-internal/runtime/clients_service_connect.go  # issueLocked option RefuseExistingRecord
-internal/runtime/binding_guard.go            # GuardState.PinnedTokens; conservative guard handles them
+internal/runtime/clients_service_connect.go  # issueLocked option RefuseExistingRecord; returns the committed record (no post-commit read)
+internal/runtime/binding_guard_wiring.go     # guardedBindingSnapshot: clients + guard_bound tokens (FR-012a)
+internal/runtime/binding_guard.go            # ActiveGuardedBinding (clients + guard_bound tokens) at every call site; delta keyed by TokenName
 internal/runtime/events.go                   # EventTypeCredentialsChanged
 internal/runtime/runtime.go                  # wire CredentialsService (shares bindingWriteMu, store, hmac, activity, publish)
-internal/server/profile_binding_guard.go     # BindingGuardDelta evaluates PinnedTokens with bindingBypassable
+internal/server/profile_binding_guard.go     # bindingGuardActive/BindingGuardDelta/ActiveBindings use ActiveGuardedBinding (FR-012a)
 internal/server/mcp_admin_access.go          # NEW: adminToolAccess (extracted from profilesToolAccess)
 internal/server/mcp_credentials_tool.go      # NEW: build/filter/handle `credentials`, audit body
 internal/server/mcp_credentials_tool_schema.go # NEW
@@ -102,7 +103,7 @@ docs/features/profiles.md, docs/features/agent-tokens.md
 
 ## Phasing (one PR, or two stacked-free PRs if review size demands)
 
-1. **Foundation (backend, no surface change)**: record fields, change kinds, error codes, event type, guard `PinnedTokens`, `CredentialsService`, with REST tokens and custom client add moved onto it. REST and CLI behaviour stays the same apart from the audit record and the event.
+1. **Foundation (backend, no surface change)**: record fields, change kinds, error codes, event type, standing guard bindings for MCP-issued tokens (`guard_bound`, `ActiveGuardedBinding`), the secret-shaped input screen, `CredentialsService`, with REST tokens and custom client add moved onto it. REST and CLI behaviour stays the same apart from the audit record and the event.
 2. **MCP tool**: `adminToolAccess` extraction, the `credentials` tool, redaction backstop, deliberate golden update.
 3. **E2E**: dispatch counter and the six `TestE2E_CredentialsLifecycle_*` scenarios.
 4. **Web UI**: event relay, rows, links, lease and tier copy, Activity labels, vitest, Playwright sweep and screenshots.

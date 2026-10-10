@@ -6,16 +6,17 @@ A refusal is an MCP tool result with `isError: true`. Its single text content is
 { "code": "<code>", "error": "<human sentence>", "field": "<argument>", "...": "code-specific keys" }
 ```
 
-`field` is present when one argument is at fault. Texts never contain secrets, hashes, storage paths or Go error chains (FR-020). New codes are constants in `internal/profile/contract.go`, pinned in `internal/profile/testdata/contract/enums.json` (`credential_error_codes`), and mirrored in `frontend/src/types/contracts.ts`.
+`field` is present when one argument is at fault. Texts never contain secrets, hashes, storage paths or Go error chains (FR-020). Echo rule: a text may quote an argument value only when that value passed the secret-shaped input screen **and** its own syntax or enum check (an id or token name matching its pattern, a known profile-name syntax). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`, a malformed id) are never quoted; the text names the field instead. New codes are constants in `internal/profile/contract.go`, pinned in `internal/profile/testdata/contract/enums.json` (`credential_error_codes`), and mirrored in `frontend/src/types/contracts.ts`.
 
 | Code | Operations | When | Extra keys | Example `error` |
 |---|---|---|---|---|
-| `unknown_operation` | all | `operation` is not in the enum | `field: operation` | `unknown operation "create"; valid: list, get, create_client, create_token, revoke` |
+| `secret_in_argument` | all | an argument value is secret-shaped (data-model §8); checked first | `field` | `argument "purpose" looks like a credential or secret; it was not stored. Remove it and retry` |
+| `unknown_operation` | all | `operation` is not in the enum | `field: operation` | `unknown operation; valid: list, get, create_client, create_token, revoke` |
 | `missing_argument` | all | required argument absent | `field` | `create_token: missing required argument "expires_in"` |
-| `invalid_argument` | all | wrong type, bad syntax, both/neither of client/token, unknown key, length over limit | `field` | `invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters` |
+| `invalid_argument` | all | wrong type, bad syntax, both/neither of client/token, unknown key, length over limit | `field` | `invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters` (the value is not quoted) |
 | `profile_required` | create_* | `profile: ""` (All servers) | `field: profile` | `a worker credential must name a profile; All servers is not allowed here` |
 | `unknown_profile` | create_* | profile does not exist | `field: profile` | `unknown profile "daily-reserch"` |
-| `invalid_expiry` | create_* | unparseable, ≤0 or >365d | `field: expires_in` | `invalid expiry duration: "1y"` / `expiry duration cannot exceed 365 days` |
+| `invalid_expiry` | create_* | unparseable, ≤0 or >365d | `field: expires_in` | `invalid argument "expires_in": use a duration such as 30m, 4h or 7d` / `expiry duration cannot exceed 365 days` |
 | `identity_exists` | create_* | any record holds the id/name | `field`, `state: active\|expired\|revoked\|conflicting_token` | `client delegated-worker already exists (revoked); choose a new id` |
 | `reserved_identity` | create_* | connect-registry client id; token name `client-…` | `field` | `client id "cursor" is a supported client; connect it from the Web UI or CLI instead` |
 | `identity_not_found` | get, revoke | no record | `field` | `token "research-task-42" not found` |
