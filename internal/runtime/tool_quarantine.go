@@ -863,6 +863,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// was recorded.
 			priorHashMatches := existing.CurrentHash == currentHash
 
+			// UX-02: whether the stored record already describes the live tool.
+			// A pending record that stays pending unchanged is not rewritten
+			// below — the rewrite was one fsynced transaction per tool on every
+			// pass, holding the tool-approval lock for seconds on a large
+			// quarantined server. Only a stamped record is skipped: an
+			// unstamped one still needs its save (Spec 105 FR-009).
+			pendingUnchanged := existing.IdentityKeyed && priorHashMatches &&
+				existing.CurrentDescription == tool.Description &&
+				existing.CurrentSchema == schemaJSON &&
+				existing.CurrentOutputSchema == outputSchemaJSON &&
+				(reflect.DeepEqual(existing.CurrentAnnotations, capturedToolAnnotations(tool.Annotations)) ||
+					reflect.DeepEqual(existing.CurrentAnnotations, cloneToolAnnotations(tool.Annotations)))
+
 			// Update current info to the live snapshot.
 			existing.CurrentHash = currentHash
 			existing.CurrentDescription = tool.Description
@@ -920,12 +933,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				continue
 			}
 
-			// Stays pending — persist the updated current info.
-			if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
-				r.logger.Debug("Failed to update pending tool approval",
-					zap.String("server", serverName),
-					zap.String("tool", toolName),
-					zap.Error(saveErr))
+			// Stays pending — persist the updated current info (skipped when
+			// nothing changed, see pendingUnchanged).
+			if !pendingUnchanged {
+				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
+					r.logger.Debug("Failed to update pending tool approval",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+				}
 			}
 
 			// Two-gate consistency (MCP-2931 #5): block from the index whenever
@@ -2046,14 +2062,30 @@ func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, a
 // for explicit review, and approved records are not rewritten. Missing
 // records are skipped. Returns the number of records written approved.
 func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
-	approved := 0
+	if len(toolNames) == 0 {
+		return 0, nil
+	}
+	// One consistent read of every named record, and below one write
+	// transaction for all of them: a 165-tool approval used to cost one
+	// fsynced transaction per tool while holding the lock.
+	current, err := r.storageManager.GetToolApprovals(serverName, toolNames...)
+	if err != nil {
+		return 0, fmt.Errorf("read tool approvals for %s: %w", serverName, err)
+	}
+
+	var batch []*storage.ToolApprovalRecord
+	var invariantErr error
+	seen := make(map[string]struct{}, len(toolNames))
 	for _, toolName := range toolNames {
-		record, err := r.storageManager.GetToolApproval(serverName, toolName)
-		if err != nil {
+		if _, dup := seen[toolName]; dup {
+			continue
+		}
+		seen[toolName] = struct{}{}
+		record := current[toolName]
+		if record == nil {
 			r.logger.Warn("Tool approval record not found for approval",
 				zap.String("server", serverName),
-				zap.String("tool", toolName),
-				zap.Error(err))
+				zap.String("tool", toolName))
 			continue
 		}
 		if pendingOnly && record.Status != storage.ToolApprovalStatusPending {
@@ -2061,11 +2093,15 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 		}
 
 		if err := r.enforceInvariant(serverName, toolName, record.Status, storage.ToolApprovalStatusApproved, ReasonUserApprove); err != nil {
-			return approved, err
+			// Records approved before the violation are still committed,
+			// as the per-tool loop did.
+			invariantErr = err
+			break
 		}
 
 		// Spec 105 FR-009: an operator write on a pre-105 record must not
-		// end its legacy consult while it still restricts (saveReadToolApproval).
+		// end its legacy consult while it still restricts (the
+		// saveReadToolApproval rule, applied to the batch).
 		wasUnstamped := !record.IdentityKeyed
 
 		record.Status = storage.ToolApprovalStatusApproved
@@ -2078,22 +2114,26 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
+		record.IdentityKeyed = !(wasUnstamped && record.Restricts())
 
-		if err := r.saveReadToolApproval(record, wasUnstamped); err != nil {
-			return approved, err
-		}
-		approved++
+		batch = append(batch, record)
+	}
 
+	if err := r.storageManager.SaveToolApprovals(batch); err != nil {
+		return 0, err
+	}
+
+	for _, record := range batch {
 		r.logger.Info("Tool approved",
 			zap.String("server", serverName),
-			zap.String("tool", toolName),
+			zap.String("tool", record.ToolName),
 			zap.String("approved_by", approvedBy))
 
 		// Emit activity event
-		r.emitToolQuarantineEvent(serverName, toolName, "tool_approved",
+		r.emitToolQuarantineEvent(serverName, record.ToolName, "tool_approved",
 			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
 	}
-	return approved, nil
+	return len(batch), invariantErr
 }
 
 // notifyToolsApproved publishes the approval to SSE subscribers and reindexes.

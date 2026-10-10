@@ -312,3 +312,48 @@ func TestWithToolApprovalLock_WaitsForInFlightPass(t *testing.T) {
 	}()
 	require.True(t, waitOrTimeout(done, 2*time.Second), "locks are per server")
 }
+
+// A discovery pass over unchanged pending records must not rewrite them: the
+// rewrite was pure churn (one fsynced bbolt transaction per tool) that kept
+// the tool-approval lock held for seconds on a large quarantined server and
+// delayed approvals queued behind it.
+func TestCheckToolApprovals_UnchangedPendingNotRewritten(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true, Quarantined: true}})
+	tools := ux02Tools("srv", 40)
+	_, err := rt.checkToolApprovals("srv", tools) // files 40 pending records
+	require.NoError(t, err)
+
+	pageWrites := func() int64 { st := rt.storageManager.GetDB().Stats(); return st.TxStats.GetWrite() }
+	before := pageWrites()
+	res, err := rt.checkToolApprovals("srv", tools)
+	require.NoError(t, err)
+	require.Equal(t, 40, res.PendingCount)
+	writes := pageWrites() - before
+	require.Less(t, writes, int64(10), "an unchanged pending record must not be rewritten on every pass (got %d page writes)", writes)
+
+	// A changed definition on a pending record is still persisted.
+	tools[3].Description = "Read records 3, now with a new description"
+	_, err = rt.checkToolApprovals("srv", tools)
+	require.NoError(t, err)
+	rec, err := rt.storageManager.GetToolApproval("srv", "read_003")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusPending, rec.Status)
+	require.Equal(t, tools[3].Description, rec.CurrentDescription)
+}
+
+// Approving a large captured toolset commits in one storage transaction
+// instead of one fsynced transaction per tool, so the tool-approval lock is
+// held for milliseconds rather than seconds (a 165-tool approval took 5-15s).
+func TestApproveTools_BatchesRecordWrites(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true, Quarantined: true}})
+	tools := ux02Tools("srv", 40)
+	_, err := rt.checkToolApprovals("srv", tools)
+	require.NoError(t, err)
+
+	pageWrites := func() int64 { st := rt.storageManager.GetDB().Stats(); return st.TxStats.GetWrite() }
+	before := pageWrites()
+	require.NoError(t, rt.ApproveTools("srv", ux02ToolNames(tools), "test"))
+	writes := pageWrites() - before
+	require.Empty(t, ux02NotApproved(t, rt, "srv"))
+	require.Less(t, writes, int64(40), "approving 40 tools must not cost one transaction per tool (got %d page writes)", writes)
+}

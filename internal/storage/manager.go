@@ -522,6 +522,15 @@ func (m *Manager) SaveToolApproval(record *ToolApprovalRecord) error {
 	return m.db.SaveToolApproval(record)
 }
 
+// SaveToolApprovals saves several tool approval records in one storage
+// transaction under one manager write lock (all or nothing).
+func (m *Manager) SaveToolApprovals(records []*ToolApprovalRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveToolApprovals(records)
+}
+
 // StampToolApprovalsIdentityKeyed stamps the named records identity-keyed in
 // one storage transaction under one manager write lock — the same lock every
 // SaveToolApproval takes, so an operator write is either fully before the

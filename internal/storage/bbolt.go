@@ -436,23 +436,46 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 // the caller's record.
 func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
+		return putToolApproval(tx.Bucket([]byte(ToolApprovalBucket)), record)
+	})
+}
+
+// SaveToolApprovals saves several tool approval records in ONE transaction:
+// either every record is written or none is. Each record is written exactly
+// as SaveToolApproval would write it.
+func (b *BoltDB) SaveToolApprovals(records []*ToolApprovalRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
-		if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
-			prior := &ToolApprovalRecord{}
-			if err := prior.UnmarshalBinary(encoded); err == nil {
-				if toolDefinitionContentChanged(prior, record) {
-					record.DefinitionChangedAt = time.Now().UTC()
-				} else {
-					record.DefinitionChangedAt = prior.DefinitionChangedAt
-				}
+		for _, record := range records {
+			if err := putToolApproval(bucket, record); err != nil {
+				return fmt.Errorf("save tool approval %q: %w", record.Key(), err)
 			}
 		}
-		data, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(record.Key()), data)
+		return nil
 	})
+}
+
+// putToolApproval writes one record inside an update transaction, carrying
+// DefinitionChangedAt forward unless the definition content changed.
+func putToolApproval(bucket *bbolt.Bucket, record *ToolApprovalRecord) error {
+	if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
+		prior := &ToolApprovalRecord{}
+		if err := prior.UnmarshalBinary(encoded); err == nil {
+			if toolDefinitionContentChanged(prior, record) {
+				record.DefinitionChangedAt = time.Now().UTC()
+			} else {
+				record.DefinitionChangedAt = prior.DefinitionChangedAt
+			}
+		}
+	}
+	data, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(record.Key()), data)
 }
 
 // toolDefinitionContentChanged reports whether the current description or

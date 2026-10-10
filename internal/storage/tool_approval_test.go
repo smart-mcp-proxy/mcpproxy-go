@@ -454,3 +454,34 @@ func TestListToolApprovals_PrefixFilterRunsBeforeDecode(t *testing.T) {
 	_, err = manager.ListToolApprovals("")
 	assert.Error(t, err, "an aggregate call must surface a corrupt record anywhere in the bucket")
 }
+
+// UX-02: SaveToolApprovals writes many records in one transaction, each as
+// SaveToolApproval would (DefinitionChangedAt carried or stamped).
+func TestSaveToolApprovals_BatchWritesAllRecords(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	first := &ToolApprovalRecord{ServerName: "srv", ToolName: "a", Status: ToolApprovalStatusPending, CurrentDescription: "A"}
+	require.NoError(t, manager.SaveToolApproval(first))
+	stored, err := manager.GetToolApproval("srv", "a")
+	require.NoError(t, err)
+	changedAt := stored.DefinitionChangedAt
+
+	stored.Status = ToolApprovalStatusApproved
+	recs := []*ToolApprovalRecord{
+		stored,
+		{ServerName: "srv", ToolName: "b", Status: ToolApprovalStatusApproved, CurrentDescription: "B"},
+	}
+	require.NoError(t, manager.SaveToolApprovals(recs))
+	require.NoError(t, manager.SaveToolApprovals(nil))
+
+	got, err := manager.ListToolApprovals("srv")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, r := range got {
+		assert.Equal(t, ToolApprovalStatusApproved, r.Status, r.ToolName)
+	}
+	a, err := manager.GetToolApproval("srv", "a")
+	require.NoError(t, err)
+	assert.Equal(t, changedAt, a.DefinitionChangedAt, "unchanged definition keeps its DefinitionChangedAt")
+}
