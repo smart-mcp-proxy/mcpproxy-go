@@ -178,6 +178,7 @@
             :stale-reasons="tools?.stale_classification_reasons"
             :draft-rules="draftTools"
             :profile-label="saved.title || saved.name"
+            :profile-name="saved.name"
             :servers-chosen="draft.servers.length > 0"
             :loading="toolsLoading"
             :editable="canEdit"

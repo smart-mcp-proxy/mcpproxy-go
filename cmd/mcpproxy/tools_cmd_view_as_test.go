@@ -72,7 +72,7 @@ func TestToolsViewAs_GoldenColumns(t *testing.T) {
 	require.Len(t, rows, 3)
 	assert.Equal(t, []string{"callable", "-"}, []string{rows[0][4], rows[0][5]})
 	assert.Equal(t, []string{"hidden", "above_tier_cap"}, []string{rows[1][4], rows[1][5]})
-	assert.Equal(t, []string{"visible", "tool_approval"}, []string{rows[2][4], rows[2][5]})
+	assert.Equal(t, []string{"held", "tool_approval"}, []string{rows[2][4], rows[2][5]})
 	for _, row := range rows {
 		assert.Len(t, row, len(headers))
 	}

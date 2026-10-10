@@ -441,10 +441,30 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 		return err
 	}
 	if counts != nil && ResolveOutputFormat() == "table" {
-		fmt.Fprintf(os.Stderr, "\n%d visible, %d hidden under profile %s (hidden tools are administrator-only)\n",
-			getIntField(counts, "visible"), getIntField(counts, "hidden"), toolsProfileView)
+		fmt.Fprint(os.Stderr, "\n"+viewAsCountsSummary(counts, toolsProfileView))
 	}
 	return nil
+}
+
+// viewAsCountsSummary is the footer of `tools --profile`: tools allowed by the
+// profile are kept apart from the ones callable right now. The callable and
+// held counts, and the explain hint, appear only when the daemon sent
+// counts.callable (administrator callers); `access` rows carry the verdict.
+func viewAsCountsSummary(counts map[string]interface{}, profile string) string {
+	line := fmt.Sprintf("%d allowed by profile %s, %d hidden", getIntField(counts, "visible"), profile, getIntField(counts, "hidden"))
+	if _, admin := counts["callable"]; !admin {
+		return line + " (hidden tools are administrator-only)\n"
+	}
+	callable := getIntField(counts, "callable")
+	held := getIntField(counts, "visible") - callable
+	if held < 0 {
+		held = 0
+	}
+	line += fmt.Sprintf(", %d callable now, %d held\n", callable, held)
+	if held > 0 {
+		line += "Held tools are allowed by the profile but not callable yet (for example awaiting approval). Run: mcpproxy access explain --profile " + profile + " --tool <server:tool>\n"
+	}
+	return line
 }
 
 // toolsViewAsQuery is the REST query of the view-as flags (Spec 108 FR-032):
@@ -464,7 +484,7 @@ func toolsViewAsQuery() (url.Values, error) {
 }
 
 // viewAsAccessCell renders the ACCESS column of a view-as row: callable (a real
-// call would succeed), visible (listed by discovery but a later gate refuses it
+// call would succeed), held (allowed by the profile but a later gate refuses it
 // or it awaits approval), hidden (not visible at all).
 func viewAsAccessCell(t map[string]interface{}) string {
 	access, ok := t["access"].(map[string]interface{})
@@ -475,7 +495,7 @@ func viewAsAccessCell(t map[string]interface{}) string {
 	case getBoolField(access, "callable"):
 		return "callable"
 	case getBoolField(access, "visible"):
-		return "visible"
+		return "held"
 	default:
 		return "hidden"
 	}

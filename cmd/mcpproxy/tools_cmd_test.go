@@ -693,3 +693,17 @@ func TestToolRowsCollapseDescriptionWhitespace(t *testing.T) {
 	require.NotEmpty(t, rows)
 	assert.Equal(t, "A. B.", rows[0][1])
 }
+
+func TestViewAsCountsSummary(t *testing.T) {
+	admin := viewAsCountsSummary(map[string]interface{}{"visible": float64(294), "hidden": float64(27), "callable": float64(290)}, "qa-read")
+	require.Contains(t, admin, "294 allowed by profile qa-read, 27 hidden, 290 callable now, 4 held")
+	require.Contains(t, admin, "mcpproxy access explain --profile qa-read --tool <server:tool>")
+
+	clean := viewAsCountsSummary(map[string]interface{}{"visible": float64(3), "hidden": float64(0), "callable": float64(3)}, "p")
+	require.Contains(t, clean, "3 callable now, 0 held")
+	require.NotContains(t, clean, "access explain")
+
+	other := viewAsCountsSummary(map[string]interface{}{"visible": float64(3), "hidden": float64(2)}, "p")
+	require.Equal(t, "3 allowed by profile p, 2 hidden (hidden tools are administrator-only)\n", other)
+	require.Equal(t, "held", viewAsAccessCell(map[string]interface{}{"access": map[string]interface{}{"visible": true, "callable": false}}))
+}

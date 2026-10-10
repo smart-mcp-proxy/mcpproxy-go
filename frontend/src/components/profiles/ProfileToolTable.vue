@@ -1,7 +1,12 @@
 <template>
   <section class="space-y-3" aria-labelledby="profile-tools-heading" data-test="profile-tool-table">
     <h2 id="profile-tools-heading" class="font-semibold">Tools under this profile</h2>
-    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts"><template v-if="unsaved">Saved profile: </template>{{ counts.visible }} visible &middot; {{ counts.hidden }} hidden</p>
+    <p v-if="counts" class="text-sm opacity-70" data-test="profile-tool-counts"><template v-if="unsaved">Saved profile: </template>{{ counts.visible }} allowed by profile &middot; {{ counts.hidden }} hidden<template v-if="isAdmin"> &middot; {{ callableCount }} callable now &middot; {{ heldCount }} held</template></p>
+    <p v-if="counts" class="text-xs opacity-70" data-test="profile-tool-semantics">
+      <strong>Allowed by profile</strong> is this profile's policy only (servers, rules, tier cap).
+      <template v-if="isAdmin"><strong>Callable now</strong> also passes the later gates; a <strong>Held</strong> tool is allowed here but waiting on one (for example tool approval or server state), so an agent cannot call it yet.</template>
+      <template v-else>Later gates, such as tool approval, can still hold an allowed tool.</template>
+    </p>
     <p v-if="unsaved" class="text-xs text-warning" data-test="profile-tool-unsaved-note">Counts and access show the saved profile. Save to update them, or use Try it below to test your unsaved edits.</p>
 
     <div class="flex flex-wrap gap-2" data-test="profile-tool-filters">
@@ -13,7 +18,11 @@
       <label class="sr-only" for="tool-filter-reason">Filter by access</label>
       <select id="tool-filter-reason" v-model="reasonFilter" class="select select-bordered select-xs" data-test="tool-filter-reason">
         <option value="">Any access</option>
-        <option value="visible">Visible</option>
+        <option value="visible">Allowed by profile</option>
+        <template v-if="isAdmin">
+          <option value="callable">Callable now</option>
+          <option value="held">Held</option>
+        </template>
         <option v-for="reason in REASONS" :key="reason" :value="reason">{{ reasonText(reason) }}</option>
       </select>
       <label class="sr-only" for="tool-filter-search">Search tools</label>
@@ -55,8 +64,16 @@
             <td class="font-mono text-xs break-all">{{ row.server }}:{{ row.tool }}</td>
             <td class="text-xs whitespace-nowrap">{{ row.intrinsic_tier }}<template v-if="row.profile_tier && row.profile_tier !== row.intrinsic_tier"> &rarr; {{ row.profile_tier }}</template></td>
             <td class="text-xs">
-              <span class="badge badge-sm" :class="row.access.visible ? 'badge-success' : 'badge-ghost'">{{ row.access.visible ? 'Visible' : 'Hidden' }}</span>
-              <span v-if="!row.access.visible" class="ml-1">{{ reasonText(row.access.reason) }}</span>
+              <span class="badge badge-sm whitespace-nowrap" :class="stateClass(row)" :data-test="`profile-tool-state-${toolRowId(row)}`">{{ stateLabel(row) }}</span>
+              <span v-if="!row.access.visible || isHeld(row)" class="ml-1" :data-test="`profile-tool-reason-${toolRowId(row)}`">{{ reasonText(row.access.reason) }}</span>
+              <button
+                v-if="isHeld(row) && profileName"
+                type="button"
+                class="btn btn-ghost btn-xs ml-1 min-h-6"
+                :aria-label="`Explain access to ${key(row)}`"
+                :data-test="`profile-tool-explain-${toolRowId(row)}`"
+                @click="explainTool = key(row)"
+              >Explain access</button>
               <p v-if="row.classification_stale" class="mt-1 text-warning" :data-test="`profile-stale-${toolRowId(row)}`">classification ignored &mdash; tool is now annotated</p>
             </td>
             <td>
@@ -105,12 +122,14 @@
       </table>
     </div>
     <p v-if="hiddenOnly" class="text-sm opacity-70" data-test="profile-tool-hidden-count">{{ hiddenOnly }} hidden</p>
+    <AccessExplainer v-if="profileName" :open="explainTool !== ''" :subject="{ kind: 'profile', name: profileName }" :tool="explainTool || undefined" @close="explainTool = ''" />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { reasonText, toolKey, toolRowId } from '@/utils/profiles'
+import AccessExplainer from '@/components/AccessExplainer.vue'
 import type { EffectiveTool, EffectiveToolsResult, ProfileToolRules } from '@/types/api'
 
 // Spec 108-i I18 / FR-041: the per-tool table of a profile, from
@@ -124,6 +143,8 @@ const props = defineProps<{
   staleReasons?: Record<string, string>
   draftRules: ProfileToolRules | undefined
   profileLabel: string
+  // The saved profile's name; enables "Explain access" on held tools.
+  profileName?: string
   serversChosen: boolean
   loading?: boolean
   editable?: boolean
@@ -147,11 +168,29 @@ const toggles = new Map<string, HTMLInputElement>()
 const rowEls = new Map<string, HTMLElement>()
 
 const key = toolKey
+const explainTool = ref('')
+// counts.callable is administrator-only: its presence is the signal that the
+// held/callable split (and a held tool's reason) may be shown to this caller.
+const isAdmin = computed(() => props.counts?.callable !== undefined && props.counts?.callable !== null)
+const callableCount = computed(() => props.counts?.callable ?? 0)
+const heldCount = computed(() => Math.max(0, (props.counts?.visible ?? 0) - callableCount.value))
+const isHeld = (row: EffectiveTool): boolean => isAdmin.value && row.access.visible && !row.access.callable
+function stateLabel(row: EffectiveTool): string {
+  if (!row.access.visible) return 'Hidden'
+  if (!isAdmin.value) return 'Allowed by profile'
+  return row.access.callable ? 'Callable now' : 'Held'
+}
+function stateClass(row: EffectiveTool): string {
+  if (!row.access.visible) return 'badge-ghost'
+  return isHeld(row) ? 'badge-warning' : 'badge-success'
+}
 const serverNames = computed(() => [...new Set(props.rows.map(row => row.server))].sort())
 const visibleRows = computed(() => props.rows.filter(row => {
   if (serverFilter.value && row.server !== serverFilter.value) return false
   if (reasonFilter.value === 'visible' && !row.access.visible) return false
-  if (reasonFilter.value && reasonFilter.value !== 'visible' && row.access.reason !== reasonFilter.value) return false
+  if (reasonFilter.value === 'callable' && !(row.access.visible && row.access.callable)) return false
+  if (reasonFilter.value === 'held' && !isHeld(row)) return false
+  if (reasonFilter.value && !['visible', 'callable', 'held'].includes(reasonFilter.value) && row.access.reason !== reasonFilter.value) return false
   if (search.value && !`${row.server}:${row.tool}`.toLowerCase().includes(search.value.toLowerCase())) return false
   return true
 }))

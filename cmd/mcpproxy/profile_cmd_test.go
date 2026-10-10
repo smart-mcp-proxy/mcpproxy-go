@@ -528,3 +528,27 @@ func TestRootCommand_BuildsWithoutPanic(t *testing.T) {
 	}
 	require.NotPanics(t, func() { walk(root) })
 }
+
+// UX-07: the preview is policy-only. The header keeps "allowed by profile"
+// apart from "callable", the ACCESS column calls a gated tool "held", and the
+// held tools come with the exact access-explain command.
+func TestProfileShow_EffectiveSeparatesAllowedCallableAndHeld(t *testing.T) {
+	const fixture = `{"profile":"qa-read","tools":[
+ {"server":"lib","tool":"ok","intrinsic_tier":"read","profile_tier":"read","access":{"visible":true,"callable":true,"reason":""},"classification_stale":false},
+ {"server":"lib","tool":"pending","intrinsic_tier":"read","profile_tier":"read","access":{"visible":true,"callable":false,"reason":"tool_approval"},"classification_stale":false}],
+ "counts":{"visible":2,"hidden":1,"callable":1,"by_reason":{"tool_approval":1,"above_tier_cap":1}}}`
+	newRESTRecorder(t, map[string]cannedResponse{"GET /api/v1/profiles/qa-read/effective-tools": okResp(fixture)})
+	out, _, err := runCLI(t, GetProfileCommand, "table", "show", "qa-read", "--effective")
+	require.NoError(t, err)
+	require.Contains(t, out, "Profile: qa-read (allowed by profile 2, hidden 1, callable 1, held 1)")
+	require.Regexp(t, `pending\s+read\s+read\s+held\s+tool_approval`, out)
+	require.Contains(t, out, "1 tool held: allowed by the profile but not callable yet. Run: mcpproxy access explain --profile qa-read --tool <server:tool>")
+}
+
+func TestProfileShow_EffectiveNonAdminHasNoHeldClaims(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{"GET /api/v1/profiles/p/effective-tools": okResp(`{"profile":"p","tools":[],"counts":{"visible":2,"hidden":1}}`)})
+	out, _, err := runCLI(t, GetProfileCommand, "table", "show", "p", "--effective")
+	require.NoError(t, err)
+	require.Contains(t, out, "Profile: p (allowed by profile 2, hidden 1)")
+	require.NotContains(t, out, "held")
+}
