@@ -155,9 +155,10 @@ const noRecord = computed(() => {
   return credentialless && !c.installed && !c.connected
 })
 const bindable = computed(() => props.client.credential_state === 'client')
-// Spec 115 UI-005: a lease that ended is a planned task end, never a
-// "Reconnect" call to action.
-const showCredentialCta = computed(() => !((props.client as { lease?: boolean }).lease && props.client.credential_state === 'expired'))
+// Spec 115 UI-005: a lease that ended or was revoked is a planned task end,
+// never a "Reconnect" call to action.
+const showCredentialCta = computed(() => !((props.client as { lease?: boolean }).lease &&
+  (props.client.credential_state === 'expired' || props.client.credential_state === 'revoked')))
 const locked = computed(() => props.client.profile_mode === 'locked' || props.client.profile_source === 'pin')
 const missing = computed(() => props.client.profile_missing === true)
 

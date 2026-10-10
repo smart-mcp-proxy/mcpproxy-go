@@ -32,6 +32,13 @@ describe('ProfileChip on an ended lease', () => {
     expect(lease.find('[data-test="client-credential-cta-w"]').exists()).toBe(false)
     const long = mount(ProfileChip, { props: { client: { ...base, credential_state: 'expired', lease: false } as any }, global: { stubs: { RouterLink: true } } })
     expect(long.find('[data-test="client-credential-cta-w"]').text()).toBe('Reconnect')
+    const revokedLease = mount(ProfileChip, { props: { client: { ...base, credential_state: 'revoked', lease: true } as any }, global: { stubs: { RouterLink: true } } })
+    expect(revokedLease.find('[data-test="client-credential-cta-w"]').exists()).toBe(false)
+  })
+
+  it('a non-lease credential row still shows its expiry (UI-001)', () => {
+    const w = mount(CredentialLifecycle, { props: { id: 'n', kind: 'client', profile: 'p', lease: false, expiresAt: '2026-10-12T12:00:00Z', showState: true, now: Date.parse('2026-10-10T12:00:00Z') } })
+    expect(w.find('[data-test="credential-expiry-n"]').text()).toMatch(/^Expires 2026-10-1\d/)
   })
 })
 

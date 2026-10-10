@@ -596,8 +596,10 @@ func TestE2E_CredentialsLifecycle_SurfaceParity(t *testing.T) {
 		before := e.library.Dispatches("search_books")
 		// The execution envelope is {ok, value, error}: assert the script ran
 		// and what the nested call returned, not the outer isError alone.
+		// call_tool answers {ok, result} on transport success (an upstream
+		// error is result.isError) and {ok: false, error} on a refusal.
 		nested := func(srv, tool string) (bool, string) {
-			script := fmt.Sprintf(`const r = call_tool(%q, %q, {}); ({refused: !!(r && (r.isError || r.error))})`, srv, tool)
+			script := fmt.Sprintf(`const r = call_tool(%q, %q, {}); ({refused: !r || !r.ok || !!r.error || !!(r.result && r.result.isError), text: r && r.ok && r.result && r.result.content ? JSON.stringify(r.result.content) : ""})`, srv, tool)
 			isErr, text, err := workerCall(code, "code_execution", map[string]any{"code": script})
 			require.NoError(t, err)
 			require.False(t, isErr, text)
@@ -613,6 +615,7 @@ func TestE2E_CredentialsLifecycle_SurfaceParity(t *testing.T) {
 		}
 		refused, text := nested("library", "search_books")
 		assert.False(t, refused, "%s admitted nested read: %s", label, text)
+		assert.Contains(t, text, `search_books`, "the admitted nested read returns the upstream's content")
 		assert.Equal(t, before+1, e.library.Dispatches("search_books"))
 		for _, name := range forbidden {
 			srv, tool, _ := strings.Cut(name, ":")
@@ -763,8 +766,10 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 		return strings.Count(body, `"tool_name":"credentials"`) >= wantCalls
 	}, 20*time.Second, 200*time.Millisecond, "every credentials call must be recorded before the sinks are read")
 	require.Eventually(t, func() bool {
-		return strings.Count(sse.snapshot(), "credentials.changed") >= 4
-	}, 10*time.Second, 100*time.Millisecond, "the SSE capture must contain both issues and both revokes")
+		snap := sse.snapshot()
+		return strings.Count(snap, "credentials.changed") >= 4 &&
+			strings.Count(snap, `"internal_tool_name":"credentials"`) >= wantCalls
+	}, 20*time.Second, 100*time.Millisecond, "the SSE capture must contain every credentials call frame and both issues and revokes")
 
 	sinks := map[string]string{
 		"errors":          strings.Join(errorsSeen, "\n"),
@@ -788,12 +793,13 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	}
 	sinks["logs"] = logBuf.String()
 	cfgPath := config.GetConfigPath(e.env.proxyServer.runtime.Config().DataDir)
-	if raw, err := os.ReadFile(cfgPath); err == nil {
-		sinks["config file"] = string(raw)
-	}
-	if raw, err := os.ReadFile(filepath.Join(e.env.proxyServer.runtime.Config().DataDir, "config.db")); err == nil {
-		sinks["config.db"] = string(raw)
-	}
+	rawCfg, err := os.ReadFile(cfgPath)
+	require.NoError(t, err, "the config file is a sink that must be examined")
+	sinks["config file"] = string(rawCfg)
+	rawDB, err := os.ReadFile(filepath.Join(e.env.proxyServer.runtime.Config().DataDir, "config.db"))
+	require.NoError(t, err, "config.db is a sink that must be examined")
+	require.NotEmpty(t, rawDB)
+	sinks["config.db"] = string(rawDB)
 	sinks["sse"] = sse.text()
 	assert.Contains(t, sinks["sse"], "credentials.changed", "the SSE capture saw the lifecycle events")
 	assert.Contains(t, sinks["activity"], "credentials", "the activity capture is not empty")

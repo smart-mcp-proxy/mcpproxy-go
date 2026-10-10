@@ -3,6 +3,7 @@
     <span v-if="binding" class="font-medium whitespace-nowrap" :data-test="`credential-binding-${id}`">{{ binding }}</span>
     <span v-if="issuer" class="opacity-70 whitespace-nowrap" :data-test="`credential-issuer-${id}`">{{ issuer }}</span>
     <span v-if="lease && !hideLease" class="opacity-80 whitespace-nowrap" :data-test="`credential-lease-${id}`">{{ lease }}</span>
+    <span v-else-if="expiryText && !hideLease" class="opacity-80 whitespace-nowrap" :data-test="`credential-expiry-${id}`">{{ expiryText }}</span>
     <span
       v-if="showState"
       class="whitespace-nowrap"
@@ -21,7 +22,8 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { PURPOSE_LABEL, bindingText, issuerText, leaseText, stateBadge } from '@/utils/credentials'
+import { PURPOSE_LABEL, bindingText, isLease, issuerText, leaseText, stateBadge } from '@/utils/credentials'
+import { formatDateTimeShort } from '@/utils/datetime'
 import { useNow } from '@/composables/useNow'
 import type { CredentialIssuer } from '@/types/api'
 
@@ -60,4 +62,9 @@ const issuer = computed(() => issuerText(props.issuer))
 const state = computed(() => stateBadge(fields.value, nowMs.value))
 const lease = computed(() => (state.value.label === 'Revoked' || state.value.label === 'Lease ended' ? '' : leaseText(fields.value, nowMs.value)))
 const dangling = computed(() => props.profileState === 'dangling')
+// A non-lease credential still shows when it expires (UI-001).
+const expiryText = computed(() => {
+  if (lease.value || isLease(fields.value) || !props.expiresAt || state.value.label !== 'Active') return ''
+  return `Expires ${formatDateTimeShort(props.expiresAt)}`
+})
 </script>
