@@ -58,6 +58,17 @@ const (
 	ReasonPolicyFiltered      Reason = "policy_filtered"
 	ReasonNotFound            Reason = "not_found"
 	ReasonServerNotConfigured Reason = "server_not_configured"
+	// ReasonToolBlockedByProfile (issue #1548) is the effective Spec 108
+	// profile tool policy — tier cap, deny rules, unannotated handling and
+	// classification — refusing a tool that exists. It is the preflight
+	// projection of dispatch's "blocked by profile: ..." refusal, so a tool
+	// dispatch refuses under a profile can never preflight as ready. Added
+	// additively: a consumer that predates it treats it as non-retryable.
+	// Emitted at the OPERATOR tier only; the agent-token tier answers the
+	// scope-silent not_found instead (FR-013), because discovery hides a
+	// profile-excluded tool (Spec 108 FR-011) and the check must not confirm
+	// what discovery withholds.
+	ReasonToolBlockedByProfile Reason = "tool_blocked_by_profile"
 )
 
 // Class groups reasons by what an operator must do about them. It drives the
@@ -174,6 +185,11 @@ var reasonTable = map[Reason]reasonSpec{
 		verdict: VerdictBlocked, exitCode: ExitBlocked,
 		remediation: "The tool is explicitly marked unsafe for this filter; drop the filter to use it.",
 	},
+	ReasonToolBlockedByProfile: {
+		class: ClassPermanentConfig, retryable: false, action: health.ActionConfigure,
+		verdict: VerdictBlocked, exitCode: ExitBlocked,
+		remediation: "The profile's tool policy (max_tier, tools.deny/allow, unannotated handling) excludes this tool; check under a profile that allows it, or have an operator adjust the profile (mcpproxy access explain --profile <name> --tool <server:tool>).",
+	},
 	ReasonNotFound: {
 		class: ClassPermanentConfig, retryable: false, action: health.ActionConfigure,
 		verdict: VerdictUnknownIDs, exitCode: ExitUnknownIDs,
@@ -197,6 +213,7 @@ var Precedence = []Reason{
 	ReasonServerQuarantined,
 	ReasonServerDisabled,
 	ReasonNotFound,
+	ReasonToolBlockedByProfile,
 	ReasonToolDeniedByConfig,
 	ReasonToolBlockedByUser,
 	ReasonToolChanged,

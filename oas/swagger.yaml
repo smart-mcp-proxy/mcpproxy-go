@@ -2598,13 +2598,15 @@ components:
       - PreflightReasonPolicyFiltered
       - PreflightReasonNotFound
       - PreflightReasonServerNotConfigured
+      - PreflightReasonToolBlockedByProfile
     contracts.PreflightRequest:
       properties:
         policy:
           $ref: '#/components/schemas/contracts.PreflightPolicy'
         profile:
-          description: 'Profile evaluates under a named profile''s server scope. Unknown:
-            400.'
+          description: |-
+            Profile evaluates under a named profile's server scope and tool policy;
+            it can only narrow a credential's own pin. Unknown: 400.
           type: string
         tools:
           description: |-

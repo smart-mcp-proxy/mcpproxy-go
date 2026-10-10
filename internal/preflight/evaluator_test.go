@@ -162,6 +162,12 @@ func TestEvaluate_EveryReasonCell(t *testing.T) {
 			ref:    ToolRef{ID: id},
 			reason: ReasonPolicyFiltered,
 		},
+		{
+			name:   "tool_blocked_by_profile (operator tier)",
+			build:  func() *world { return healthyWorld().blockByProfile() },
+			ref:    ToolRef{ID: id},
+			reason: ReasonToolBlockedByProfile,
+		},
 	}
 
 	seen := map[Reason]bool{}

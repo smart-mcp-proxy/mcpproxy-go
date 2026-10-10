@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -42,11 +43,16 @@ import (
 // read — the served surface maps those to 503 rather than fabricating a reason
 // code (FR-006).
 func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Params) (preflight.Outcome, error) {
-	if _, err := p.preflightRuntimeConfig(); err != nil {
+	cfg, err := p.preflightRuntimeConfig()
+	if err != nil {
 		return preflight.Outcome{}, err
 	}
 
-	scope, err := p.resolvePreflightScope(params)
+	// ONE config snapshot and ONE profile index for the scope AND the tool
+	// policy (issue #1548): resolving them from two reads would let a hot
+	// reload between them pair a new server scope with an old tool policy.
+	idx := p.profileIndexFor(cfg)
+	scope, policies, err := p.resolvePreflightScope(params, cfg, idx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
@@ -56,7 +62,7 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		tier = preflight.TierOperator
 	}
 
-	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters, nil)
+	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters, nil, policies)
 }
 
 // preflightRuntimeConfig is the shared "can this process answer at all" guard:
@@ -81,6 +87,9 @@ func (p *MCPProxyServer) preflightRuntimeConfig() (*config.Config, error) {
 // evaluatePreflight runs one evaluation. indexReader selects the CORPUS an id
 // resolves against and the corpus did_you_mean draws from; nil means the shared
 // search index, which is every surface except spec 102's direct describe.
+// policies are the Spec 108 profile tool policies in effect for the caller
+// (issue #1548); every one of them must admit a tool for it to be ready, and an
+// empty list means no profile policy applies.
 func (p *MCPProxyServer) evaluatePreflight(
 	ctx context.Context,
 	refs []preflight.ToolRef,
@@ -88,6 +97,7 @@ func (p *MCPProxyServer) evaluatePreflight(
 	scope *preflight.Scope,
 	filters toolannotations.Filters,
 	indexReader preflight.IndexReader,
+	policies []preflightProfilePolicy,
 ) (preflight.Outcome, error) {
 	cfg, err := p.preflightRuntimeConfig()
 	if err != nil {
@@ -123,6 +133,12 @@ func (p *MCPProxyServer) evaluatePreflight(
 		// runtime with no snapshot object at all (preflightSnapshot above).
 		RequireRuntimeEntry: state != nil,
 	}
+	if len(policies) > 0 {
+		ec.ToolPolicy = &preflightToolPolicyReader{
+			policies:    policies,
+			annotations: p.preflightAnnotationSource(state),
+		}
+	}
 
 	results, err := preflight.Evaluate(ctx, ec, refs)
 	if err != nil {
@@ -144,13 +160,21 @@ func (p *MCPProxyServer) evaluatePreflight(
 // must never hand the token a wider view than it had yesterday. The agent then
 // sees every id as not_found (tier scope-silence) — a loud, correct answer that
 // names the removed profile in the logs, rather than a silent widening.
-func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*preflight.Scope, error) {
+//
+// It also returns the profile tool policies the same names put in effect (issue
+// #1548): the token pin's and the requested profile's, both compiled in idx —
+// the snapshot dispatch decides against. Both must admit a tool, so an explicit
+// request profile can only NARROW what the pin allows, never widen it, exactly
+// as it narrows the server scope.
+func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params, cfg *config.Config, idx *profileIndex) (*preflight.Scope, []preflightProfilePolicy, error) {
 	inputs := preflight.ScopeInputs{Restricted: params.Restricted, TokenServers: params.TokenServers}
+	var policies []preflightProfilePolicy
 
 	if pin := params.TokenProfilePin; pin != "" {
 		inputs.TokenPinName = pin
-		if scope := p.profileScopeForSlug(pin); scope != nil {
+		if scope := profileScopeForSlugIn(cfg, pin); scope != nil {
 			inputs.TokenPinServers = scope.AllowedServerNames()
+			policies = appendProfilePolicy(policies, idx, pin)
 		} else {
 			inputs.TokenPinServers = nil
 			if p.logger != nil {
@@ -161,15 +185,36 @@ func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*prefli
 	}
 
 	if name := params.Profile; name != "" {
-		scope := p.profileScopeForSlug(name)
+		scope := profileScopeForSlugIn(cfg, name)
 		if scope == nil {
-			return nil, fmt.Errorf("%w: %q", preflight.ErrUnknownProfile, name)
+			return nil, nil, fmt.Errorf("%w: %q", preflight.ErrUnknownProfile, name)
 		}
 		inputs.RequestedProfileName = name
 		inputs.RequestedProfileServers = scope.AllowedServerNames()
+		policies = appendProfilePolicy(policies, idx, name)
 	}
 
-	return preflight.ResolveScope(inputs), nil
+	return preflight.ResolveScope(inputs), policies, nil
+}
+
+// appendProfilePolicy adds the compiled policy of the named profile, if the
+// snapshot compiles one, labelled for disclosure: the REST caller either named
+// the profile itself or holds the credential pinned to it, so the operator-tier
+// detail may name it (Spec 108 D39). The agent-token tier never shows the
+// detail at all.
+func appendProfilePolicy(policies []preflightProfilePolicy, idx *profileIndex, slug string) []preflightProfilePolicy {
+	if idx == nil || slug == "" {
+		return policies
+	}
+	policy := idx.PolicyFor(slug)
+	if policy == nil {
+		return policies
+	}
+	subject := refusalSubject{Slug: slug, Disclose: true}
+	if pc := idx.lookup(slug); pc != nil {
+		subject.Title = pc.Title
+	}
+	return append(policies, preflightProfilePolicy{policy: policy, subject: subject})
 }
 
 // RunPreflightForSession evaluates one IN-BAND preflight — describe_tool check
@@ -188,15 +233,23 @@ func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*prefli
 //     no `profile`, so an agent cannot re-point or widen its own view by
 //     asking (FR-009a).
 func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []preflight.ToolRef, filters toolannotations.Filters) (preflight.Outcome, error) {
-	scope, err := p.sessionPreflightScope(ctx)
+	scope, policies, err := p.sessionPreflightView(ctx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
-	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil)
+	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil, policies)
 }
 
 // sessionPreflightScope projects the session's OWN visibility predicate onto a
-// preflight scope (FR-009a).
+// preflight scope (FR-009a). See sessionPreflightView.
+func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
+	scope, _, err := p.sessionPreflightView(ctx)
+	return scope, err
+}
+
+// sessionPreflightView projects the session's OWN visibility predicate onto a
+// preflight scope (FR-009a), and returns the profile tool policies in effect
+// for the session (issue #1548).
 //
 // It deliberately does not re-derive the scope from names the way the REST path
 // does. The composition an MCP session is subject to — agent-token
@@ -212,26 +265,65 @@ func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []pref
 // grants nothing (which a name-based intersection would read as "no
 // restriction").
 //
-// nil means unrestricted, and is returned only when there is no auth context
-// and no profile in effect — i.e. nothing to restrict.
-func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
+// The Spec 108 v3 resolution dispatch decides against (pin > url > session >
+// binding > anonymous) is applied ON TOP, and can only narrow: its scope —
+// including an authoritative deny-all (the FR-008a anonymous binding guard, a
+// dangling binding or anonymous base) — must also admit the server, and its
+// compiled policy must admit the tool. When the legacy resolver names a
+// different profile (the name toolVisibleToSession's policy gate reads), that
+// profile's policy applies too. The non-recording resolver is used, so the
+// check writes no recorded resolution of its own. It is not a pure read: like
+// every request, it re-validates a stored set_profile selection and clears one
+// that is no longer admissible (FR-022). That adds nothing the request has not
+// already done — mcp-go runs the WithToolFilter chain (filterProfileV3Tools,
+// on the indexed and direct servers alike) at tools/call ahead of this
+// handler, and that filter resolves through the recording resolver — and the
+// verdict never depends on it: an inadmissible selection resolves to the
+// fail-closed base view either way.
+//
+// A nil scope means unrestricted, and is returned only when there is no auth
+// context and no profile in effect under either resolver.
+func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (*preflight.Scope, []preflightProfilePolicy, error) {
 	authCtx := auth.AuthContextFromContext(ctx)
-	profileName, profileScope := p.resolveActiveProfile(ctx)
-	if authCtx == nil && profileScope == nil {
-		return nil, nil
+	profileName, profileScope, idx := p.resolveActiveProfileWithIndex(ctx)
+
+	var res ProfileResolution
+	if idx != nil {
+		res = p.resolveProfileV3(ctx, idx)
+	}
+	var policies []preflightProfilePolicy
+	if res.Policy != nil {
+		policies = append(policies, preflightProfilePolicy{policy: res.Policy, subject: profileRefusalSubject(res, idx)})
+	}
+	policyName := profileName
+	if res.Scope != nil {
+		policyName = res.Name
+	}
+	if policyName != "" && idx != nil {
+		if policy := idx.PolicyFor(policyName); policy != nil && policy != res.Policy {
+			policies = append(policies, preflightProfilePolicy{policy: policy})
+		}
+	}
+
+	if authCtx == nil && profileScope == nil && res.Scope == nil {
+		return nil, policies, nil
 	}
 
 	names, err := p.preflightServerUniverse()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	allowed := make([]string, 0, len(names))
 	for _, name := range names {
-		if p.serverInScope(authCtx, profileScope, name) {
-			allowed = append(allowed, name)
+		if !p.serverInScope(authCtx, profileScope, name) {
+			continue
 		}
+		if res.Scope != nil && !res.Scope.Allows(name) {
+			continue
+		}
+		allowed = append(allowed, name)
 	}
-	return preflight.NewScope(profileName, allowed), nil
+	return preflight.NewScope(profileName, allowed), policies, nil
 }
 
 // preflightServerUniverse is every server name an evaluation could legitimately
@@ -386,6 +478,65 @@ func (r *preflightIndexReader) IndexedServerNames() ([]string, error) {
 		return nil, fmt.Errorf("index server list: %w", err)
 	}
 	return names, nil
+}
+
+// ---------------------------------------------------------------------------
+// ToolPolicyReader (issue #1548)
+// ---------------------------------------------------------------------------
+
+// preflightProfilePolicy is one compiled Spec 108 profile policy in effect for
+// a preflight caller, with what an operator-tier refusal may say about it.
+type preflightProfilePolicy struct {
+	policy  *profile.CompiledPolicy
+	subject refusalSubject
+}
+
+// preflightToolPolicyReader answers the evaluator's profile-policy question
+// with the decision dispatch makes: CompiledPolicy.Decide over
+// profile.IntrinsicTier of the tool's effective annotations — the same
+// identity seam handleCallToolVariant and the access explainer read — and
+// the refusal text profileToolPolicyRefusal renders for dispatch. Nothing here
+// re-implements a tier cap, a rule match or the unannotated handling.
+type preflightToolPolicyReader struct {
+	policies    []preflightProfilePolicy
+	annotations func(serverName, toolName string) (*config.ToolAnnotations, bool)
+}
+
+func (r *preflightToolPolicyReader) ProfileToolDecision(serverName, toolName string) preflight.ProfileToolDecision {
+	if len(r.policies) == 0 {
+		return preflight.ProfileToolDecision{}
+	}
+	annotations, found := r.annotations(serverName, toolName)
+	intrinsic := profile.IntrinsicTier(annotations, found)
+	for _, pp := range r.policies {
+		admitted, reason, tier := pp.policy.Decide(serverName, toolName, intrinsic)
+		if admitted {
+			continue
+		}
+		// server_not_in_profile is normally answered earlier by the scope
+		// gate built from the same profile. If the two ever disagree, fail
+		// closed: a policy that does not admit the tool is not ready.
+		detail, _ := profileToolPolicyRefusal(reason, tier, pp.policy.Cap, serverName, toolName, pp.subject)
+		return preflight.ProfileToolDecision{Blocked: true, Detail: detail}
+	}
+	return preflight.ProfileToolDecision{}
+}
+
+// preflightAnnotationSource returns the effective-annotation lookup the
+// profile policy decides from. With the request's own stateview snapshot it
+// resolves through resolveExactToolIdentityIn on THAT snapshot — the identity
+// read dispatch's tier gate uses — so every tool in a batch is classified
+// against one instant. Annotations and Found do not depend on the persisted
+// server record (it only decides hydration), so none is read per tool. A
+// snapshot a test injects falls back to the live EffectiveAnnotations seam.
+func (p *MCPProxyServer) preflightAnnotationSource(state preflight.StateReader) func(serverName, toolName string) (*config.ToolAnnotations, bool) {
+	if snapshot, ok := state.(*preflightStateSnapshot); ok && snapshot != nil && snapshot.proxy != nil {
+		return func(serverName, toolName string) (*config.ToolAnnotations, bool) {
+			identity := snapshot.proxy.resolveExactToolIdentityIn(snapshot.servers, serverName, toolName, nil)
+			return identity.Annotations, identity.Found
+		}
+	}
+	return p.EffectiveAnnotations
 }
 
 // ---------------------------------------------------------------------------
