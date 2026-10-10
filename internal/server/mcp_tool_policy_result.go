@@ -7,6 +7,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -74,5 +75,45 @@ func toolPolicyJSONResult(response map[string]interface{}, description string) *
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize %s response: %v", description, err))
 	}
-	return mcp.NewToolResultText(string(jsonResult))
+	// The JSON body stays parseable (status/reason/action survive), but the
+	// result is flagged isError so MCP clients treat a policy block as a failed
+	// call (UX-05) — consistent with every other refusal shape.
+	res := mcp.NewToolResultText(string(jsonResult))
+	res.IsError = true
+	return res
+}
+
+// Block reasons for quarantine refusals surfaced through REST (UX-05).
+const (
+	blockReasonServerQuarantined profile.BlockReason = "server_quarantined"
+	blockReasonToolQuarantined   profile.BlockReason = "tool_quarantined"
+)
+
+// quarantineRefusalFromText recognizes the QUARANTINED_SERVER_BLOCKED and
+// TOOL_QUARANTINED policy bodies built in this package and returns them as a
+// typed *profile.ToolBlockedError so the HTTP layer can answer 403 with the
+// payload instead of flattening them into a 500. The echoed request arguments
+// (requestedArgs) are dropped from the error message: they are caller data
+// that may carry secrets, and an error string ends up in logs and CLI stderr.
+// Returns nil for any other text.
+func quarantineRefusalFromText(text string) *profile.ToolBlockedError {
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &body); err != nil {
+		return nil
+	}
+	var reason profile.BlockReason
+	switch body["status"] {
+	case "QUARANTINED_SERVER_BLOCKED":
+		reason = blockReasonServerQuarantined
+	case "TOOL_QUARANTINED":
+		reason = blockReasonToolQuarantined
+	default:
+		return nil
+	}
+	delete(body, "requestedArgs")
+	redacted, err := json.Marshal(body)
+	if err != nil {
+		return nil
+	}
+	return &profile.ToolBlockedError{Reason: reason, Message: string(redacted)}
 }

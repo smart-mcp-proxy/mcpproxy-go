@@ -19,7 +19,7 @@ func TestToolPendingApprovalResult_Shape(t *testing.T) {
 	approval := &storage.ToolApprovalRecord{CurrentDescription: "new capability"}
 	res := toolPendingApprovalResult("github", "new_tool", approval)
 	require.NotNil(t, res)
-	assert.False(t, res.IsError)
+	assert.True(t, res.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &payload))
@@ -35,7 +35,7 @@ func TestToolChangedApprovalResult_Shape(t *testing.T) {
 	approval := &storage.ToolApprovalRecord{PreviousDescription: "old", CurrentDescription: "new"}
 	res := toolChangedApprovalResult("github", "mutated_tool", approval)
 	require.NotNil(t, res)
-	assert.False(t, res.IsError)
+	assert.True(t, res.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &payload))
@@ -56,7 +56,7 @@ func TestToolPendingApprovalResult_ImplicitNoRecordShape(t *testing.T) {
 	require.True(t, isImplicitPendingApproval(approval))
 	res := toolPendingApprovalResult("github", "new_tool", approval)
 	require.NotNil(t, res)
-	assert.False(t, res.IsError)
+	assert.True(t, res.IsError, "policy blocks are flagged isError (UX-05)")
 
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &payload))
@@ -74,4 +74,28 @@ func TestToolPendingApprovalResult_ImplicitNoRecordShape(t *testing.T) {
 	assert.False(t, isImplicitPendingApproval(&storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending}))
 	assert.Nil(t, implicitPendingApproval("github", "new_tool", true, "", false), "gate off")
 	assert.Nil(t, implicitPendingApproval("github", "new_tool", false, "", true), "not discovered")
+}
+
+func TestQuarantineRefusalFromText(t *testing.T) {
+	pending := toolPendingApprovalResult("github", "new_tool", &storage.ToolApprovalRecord{CurrentDescription: "d"})
+	r := quarantineRefusalFromText(pending.Content[0].(mcp.TextContent).Text)
+	require.NotNil(t, r)
+	assert.Equal(t, blockReasonToolQuarantined, r.Reason)
+	assert.Contains(t, r.Message, "TOOL_QUARANTINED")
+
+	body, err := json.Marshal(map[string]interface{}{
+		"status":        "QUARANTINED_SERVER_BLOCKED",
+		"serverName":    "s",
+		"requestedArgs": map[string]interface{}{"token": "sk-secret"},
+	})
+	require.NoError(t, err)
+	r = quarantineRefusalFromText(string(body))
+	require.NotNil(t, r)
+	assert.Equal(t, blockReasonServerQuarantined, r.Reason)
+	assert.NotContains(t, r.Message, "sk-secret", "echoed args never reach the REST error text")
+	assert.NotContains(t, r.Message, "requestedArgs")
+	assert.Contains(t, r.Message, "QUARANTINED_SERVER_BLOCKED")
+
+	assert.Nil(t, quarantineRefusalFromText("plain upstream error"))
+	assert.Nil(t, quarantineRefusalFromText(`{"status":"OK"}`))
 }
