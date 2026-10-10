@@ -38,7 +38,7 @@
 }
 ```
 
-**Secret-shaped input screen (FR-020a).** Before anything else, including operation dispatch, the type check and the unknown-key check, the whole argument payload is screened as in data-model §8: every key and every value at every depth, whatever its JSON type, and every hit is collected. A hit answers `secret_in_argument` with `field` = the first offending known argument name in sorted order, or `"(unknown argument)"` when only unknown arguments offend, writes nothing, and never echoes a caller-supplied key or value.
+**Secret-shaped input screen (FR-020a).** Before anything else, including operation dispatch, the type check and the unknown-key check, the size of the whole payload is checked (over 16 KiB of canonical JSON answers `arguments_too_large` and nothing of the payload is retained, data-model §8), and then the whole argument payload is screened as in data-model §8 by a screening detector whose enablement, request scanning, categories and payload limit are forced on regardless of `sensitive_data_detection`: every key and every value at every depth, whatever its JSON type, and every hit is collected. A hit answers `secret_in_argument` with `field` = the first offending known argument name in sorted order, or `"(unknown argument)"` when only unknown arguments offend, writes nothing, and never echoes a caller-supplied key or value.
 
 Arguments not listed for an operation are refused with `invalid_argument`. `field` names the first offending key in sorted order only when it is a known argument name of the tool (listed for another operation); for any other key it is the fixed placeholder `"(unknown argument)"`, so a caller-supplied key is never echoed. Every argument is a string. A non-string value answers `invalid_argument` with `"must be a string"`.
 
@@ -70,7 +70,7 @@ Args: `client` (required), `profile` (required), `expires_in` (required), `mode?
 
 Checks run in order under `bindingWriteMu`. The first one that fails is returned, and nothing is written:
 
-0. secret-shaped input screen (`secret_in_argument`), run by the handler before the service is called
+0. size cap (`arguments_too_large`) and secret-shaped input screen (`secret_in_argument`), run by the handler over the whole payload before the service is called; the service then screens the persisted fields again as its own first step (data-model §8.2), which is the same check REST and CLI issuance go through
 1. read_only_mode, then disable_management
 2. edition supports clients (`unsupported_edition`)
 3. `client` id syntax (`invalid_argument`), then a connect-registry id (`reserved_identity`)
@@ -104,7 +104,7 @@ Args: exactly one of `client` or `token`. Refused under read_only_mode and disab
 { "credential": CredentialView, "changed": true, "client_config_untouched": true }
 ```
 
-`client_config_untouched` is present for clients only. If the identity is already revoked, the call answers `changed: false` and writes no record. An unknown identity answers `identity_not_found`. A connect in flight for that client answers `connect_in_progress`.
+`client_config_untouched` is present for clients only. If the identity is already revoked, the call answers `changed: false` and writes no record. An unknown identity answers `identity_not_found`. A connect in flight for that client does **not** block revocation (spec review r3): revoke goes through the existing `forgetLockedOpt` path, which succeeds immediately and invalidates both the current secret and any secret staged by the in-flight connect. The outstanding connect then fails closed at commit with the existing `credential_superseded` error and cannot restore access. This preserves the deliberate behaviour pinned by `TestConnectMinter_ForgetDuringConnectFailsCommitClosed` (`internal/runtime/clients_service_inflight_test.go`).
 
 ## One-time delivery response
 

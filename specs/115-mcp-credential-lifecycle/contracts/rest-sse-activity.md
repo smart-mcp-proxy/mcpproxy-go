@@ -18,7 +18,7 @@ New optional fields:
 
 ### `POST /api/v1/tokens`, `DELETE /api/v1/tokens/{name}`
 
-Request, response and status codes are unchanged. Behaviour change: the request now goes through `runtime.CredentialsService`, which writes `profile_change{change: issue|revoke, surface: api|cli}` and publishes `credentials.changed`. The binding guard is **not** enforced here (spec A9). `POST` accepts an optional `purpose` (≤ 500 characters).
+Request, response and status codes are unchanged. Behaviour change: the request now goes through `runtime.CredentialsService`, which writes `profile_change{change: issue|revoke, surface: api|cli}` and publishes `credentials.changed`. The binding guard is **not** enforced here (spec A9). `POST` accepts an optional `purpose` (≤ 500 characters). `name` and `purpose` pass the shared service screen (data-model §8.2) before anything is minted; a secret-shaped value answers 400 naming the field, with no token created, nothing stored, no audit record and no event.
 
 ### `GET /api/v1/clients`, `GET /api/v1/clients/{id}` (custom client rows)
 
@@ -26,7 +26,7 @@ The client credential object gains `revoked_at`, `issuer`, `purpose`, `lease` an
 
 ### `POST /api/v1/clients` (custom client add)
 
-Request and response are unchanged, and the request gains an optional `purpose`. The audit record changes from `change: assign` to `change: issue` (FR-010). The OpenAPI description, `docs/api/rest-api.md` and `oas/swagger.yaml` are updated.
+Request and response are unchanged, and the request gains an optional `purpose`. `id`, `display_name`, `profile`, `mode`, `expires_in` and `purpose` pass the shared service screen (data-model §8.2) before anything is minted; a secret-shaped value answers 400 naming the field, with no client created, nothing stored, no audit record and no event. The audit record changes from `change: assign` to `change: issue` (FR-010). The OpenAPI description, `docs/api/rest-api.md` and `oas/swagger.yaml` are updated.
 
 ## SSE `/events`
 

@@ -10,7 +10,7 @@ Existing fields are unchanged: `name`, `token_hash`, `token_prefix`, `allowed_se
 |---|---|---|---|---|
 | `RevokedAt` | `revoked_at` | `*time.Time` | `RevokeAgentToken*`, `ForgetClientCredential*` | Stamped (UTC) the first time `Revoked` flips to true, and never overwritten. Absent on legacy revoked records. |
 | `Issuer` | `issuer` | `*CredentialIssuer` | `CredentialsService.Issue*` | Absent on records minted before 115, and on connect-minted clients (connect is not an issue). |
-| `Purpose` | `purpose` | `string` | `CredentialsService.Issue*` | At most 500 characters (`MaxCredentialPurpose`). Display-only and never enforced. Never copied into activity metadata. Passes the secret-shaped input screen (§8) before it is stored. |
+| `Purpose` | `purpose` | `string` | `CredentialsService.Issue*` | At most 500 characters (`MaxCredentialPurpose`). Display-only and never enforced. Never copied into activity metadata. Passes the shared service screen (§8.2) inside `CredentialsService` before anything is minted or stored, on every surface (MCP, REST, CLI). |
 | `GuardBound` | `guard_bound` | `bool` | `CredentialsService.IssueToken` with `EnforceGuard` | Set on agent tokens minted through the MCP path. Marks the token's `profile_pin` as a **standing** FR-008a binding: every later guard evaluation (config writes, hot reload, the anonymous request guard, warnings) includes it, not only its issuance (§5). Never set on client records (they are always bindings) or on REST/CLI tokens (Assumption A13). Immutable after mint. |
 
 ```go
@@ -172,7 +172,9 @@ Runs first, before any other check and before anything is persisted or echoed, o
 A value is secret-shaped when any of these holds:
 1. it contains `mcp_agt_` or `mcp_cli_` (the issued-credential prefixes), case-insensitive;
 2. it contains the daemon's configured `api_key` value (compared in constant time; skipped when the key is empty);
-3. the existing sensitive-data detector (`internal/security.Detector`, built from the live `sensitive_data_detection` config with every category enabled regardless of user toggles) reports a finding in it.
+3. the **screening detector** reports a finding in it. This is a dedicated `internal/security.Detector` instance built by `credentialScreenDetectorConfig(live)`, which copies the live `sensitive_data_detection` config only for its custom patterns and entropy threshold, and then **forces** (spec review r3): `Enabled = true`, `ScanRequests = true`, every category enabled (built-in and custom), and `MaxPayloadSizeKB` = `MaxCredentialArgumentsBytes/1024 + 1`, so that no screened string is ever truncated. The user's toggles (`enabled: false`, `scan_requests: false`, disabled categories, a small `max_payload_size_kb`) therefore never weaken the screen; they keep governing upstream traffic exactly as before. The screen calls `Scan(value, "")` and also treats `Result.Truncated == true` as a hit (fail closed), so even a future change to the size rule cannot let an unscanned tail through.
+
+**Size cap (spec review r3).** Before the walk, the handler measures the canonical JSON serialization of the decoded `arguments` object. When it exceeds `MaxCredentialArgumentsBytes` (16 KiB; the largest legitimate call is a 500-character purpose plus a few ids, well under 2 KiB), the call is refused with `arguments_too_large`, **nothing of the payload is retained**, and the stored `internal_tool_call.arguments` is replaced wholesale with `{ "_screened": "oversized input; arguments not stored", "operation": "<known enum value or omitted>", "size_bytes": <n> }`. The oversized payload is never scanned partially, never logged, and never reaches the type, unknown-key or service checks. Any single screened string is therefore at most 16 KiB, below the screening detector's forced payload limit, so the scan of every string is complete.
 
 Coverage (spec review r2): the screen runs over the **whole payload**, not only the known string arguments. It walks the decoded `arguments` object recursively and screens:
 - every value at every depth, whatever its JSON type: strings as-is; numbers and booleans as their JSON text (a numeric API key is still caught); arrays and objects element by element;
@@ -194,6 +196,21 @@ Recording: on a hit the handler does **not** record the caller's arguments with 
 
 No other caller key or value is kept, so a second secret, a nested secret, or a secret used as a key cannot survive into activity, export, SSE, `sensitive_data.detected` rows, logs or the DB. The record is built only from this summary. The handler's own logging (any level) uses the same summary; the generic upstream `handleCallTool` debug line (`mcp.go:3710`) is not on this path because `credentials` is a built-in tool with its own handler, and a test pins that.
 
-Passing calls: because the screen covered every key and value, the arguments of a call that passes are stored as-is. Unknown keys of a passing call are still refused with `invalid_argument` and `field: "(unknown argument)"`, never their name.
+Passing calls: because the screen covered every key and value completely (forced detector, no truncation, size cap), the arguments of a call that passes are stored as-is. Unknown keys of a passing call are still refused with `invalid_argument` and `field: "(unknown argument)"`, never their name.
+
+### 8.1 Where the screen runs
+
+The screen is one function, `runtime.ScreenCredentialInput(values ScreenInput) *SecretInputError`, in `internal/runtime/credential_input_screen.go`, owned by `CredentialsService` together with its screening detector and the live API key. It is called from two places:
+
+1. **MCP handler, whole payload** (this section): `handleCredentials` calls it over the whole decoded `arguments` object first, so that a hit can replace the recorded arguments wholesale before any record is built.
+2. **Service, persisted fields (§8.2)**: every `CredentialsService.Issue*` call screens again, whatever the surface.
+
+### 8.2 Shared service screen (all surfaces, spec review r3)
+
+`CredentialsService.IssueClient` and `IssueToken` run `ScreenCredentialInput` as their **first** step, under `bindingWriteMu`, before validation, before `GenerateToken`, and before any store call, over every caller-supplied string that can be persisted or echoed: `client`/`name`, `display_name`, `profile`, `mode`, `expires_in` (in its original text form when the surface passes text) and `purpose`. This is the authoritative pre-mint check for REST `POST /api/v1/tokens`, REST `POST /api/v1/clients`, the CLI (which calls REST), and the MCP path (where it is a second, cheap pass over the same values). A hit returns the typed `*SecretInputError{Fields}`; nothing is generated, minted, stored, audited (`profile_change` is not written) or published (`credentials.changed` is not emitted).
+
+REST mapping: a `*SecretInputError` answers **400 Bad Request** in the route's existing error envelope with the text `argument "<known field>" looks like a credential or secret; it was not stored. Remove it and retry`. The text names the field and never the value. This is the only new REST refusal in this spec and is additive: no request that succeeds today and does not carry a secret-shaped value changes outcome. The REST handlers do not log request bodies (verified: no `io.ReadAll(r.Body)` or body field in `internal/httpapi`), and a test pins that the refusal path logs only the field name.
+
+Connect-minted clients (`ConnectMinter`) are not covered by §8.2: their `display_name` comes from the server-side connect registry, not from the caller.
 
 Independently of the screen, error texts echo only values that already passed it **and** passed their syntax check (an id or name matching its regex, or an enum value). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`) are never echoed.
