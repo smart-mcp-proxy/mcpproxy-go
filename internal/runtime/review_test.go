@@ -258,6 +258,9 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"plain env low entropy":     {"-c", `API_KEY=@hunter2xyz exec npx srv`},
 		"plain env client secret":   {"-c", `CLIENT_SECRET=@hunter2xyz exec npx srv`},
 		"ansi-c escaped apostrophe": {"-c", `exec npx srv --name $'it\'s '$(helper --password hunter2xyz)`},
+		"ansi-c in subst multiword": {"-c", `exec npx srv --name "$(printf %s $'it\'s ')" --password 'two hunter2xyz'`},
+		"nested sh -c":              {"-c", `exec sh -c 'exec npx srv --password hunter2xyz'`},
+		"nested bash -lc":           {"-c", `exec bash -lc "exec npx srv --password hunter2xyz"`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -311,4 +314,24 @@ func TestReviewToolScanVerdict_UsesToolFindingsAndHeldFallback(t *testing.T) {
 func TestReviewUnifiedDiffUsesReadableSingleLineHunk(t *testing.T) {
 	require.Equal(t, "@@ -1 +1 @@\n-old\n+new", reviewUnifiedDiff("old", "new"))
 	require.Empty(t, reviewUnifiedDiff("same", "same"))
+}
+
+func TestGetServerReview_RedactsWhitespaceFreeShellCommand(t *testing.T) {
+	args := []string{"-c", "API_KEY=@hunter2xyz;npx"}
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
+		Name: "nows", Enabled: true, Quarantined: true, Protocol: "stdio", Command: "sh", Args: args,
+	}})
+	review, err := rt.GetServerReview(context.Background(), "nows")
+	require.NoError(t, err)
+	encoded, err := json.Marshal(review.Server)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "hunter2xyz")
+	require.Contains(t, review.Server.Args[1], "npx")
+	cfg, cerr := rt.GetConfig()
+	require.NoError(t, cerr)
+	for _, sc := range cfg.Servers {
+		if sc.Name == "nows" {
+			require.Equal(t, args, sc.Args)
+		}
+	}
 }

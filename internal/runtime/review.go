@@ -217,9 +217,9 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 	// quoted inline value (--password='a b') mid-quote, leaving unbalanced
 	// quoting that the token splitter then cannot group.
 	for i, arg := range contractServer.Args {
-		if strings.ContainsAny(arg, " \t\n\r") {
-			contractServer.Args[i] = oauth.LiveRedaction.CommandString(arg)
-		}
+		// Every element, not only whitespace-bearing ones: `API_KEY=@x;npx` is a
+		// whole command line with no whitespace in it.
+		contractServer.Args[i] = oauth.LiveRedaction.CommandString(arg)
 	}
 	oauth.RedactServerSecretFields(&contractServer)
 	reviewServer := ReviewServer{

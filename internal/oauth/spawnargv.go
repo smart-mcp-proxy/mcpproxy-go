@@ -177,6 +177,19 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 			}
 		}
 	}
+	// A quoted word that holds a whole command line (the operand of a nested
+	// `sh -c '...'`) is one token to the argv pass; mask the command inside it.
+	for i, d := range decoded {
+		if d == tokens[i] || masked[i] != tokens[i] || !strings.ContainsAny(d, " \t\n\r") {
+			continue
+		}
+		if inner := r.commandStringTokens(d, spawnRules); inner != d {
+			if !strings.Contains(inner, "'") {
+				inner = "'" + inner + "'"
+			}
+			masked[i] = inner
+		}
+	}
 	// A NAME=value assignment whose NAME is sensitive (quoted or not) is masked
 	// whole: the generic leaf rule misses low-entropy or multiword values
 	// (API_KEY=@hunter2xyz, PASSWORD='a b c').
@@ -588,9 +601,15 @@ func scanShellWord(s string, i int, quoteAware bool) (end int, balanced bool) {
 func scanSubstitution(s string, i int, closer byte, quoteAware bool) (end int, ok bool) {
 	depth := 0
 	var quote byte
+	ansi := false // inside $'...', where a backslash escapes even a quote
 	for j := i; j < len(s); j++ {
 		c := s[j]
-		if c == '\\' && quote != '\'' && j+1 < len(s) {
+		if c == '\\' && (quote != '\'' || ansi) && j+1 < len(s) {
+			j++
+			continue
+		}
+		if quoteAware && quote == 0 && c == '$' && j+1 < len(s) && s[j+1] == '\'' {
+			quote, ansi = '\'', true
 			j++
 			continue
 		}
@@ -610,7 +629,7 @@ func scanSubstitution(s string, i int, closer byte, quoteAware bool) (end int, o
 				continue
 			}
 			if c == quote {
-				quote = 0
+				quote, ansi = 0, false
 			}
 			continue
 		}
