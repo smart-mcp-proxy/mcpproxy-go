@@ -81,8 +81,11 @@ describe('a stale client detail cannot undo a lifecycle refresh', () => {
     api.getClients = vi.fn().mockResolvedValue({ success: true, data: { clients: [{ ...row, credential_state: 'revoked' }] } })
     await store.refreshPresence()
     expect(store.clients[0].credential_state).toBe('revoked')
+    // The superseded detail is re-requested and the fresh answer applies.
+    api.getClient = vi.fn().mockResolvedValue({ success: true, data: { ...row, credential_state: 'revoked', sessions: [{ id: 's1' }] } })
     resolveDetail({ success: true, data: { ...row, credential_state: 'client' } })
     await pending
     expect(store.clients[0].credential_state).toBe('revoked')
+    expect(store.clients[0].sessions).toEqual([{ id: 's1' }])
   })
 })

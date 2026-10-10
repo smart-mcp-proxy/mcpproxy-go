@@ -164,13 +164,17 @@ export const useClientsStore = defineStore('clients', () => {
     stale.value = true
   }
 
-  async function loadDetail(id: string) {
+  async function loadDetail(id: string, attempt = 0): Promise<void> {
     // A roster refresh that starts while this detail is in flight (an SSE
     // invalidation such as credentials.changed) supersedes it: a stale detail
-    // must not overwrite the newer row (Spec 115 UI-004).
+    // must not overwrite the newer row (Spec 115 UI-004). The superseded
+    // request is re-issued, so the expanded row still gets its detail.
     const generation = rosterGeneration
     const response = await api.getClient(id)
-    if (generation !== rosterGeneration) return
+    if (generation !== rosterGeneration) {
+      if (attempt < 3 && clients.value.some(client => client.id === id)) return loadDetail(id, attempt + 1)
+      return
+    }
     if (!response.success || !response.data) return
     const index = clients.value.findIndex(client => client.id === id)
     if (index >= 0) {
