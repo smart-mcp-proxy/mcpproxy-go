@@ -16,6 +16,7 @@ func TestSpawnArgv_Round14(t *testing.T) {
 		`exec bash -lc "exec npx srv --password hunter2xyz"`,
 		`exec sh -c 'exec npx srv --password hunter2xyz --token=othersecret'`,
 		`exec sh -c ':;API_KEY=@hunter2xyz;npx'`,
+		`exec sh -c 'exec npx srv --password="hunter2xyz and more"'`,
 	}
 	for _, cmd := range cases {
 		argv := []string{"sh", "-c", cmd}
@@ -29,6 +30,8 @@ func TestSpawnArgv_Round14(t *testing.T) {
 		} {
 			assert.NotContains(t, out, "hunter2xyz", name+": "+cmd)
 			assert.NotContains(t, out, "othersecret", name+": "+cmd+" -> "+out)
+			assert.NotContains(t, out, "and more", name+": "+cmd+" -> "+out)
+			assert.NotContains(t, out, "more\"", name+": "+cmd+" -> "+out)
 			assert.NotContains(t, out, "two", name+": "+cmd+" -> "+out)
 		}
 		assert.Equal(t, orig, argv)

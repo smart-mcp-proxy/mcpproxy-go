@@ -262,6 +262,7 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"nested sh -c":              {"-c", `exec sh -c 'exec npx srv --password hunter2xyz'`},
 		"nested bash -lc":           {"-c", `exec bash -lc "exec npx srv --password hunter2xyz"`},
 		"nested two secrets":        {"-c", `exec sh -c 'exec npx srv --password hunter2xyz --token=othersecret'`},
+		"nested quoted multiword":   {"-c", `exec sh -c 'exec npx srv --password="hunter2xyz and more"'`},
 		"nested no whitespace":      {"-c", `exec sh -c ':;API_KEY=@hunter2xyz;npx'`},
 	}
 	for name, args := range cases {

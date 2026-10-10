@@ -179,23 +179,21 @@ func (r Redaction) maskTokens(tokens []string, spawnRules bool) []string {
 	}
 	// A quoted word that holds a whole command line (the operand of a nested
 	// `sh -c '...'`) is one token to the argv pass; mask the command inside it.
-	// The recursion runs even when an earlier pass already masked part of the
-	// token (a second secret in the same nested command), and whether or not the
-	// operand has whitespace (`:;API_KEY=@x;npx`). It starts from the already
-	// masked text so a wholly masked token stays masked.
+	// The recursion always starts from the decoded ORIGINAL text, never from the
+	// flat pass's rendering: that rendering drops the quotes around a masked
+	// value, so a multiword secret (--password="a b") would re-tokenize into
+	// unrelated words. The inner pass applies the same rules to every token, so
+	// it also covers whatever the flat pass masked; when it changes nothing the
+	// flat rendering stands. Whitespace-free operands (`:;API_KEY=@x;npx`) recurse too.
 	for i, d := range decoded {
-		if d == tokens[i] {
+		// A word that starts with a dash is a flag (`--password="a b c"`), not a
+		// command line: the flat pass already judged it as one unit, and
+		// re-splitting its value on whitespace would leave the tail visible.
+		if d == tokens[i] || IsArgvFlag(d) {
 			continue
 		}
-		base := d
-		if masked[i] != tokens[i] {
-			base = shellDecodeToken(masked[i])
-		}
-		if inner := r.commandStringTokens(base, spawnRules); inner != base {
-			if !strings.Contains(inner, "'") {
-				inner = "'" + inner + "'"
-			}
-			masked[i] = inner
+		if inner := r.commandStringTokens(d, spawnRules); inner != d {
+			masked[i] = "'" + strings.ReplaceAll(inner, "'", `'\''`) + "'"
 		}
 	}
 	// A NAME=value assignment whose NAME is sensitive (quoted or not) is masked
