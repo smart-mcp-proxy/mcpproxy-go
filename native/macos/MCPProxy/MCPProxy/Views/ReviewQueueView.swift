@@ -137,6 +137,31 @@ enum ReviewPresentation {
 
     static func approveAllLabel(total: Int) -> String { "Approve All (\(total) \(total == 1 ? "tool" : "tools"))" }
 
+    // MARK: Binding an approval to the reviewed definitions (UX-02)
+
+    /// The definitions the operator is looking at, by hash: the core approves
+    /// only these and answers 409 "out of date" when one changed or a new tool
+    /// appeared since. Nil (an unbound request) only when no tool in the whole
+    /// `review` carries a hash, i.e. the core predates `current_hash`. A single
+    /// tool without a hash on a newer core is left out of the binding instead of
+    /// unbinding the approval: the core then refuses it as out of date unless
+    /// that tool is blocked. `review` defaults to `tools`. Matches the CLI and
+    /// the Web screen.
+    static func expectedHashes(_ tools: [ReviewTool], review: [ReviewTool]? = nil) -> [String: String]? {
+        guard (review ?? tools).contains(where: { !($0.currentHash ?? "").isEmpty }) else { return nil }
+        var out: [String: String] = [:]
+        for tool in tools { if let hash = tool.currentHash, !hash.isEmpty { out[tool.name] = hash } }
+        return out
+    }
+
+    /// The core's message when an approval was refused because the review is
+    /// out of date (409); nil for every other failure.
+    static func staleReviewMessage(_ error: Error) -> String? {
+        guard case let APIClientError.httpError(status, message) = error, status == 409,
+              message.localizedCaseInsensitiveContains("out of date") else { return nil }
+        return message
+    }
+
     enum ToolControl: Equatable { case allowToggle, approveReject, approved, blocked }
 
     /// The control a tool row gets: the quarantine toggle, Approve/Reject, or a plain state.
@@ -155,7 +180,10 @@ struct ReviewSheet: View {
     @State private var allowed = Set<String>()
     @State private var choices: [String: ReviewPresentation.Choice] = [:]
     @State private var pendingBlock: [String]?
+    /// The review hashes the pending decision was made on; a force retry re-sends them (UX-02).
+    @State private var pendingExpected: [String: String]??
     @State private var error: String?
+    @State private var staleNotice: String?
     @State private var scanning = false
     @State private var showBlindApprovalConfirmation = false
     @State private var showForceApprovalConfirmation = false
@@ -172,6 +200,7 @@ struct ReviewSheet: View {
                 }
             }.padding()
             if let error { Text(error).foregroundStyle(.red).padding(.horizontal) }
+            if let staleNotice { Label(staleNotice, systemImage: "arrow.triangle.2.circlepath").foregroundStyle(.orange).padding(.horizontal) }
             if let server = review?.server {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Transport: \(server.transport ?? "unknown")")
@@ -284,17 +313,29 @@ struct ReviewSheet: View {
         do { let value = try await client.serverReview(serverName); review = value; allowed = ReviewPresentation.mergeSelection(value.tools, choices: choices) } catch { self.error = error.localizedDescription }
     }
     private func requestApprove(everything: Bool) {
+        pendingExpected = nil
         if review?.server.definitionsCaptured == false { pendingBlock = nil; showBlindApprovalConfirmation = true; return }
         pendingBlock = everything ? [] : nil
         Task { await approve(force: false) }
     }
-    /// The force retry re-sends the block list of the attempt that triggered it (D43.5).
+    /// The force retry re-sends the decision of the attempt that triggered it
+    /// (D43.5): its block list AND the hashes of the review it was made on
+    /// (UX-02). A review that reloaded while the force dialog was open (a new or
+    /// changed tool) therefore fails as out of date instead of pairing the old
+    /// block list with definitions the operator never decided on.
     private func approve(force: Bool) async {
         guard let client = appState.apiClient, let review else { return }
         let block = pendingBlock ?? review.tools.map(\.name).filter { !allowed.contains($0) }
+        let expected = pendingExpected ?? ReviewPresentation.expectedHashes(review.tools)
         pendingBlock = block
-        do { try await client.securityApproveServer(serverName, force: force, block: block); choices = [:]; pendingBlock = nil; await load() }
-        catch { self.error = error.localizedDescription; if !force, case let APIClientError.httpError(status, message) = error, status == 409, message.localizedCaseInsensitiveContains("dangerous") { showForceApprovalConfirmation = true } }
+        pendingExpected = .some(expected)
+        error = nil; staleNotice = nil
+        do { try await client.securityApproveServer(serverName, force: force, block: block, expectedHashes: expected); choices = [:]; pendingBlock = nil; pendingExpected = nil; await load() }
+        catch {
+            // A stale review (409): reload so the operator sees what changed, keeping the message.
+            if let stale = ReviewPresentation.staleReviewMessage(error) { pendingBlock = nil; pendingExpected = nil; await load(); staleNotice = stale; return }
+            self.error = error.localizedDescription; if !force, case let APIClientError.httpError(status, message) = error, status == 409, message.localizedCaseInsensitiveContains("dangerous") { showForceApprovalConfirmation = true }
+        }
     }
     private func fetchDefinitions() async {
         guard let client = appState.apiClient else { return }
@@ -302,7 +343,13 @@ struct ReviewSheet: View {
         do { try await client.discoverServerTools(serverName); scanning = false; await load() }
         catch { scanning = false; self.error = error.localizedDescription }
     }
-    private func approveTool(_ name: String) async { guard let client = appState.apiClient else { return }; do { try await client.approveSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
+    private func approveTool(_ name: String) async {
+        guard let client = appState.apiClient else { return }
+        let expected = ReviewPresentation.expectedHashes(review?.tools.filter { $0.name == name } ?? [], review: review?.tools ?? [])
+        error = nil; staleNotice = nil
+        do { try await client.approveSpecificTools(serverName, tools: [name], expectedHashes: expected); await load() }
+        catch { if let stale = ReviewPresentation.staleReviewMessage(error) { await load(); staleNotice = stale } else { self.error = error.localizedDescription } }
+    }
     private func rejectTool(_ name: String) async { guard let client = appState.apiClient else { return }; do { try await client.blockSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
     private func rejectServer() async { guard let client = appState.apiClient else { return }; do { try await client.securityRejectServer(serverName); await load() } catch { self.error = error.localizedDescription } }
     private func definitionText(_ tool: ReviewTool) -> String {

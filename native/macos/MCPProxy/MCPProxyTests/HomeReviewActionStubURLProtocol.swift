@@ -15,10 +15,15 @@ final class HomeReviewActionStubURLProtocol: URLProtocol {
     /// Request bodies are retained separately so approval-path tests can pin
     /// the force flag without changing the existing navigation assertions.
     static var requestBodies: [Data?] = []
+    /// The canned answer; approval-binding tests swap in a 409.
+    static var responseStatus = 200
+    static var responseBody = "{\"success\":true,\"data\":{}}"
 
     static func reset() {
         requests = []
         requestBodies = []
+        responseStatus = 200
+        responseBody = "{\"success\":true,\"data\":{}}"
     }
 
     /// An APIClient whose traffic is intercepted by this stub.
@@ -43,12 +48,12 @@ final class HomeReviewActionStubURLProtocol: URLProtocol {
         HomeReviewActionStubURLProtocol.requestBodies.append(requestBody(request))
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "http://127.0.0.1:8080")!,
-            statusCode: 200,
+            statusCode: HomeReviewActionStubURLProtocol.responseStatus,
             httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "application/json"]
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data("{\"success\":true,\"data\":{}}".utf8))
+        client?.urlProtocol(self, didLoad: Data(HomeReviewActionStubURLProtocol.responseBody.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
