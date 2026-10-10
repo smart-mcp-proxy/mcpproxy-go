@@ -1574,7 +1574,10 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Approval waits for an in-flight discovery pass on the server (UX-02
+	// serialization) and then promotes the whole captured toolset; allow the
+	// same budget as `review approve`.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/security/approve", body)
