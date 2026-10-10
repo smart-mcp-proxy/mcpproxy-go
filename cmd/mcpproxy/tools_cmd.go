@@ -1144,7 +1144,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&profile, "profile", "", "Evaluate under a named profile's server scope")
+	cmd.Flags().StringVar(&profile, "profile", "", "Evaluate under a named profile's server scope and tool policy")
 	cmd.Flags().StringArrayVar(&pins, "pin", nil, "Pin a tool to a schema hash: --pin <server:tool>=sha256/v<N>:<hex> (repeatable)")
 	cmd.Flags().BoolVar(&readOnlyOnly, "read-only-only", false, "Require tools to be annotated read-only")
 	cmd.Flags().BoolVar(&excludeDestructive, "exclude-destructive", false, "Require tools to be annotated non-destructive")
