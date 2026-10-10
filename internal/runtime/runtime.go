@@ -2073,6 +2073,15 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	}
 	r.retireStaleClients(&configCopy)
 
+	// The applied servers reach storage in the same commit that published them.
+	// The reconciliation below runs later, and any commit that lands before it
+	// rebuilds the server list from storage: a quarantine or disable written
+	// only to the live config would be reverted by an unrelated toggle's save,
+	// and a newly configured server dropped (UX-01 r9).
+	if serversChanged {
+		r.persistAppliedServersLocked(&configCopy)
+	}
+
 	// Issue #1458: a profile edit is live the moment the apply returns, so its
 	// per-profile search index must be too, not after the next discovery pass.
 	// A stale index only hides in-scope tools (retrieve_tools re-admits every

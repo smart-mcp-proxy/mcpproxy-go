@@ -608,6 +608,16 @@ func (m *Manager) RetireStaleClients(servers []*config.ServerConfig) {
 			desired[s.Name] = s
 		}
 	}
+	// Retirement is a barrier against review captures: a capture persisting a
+	// retired client's definitions into the server's review records would
+	// mislabel them as the new configuration's. captureMu's writer side waits
+	// for every capture already inside its persistence section (the same wait
+	// AddServerConfig and RemoveServer perform), and WithCurrentClientOnEpoch
+	// refuses a retired client, so after this returns none of the old client's
+	// definitions can be persisted (UX-01 r9). Lock order matches
+	// WithCurrentClientOnEpoch: captureMu, then mu.
+	m.captureMu.Lock()
+	defer m.captureMu.Unlock()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for id, client := range m.clients {
@@ -1288,7 +1298,9 @@ func (m *Manager) WithCurrentClientOnEpoch(id string, expected *managed.Client, 
 	m.mu.RLock()
 	client, ok := m.clients[id]
 	m.mu.RUnlock()
-	if !ok || client != expected {
+	// A retired client's responses belong to a configuration a newer commit
+	// already replaced, even before the manager swaps the client (UX-01 r9).
+	if !ok || client != expected || client.IsRetired() {
 		return false, nil
 	}
 	return client.WithConnectionEpoch(expectedEpoch, fn)

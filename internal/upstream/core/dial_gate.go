@@ -1,6 +1,11 @@
 package core
 
-import "errors"
+import (
+	"context"
+	"errors"
+
+	proxytransport "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+)
 
 // ErrDialRefused is returned when the owner of this client (the managed client,
 // on behalf of the upstream manager) refuses a launch or dial because the client
@@ -54,4 +59,25 @@ func (c *Client) admitSpawn() (release func(), err error) {
 		BeforeLaunchHook(c.config.Name)
 	}
 	return c.admitDial()
+}
+
+// SetRetireContext installs the context the owner cancels when it retires this
+// client. HTTP/SSE requests admitted but not yet on the wire are aborted by it,
+// so retirement never waits on a slow dial (UX-01 r9).
+func (c *Client) SetRetireContext(ctx context.Context) {
+	c.retireCtx.Store(&ctx)
+}
+
+// requestGate is the per-request gate for this client's HTTP/SSE transports, or
+// nil when the client has no owner gate.
+func (c *Client) requestGate() *proxytransport.RequestGate {
+	g := c.dialGate.Load()
+	if g == nil || *g == nil {
+		return nil
+	}
+	gate := &proxytransport.RequestGate{Admit: c.admitDial}
+	if p := c.retireCtx.Load(); p != nil {
+		gate.RetireCtx = *p
+	}
+	return gate
 }

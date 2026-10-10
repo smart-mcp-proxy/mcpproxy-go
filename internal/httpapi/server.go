@@ -2654,6 +2654,22 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// patchRejection is a PATCH request refused while it was being resolved against
+// the server's current state. It travels as an error out of the config commit.
+type patchRejection struct {
+	status int
+	msg    string
+}
+
+func (p *patchRejection) Error() string { return p.msg }
+
+// serverResolveUpdater is implemented by controllers that can resolve a PATCH
+// against the stored server inside the config commit. The resolver receives the
+// freshly read server and returns the update to apply.
+type serverResolveUpdater interface {
+	UpdateServerResolved(ctx context.Context, serverName string, resolve func(existing *config.ServerConfig) (*config.ServerConfig, error)) error
+}
+
 // handlePatchServer godoc
 // @Summary Partially update an upstream server
 // @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
@@ -2713,264 +2729,293 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build partial update config - only set fields that were provided
-	updates := &config.ServerConfig{Name: serverName}
-	hasUpdates := false
+	// resolve turns the request into the update to commit, against the server
+	// as it is NOW. It runs twice: once here against the live snapshot, to
+	// reject a bad request before anything is committed, and once inside the
+	// config commit (Runtime.CommitServerUpdate) against the freshly read
+	// stored server, so omitted fields and the env/header merges are resolved
+	// from the state the update is actually applied to rather than from a
+	// snapshot a concurrent commit has since moved past (UX-01 r9).
+	resolve := func(existingSrv *config.ServerConfig) (*config.ServerConfig, *patchRejection) {
+		// Build partial update config - only set fields that were provided
+		updates := &config.ServerConfig{Name: serverName}
+		hasUpdates := false
 
-	if req.URL != "" {
-		// #872: the read path masks secrets in the URL query string / userinfo
-		// (redactServerSecrets → oauth.RedactServerSecretFields), but url is a
-		// single string field with no field-level diff. If a client edits a
-		// non-secret part and echoes the masked url back, restore the stored
-		// real secrets so the mask is never persisted over them. Protects ALL
-		// clients, not just the tray.
-		//
-		// #1148 round 6: this is oauth.UnmaskLiveURL, the SAME function the MCP
-		// patch door calls — the whole-URL echo, then the sensitive-param and
-		// per-parameter reverts, then a refusal for any mask left unbound. The
-		// plain oauth.UnmaskURL used here before knew only the params it had
-		// masked itself, so once the REST read door started masking a
-		// credential under an unrecognised parameter name the mask was written
-		// through as the credential.
-		var storedURL string
-		if existingSrv != nil {
-			storedURL = existingSrv.URL
-		}
-		unmaskedURL, err := oauth.UnmaskLiveURL(req.URL, storedURL)
-		if err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
-		}
-		updates.URL = unmaskedURL
-		hasUpdates = true
-	}
-	if req.Command != "" {
-		updates.Command = req.Command
-		hasUpdates = true
-	}
-	if req.Args != nil {
-		// #1148 round 4: `args` REPLACES the vector, and the read path masks
-		// credential-shaped argv tokens. Unlike env/headers/url there is no
-		// unmask contract for argv — an argv slot has no key to bind a stored
-		// secret to, and the caller supplies the whole vector *and* `command`
-		// in the same request — so an echoed mask is refused, not reverted.
-		var storedArgs []string
-		if existingSrv != nil {
-			storedArgs = existingSrv.Args
-		}
-		if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
-		}
-		updates.Args = req.Args
-		hasUpdates = true
-	}
-	// PATCH semantics for headers and env follow JSON Merge Patch
-	// (RFC 7396): keys with a non-null value upsert, keys with a null
-	// value delete, omitted keys are preserved. This lets the Web UI /
-	// macOS tray / CLI send a minimal diff so redacted-but-unchanged
-	// values (returned by the GET path via `redactServerSecrets`)
-	// never round-trip through the client.
-	if req.Env != nil {
-		merged := map[string]string{}
-		if existingSrv != nil {
-			for k, v := range existingSrv.Env {
-				merged[k] = v
+		if req.URL != "" {
+			// #872: the read path masks secrets in the URL query string / userinfo
+			// (redactServerSecrets → oauth.RedactServerSecretFields), but url is a
+			// single string field with no field-level diff. If a client edits a
+			// non-secret part and echoes the masked url back, restore the stored
+			// real secrets so the mask is never persisted over them. Protects ALL
+			// clients, not just the tray.
+			//
+			// #1148 round 6: this is oauth.UnmaskLiveURL, the SAME function the MCP
+			// patch door calls — the whole-URL echo, then the sensitive-param and
+			// per-parameter reverts, then a refusal for any mask left unbound. The
+			// plain oauth.UnmaskURL used here before knew only the params it had
+			// masked itself, so once the REST read door started masking a
+			// credential under an unrecognised parameter name the mask was written
+			// through as the credential.
+			var storedURL string
+			if existingSrv != nil {
+				storedURL = existingSrv.URL
 			}
-		}
-		for k, vp := range req.Env {
-			if vp == nil {
-				delete(merged, k)
-			} else {
-				merged[k] = *vp
+			unmaskedURL, err := oauth.UnmaskLiveURL(req.URL, storedURL)
+			if err != nil {
+				return nil, &patchRejection{status: http.StatusBadRequest, msg: err.Error()}
 			}
-		}
-		// #872: a client could echo a masked env value back (the tray diffs, but
-		// other clients may send the full map). Revert any value that is exactly
-		// the masked rendering of the stored one.
-		//
-		// #1148 round 6: UnmaskLiveEnvValues first, because the LIVE read door
-		// masks a vendor-shaped credential under a benign variable name — a
-		// rendering UnmaskEnvValues (which compares against oauth's own name
-		// rule) cannot recognise. Both bind by KEY, so a value is only ever
-		// restored to the variable it was read from.
-		if existingSrv != nil {
-			merged = oauth.UnmaskEnvValues(oauth.UnmaskLiveEnvValues(merged, existingSrv.Env), existingSrv.Env)
-		}
-		updates.Env = merged
-		hasUpdates = true
-	}
-	if req.Headers != nil {
-		merged := map[string]string{}
-		if existingSrv != nil {
-			for k, v := range existingSrv.Headers {
-				merged[k] = v
-			}
-		}
-		for k, vp := range req.Headers {
-			if vp == nil {
-				delete(merged, k)
-			} else {
-				merged[k] = *vp
-			}
-		}
-		// #872 / #1148 round 6: revert any masked header value echoed back (see
-		// the env note above — same two-step, same key binding).
-		if existingSrv != nil {
-			merged = oauth.UnmaskHeaders(oauth.UnmaskLiveHeaders(merged, existingSrv.Headers), existingSrv.Headers)
-		}
-		updates.Headers = merged
-		hasUpdates = true
-	}
-	if req.WorkingDir != "" {
-		updates.WorkingDir = req.WorkingDir
-		hasUpdates = true
-	}
-	if req.Protocol != "" {
-		updates.Protocol = req.Protocol
-		hasUpdates = true
-	}
-	if req.Enabled != nil {
-		updates.Enabled = *req.Enabled
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.Enabled = existingSrv.Enabled
-	}
-	if req.Quarantined != nil {
-		updates.Quarantined = *req.Quarantined
-		// Only a body that carries the field is an operator decision; UpdateServer
-		// and the storage guard lower a recorded quarantine only for this case.
-		updates.MarkQuarantineExplicitlySet(true)
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.Quarantined = existingSrv.Quarantined
-	}
-	if req.ReconnectOnUse != nil {
-		updates.ReconnectOnUse = *req.ReconnectOnUse
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.ReconnectOnUse = existingSrv.ReconnectOnUse
-	}
-	// MCP-2940: auto_approve_tool_changes is a tri-state *bool, so unlike the
-	// non-pointer bools above we preserve the EXISTING POINTER (which may be
-	// nil = "never set") when the request omits the field — collapsing to a
-	// plain bool here would erase the unset/false distinction the trust-baseline
-	// logic (MCP-2931) relies on.
-	if req.AutoApproveToolChanges != nil {
-		updates.AutoApproveToolChanges = req.AutoApproveToolChanges
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
-	}
-	// F9: expose_prompts is a tri-state *bool — preserve the EXISTING POINTER
-	// (which may be nil = "never set") when the request omits the field, so a
-	// bare PATCH of an unrelated field does not wipe a configured override.
-	if req.ExposePrompts != nil {
-		updates.ExposePrompts = req.ExposePrompts
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.ExposePrompts = existingSrv.ExposePrompts
-	}
-	// Spec 112: forward_headers preserves the existing allowlist when the
-	// request omits it (nil slice); a non-nil slice replaces it and an empty
-	// one clears it. Validated against the static headers this PATCH will leave
-	// in place, so a header change cannot introduce a collision either.
-	{
-		staticAfter := updates.Headers
-		if req.Headers == nil && existingSrv != nil {
-			staticAfter = existingSrv.Headers
-		}
-		switch {
-		case req.ForwardHeaders != nil:
-			if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
-				s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-				return
-			}
-			updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
+			updates.URL = unmaskedURL
 			hasUpdates = true
-		case existingSrv != nil:
-			if req.Headers != nil {
-				if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
-					s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-					return
+		}
+		if req.Command != "" {
+			updates.Command = req.Command
+			hasUpdates = true
+		}
+		if req.Args != nil {
+			// #1148 round 4: `args` REPLACES the vector, and the read path masks
+			// credential-shaped argv tokens. Unlike env/headers/url there is no
+			// unmask contract for argv — an argv slot has no key to bind a stored
+			// secret to, and the caller supplies the whole vector *and* `command`
+			// in the same request — so an echoed mask is refused, not reverted.
+			var storedArgs []string
+			if existingSrv != nil {
+				storedArgs = existingSrv.Args
+			}
+			if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
+				return nil, &patchRejection{status: http.StatusBadRequest, msg: err.Error()}
+			}
+			updates.Args = req.Args
+			hasUpdates = true
+		}
+		// PATCH semantics for headers and env follow JSON Merge Patch
+		// (RFC 7396): keys with a non-null value upsert, keys with a null
+		// value delete, omitted keys are preserved. This lets the Web UI /
+		// macOS tray / CLI send a minimal diff so redacted-but-unchanged
+		// values (returned by the GET path via `redactServerSecrets`)
+		// never round-trip through the client.
+		if req.Env != nil {
+			merged := map[string]string{}
+			if existingSrv != nil {
+				for k, v := range existingSrv.Env {
+					merged[k] = v
 				}
 			}
-			updates.ForwardHeaders = existingSrv.ForwardHeaders
+			for k, vp := range req.Env {
+				if vp == nil {
+					delete(merged, k)
+				} else {
+					merged[k] = *vp
+				}
+			}
+			// #872: a client could echo a masked env value back (the tray diffs, but
+			// other clients may send the full map). Revert any value that is exactly
+			// the masked rendering of the stored one.
+			//
+			// #1148 round 6: UnmaskLiveEnvValues first, because the LIVE read door
+			// masks a vendor-shaped credential under a benign variable name — a
+			// rendering UnmaskEnvValues (which compares against oauth's own name
+			// rule) cannot recognise. Both bind by KEY, so a value is only ever
+			// restored to the variable it was read from.
+			if existingSrv != nil {
+				merged = oauth.UnmaskEnvValues(oauth.UnmaskLiveEnvValues(merged, existingSrv.Env), existingSrv.Env)
+			}
+			updates.Env = merged
+			hasUpdates = true
 		}
-	}
-	// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
-	// preserve the existing value when the request omits it (a bare PATCH of an
-	// unrelated field must not reset the trust tier).
-	if req.TrustMode != "" {
-		updates.TrustMode = req.TrustMode
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.TrustMode = existingSrv.TrustMode
-	}
-	// MCP-3322: init_timeout is a tri-state *Duration — preserve the existing
-	// pointer when the request omits it so an unrelated PATCH doesn't wipe a
-	// configured deadline.
-	if req.InitTimeout != nil {
-		updates.InitTimeout = req.InitTimeout
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.InitTimeout = existingSrv.InitTimeout
-	}
-	// Spec 093: the per-server concurrency overrides are tri-state pointers —
-	// preserve the existing values when the request omits them so an unrelated
-	// PATCH cannot wipe a configured limit.
-	if req.MaxConcurrentRequests != nil {
-		updates.MaxConcurrentRequests = req.MaxConcurrentRequests
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.MaxConcurrentRequests = existingSrv.MaxConcurrentRequests
-	}
-	if req.QueueSize != nil {
-		updates.QueueSize = req.QueueSize
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.QueueSize = existingSrv.QueueSize
-	}
-	if req.QueueTimeout != nil {
-		updates.QueueTimeout = req.QueueTimeout
-		hasUpdates = true
-	} else if existingSrv != nil {
-		updates.QueueTimeout = existingSrv.QueueTimeout
-	}
-	// Isolation is resolved against the PERSISTED overrides, so an omitted
-	// `enabled` cannot become an explicit opt-out and the fields the request
-	// does not expose (mode, log driver) survive (GH #1142). The controller
-	// then replaces the block wholesale.
-	if req.Isolation != nil {
-		var existingIso *config.IsolationConfig
-		if existingSrv != nil {
-			existingIso = existingSrv.Isolation
+		if req.Headers != nil {
+			merged := map[string]string{}
+			if existingSrv != nil {
+				for k, v := range existingSrv.Headers {
+					merged[k] = v
+				}
+			}
+			for k, vp := range req.Headers {
+				if vp == nil {
+					delete(merged, k)
+				} else {
+					merged[k] = *vp
+				}
+			}
+			// #872 / #1148 round 6: revert any masked header value echoed back (see
+			// the env note above — same two-step, same key binding).
+			if existingSrv != nil {
+				merged = oauth.UnmaskHeaders(oauth.UnmaskLiveHeaders(merged, existingSrv.Headers), existingSrv.Headers)
+			}
+			updates.Headers = merged
+			hasUpdates = true
 		}
-		updates.Isolation = req.Isolation.resolve(existingIso)
-		hasUpdates = true
+		if req.WorkingDir != "" {
+			updates.WorkingDir = req.WorkingDir
+			hasUpdates = true
+		}
+		if req.Protocol != "" {
+			updates.Protocol = req.Protocol
+			hasUpdates = true
+		}
+		if req.Enabled != nil {
+			updates.Enabled = *req.Enabled
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.Enabled = existingSrv.Enabled
+		}
+		if req.Quarantined != nil {
+			updates.Quarantined = *req.Quarantined
+			// Only a body that carries the field is an operator decision; UpdateServer
+			// and the storage guard lower a recorded quarantine only for this case.
+			updates.MarkQuarantineExplicitlySet(true)
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.Quarantined = existingSrv.Quarantined
+		}
+		if req.ReconnectOnUse != nil {
+			updates.ReconnectOnUse = *req.ReconnectOnUse
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.ReconnectOnUse = existingSrv.ReconnectOnUse
+		}
+		// MCP-2940: auto_approve_tool_changes is a tri-state *bool, so unlike the
+		// non-pointer bools above we preserve the EXISTING POINTER (which may be
+		// nil = "never set") when the request omits the field — collapsing to a
+		// plain bool here would erase the unset/false distinction the trust-baseline
+		// logic (MCP-2931) relies on.
+		if req.AutoApproveToolChanges != nil {
+			updates.AutoApproveToolChanges = req.AutoApproveToolChanges
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
+		}
+		// F9: expose_prompts is a tri-state *bool — preserve the EXISTING POINTER
+		// (which may be nil = "never set") when the request omits the field, so a
+		// bare PATCH of an unrelated field does not wipe a configured override.
+		if req.ExposePrompts != nil {
+			updates.ExposePrompts = req.ExposePrompts
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.ExposePrompts = existingSrv.ExposePrompts
+		}
+		// Spec 112: forward_headers preserves the existing allowlist when the
+		// request omits it (nil slice); a non-nil slice replaces it and an empty
+		// one clears it. Validated against the static headers this PATCH will leave
+		// in place, so a header change cannot introduce a collision either.
+		{
+			staticAfter := updates.Headers
+			if req.Headers == nil && existingSrv != nil {
+				staticAfter = existingSrv.Headers
+			}
+			switch {
+			case req.ForwardHeaders != nil:
+				if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
+					return nil, &patchRejection{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
+				}
+				updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
+				hasUpdates = true
+			case existingSrv != nil:
+				if req.Headers != nil {
+					if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
+						return nil, &patchRejection{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
+					}
+				}
+				updates.ForwardHeaders = existingSrv.ForwardHeaders
+			}
+		}
+		// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
+		// preserve the existing value when the request omits it (a bare PATCH of an
+		// unrelated field must not reset the trust tier).
+		if req.TrustMode != "" {
+			updates.TrustMode = req.TrustMode
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.TrustMode = existingSrv.TrustMode
+		}
+		// MCP-3322: init_timeout is a tri-state *Duration — preserve the existing
+		// pointer when the request omits it so an unrelated PATCH doesn't wipe a
+		// configured deadline.
+		if req.InitTimeout != nil {
+			updates.InitTimeout = req.InitTimeout
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.InitTimeout = existingSrv.InitTimeout
+		}
+		// Spec 093: the per-server concurrency overrides are tri-state pointers —
+		// preserve the existing values when the request omits them so an unrelated
+		// PATCH cannot wipe a configured limit.
+		if req.MaxConcurrentRequests != nil {
+			updates.MaxConcurrentRequests = req.MaxConcurrentRequests
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.MaxConcurrentRequests = existingSrv.MaxConcurrentRequests
+		}
+		if req.QueueSize != nil {
+			updates.QueueSize = req.QueueSize
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.QueueSize = existingSrv.QueueSize
+		}
+		if req.QueueTimeout != nil {
+			updates.QueueTimeout = req.QueueTimeout
+			hasUpdates = true
+		} else if existingSrv != nil {
+			updates.QueueTimeout = existingSrv.QueueTimeout
+		}
+		// Isolation is resolved against the PERSISTED overrides, so an omitted
+		// `enabled` cannot become an explicit opt-out and the fields the request
+		// does not expose (mode, log driver) survive (GH #1142). The controller
+		// then replaces the block wholesale.
+		if req.Isolation != nil {
+			var existingIso *config.IsolationConfig
+			if existingSrv != nil {
+				existingIso = existingSrv.Isolation
+			}
+			updates.Isolation = req.Isolation.resolve(existingIso)
+			hasUpdates = true
+		}
+
+		if !hasUpdates {
+			return nil, &patchRejection{status: http.StatusBadRequest, msg: "No fields to update"}
+		}
+
+		// #1148 round 6: the fail-closed net. The key-bound reverts above restored
+		// every mask this proxy can bind back to the value it was read from;
+		// anything still carrying one is refused rather than persisted over a live
+		// credential. This is what covers the fields with no revert (args,
+		// oauth.scopes, isolation.extra_args) AND every field added to
+		// config.ServerConfig later — a new field fails CLOSED instead of silently
+		// round-tripping its own mask into the config. See
+		// oauth.ServerFieldMaskDecisions.
+		if err := oauth.CheckServerWriteMasks("server.", updates); err != nil {
+			return nil, &patchRejection{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		return updates, nil
 	}
 
-	if !hasUpdates {
-		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
-		return
-	}
-
-	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
-	// every mask this proxy can bind back to the value it was read from;
-	// anything still carrying one is refused rather than persisted over a live
-	// credential. This is what covers the fields with no revert (args,
-	// oauth.scopes, isolation.extra_args) AND every field added to
-	// config.ServerConfig later — a new field fails CLOSED instead of silently
-	// round-tripping its own mask into the config. See
-	// oauth.ServerFieldMaskDecisions.
-	if err := oauth.CheckServerWriteMasks("server.", updates); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
+	updates, rej := resolve(existingSrv)
+	if rej != nil {
+		s.writeError(w, r, rej.status, rej.msg)
 		return
 	}
 
 	logger := s.getRequestLogger(r)
 
-	if err := s.controller.UpdateServer(r.Context(), serverName, updates); err != nil {
+	var commitErr error
+	if rc, ok := s.controller.(serverResolveUpdater); ok {
+		// Re-resolve the request inside the commit, against the stored server
+		// read under the commit lock (UX-01 r9).
+		commitErr = rc.UpdateServerResolved(r.Context(), serverName, func(fresh *config.ServerConfig) (*config.ServerConfig, error) {
+			u, rej := resolve(fresh)
+			if rej != nil {
+				return nil, rej
+			}
+			return u, nil
+		})
+	} else {
+		commitErr = s.controller.UpdateServer(r.Context(), serverName, updates)
+	}
+	if err := commitErr; err != nil {
+		var rej *patchRejection
+		if errors.As(err, &rej) {
+			s.writeError(w, r, rej.status, rej.msg)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return

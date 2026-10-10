@@ -27,6 +27,11 @@ func seedSecurityState(t *testing.T, rt *Runtime, sc *config.ServerConfig) {
 	require.NoError(t, rt.StorageManager().SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: sc.Name, ToolName: "t1", ApprovedHash: "h1", CurrentHash: "h1", Status: "approved", ApprovedAt: time.Now(),
 	}))
+	for _, st := range []string{"approved", "changed"} {
+		require.NoError(t, rt.StorageManager().SavePromptApproval(&storage.PromptApprovalRecord{
+			ServerName: sc.Name, PromptName: "p-" + st, ApprovedHash: "ph", CurrentHash: "ph", Status: st, ApprovedAt: time.Now(),
+		}))
+	}
 	require.NoError(t, rt.storageManager.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
 		ServerName: oauth.GenerateServerKey(sc.Name, sc.URL), DisplayName: sc.Name,
 		AccessToken: "tok", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
@@ -40,6 +45,10 @@ func assertSecurityStateGone(t *testing.T, rt *Runtime, sc *config.ServerConfig)
 	require.Nil(t, rec, "removed server's approval record survived")
 	tok, _ := rt.StorageManager().GetOAuthToken(oauth.GenerateServerKey(sc.Name, sc.URL))
 	require.Nil(t, tok, "removed server's OAuth token survived")
+
+	prompts, err := rt.StorageManager().ListPromptApprovals(sc.Name)
+	require.NoError(t, err)
+	require.Empty(t, prompts, "removed server's prompt approvals survived (UX-01 r9)")
 
 	// Same-name create-only add must not inherit an approved baseline.
 	re := r6Server(sc.Name, sc.URL, false)
@@ -92,5 +101,14 @@ func TestConfigDrivenRemoval_PurgesApprovalsAndOAuth_SaveResurrection(t *testing
 
 	waitServerGone(t, rt, "srv-a")
 	time.Sleep(200 * time.Millisecond)
+	assertSecurityStateGone(t, rt, a)
+}
+
+func TestRemoveServerCommitted_PurgesApprovalsPromptsAndOAuth(t *testing.T) {
+	rt := newPurgeTestRuntime(t)
+	a := r6Server("srv-a", "http://127.0.0.1:1/mcp", false)
+	seedSecurityState(t, rt, a)
+
+	require.NoError(t, rt.RemoveServerCommitted("srv-a"))
 	assertSecurityStateGone(t, rt, a)
 }

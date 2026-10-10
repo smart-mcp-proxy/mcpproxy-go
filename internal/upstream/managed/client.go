@@ -69,7 +69,11 @@ type Client struct {
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
 	retired atomic.Bool
 	// launchMu orders Retire against launch admission (see admitLaunch).
-	launchMu      sync.RWMutex
+	launchMu sync.RWMutex
+	// retireCtx is cancelled by Retire so HTTP/SSE requests admitted but not
+	// yet written are aborted instead of completed (UX-01 r9).
+	retireCtx     context.Context
+	retireCancel  context.CancelFunc
 	connectMu     sync.Mutex
 	connectCancel context.CancelFunc
 
@@ -372,6 +376,8 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	// atomically swapped configs on each call, so a hot reload takes effect on
 	// the next tools/call with no reconnect.
 	coreClient.SetForwardPolicyProvider(mc.forwardPolicy)
+	mc.retireCtx, mc.retireCancel = context.WithCancel(context.Background())
+	coreClient.SetRetireContext(mc.retireCtx)
 	coreClient.SetDialGate(mc.admitLaunch)
 	mc.warnForwardHeaders()
 
@@ -453,9 +459,16 @@ func (mc *Client) Retire() {
 	// spawn (admitDial holds the read side across the process start). After
 	// Retire returns, no further child can start, and one that did start
 	// before is visible to the Disconnect that follows (UX-01 r8).
-	mc.launchMu.Lock()
+	//
+	// The flag is stored first so no later admission succeeds, and the retire
+	// context is cancelled before waiting so an admitted HTTP request still
+	// dialing is aborted rather than awaited.
 	mc.retired.Store(true)
-	mc.launchMu.Unlock()
+	if mc.retireCancel != nil {
+		mc.retireCancel()
+	}
+	mc.launchMu.Lock()
+	mc.launchMu.Unlock() //nolint:staticcheck // empty critical section: a barrier against in-flight admissions
 }
 
 // admitLaunch is the core client's dial gate: it admits a launch only while the

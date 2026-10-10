@@ -47,6 +47,7 @@ type Client struct {
 	exposePrompts atomic.Pointer[bool]
 	// dialGate is the owner's launch/dial admission (see DialGate).
 	dialGate     atomic.Pointer[DialGate]
+	retireCtx    atomic.Pointer[context.Context]
 	globalConfig *config.Config
 	storage      *storage.BoltDB
 	logger       *zap.Logger
@@ -660,6 +661,7 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// with — which is exactly what keeps generations from bleeding into each
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
+	cfg.Gate = c.requestGate()
 	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
 	cfg.ForwardNames = func() []string {
 		if pp := c.forwardPolicy.Load(); pp != nil {

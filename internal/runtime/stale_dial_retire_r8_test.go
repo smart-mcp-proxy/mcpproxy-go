@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -91,7 +93,7 @@ func TestStaleDial_RemovalPublishedWhileReconcileQueued_OldEndpointNeverStarts(t
 	time.Sleep(200 * time.Millisecond)
 }
 
-func TestStaleDial_EndpointChangePublishedWhileReconcileQueued_OldEndpointNeverStarts(t *testing.T) {
+func TestStaleDial_DisablePublishedWhileReconcileQueued_OldEndpointNeverStarts(t *testing.T) {
 	rt := newPurgeTestRuntime(t)
 	dir := t.TempDir()
 	oldMarker := filepath.Join(dir, "old")
@@ -112,4 +114,69 @@ func TestStaleDial_EndpointChangePublishedWhileReconcileQueued_OldEndpointNeverS
 	time.Sleep(700 * time.Millisecond)
 	require.Zero(t, launches.Load(), "the disabled server's old command was started")
 	require.NoFileExists(t, oldMarker)
+}
+
+// UX-01 r9: a published command change retires the captured old client even
+// though the manager reconciliation for it is still queued; the old command
+// must never start, and the new one must start once the reconciliation runs.
+func TestStaleDial_CommandChangePublishedWhileReconcileQueued_OldEndpointNeverStarts(t *testing.T) {
+	rt := newPurgeTestRuntime(t)
+	dir := t.TempDir()
+	oldMarker := filepath.Join(dir, "old")
+	newMarker := filepath.Join(dir, "new")
+	reached, release := parkAfterRegister(t, "srv-a")
+	// Counted by hand: the hook is cleared before the reconciliation is released
+	// (no launch is in flight until then), so the new endpoint's later launch
+	// never reads a global a cleanup is writing.
+	var launches atomic.Int32
+	core.AfterLaunchHook = func(string) { launches.Add(1) }
+
+	// Park the SECOND reconciliation (the one for the endpoint change) before it
+	// touches anything; the first one registered the old client and parked it.
+	var syncs atomic.Int32
+	syncParked := make(chan struct{})
+	syncGate := make(chan struct{})
+	loadConfiguredServersBeforeSyncHook = func() {
+		if syncs.Add(1) == 2 {
+			close(syncParked)
+			<-syncGate
+		}
+	}
+	t.Cleanup(func() { loadConfiguredServersBeforeSyncHook = nil })
+	var syncOnce sync.Once
+	releaseSync := func() { syncOnce.Do(func() { close(syncGate) }) }
+	t.Cleanup(releaseSync)
+
+	_, err := rt.ApplyConfig(validConfigWith(rt, stdioMarkerServer("srv-a", oldMarker)), "")
+	require.NoError(t, err)
+	<-reached // old client registered, dial not started
+
+	_, err = rt.ApplyConfig(validConfigWith(rt, stdioMarkerServer("srv-a", newMarker)), "")
+	require.NoError(t, err)
+	<-syncParked
+	live, ok := clientURLOrCommand(rt, "srv-a")
+	require.True(t, ok)
+	require.Contains(t, live, oldMarker, "test premise: the manager still holds the old endpoint")
+
+	release()
+	time.Sleep(700 * time.Millisecond)
+	require.Zero(t, launches.Load(), "the replaced endpoint's old command was started")
+	require.NoFileExists(t, oldMarker)
+
+	core.AfterLaunchHook = nil
+	releaseSync()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(newMarker)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "the new endpoint never started after reconciliation")
+	require.NoFileExists(t, oldMarker)
+}
+
+func clientURLOrCommand(rt *Runtime, name string) (string, bool) {
+	c, ok := rt.upstreamManager.GetClient(name)
+	if !ok {
+		return "", false
+	}
+	cfg := c.GetConfig()
+	return cfg.URL + " " + cfg.Command + " " + strings.Join(cfg.Args, " "), true
 }

@@ -158,6 +158,10 @@ type HTTPTransportConfig struct {
 	// The trace transport masks those header names (request and response) even
 	// when a given request carries no forwarded set (FR-018). May be nil.
 	ForwardNames func() []string
+
+	// Gate, when set, bars requests once the owning client is retired
+	// (UX-01 r9). nil leaves the transport ungated.
+	Gate *RequestGate
 }
 
 // upstreamRoundTripper composes the outbound transport wrappers for an upstream
@@ -170,6 +174,9 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
+	// Innermost: the gate sits next to the network, below tracing and the
+	// recorders, so a refused request leaves nothing on the wire.
+	rt = newGateRoundTripper(rt, cfg.Gate)
 	if cfg.TraceEnabled {
 		lt := NewLoggingTransport(rt, logger)
 		lt.maskNames = cfg.ForwardNames

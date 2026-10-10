@@ -283,3 +283,39 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, current.Status, "the replacement definition becomes the active review record")
 }
+
+// UX-01 r9: a commit that replaced the quarantined endpoint retires the old
+// client at publication, before the manager reconciliation swaps it. A
+// tools/list response from that retired client must not be persisted into the
+// server's review records, whatever the pointer/epoch/generation checks say.
+func TestCaptureQuarantinedToolDefinitions_RetiredClientNeverPersists(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	first := httptest.NewServer(captureTestServer("first", "old_definition"))
+	t.Cleanup(first.Close)
+
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.StartBackgroundInitialization()
+	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
+
+	var retired atomic.Bool
+	rt.quarantinedCaptureBeforePersist = func() {
+		if !retired.CompareAndSwap(false, true) {
+			return
+		}
+		// What the config commit does at publication, with the reconciliation
+		// that would replace the client withheld.
+		cfgB := *cfgA
+		cfgB.URL = "http://127.0.0.1:1/other"
+		rt.upstreamManager.RetireStaleClients([]*config.ServerConfig{&cfgB})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.Error(t, rt.captureQuarantinedToolDefinitions(ctx, "quarantined"))
+	assert.True(t, retired.Load())
+	_, err = rt.storageManager.GetToolApproval("quarantined", "old_definition")
+	assert.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "a retired client's definitions must never be persisted")
+}

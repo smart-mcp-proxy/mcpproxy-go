@@ -1509,90 +1509,9 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool, bas
 
 	// FIRST: Save all servers to storage in one batch (fast, synchronous)
 	// This ensures API /servers endpoint can return data immediately
-	r.logger.Debug("Starting synchronous storage save phase", zap.Int("total_servers", len(cfg.Servers)))
-	for _, serverCfg := range cfg.Servers {
-		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
-
-		// Check if OAuth config changed (requires reconnection)
-		oauthChanged := existsInStorage && config.OAuthConfigChanged(storedServer.OAuth, serverCfg.OAuth)
-
-		// ExposePrompts changed: doesn't need a reconnect (upstream.Manager's
-		// AddServerConfig already refreshes it via managed.Client.SetConfig
-		// regardless of hasChanged), but without counting it here a
-		// hot-reloaded toggle would never emit servers.changed, so
-		// RefreshPrompts would never re-run and the proxy's advertised
-		// prompt set would stay stale until an unrelated change (PR #973
-		// review, P2).
-		exposePromptsChanged := existsInStorage && !boolPtrEqual(storedServer.ExposePrompts, serverCfg.ExposePrompts)
-
-		hasChanged := !existsInStorage ||
-			storedServer.Enabled != serverCfg.Enabled ||
-			storedServer.Quarantined != serverCfg.Quarantined ||
-			storedServer.URL != serverCfg.URL ||
-			storedServer.Command != serverCfg.Command ||
-			storedServer.Protocol != serverCfg.Protocol ||
-			oauthChanged ||
-			exposePromptsChanged
-
-		// Security (issue #1061): a server that just BECAME quarantined on this
-		// path must lose its indexed tools, exactly as it does when the API
-		// handler sets the flag. The purge used to live only in
-		// Runtime.QuarantineServer, so a quarantine written into the config file
-		// — by an operator edit, by the config-load admission gate re-holding an
-		// unreviewed server, or by any future writer — was detected here and then
-		// ignored, leaving the tool descriptions retrievable indefinitely.
-		//
-		// Purge on the false -> true transition, and also when the server is not
-		// in the stored view at all. Doing it whenever the flag is already true
-		// would re-delete on every unrelated reload, and doing it on true -> false
-		// would blank the catalog until the next discovery pass.
-		//
-		// The not-in-storage arm is not redundant: a genuinely first-seen server
-		// has nothing indexed, so the delete is a cheap no-op, but a FAILED
-		// storage read produces the same empty view (see storageReadable above)
-		// while the index still holds the previous run's tools. Without this arm
-		// a quarantined server would keep its descriptions searchable for exactly
-		// as long as storage stays unreadable.
-		newlyQuarantined := serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)
-
-		if hasChanged {
-			changed = true
-			r.logger.Info("Server configuration changed, updating storage",
-				zap.String("server", serverCfg.Name),
-				zap.Bool("new", !existsInStorage),
-				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
-				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
-				zap.Bool("oauth_changed", oauthChanged))
-
-			if newlyQuarantined {
-				r.purgeQuarantinedServerFromIndex(serverCfg.Name)
-			}
-
-			// Clear OAuth state if OAuth config changed
-			if oauthChanged && r.storageManager != nil {
-				r.logger.Info("OAuth config changed, clearing cached OAuth state",
-					zap.String("server", serverCfg.Name))
-				if err := r.storageManager.ClearOAuthState(serverCfg.Name); err != nil {
-					r.logger.Warn("Failed to clear OAuth state",
-						zap.String("server", serverCfg.Name),
-						zap.Error(err))
-				}
-			}
-		}
-
-		// Save synchronously to ensure storage is populated for API queries
-		r.logger.Debug("Saving server to storage", zap.String("server", serverCfg.Name), zap.Bool("exists", existsInStorage))
-		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
-			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
-			continue
-		}
-		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
-		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
-			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
-			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
-		}
-	}
-	r.logger.Debug("Completed synchronous storage save phase")
+	phaseChanged, phaseReview := r.persistServersToStorageLocked(cfg, storedServerMap)
+	changed = changed || phaseChanged
+	reviewChangedServers = append(reviewChangedServers, phaseReview...)
 
 	// SECOND: Manage upstream connections asynchronously (slow, can take 30s+).
 	// Scheduling happens under the commit lock, but the goroutines run later, so
@@ -1762,6 +1681,124 @@ func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool, bas
 	return nil
 }
 
+// persistServersToStorageLocked writes every server in cfg to storage and runs
+// the side effects of a server's state moving (index purge for a newly
+// quarantined server, OAuth state reset when the OAuth config changed). It
+// reports whether anything changed and which servers' review queue entries did.
+// stored is the storage view to diff against. Caller holds configCommitMu.
+func (r *Runtime) persistServersToStorageLocked(cfg *config.Config, storedServerMap map[string]*config.ServerConfig) (changed bool, reviewChangedServers []string) {
+	r.logger.Debug("Starting synchronous storage save phase", zap.Int("total_servers", len(cfg.Servers)))
+	for _, serverCfg := range cfg.Servers {
+		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
+
+		// Check if OAuth config changed (requires reconnection)
+		oauthChanged := existsInStorage && config.OAuthConfigChanged(storedServer.OAuth, serverCfg.OAuth)
+
+		// ExposePrompts changed: doesn't need a reconnect (upstream.Manager's
+		// AddServerConfig already refreshes it via managed.Client.SetConfig
+		// regardless of hasChanged), but without counting it here a
+		// hot-reloaded toggle would never emit servers.changed, so
+		// RefreshPrompts would never re-run and the proxy's advertised
+		// prompt set would stay stale until an unrelated change (PR #973
+		// review, P2).
+		exposePromptsChanged := existsInStorage && !boolPtrEqual(storedServer.ExposePrompts, serverCfg.ExposePrompts)
+
+		hasChanged := !existsInStorage ||
+			storedServer.Enabled != serverCfg.Enabled ||
+			storedServer.Quarantined != serverCfg.Quarantined ||
+			storedServer.URL != serverCfg.URL ||
+			storedServer.Command != serverCfg.Command ||
+			storedServer.Protocol != serverCfg.Protocol ||
+			oauthChanged ||
+			exposePromptsChanged
+
+		// Security (issue #1061): a server that just BECAME quarantined on this
+		// path must lose its indexed tools, exactly as it does when the API
+		// handler sets the flag. The purge used to live only in
+		// Runtime.QuarantineServer, so a quarantine written into the config file
+		// — by an operator edit, by the config-load admission gate re-holding an
+		// unreviewed server, or by any future writer — was detected here and then
+		// ignored, leaving the tool descriptions retrievable indefinitely.
+		//
+		// Purge on the false -> true transition, and also when the server is not
+		// in the stored view at all. Doing it whenever the flag is already true
+		// would re-delete on every unrelated reload, and doing it on true -> false
+		// would blank the catalog until the next discovery pass.
+		//
+		// The not-in-storage arm is not redundant: a genuinely first-seen server
+		// has nothing indexed, so the delete is a cheap no-op, but a FAILED
+		// storage read produces the same empty view (see storageReadable above)
+		// while the index still holds the previous run's tools. Without this arm
+		// a quarantined server would keep its descriptions searchable for exactly
+		// as long as storage stays unreadable.
+		newlyQuarantined := serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)
+
+		if hasChanged {
+			changed = true
+			r.logger.Info("Server configuration changed, updating storage",
+				zap.String("server", serverCfg.Name),
+				zap.Bool("new", !existsInStorage),
+				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
+				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
+				zap.Bool("oauth_changed", oauthChanged))
+
+			if newlyQuarantined {
+				r.purgeQuarantinedServerFromIndex(serverCfg.Name)
+			}
+
+			// Clear OAuth state if OAuth config changed
+			if oauthChanged && r.storageManager != nil {
+				r.logger.Info("OAuth config changed, clearing cached OAuth state",
+					zap.String("server", serverCfg.Name))
+				if err := r.storageManager.ClearOAuthState(serverCfg.Name); err != nil {
+					r.logger.Warn("Failed to clear OAuth state",
+						zap.String("server", serverCfg.Name),
+						zap.Error(err))
+				}
+			}
+		}
+
+		// Save synchronously to ensure storage is populated for API queries
+		r.logger.Debug("Saving server to storage", zap.String("server", serverCfg.Name), zap.Bool("exists", existsInStorage))
+		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
+			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
+			continue
+		}
+		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
+		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
+			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
+			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
+		}
+	}
+	r.logger.Debug("Completed synchronous storage save phase")
+	return changed, reviewChangedServers
+}
+
+// persistAppliedServersLocked writes the servers of an applied config to
+// storage inside the apply's commit. The reconciliation that follows still owns
+// connections, removals and orphan GC. Caller holds configCommitMu.
+func (r *Runtime) persistAppliedServersLocked(cfg *config.Config) {
+	if r.storageManager == nil || cfg == nil {
+		return
+	}
+	stored, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		// The reconciliation retries with its own read.
+		r.logger.Warn("Failed to read stored servers while committing an applied config", zap.Error(err))
+		return
+	}
+	storedByName := make(map[string]*config.ServerConfig, len(stored))
+	for _, sc := range stored {
+		if sc != nil {
+			storedByName[sc.Name] = sc
+		}
+	}
+	_, reviewChanged := r.persistServersToStorageLocked(cfg, storedByName)
+	for _, name := range reviewChanged {
+		r.emitReviewChanged(name)
+	}
+}
+
 // liveHoldsServerState reports whether the live config still carries want's
 // server in the same connection state. Caller holds configCommitMu.
 func (r *Runtime) liveHoldsServerState(want *config.ServerConfig) bool {
@@ -1889,6 +1926,13 @@ func (r *Runtime) CommitServerUpdate(name string,
 	if r.storageManager == nil {
 		return fmt.Errorf("runtime storage not initialized")
 	}
+	// A server an applied config removed is gone as far as an update is
+	// concerned, even while its storage row waits for the asynchronous cleanup:
+	// writing that row would republish the server into the live config and the
+	// file (UX-01 r9).
+	if _, gone := r.pendingServerRemovalNames()[name]; gone {
+		return fmt.Errorf("%w: '%s'", ErrServerNotFound, name)
+	}
 	existing, err := r.storageManager.GetUpstreamServer(name)
 	if err != nil || existing == nil {
 		return fmt.Errorf("%w: '%s'", ErrServerNotFound, name)
@@ -1904,6 +1948,20 @@ func (r *Runtime) CommitServerUpdate(name string,
 		return nil
 	}
 	updated.Name = name
+	// Shared and AuthBroker are configuration-only: the stored record the edit
+	// was built from cannot carry them, so keep the live entry's values or an
+	// ordinary update would unshare the server and drop its broker settings
+	// (UX-01 r9).
+	if live := r.Config(); live != nil {
+		for _, sc := range live.Servers {
+			if sc != nil && sc.Name == name {
+				kept := config.CopyServerConfig(sc)
+				updated.Shared = kept.Shared
+				updated.AuthBroker = kept.AuthBroker
+				break
+			}
+		}
+	}
 	if err := r.storageManager.SaveUpstreamServer(updated); err != nil {
 		return fmt.Errorf("failed to save server: %w", err)
 	}
@@ -1948,6 +2006,13 @@ func (r *Runtime) purgeRemovedServerSecurityState(name string) {
 	}
 	if err := r.storageManager.DeleteServerToolApprovals(name); err != nil {
 		r.logger.Warn("Failed to clear tool approvals for removed server",
+			zap.String("server", name), zap.Error(err))
+	}
+	// Prompt rug-pull baselines (spec 100) are keyed by server name too: a
+	// same-name manual-trust replacement must not inherit approved prompt hashes
+	// (UX-01 r9).
+	if err := r.storageManager.DeleteServerPromptApprovals(name); err != nil {
+		r.logger.Warn("Failed to clear prompt approvals for removed server",
 			zap.String("server", name), zap.Error(err))
 	}
 }
