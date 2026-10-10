@@ -127,3 +127,26 @@ func TestEvaluate_ProfileMixedBatchIsBlocked(t *testing.T) {
 	assert.Equal(t, ReasonToolBlockedByProfile, results[1].Reason)
 	assert.Equal(t, VerdictBlocked, VerdictForResults(results))
 }
+
+// At the agent-token tier a hidden tool must be indistinguishable from an
+// absent one in EVERY server state, including the not-Ready states where an
+// absent id answers a connection verdict instead of not_found.
+func TestEvaluate_ProfileHidden_IndistinguishableFromAbsentInEveryState(t *testing.T) {
+	states := []ServerRuntimeState{RuntimeStateReady, RuntimeStateConnecting, RuntimeStateDisconnected, RuntimeStatePendingAuth, RuntimeStateError}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			hiddenIndexed := healthyWorld().runtime(state).blockByProfile()
+			hiddenIndexed.tier = TierAgentToken
+
+			hiddenRecordOnly := healthyWorld().runtime(state).unindex().blockByProfile()
+			hiddenRecordOnly.tier = TierAgentToken
+
+			absent := healthyWorld().runtime(state).unindex().forget()
+			absent.tier = TierAgentToken
+			want := evalOne(t, absent, ToolRef{ID: id})
+
+			assert.Equal(t, want, evalOne(t, hiddenIndexed, ToolRef{ID: id}), "indexed hidden tool")
+			assert.Equal(t, want, evalOne(t, hiddenRecordOnly, ToolRef{ID: id}), "approval-record-only hidden tool")
+		})
+	}
+}

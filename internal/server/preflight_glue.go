@@ -233,46 +233,23 @@ func appendProfilePolicy(policies []preflightProfilePolicy, idx *profileIndex, s
 //     no `profile`, so an agent cannot re-point or widen its own view by
 //     asking (FR-009a).
 func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []preflight.ToolRef, filters toolannotations.Filters) (preflight.Outcome, error) {
-	scope, err := p.sessionPreflightScope(ctx)
+	scope, policies, err := p.sessionPreflightView(ctx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
-	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil, p.sessionPreflightPolicies(ctx))
-}
-
-// sessionPreflightPolicies returns the profile tool policies in effect for
-// this session (issue #1548): the Spec 108 v3 resolution dispatch decides
-// against (pin > url > session > binding > anonymous), plus — when the legacy
-// resolver names a different profile, the way describe_tool's own visibility
-// gate (toolVisibleToSession) reads it — that profile's policy too. Every
-// policy must admit a tool, so adding one can only narrow.
-//
-// The non-recording resolver is used: a check is observational and must not
-// rewrite the session's recorded resolution.
-func (p *MCPProxyServer) sessionPreflightPolicies(ctx context.Context) []preflightProfilePolicy {
-	legacyName, _, idx := p.resolveActiveProfileWithIndex(ctx)
-	if idx == nil {
-		return nil
-	}
-	res := p.resolveProfileV3(ctx, idx)
-	var policies []preflightProfilePolicy
-	if res.Policy != nil {
-		policies = append(policies, preflightProfilePolicy{policy: res.Policy, subject: profileRefusalSubject(res, idx)})
-	}
-	name := legacyName
-	if res.Scope != nil {
-		name = res.Name
-	}
-	if name != "" {
-		if policy := idx.PolicyFor(name); policy != nil && policy != res.Policy {
-			policies = append(policies, preflightProfilePolicy{policy: policy})
-		}
-	}
-	return policies
+	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil, policies)
 }
 
 // sessionPreflightScope projects the session's OWN visibility predicate onto a
-// preflight scope (FR-009a).
+// preflight scope (FR-009a). See sessionPreflightView.
+func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
+	scope, _, err := p.sessionPreflightView(ctx)
+	return scope, err
+}
+
+// sessionPreflightView projects the session's OWN visibility predicate onto a
+// preflight scope (FR-009a), and returns the profile tool policies in effect
+// for the session (issue #1548).
 //
 // It deliberately does not re-derive the scope from names the way the REST path
 // does. The composition an MCP session is subject to — agent-token
@@ -288,26 +265,58 @@ func (p *MCPProxyServer) sessionPreflightPolicies(ctx context.Context) []preflig
 // grants nothing (which a name-based intersection would read as "no
 // restriction").
 //
-// nil means unrestricted, and is returned only when there is no auth context
-// and no profile in effect — i.e. nothing to restrict.
-func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
+// The Spec 108 v3 resolution dispatch decides against (pin > url > session >
+// binding > anonymous) is applied ON TOP, and can only narrow: its scope —
+// including an authoritative deny-all (the FR-008a anonymous binding guard, a
+// dangling binding or anonymous base) — must also admit the server, and its
+// compiled policy must admit the tool. When the legacy resolver names a
+// different profile (the name toolVisibleToSession's policy gate reads), that
+// profile's policy applies too. The non-recording resolver is used: a check is
+// observational and must not rewrite the session's recorded resolution.
+//
+// A nil scope means unrestricted, and is returned only when there is no auth
+// context and no profile in effect under either resolver.
+func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (*preflight.Scope, []preflightProfilePolicy, error) {
 	authCtx := auth.AuthContextFromContext(ctx)
-	profileName, profileScope := p.resolveActiveProfile(ctx)
-	if authCtx == nil && profileScope == nil {
-		return nil, nil
+	profileName, profileScope, idx := p.resolveActiveProfileWithIndex(ctx)
+
+	var res ProfileResolution
+	if idx != nil {
+		res = p.resolveProfileV3(ctx, idx)
+	}
+	var policies []preflightProfilePolicy
+	if res.Policy != nil {
+		policies = append(policies, preflightProfilePolicy{policy: res.Policy, subject: profileRefusalSubject(res, idx)})
+	}
+	policyName := profileName
+	if res.Scope != nil {
+		policyName = res.Name
+	}
+	if policyName != "" && idx != nil {
+		if policy := idx.PolicyFor(policyName); policy != nil && policy != res.Policy {
+			policies = append(policies, preflightProfilePolicy{policy: policy})
+		}
+	}
+
+	if authCtx == nil && profileScope == nil && res.Scope == nil {
+		return nil, policies, nil
 	}
 
 	names, err := p.preflightServerUniverse()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	allowed := make([]string, 0, len(names))
 	for _, name := range names {
-		if p.serverInScope(authCtx, profileScope, name) {
-			allowed = append(allowed, name)
+		if !p.serverInScope(authCtx, profileScope, name) {
+			continue
 		}
+		if res.Scope != nil && !res.Scope.Allows(name) {
+			continue
+		}
+		allowed = append(allowed, name)
 	}
-	return preflight.NewScope(profileName, allowed), nil
+	return preflight.NewScope(profileName, allowed), policies, nil
 }
 
 // preflightServerUniverse is every server name an evaluation could legitimately

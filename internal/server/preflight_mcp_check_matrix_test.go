@@ -176,6 +176,30 @@ func TestPreflightMatrixMCPSurfaces(t *testing.T) {
 		})
 	}
 
+	// --- profile-hidden collapse (issue #1548) ---
+	// A session pinned to a read-capped profile checks an existing tool the
+	// profile excludes: it must answer exactly what an absent id answers.
+	driven["mcp_check_profile_hidden"] = true
+	t.Run("mcp_check_profile_hidden", func(t *testing.T) {
+		scenario := scenarios["mcp_check_profile_hidden"]
+		pinned := newDescribeCheckFixture(t, func(cfg *config.Config) {
+			cfg.Profiles = []config.ProfileConfig{{Name: "ro", Servers: []string{"gh"}, MaxTier: "read", Tools: &config.ProfileToolRules{Deny: []string{"gh:create_issue"}}}}
+		})
+		seedCheckFixture(t, pinned)
+		ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "matrix-ro-bot", AllowedServers: []string{"*"},
+			Permissions: []string{auth.PermRead}, ProfilePin: "ro",
+		})
+		payload, raw := pinned.check(t, ctx, []interface{}{"gh:create_issue", "gh:no_such_tool"}, nil)
+		require.Len(t, payload.Results, 2)
+		assertMatrixCell(t, scenario, payload.Results[0], preflight.VerdictForReasons([]string{payload.Results[0].Reason}))
+		hidden, absent := payload.Results[0], payload.Results[1]
+		hidden.ID, absent.ID = "", ""
+		hidden.DidYouMean, absent.DidYouMean = nil, nil
+		assert.Equal(t, absent, hidden, "a profile-hidden tool is byte-identical to an absent one")
+		assert.NotContains(t, raw, "ro\"", "the profile is never named in band")
+	})
+
 	// --- cap boundary ---
 	driven["mcp_check_cap_boundary_50"] = true
 	t.Run("mcp_check_cap_boundary_50", func(t *testing.T) {

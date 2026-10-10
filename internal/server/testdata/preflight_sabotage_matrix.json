@@ -642,11 +642,40 @@
       "expect": {
         "plain_error": "not_found"
       }
+    },
+    {
+      "scenario": "tool_blocked_by_profile",
+      "surface": "state-injected",
+      "tier": "operator",
+      "sabotage": "issue #1548: an approved, healthy write tool checked by an operator with profile=work-readonly (max_tier read) in the request; the profile's tier cap excludes it, exactly as dispatch refuses it (TestPreflightProfilePolicy_RESTOperatorTier)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "tool_blocked_by_profile",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_profile_hidden",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "issue #1548: a session pinned to a read-capped profile checks an existing write tool in band; discovery hides it, so the check answers the same not_found an absent id gets (TestPreflightProfilePolicy_InBandCheck)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "not_found",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "unknown_ids",
+        "exit_code": 12
+      }
     }
   ],
   "rest_only_reasons": {
     "hash_mismatch": "in-band hash pins were trimmed from spec 099 v1 (FR-008): nothing in band can request a pin, so nothing in band can fail one",
     "server_not_in_scope": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where this collapses to not_found",
-    "server_not_configured": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where this collapses to not_found \u2014 see mcp_check_unknown_server, which asserts the collapse"
+    "server_not_configured": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where this collapses to not_found \u2014 see mcp_check_unknown_server, which asserts the collapse",
+    "tool_blocked_by_profile": "the whole in-band surface is the agent-token tier (spec 099 FR-009), where a profile-excluded tool collapses to not_found as discovery hides it (issue #1548) \u2014 see mcp_check_profile_hidden, which asserts the collapse"
   }
 }

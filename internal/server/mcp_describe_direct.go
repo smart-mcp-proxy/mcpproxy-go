@@ -488,7 +488,7 @@ func (p *MCPProxyServer) runDirectCheck(
 		return plan.restore(preflight.Outcome{}), nil
 	}
 
-	scope, err := p.sessionPreflightScope(ctx)
+	scope, policies, err := p.sessionPreflightView(ctx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
@@ -504,7 +504,7 @@ func (p *MCPProxyServer) runDirectCheck(
 	// (directEntryVisibleToSession); the session's policies are passed too so
 	// the evaluator applies the same decision as the retrieve-mode check,
 	// which can only narrow (issue #1548).
-	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, p.sessionPreflightPolicies(ctx))
+	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, policies)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}

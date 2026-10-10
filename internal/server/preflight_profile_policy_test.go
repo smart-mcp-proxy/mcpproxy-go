@@ -47,6 +47,19 @@ func newPreflightPolicyFixture(t *testing.T, configure func(*config.Config)) *re
 	return f
 }
 
+// assertMatrixRow ties an observed (reason, verdict) to its committed sabotage
+// matrix row, so the FR-016 coverage gate's rows are exercised, not just listed.
+func assertMatrixRow(t *testing.T, scenario, reason, verdict string) {
+	t.Helper()
+	row, ok := loadSabotageMatrix(t)[scenario]
+	require.True(t, ok, "scenario %q missing from %s", scenario, preflightMatrixPath)
+	assert.Equal(t, row.Expect.Reason, reason, scenario)
+	if row.Expect.Reason == preflight.ReasonToolBlockedByProfile {
+		assert.Equal(t, row.Expect.Verdict, verdict, scenario)
+	}
+	assert.Equal(t, row.Expect.Verdict, preflight.ReasonVerdict(reason), scenario)
+}
+
 type preflightWireResult struct {
 	ID         string   `json:"id"`
 	Status     string   `json:"status"`
@@ -139,6 +152,7 @@ func TestPreflightProfilePolicy_RESTOperatorTier(t *testing.T) {
 		assert.True(t, strings.HasPrefix(res.Detail, "blocked by profile: "+id), "%s detail: %s", id, res.Detail)
 	}
 	assert.Contains(t, out.byID(t, "github:create_issue").Detail, "is a write tool")
+	assertMatrixRow(t, "tool_blocked_by_profile", out.byID(t, "github:create_issue").Reason, out.Verdict)
 	assert.Contains(t, out.byID(t, "github:get_secret_scanning_alert").Detail, "is denied by a rule")
 
 	// Control: the same operator WITHOUT a profile has no tool policy in effect.
@@ -284,6 +298,8 @@ func TestPreflightProfilePolicy_InBandCheck(t *testing.T) {
 				"github:get_secret_scanning_alert", "github:search_code", "github:no_such_tool")
 			absent := checkResultByID(t, payload, "github:no_such_tool")
 			require.Equal(t, preflight.ReasonNotFound, absent.Reason)
+			hidden := checkResultByID(t, payload, "github:create_issue")
+			assertMatrixRow(t, "mcp_check_profile_hidden", hidden.Reason, preflight.ReasonVerdict(hidden.Reason))
 			assert.Equal(t, preflight.StatusReady, checkResultByID(t, payload, "github:list_issues").Status)
 			assert.Equal(t, preflight.StatusReady, checkResultByID(t, payload, "notion:update_page").Status)
 			for _, id := range []string{"github:create_issue", "github:get_secret_scanning_alert", "github:search_code"} {
@@ -353,4 +369,26 @@ func TestPreflightProfilePolicy_DispatchParity(t *testing.T) {
 	}
 	require.NotZero(t, blockedSeen, "the parity table must exercise blocked rows")
 	require.NotZero(t, readySeen, "the parity table must exercise ready rows")
+}
+
+// The v3 resolution's own scope composes into the in-band check too: an
+// anonymous caller under the FR-008a binding guard (a named client binding
+// exists and no anonymous_profile confines anonymous access) is deny-all for
+// dispatch, so the check must not answer ready — nor suggest any tool.
+func TestPreflightProfilePolicy_InBandAnonymousBindingGuard(t *testing.T) {
+	f := newPreflightPolicyFixture(t, func(cfg *config.Config) { cfg.RequireMCPAuth = false })
+
+	payload := inBandCheck(t, f.proxy, anonCtx(), "github:list_issues", "github:list_issue")
+	require.Equal(t, preflight.StatusReady, checkResultByID(t, payload, "github:list_issues").Status,
+		"control: with no named binding, anonymous access is legacy-unrestricted")
+
+	f.mintClient("cursor", restV3ReadonlyID, auth.ProfileModeLocked)
+	payload = inBandCheck(t, f.proxy, anonCtx(), "github:list_issues", "github:list_issue")
+	assert.Equal(t, preflight.ReasonNotFound, checkResultByID(t, payload, "github:list_issues").Reason)
+	assert.Empty(t, checkResultByID(t, payload, "github:list_issue").DidYouMean, "a deny-all scope suggests nothing")
+
+	result, err := f.proxy.handleCallToolVariant(anonCtx(), auditCallToolRequest("github:list_issues", nil), contracts.ToolVariantRead)
+	require.NoError(t, err)
+	assert.True(t, result.IsError, "dispatch agrees: the guarded anonymous caller is refused")
+	assert.Zero(t, f.totalDispatched())
 }

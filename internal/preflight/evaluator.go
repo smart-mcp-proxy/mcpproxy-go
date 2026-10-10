@@ -356,7 +356,22 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("preflight: read tool approval for %q: %w", id, err)
 	}
-	if indexed == nil && approval == nil {
+	// The effective profile tool policy (issue #1548) is read once, for a tool
+	// with existence evidence only: an unknown id under a profile stays
+	// not_found (or the connection verdict that owns it).
+	var profileDecision ProfileToolDecision
+	if ec.ToolPolicy != nil && (indexed != nil || approval != nil) {
+		profileDecision = ec.ToolPolicy.ProfileToolDecision(serverName, toolName)
+	}
+	// At the agent-token tier a profile-excluded tool IS an absent tool:
+	// discovery (retrieve_tools, describe_tool and the direct surface's check
+	// mode) already hides it (Spec 108 FR-011), and the check must not confirm
+	// what discovery withholds (FR-013). It therefore takes the absent-tool
+	// branch below verbatim — including the connection verdict a not-Ready
+	// server answers for an absent id — so the index or an approval record can
+	// never make a hidden id answer differently from one that does not exist.
+	hiddenFromAgent := profileDecision.Blocked && ec.Tier == TierAgentToken
+	if (indexed == nil && approval == nil) || hiddenFromAgent {
 		res, notReady, cerr := connectionVerdict(ec, id, serverName)
 		if cerr != nil {
 			return Result{}, cerr
@@ -367,28 +382,18 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		return corpus.notFoundResult(id)
 	}
 
-	// 5b. tool_blocked_by_profile (issue #1548) — the effective profile tool
-	//     policy dispatch enforces (tier cap, deny rules, unannotated
-	//     handling, classification). Evaluated only now that the tool is
-	//     known to exist, so an unknown id under a profile stays not_found,
-	//     and ahead of the tool-level gates, matching dispatch, where the
-	//     profile gate precedes server state and tool approval.
-	//     At the agent-token tier a profile-excluded tool is answered with the
-	//     ONE not_found construction: discovery (retrieve_tools, describe_tool
-	//     and the direct surface's check mode) already hides it as if absent
-	//     (Spec 108 FR-011), and the check must not confirm what discovery
-	//     withholds (FR-013).
-	if ec.ToolPolicy != nil {
-		if decision := ec.ToolPolicy.ProfileToolDecision(serverName, toolName); decision.Blocked {
-			if ec.Tier == TierAgentToken {
-				return corpus.notFoundResult(id)
-			}
-			detail := decision.Detail
-			if detail == "" {
-				detail = fmt.Sprintf("Tool %q is excluded by the profile tool policy in effect.", id)
-			}
-			return unavailable(id, ReasonToolBlockedByProfile, detail), nil
+	// 5b. tool_blocked_by_profile (issue #1548, operator tier) — the effective
+	//     profile tool policy dispatch enforces (tier cap, deny rules,
+	//     unannotated handling, classification). Evaluated only once the tool
+	//     is known to exist, and ahead of the tool-level gates, matching
+	//     dispatch, where the profile gate precedes server state and tool
+	//     approval.
+	if profileDecision.Blocked {
+		detail := profileDecision.Detail
+		if detail == "" {
+			detail = fmt.Sprintf("Tool %q is excluded by the profile tool policy in effect.", id)
 		}
+		return unavailable(id, ReasonToolBlockedByProfile, detail), nil
 	}
 
 	configDenied, err := ec.Policy.ToolConfigDenied(serverName, toolName)
