@@ -210,6 +210,35 @@ const (
 	ChangeForget    ChangeKind = "forget"
 	ChangeRotate    ChangeKind = "rotate"
 	ChangeAnonymous ChangeKind = "anonymous"
+	// ChangeIssue and ChangeRevoke are the Spec 115 credential lifecycle
+	// records: a credential issued or revoked through the credentials
+	// service, on any surface (MCP, REST, CLI). `forget` stays the Clients
+	// page's Forget action.
+	ChangeIssue  ChangeKind = "issue"
+	ChangeRevoke ChangeKind = "revoke"
+)
+
+// Credential error codes of the `credentials` admin MCP tool (Spec 115,
+// contracts/errors.md). Each is the `code` of a refusal body
+// {code, error, field?}. binding_bypassable_without_auth is reused from the
+// Profiles v3 codes above.
+const (
+	CredentialErrorCodeSecretInArgument       = "secret_in_argument"
+	CredentialErrorCodeArgumentsTooLarge      = "arguments_too_large"
+	CredentialErrorCodeUnknownOperation       = "unknown_operation"
+	CredentialErrorCodeMissingArgument        = "missing_argument"
+	CredentialErrorCodeInvalidArgument        = "invalid_argument"
+	CredentialErrorCodeProfileRequired        = "profile_required"
+	CredentialErrorCodeUnknownProfile         = "unknown_profile"
+	CredentialErrorCodeInvalidExpiry          = "invalid_expiry"
+	CredentialErrorCodeIdentityExists         = "identity_exists"
+	CredentialErrorCodeReservedIdentity       = "reserved_identity"
+	CredentialErrorCodeIdentityNotFound       = "identity_not_found"
+	CredentialErrorCodeTokenLimitReached      = "token_limit_reached"
+	CredentialErrorCodeReadOnlyMode           = "read_only_mode"
+	CredentialErrorCodeManagementDisabled     = "management_disabled"
+	CredentialErrorCodeUnsupportedEdition     = "unsupported_edition"
+	CredentialErrorCodeCredentialsUnavailable = "credentials_unavailable"
 )
 
 // Staged-rotation states (FR-021a): the `diff.outcome` of a `rotate` record

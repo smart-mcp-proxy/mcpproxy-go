@@ -817,6 +817,25 @@ export const ErrorCodeProfileExists = 'profile_exists' as const;
 export const ErrorCodeNameMismatch = 'name_mismatch' as const;
 export const ErrorCodePreconditionFailed = 'precondition_failed' as const;
 
+// Spec 115: refusal codes of the credentials admin MCP tool
+// (internal/profile/contract.go CredentialErrorCode*).
+export const CredentialErrorCodeSecretInArgument = 'secret_in_argument' as const;
+export const CredentialErrorCodeArgumentsTooLarge = 'arguments_too_large' as const;
+export const CredentialErrorCodeUnknownOperation = 'unknown_operation' as const;
+export const CredentialErrorCodeMissingArgument = 'missing_argument' as const;
+export const CredentialErrorCodeInvalidArgument = 'invalid_argument' as const;
+export const CredentialErrorCodeProfileRequired = 'profile_required' as const;
+export const CredentialErrorCodeUnknownProfile = 'unknown_profile' as const;
+export const CredentialErrorCodeInvalidExpiry = 'invalid_expiry' as const;
+export const CredentialErrorCodeIdentityExists = 'identity_exists' as const;
+export const CredentialErrorCodeReservedIdentity = 'reserved_identity' as const;
+export const CredentialErrorCodeIdentityNotFound = 'identity_not_found' as const;
+export const CredentialErrorCodeTokenLimitReached = 'token_limit_reached' as const;
+export const CredentialErrorCodeReadOnlyMode = 'read_only_mode' as const;
+export const CredentialErrorCodeManagementDisabled = 'management_disabled' as const;
+export const CredentialErrorCodeUnsupportedEdition = 'unsupported_edition' as const;
+export const CredentialErrorCodeCredentialsUnavailable = 'credentials_unavailable' as const;
+
 export const GuardFixRequireMCPAuth = 'require_mcp_auth' as const;
 export const GuardFixSetAnonymousProfile = 'set_anonymous_profile' as const;
 
@@ -831,6 +850,8 @@ export const ProfileChangeUnlock = 'unlock' as const;
 export const ProfileChangeForget = 'forget' as const;
 export const ProfileChangeRotate = 'rotate' as const;
 export const ProfileChangeAnonymous = 'anonymous' as const;
+export const ProfileChangeIssue = 'issue' as const;
+export const ProfileChangeRevoke = 'revoke' as const;
 export type ProfileChangeKind =
   | typeof ProfileChangeCreate
   | typeof ProfileChangeUpdate
@@ -842,7 +863,9 @@ export type ProfileChangeKind =
   | typeof ProfileChangeUnlock
   | typeof ProfileChangeForget
   | typeof ProfileChangeRotate
-  | typeof ProfileChangeAnonymous;
+  | typeof ProfileChangeAnonymous
+  | typeof ProfileChangeIssue
+  | typeof ProfileChangeRevoke;
 
 export const RotationFinalized = 'finalized' as const;
 export const RotationRolledBack = 'rolled_back' as const;

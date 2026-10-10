@@ -437,14 +437,24 @@ func (m *Manager) RevokeAgentToken(name string) error {
 // revoked. Returns ErrAgentTokenNotFound when the (owner, name) pair does not
 // resolve, whether because it is absent or because it belongs to someone else.
 func (m *Manager) RevokeAgentTokenForOwner(userID, name string) error {
+	_, _, err := m.RevokeAgentTokenReport(userID, name)
+	return err
+}
+
+// RevokeAgentTokenReport is RevokeAgentTokenForOwner that also returns the
+// record as it was and as it is now, so a caller can tell whether the revoke
+// changed anything (Spec 115: revoking an already-revoked token is changed:
+// false). RevokedAt is stamped (UTC) the first time the token is revoked and is
+// never overwritten by a later revoke.
+func (m *Manager) RevokeAgentTokenReport(userID, name string) (before, after *auth.AgentToken, err error) {
 	if name == "" {
-		return fmt.Errorf("agent token name cannot be empty")
+		return nil, nil, fmt.Errorf("agent token name cannot be empty")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.db.db.Update(func(tx *bbolt.Tx) error {
+	err = m.db.db.Update(func(tx *bbolt.Tx) error {
 		// Resolve first; the scan must finish before the Put below.
 		hash, token, err := m.findAgentTokenHashLocked(tx, userID, name)
 		if err != nil {
@@ -459,15 +469,37 @@ func (m *Manager) RevokeAgentTokenForOwner(userID, name string) error {
 			return ErrAgentTokenNotFound
 		}
 
-		token.Revoked = true
+		prior := *token
+		before = &prior
+		markRevoked(token, time.Now())
 
 		updatedData, err := json.Marshal(token)
 		if err != nil {
 			return fmt.Errorf("failed to marshal agent token: %w", err)
 		}
 
-		return tokenBucket.Put(hash, updatedData)
+		if err := tokenBucket.Put(hash, updatedData); err != nil {
+			return err
+		}
+		after = token
+		return nil
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return before, after, nil
+}
+
+// markRevoked flips Revoked and stamps RevokedAt the first time only (Spec 115
+// data-model §1: RevokedAt is never overwritten). A legacy record that was
+// revoked before RevokedAt existed keeps no stamp: the true time is unknown.
+func markRevoked(t *auth.AgentToken, now time.Time) {
+	if t.Revoked {
+		return
+	}
+	t.Revoked = true
+	at := now.UTC()
+	t.RevokedAt = &at
 }
 
 // RevokeAgentTokensForOwner marks every token owned by userID as revoked and
@@ -530,8 +562,9 @@ func (m *Manager) RevokeAgentTokensForOwner(userID string) (int, error) {
 			return err
 		}
 
+		now := time.Now()
 		for i := range todo {
-			todo[i].token.Revoked = true
+			markRevoked(&todo[i].token, now)
 			data, err := json.Marshal(todo[i].token)
 			if err != nil {
 				return fmt.Errorf("failed to marshal agent token: %w", err)

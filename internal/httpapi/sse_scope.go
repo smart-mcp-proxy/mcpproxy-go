@@ -174,6 +174,9 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// A profile change names profiles (and so servers and policy) a scoped
 	// caller may not reach (Spec 108-f FR-038): administrator-only invalidation.
 	internalRuntime.EventTypeProfilesChanged: {},
+	// A credential lifecycle invalidation names identities and their
+	// profiles (Spec 115 FR-024): administrator-only, like the binding event.
+	internalRuntime.EventTypeCredentialsChanged: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one

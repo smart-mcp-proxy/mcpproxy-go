@@ -102,6 +102,28 @@ func (m *Manager) MintClientCredential(clientID, rawToken string, hmacKey []byte
 // also carries a display name (Spec 108-f FR-021). The name is validated with
 // the rest of the record's invariants.
 func (m *Manager) MintClientCredentialNamed(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time, displayName string) (*auth.AgentToken, error) {
+	return m.MintClientCredentialWith(clientID, rawToken, hmacKey, ClientMintOptions{
+		Mode: mode, Pin: pin, ExpiresAt: expiresAt, DisplayName: displayName,
+	})
+}
+
+// ClientMintOptions are the fields of a client credential mint. Issuer and
+// Purpose are the Spec 115 issuance fields (data-model §1); a connect mint
+// leaves them empty.
+type ClientMintOptions struct {
+	Mode        string
+	Pin         string
+	ExpiresAt   time.Time
+	DisplayName string
+	Issuer      *auth.CredentialIssuer
+	Purpose     string
+}
+
+// MintClientCredentialWith is MintClientCredentialNamed with the Spec 115
+// issuance fields. It returns the committed record (the caller projects its
+// view from it, never from a second store read).
+func (m *Manager) MintClientCredentialWith(clientID, rawToken string, hmacKey []byte, opts ClientMintOptions) (*auth.AgentToken, error) {
+	mode, pin, expiresAt, displayName := opts.Mode, opts.Pin, opts.ExpiresAt, opts.DisplayName
 	if !auth.ValidClientID(clientID) {
 		return nil, fmt.Errorf("invalid client id %q", clientID)
 	}
@@ -145,6 +167,8 @@ func (m *Manager) MintClientCredentialNamed(clientID, rawToken string, hmacKey [
 		TokenHash:      hash,
 		TokenPrefix:    auth.TokenPrefix(rawToken),
 		DisplayName:    displayName,
+		Issuer:         opts.Issuer,
+		Purpose:        opts.Purpose,
 	}
 	if err := auth.ValidateTokenInvariants(&token, auth.KindClient); err != nil {
 		return nil, fmt.Errorf("mint produced an invalid client credential record: %w", err)
@@ -535,7 +559,7 @@ func (m *Manager) forgetClientCredential(clientID string, restorePrior bool) (*a
 		if tok == nil || tok.Kind != auth.KindClient {
 			return ErrClientCredentialNotFound
 		}
-		tok.Revoked = true
+		markRevoked(tok, time.Now())
 		if restorePrior && tok.PriorProfileMode != "" {
 			tok.ProfilePin, tok.ProfileMode = tok.PriorProfilePin, tok.PriorProfileMode
 		}

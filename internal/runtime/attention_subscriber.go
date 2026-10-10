@@ -211,7 +211,7 @@ func (a *attentionSubscriber) loop(ctx context.Context) {
 func attentionTriggers(t EventType) bool {
 	switch t {
 	case EventTypeServersChanged, EventTypeClientPresenceChanged,
-		EventTypeClientBindingChanged, EventTypeProfilesChanged,
+		EventTypeClientBindingChanged, EventTypeProfilesChanged, EventTypeCredentialsChanged,
 		EventTypeConfigReloaded, EventTypeConfigSaved:
 		return true
 	}

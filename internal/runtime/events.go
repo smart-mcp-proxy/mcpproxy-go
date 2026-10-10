@@ -47,6 +47,13 @@ const (
 	// SSE. One emitter (the server's snapshot observer) covers service writes
 	// and hand edits alike.
 	EventTypeProfilesChanged EventType = "profiles.changed"
+	// EventTypeCredentialsChanged is emitted (Spec 115 FR-024) after a client
+	// credential or agent token is issued or revoked through the credentials
+	// service, and after a client is forgotten. Payload: {kind, id,
+	// token_name, change, profile}. It is an INVALIDATION carrying no secret,
+	// prefix, purpose or expiry: subscribers refetch. It names identities and
+	// profiles, so it is administrator-only on SSE.
+	EventTypeCredentialsChanged EventType = "credentials.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.
