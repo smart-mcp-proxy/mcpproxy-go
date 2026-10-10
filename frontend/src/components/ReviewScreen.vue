@@ -121,25 +121,34 @@ async function load() {
   if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }
   review.value = res.data; reviewServer = server; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed')
 }
+// A response belongs to the review session that sent it (UX-02 r9). After
+// /review/A -> B (or A -> B -> A, where the name matches again) a late answer
+// must not clear the new session's busy flag, close its dialog, reload it, or
+// put A's error on it. The watcher on serverName already reset that state.
+function stillCurrent(server: string, session: number) { return session === reviewSession && server === props.serverName }
 async function rescan() {
-  const server = props.serverName
+  const server = props.serverName; const session = reviewSession
   rescanning.value = true
   const res = await api.startScan(server)
-  if (server !== props.serverName) return // late response for a server the screen no longer shows
+  if (!stillCurrent(server, session)) return
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
 }
 function requestRequarantine() { requarantineDialog.value?.showModal?.() }
 async function requarantine() {
+  const server = props.serverName; const session = reviewSession
   requarantining.value = true
-  const res = await api.quarantineServer(props.serverName)
+  const res = await api.quarantineServer(server)
+  if (!stillCurrent(server, session)) return
   requarantining.value = false
   requarantineDialog.value?.close?.()
   if (!res.success) { error.value = res.error || 'Quarantine failed'; return }
   await load()
 }
 async function fetchDefinitions() {
+  const server = props.serverName; const session = reviewSession
   scanning.value = true
-  const res = await api.discoverServerTools(props.serverName)
+  const res = await api.discoverServerTools(server)
+  if (!stillCurrent(server, session)) return
   scanning.value = false
   if (!res.success) { error.value = res.error || 'Failed to capture tool definitions'; return }
   await load()
@@ -211,7 +220,7 @@ async function approve(force: boolean, block?: string[], decision?: ApprovalDeci
   if (!res.success) {
     const message = res.error || 'Approval failed'
     // A stale review (409): reload so the operator sees what changed, keeping the message.
-    if (/out of date/i.test(message)) { await load(); staleNotice.value = message; return }
+    if (/out of date/i.test(message)) { await load(); if (stillCurrent(server, session)) staleNotice.value = message; return }
     error.value = message; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return
   }
   choices.clear(); emit('approved'); await load()
@@ -248,7 +257,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { reviewSession++; review.value = null; allowedTools.value = []; choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
+watch(() => props.serverName, () => { reviewSession++; review.value = null; allowedTools.value = []; choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; requarantining.value = false; requarantineDialog.value?.close?.(); error.value = ''; staleNotice.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
