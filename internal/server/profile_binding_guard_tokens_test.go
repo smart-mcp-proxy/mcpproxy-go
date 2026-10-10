@@ -138,3 +138,17 @@ func TestBindingGuard_DanglingPinStaysGuarded(t *testing.T) {
 	require.NoError(t, rt.StorageManager().CreateAgentToken(guardToken("dangling-tok", "gone", true), raw, []byte("k")))
 	assert.True(t, proxy.bindingGuardActive(idx), "a hot-reloaded auth-off config with a dangling guarded binding denies anonymous")
 }
+
+// Review r1: with a valid binding sorting before a dangling one, no
+// anonymous_profile fix is offered (FR-012b).
+func TestBindingGuardFixes_MixedValidAndDangling(t *testing.T) {
+	profiles := []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}
+	proxy, _ := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) { cfg.Profiles = profiles })
+	off := &config.Config{RequireMCPAuth: false, Profiles: profiles}
+	toks := []auth.AgentToken{guardToken("a-valid", "P", true), guardToken("z-dangling", "gone", true)}
+	delta := proxy.BindingGuardDelta(runtime.GuardState{Config: &config.Config{RequireMCPAuth: true, Profiles: profiles}}, runtime.GuardState{Config: off, Tokens: toks})
+	require.Len(t, delta, 2)
+	for _, f := range proxy.BindingGuardFixes(runtime.GuardState{Config: off, Tokens: toks}, delta) {
+		assert.NotEqual(t, profile.GuardFixSetAnonymousProfile, f.Kind)
+	}
+}

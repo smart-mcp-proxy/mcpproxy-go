@@ -178,6 +178,20 @@ func (p *MCPProxyServer) handleCredentials(ctx context.Context, request mcp.Call
 	}
 
 	recordedArgs, data, auditResponse, err := p.runCredentialsOperation(ctx, args)
+	var screened *runtime.SecretInputError
+	if errors.As(err, &screened) {
+		if _, already := recordedArgs["_screened"]; !already {
+			// The service's own screen (live config at the mutex) refused what
+			// the handler's screen let through: never record the arguments.
+			fields := screened.Fields
+			if fields == nil {
+				fields = []string{}
+			}
+			recordedArgs = screenedSummary(args, "secret-shaped input; arguments not stored", map[string]any{
+				"offending_fields": fields, "unknown_offending_count": screened.UnknownCount,
+			})
+		}
+	}
 	if err != nil {
 		errText := credentialsErrorText(err)
 		p.emitActivityInternalToolCall(ctx, credentialsToolName, "", "", "", sessionID, requestID, "error", errText, time.Since(start).Milliseconds(), recordedArgs, nil, nil, "")

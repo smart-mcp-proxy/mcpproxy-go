@@ -151,7 +151,11 @@ func (p *MCPProxyServer) BindingGuardFixes(candidate runtime.GuardState, delta [
 	anon := runtime.GuardFix{Kind: profile.GuardFixSetAnonymousProfile}
 	if len(delta) > 0 && candidate.Config != nil {
 		target := delta[0].Profile
-		if !configHasProfileNamed(candidate.Config, target) {
+		dangling := false
+		for _, b := range delta {
+			dangling = dangling || !configHasProfileNamed(candidate.Config, b.Profile)
+		}
+		if dangling {
 			// Spec 115 FR-012b: a dangling pin is deny-all for its credential, so
 			// no anonymous_profile can be narrow enough and pointing anonymous at
 			// the missing profile is not a fix. Only auth on (or revoking or
