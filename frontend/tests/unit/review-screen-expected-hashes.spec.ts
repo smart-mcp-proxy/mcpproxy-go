@@ -59,6 +59,8 @@ describe('ReviewScreen review-bound approval (UX-02)', () => {
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     await flushPromises()
     expect((api.getServerReview as any).mock.calls.length).toBe(loadsBefore + 1)
-    expect(wrapper.text()).toContain('out of date')
+    expect(wrapper.get('[data-test="review-stale-notice"]').text()).toContain('out of date')
+    // The reloaded review stays visible next to the notice.
+    expect(wrapper.find('[data-test="review-approve-server"]').exists()).toBe(true)
   })
 })

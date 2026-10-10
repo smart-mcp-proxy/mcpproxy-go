@@ -3,6 +3,7 @@
     <div v-if="loading" class="text-center py-8"><span class="loading loading-spinner"></span></div>
     <div v-else-if="error" class="alert alert-error"><span>{{ error }}</span><button class="btn btn-sm" @click="load">Retry</button></div>
     <template v-else-if="review">
+      <div v-if="staleNotice" role="alert" class="alert alert-warning" data-test="review-stale-notice"><span>{{ staleNotice }} The list below is the current review; check it and approve again.</span></div>
       <header class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 class="text-2xl font-bold" data-test="review-heading">{{ headline.title }}</h2>
@@ -76,7 +77,7 @@ import { APPROVE_ALL_HINT, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel,
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
 const review = ref<ServerReviewResponse | null>(null)
-const loading = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
+const loading = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref(''); const staleNotice = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
@@ -133,7 +134,7 @@ function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined
 // The force retry re-sends the block list of the attempt that triggered it (D43.5).
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
-  closeConfirm(); forceDialog.value?.close?.(); approving.value = true
+  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; staleNotice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
@@ -144,7 +145,7 @@ async function approve(force: boolean, block?: string[]) {
   if (!res.success) {
     const message = res.error || 'Approval failed'
     // A stale review (409): reload so the operator sees what changed, keeping the message.
-    if (/out of date/i.test(message)) { await load(); error.value = message; return }
+    if (/out of date/i.test(message)) { await load(); staleNotice.value = message; return }
     error.value = message; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return
   }
   choices.clear(); emit('approved'); await load()
@@ -153,8 +154,10 @@ async function rejectServer() { approving.value = true; const res = await api.se
 async function approveTool(name: string) {
   const expected = reviewedHashes((review.value?.tools ?? []).filter(t => t.name === name))
   const res = expected ? await api.approveTools(props.serverName, [name], expected) : await api.approveTools(props.serverName, [name])
-  if (res && !res.success) error.value = res.error || 'Approval failed'
+  const message = res && !res.success ? res.error || 'Approval failed' : ''
   await load()
+  if (/out of date/i.test(message)) staleNotice.value = message
+  else if (message) error.value = message
 }
 async function blockTool(name: string) { await api.blockTools(props.serverName, [name]); await load() }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
@@ -166,7 +169,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
