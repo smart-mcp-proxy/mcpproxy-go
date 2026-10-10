@@ -402,7 +402,11 @@ func TestClientsRoutes_ListShowsCustomRowsFiltersAndKeepsWarningsUnfiltered(t *t
 	}
 	assert.True(t, ids["dev-laptop"])
 	assert.True(t, ids["open-one"])
-	assert.False(t, ids["gone-one"], "a revoked custom row is omitted from the list")
+	// Spec 115 (deliberate update): a custom client issued through the
+	// lifecycle path stays listed after revocation, showing Revoked.
+	assert.True(t, ids["gone-one"], "a revoked lifecycle-issued custom row stays listed")
+	assert.Equal(t, "revoked", rowByID(t, all, "gone-one")["credential_state"])
+	assert.NotEmpty(t, rowByID(t, all, "gone-one")["revoked_at"])
 	dev := rowByID(t, all, "dev-laptop")
 	assert.Equal(t, "custom", dev["kind"])
 	assert.Equal(t, true, dev["profile_missing"])

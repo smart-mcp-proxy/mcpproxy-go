@@ -154,6 +154,16 @@ func TestCredentialsREST_CustomClientRecordsIssue(t *testing.T) {
 	require.Len(t, list, 1)
 	assert.Equal(t, "revoked", list[0].(map[string]any)["credential_state"])
 	assert.NotEmpty(t, list[0].(map[string]any)["revoked_at"])
+	all := decodeBody(t, h.req(http.MethodGet, "/api/v1/clients", ""))["data"].(map[string]any)["clients"].([]any)
+	found := false
+	for _, r := range all {
+		row := r.(map[string]any)
+		if row["id"] == "dev-box" {
+			found = true
+			assert.Equal(t, "revoked", row["credential_state"])
+		}
+	}
+	assert.True(t, found, "an open, unfiltered Clients view keeps the revoked worker")
 }
 
 // T038b + T038d + T038f: secret-shaped values on the REST issuance routes.

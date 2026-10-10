@@ -386,8 +386,12 @@ func (s *Server) decorateClientRows(rows []clientPresence, records []auth.AgentT
 		if connect.FindClient(id) != nil || known[id] {
 			continue
 		}
-		if stateOf(rec) == profile.CredentialStateRevoked && id != detailID {
-			continue // a revoked custom row is omitted from the list (still served by detail)
+		// A legacy revoked custom row is omitted from the list (still served by
+		// detail). A credential issued through the Spec 115 lifecycle path
+		// (it records its issuer) stays listed after revocation, so an open
+		// Clients view shows "Revoked <time>" instead of the row vanishing.
+		if stateOf(rec) == profile.CredentialStateRevoked && id != detailID && rec.Issuer == nil {
+			continue
 		}
 		customIDs = append(customIDs, id)
 	}

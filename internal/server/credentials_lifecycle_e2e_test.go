@@ -594,21 +594,37 @@ func TestE2E_CredentialsLifecycle_SurfaceParity(t *testing.T) {
 		// /mcp/code: admitted nested read dispatches once, forbidden nested calls zero.
 		code := e.session("/mcp/code", hdr)
 		before := e.library.Dispatches("search_books")
-		isErr, text, err := workerCall(code, "code_execution", map[string]any{"code": `const r = call_tool('library', 'search_books', {}); ({ok: !r.isError})`})
-		require.NoError(t, err)
-		require.False(t, isErr, "%s nested read: %s", label, text)
+		// The execution envelope is {ok, value, error}: assert the script ran
+		// and what the nested call returned, not the outer isError alone.
+		nested := func(srv, tool string) (bool, string) {
+			script := fmt.Sprintf(`const r = call_tool(%q, %q, {}); ({refused: !!(r && (r.isError || r.error))})`, srv, tool)
+			isErr, text, err := workerCall(code, "code_execution", map[string]any{"code": script})
+			require.NoError(t, err)
+			require.False(t, isErr, text)
+			var env struct {
+				OK    bool `json:"ok"`
+				Value struct {
+					Refused bool `json:"refused"`
+				} `json:"value"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(text), &env), text)
+			require.True(t, env.OK, "the script itself ran: %s", text)
+			return env.Value.Refused, text
+		}
+		refused, text := nested("library", "search_books")
+		assert.False(t, refused, "%s admitted nested read: %s", label, text)
 		assert.Equal(t, before+1, e.library.Dispatches("search_books"))
 		for _, name := range forbidden {
 			srv, tool, _ := strings.Cut(name, ":")
-			script := fmt.Sprintf(`const r = call_tool(%q, %q, {}); ({refused: !!r.isError || !!r.error})`, srv, tool)
 			b := e.total()
-			_, _, _ = workerCall(code, "code_execution", map[string]any{"code": script})
+			refused, text := nested(srv, tool)
+			assert.True(t, refused, "%s nested %s must be refused: %s", label, name, text)
 			assert.Equal(t, b, e.total(), "%s nested %s dispatched", label, name)
 		}
 		// /mcp/all direct: admitted read once, forbidden zero.
 		direct := e.session("/mcp/all", hdr)
 		before = e.library.Dispatches("search_books")
-		isErr, text, err = workerCall(direct, "library__search_books", map[string]any{})
+		isErr, text, err := workerCall(direct, "library__search_books", map[string]any{})
 		require.NoError(t, err)
 		require.False(t, isErr, "%s direct read: %s", label, text)
 		assert.Equal(t, before+1, e.library.Dispatches("search_books"))
@@ -679,7 +695,14 @@ func (e *credE2E) restGet(path string) string {
 	require.NoError(e.t, err)
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	require.Equal(e.t, http.StatusOK, resp.StatusCode, "%s: %s", path, raw)
 	return string(raw)
+}
+
+func (c *sseCapture) snapshot() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }
 
 func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
@@ -730,13 +753,24 @@ func TestE2E_CredentialsLifecycle_SecretSinks(t *testing.T) {
 	}
 	e.adminOK("credentials", map[string]any{"operation": "revoke", "client": "sink-c"})
 	e.adminOK("credentials", map[string]any{"operation": "revoke", "token": "sink-t"})
-	time.Sleep(500 * time.Millisecond) // let the async activity writer settle
+	// Wait for every credentials call record (asynchronously persisted) and
+	// for the last lifecycle events to reach the SSE capture before reading
+	// the sinks: a negative substring check on a sink that is not there yet
+	// would prove nothing.
+	const wantCalls = 2 + 5 + 8*3 + 2
+	require.Eventually(t, func() bool {
+		body := e.restGet("/api/v1/activity/export?format=json&include_bodies=true&type=internal_tool_call&limit=50000")
+		return strings.Count(body, `"tool_name":"credentials"`) >= wantCalls
+	}, 20*time.Second, 200*time.Millisecond, "every credentials call must be recorded before the sinks are read")
+	require.Eventually(t, func() bool {
+		return strings.Count(sse.snapshot(), "credentials.changed") >= 4
+	}, 10*time.Second, 100*time.Millisecond, "the SSE capture must contain both issues and both revokes")
 
 	sinks := map[string]string{
 		"errors":          strings.Join(errorsSeen, "\n"),
-		"activity":        e.restGet("/api/v1/activity?limit=1000"),
-		"export json":     e.restGet("/api/v1/activity/export?format=json"),
-		"export csv":      e.restGet("/api/v1/activity/export?format=csv"),
+		"activity":        e.restGet("/api/v1/activity?limit=100"),
+		"export json":     e.restGet("/api/v1/activity/export?format=json&include_bodies=true&limit=50000"),
+		"export csv":      e.restGet("/api/v1/activity/export?format=csv&include_bodies=true&limit=50000"),
 		"tokens list":     e.restGet("/api/v1/tokens"),
 		"clients list":    e.restGet("/api/v1/clients"),
 		"credentials get": fmt.Sprint(e.adminOK("credentials", map[string]any{"operation": "list"})),
