@@ -555,7 +555,12 @@ usable.
 
 **Binding an approval to the reviewed definitions.** Both endpoints accept an
 optional `expected_hashes` object: tool name to the `current_hash` that
-`GET /api/v1/servers/{id}/review` reported for it.
+`GET /api/v1/servers/{id}/review` reported for it. Treat that value as
+opaque: it covers the tool's definition and, when the tool declares any, its
+safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
+`openWorldHint`). A tool reviewed as read-only that turns destructive before
+the approval therefore fails as out of date, even though its definition hash
+did not change.
 
 ```json
 {"tools": ["create_issue"], "expected_hashes": {"create_issue": "9f2c…"}}

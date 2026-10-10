@@ -378,6 +378,11 @@ type ToolApprovalResult struct {
 	// same discovery pass only deletes a removed tool's records while the
 	// generation is unchanged (UX-02, see lockToolApprovalsIfCurrent).
 	InventoryGeneration uint64
+	// StaleInventory is set when the pass was dropped because a
+	// later-captured inventory had already been applied for the server: the
+	// pass wrote nothing, and applyDifferentialToolUpdateCaptured makes no
+	// index change for it (UX-02 cross-review).
+	StaleInventory bool
 }
 
 // toolQuarantineGate is the per-server resolution of the tool-level
@@ -441,7 +446,23 @@ func (r *Runtime) resolveToolQuarantineGate(serverName string) toolQuarantineGat
 // If quarantine is disabled (globally or per-server), new tools are auto-approved
 // and no tools are blocked. Changed tools from previously-approved servers are still
 // blocked for security (rug pull detection).
+//
+// The inventory is treated as captured now; a caller that captured it earlier
+// (before a tools/list round trip) uses checkToolApprovalsCaptured with the
+// ticket it took before the capture.
 func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
+	return r.checkToolApprovalsCaptured(serverName, tools, r.nextInventoryTicket())
+}
+
+// checkToolApprovalsCaptured is checkToolApprovals for an inventory captured
+// under ticket (see nextInventoryTicket). When a later-captured inventory was
+// already applied for the server, this one is stale: it is dropped without a
+// single write and the result reports StaleInventory. Applying it would
+// regress newer decisions — delete the record of a tool the newer inventory
+// rediscovered (and the operator then blocked), or restore a rug-pulled
+// "changed" record to approved because the old inventory still shows the
+// approved definition (UX-02 cross-review).
+func (r *Runtime) checkToolApprovalsCaptured(serverName string, tools []*config.ToolMetadata, ticket uint64) (*ToolApprovalResult, error) {
 	if r.storageManager == nil {
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
 	}
@@ -450,8 +471,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	// isBaselinePass decision and every write — runs under the server's
 	// tool-approval lock, so overlapping discovery passes and operator
 	// approvals apply one after another instead of overwriting each other.
-	unlockApprovals, inventoryGen := r.lockToolApprovalsGen(serverName)
+	unlockApprovals, inventoryGen, staleInventory := r.lockToolApprovalsForInventory(serverName, ticket)
 	defer unlockApprovals()
+	if staleInventory {
+		r.logger.Info("Dropping a stale tool inventory: a later-captured inventory was already applied for this server",
+			zap.String("server", serverName), zap.Int("tools", len(tools)))
+		return &ToolApprovalResult{BlockedTools: make(map[string]bool), StaleInventory: true}, nil
+	}
 
 	// Determine if quarantine is enforced for this server. Storage is
 	// consulted too (fail closed): QuarantineServer flips it under this lock
@@ -1967,13 +1993,13 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 // disabled mid-sweep — or one that somehow reached this point (e.g. a stale
 // last-good snapshot for a since-quarantined server) — is never (re)indexed.
 // Returns true only when the differential update actually ran.
-func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
+func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata, ticket uint64) bool {
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return false
 	}
-	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+	if err := r.applyDifferentialToolUpdateCaptured(ctx, serverName, tools, ticket); err != nil {
 		r.logger.Error("Failed to apply differential update for server during sweep",
 			zap.String("server", serverName),
 			zap.Error(err))
@@ -2007,7 +2033,7 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	// Prefer the last-good snapshot so the reindex is a pure local diff with no
 	// network round-trip. It is populated by the full sweep and by
 	// DiscoverAndIndexToolsForServer.
-	snapshot := r.lastGoodToolsSnapshot(serverName)
+	snapshot, snapshotTicket := r.lastGoodToolsSnapshotTicket(serverName)
 	if len(snapshot) == 0 {
 		// No snapshot captured yet — fall back to a full single-server
 		// rediscover, which indexes and populates the snapshot for next time.
@@ -2034,7 +2060,7 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	// blocked/disabled ones are removed. Rug-pull safety is preserved: if the
 	// tool mutated after approval, checkToolApprovals re-flags it changed and it
 	// stays blocked.
-	if err := r.applyDifferentialToolUpdate(r.AppContext(), serverName, snapshot); err != nil {
+	if err := r.applyDifferentialToolUpdateCaptured(r.AppContext(), serverName, snapshot, snapshotTicket); err != nil {
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}
@@ -2112,7 +2138,7 @@ func staleReviewedRecords(serverName string, names []string, current map[string]
 		switch {
 		case !ok || reviewed == "":
 			stale.Unreviewed = append(stale.Unreviewed, name)
-		case reviewed != record.CurrentHash:
+		case reviewed != reviewFingerprint(record):
 			stale.Changed = append(stale.Changed, name)
 		}
 	}
@@ -2122,6 +2148,42 @@ func staleReviewedRecords(serverName string, names []string, current map[string]
 	slices.Sort(stale.Changed)
 	slices.Sort(stale.Unreviewed)
 	return stale
+}
+
+// reviewFingerprint identifies the reviewed state of an approval record: the
+// definition (CurrentHash) plus the safety hints that set the tool's tier and
+// so drove the review's default selection. GetServerReview reports it as the
+// tool's current_hash, and review-bound approvals (expected_hashes) are
+// checked against it (UX-02 cross-review).
+//
+// CurrentHash deliberately excludes annotations (see calculateToolApprovalHash:
+// they are not stable across reconnects, so they must not drive rug-pull
+// detection). That policy is unchanged; the fingerprint only binds an approval
+// to the hints the operator saw, so a tool reviewed as read-only that turns
+// destructive before the approval is rejected as out of date. A tool with no
+// safety hints fingerprints as its plain CurrentHash, matching what earlier
+// cores reported.
+func reviewFingerprint(record *storage.ToolApprovalRecord) string {
+	if record == nil {
+		return ""
+	}
+	a := record.CurrentAnnotations
+	if a == nil || (a.ReadOnlyHint == nil && a.DestructiveHint == nil && a.IdempotentHint == nil && a.OpenWorldHint == nil) {
+		return record.CurrentHash
+	}
+	hint := func(v *bool) string {
+		switch {
+		case v == nil:
+			return "-"
+		case *v:
+			return "1"
+		default:
+			return "0"
+		}
+	}
+	sum := sha256.Sum256([]byte("ro=" + hint(a.ReadOnlyHint) + ";de=" + hint(a.DestructiveHint) +
+		";id=" + hint(a.IdempotentHint) + ";ow=" + hint(a.OpenWorldHint)))
+	return record.CurrentHash + "~" + hex.EncodeToString(sum[:8])
 }
 
 // uniqueNames returns names without duplicates, in first-seen order.

@@ -233,6 +233,12 @@ type Runtime struct {
 	// name, value: *sync.Mutex. See lockToolApprovals.
 	toolApprovalLocks sync.Map
 
+	// inventoryTickets hands out monotonically increasing inventory tickets,
+	// taken when a tool inventory is CAPTURED (before tools/list), so a pass
+	// can tell whether a later-captured inventory was already applied for
+	// its server (UX-02, see checkToolApprovalsCaptured).
+	inventoryTickets atomic.Uint64
+
 	// toolApprovalReadHook, when set (tests only), runs inside
 	// checkToolApprovals right after each approval record is read, so tests
 	// can pause a pass mid-flight and drive interleavings deterministically.
@@ -246,7 +252,12 @@ type Runtime struct {
 	// Last-good tool snapshots per server used to avoid transient tool loss during
 	// global discovery races/restarts.
 	lastGoodToolsMu sync.RWMutex
-	lastGoodTools   map[string][]*config.ToolMetadata
+	// lastGoodToolsTicket is the inventory ticket (see nextInventoryTicket)
+	// of each lastGoodTools snapshot, guarded by lastGoodToolsMu. A snapshot
+	// is only replaced by one captured later, and the approval reindex hands
+	// the ticket on so a stale snapshot cannot undo a newer inventory (UX-02).
+	lastGoodToolsTicket map[string]uint64
+	lastGoodTools       map[string][]*config.ToolMetadata
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when
@@ -502,12 +513,13 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			Message:     "Runtime is initializing...",
 			LastUpdated: time.Now(),
 		},
-		statusCh:          make(chan Status, 10),
-		eventSubs:         make(map[chan Event]struct{}),
-		internalEventSubs: make(map[chan Event]struct{}),
-		phaseMachine:      newPhaseMachine(PhaseInitializing),
-		lastGoodTools:     make(map[string][]*config.ToolMetadata),
-		profileMembership: make(map[string][]string),
+		statusCh:            make(chan Status, 10),
+		eventSubs:           make(map[chan Event]struct{}),
+		internalEventSubs:   make(map[chan Event]struct{}),
+		phaseMachine:        newPhaseMachine(PhaseInitializing),
+		lastGoodTools:       make(map[string][]*config.ToolMetadata),
+		lastGoodToolsTicket: make(map[string]uint64),
+		profileMembership:   make(map[string][]string),
 	}
 	rt.truncator.Store(truncator)
 

@@ -388,6 +388,9 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// whether it still describes the live connection (astra r2 C3).
 	gens := r.discoveryGenerations()
 
+	// Inventory ticket for every server this sweep lists, taken before the
+	// capture (UX-02, see nextInventoryTicket).
+	sweepTicket := r.nextInventoryTicket()
 	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
@@ -425,13 +428,12 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// changes, switch to a deep copy here.
 	r.lastGoodToolsMu.Lock()
 	for serverName, serverTools := range toolsByServer {
-		cp := make([]*config.ToolMetadata, len(serverTools))
-		copy(cp, serverTools)
-		r.lastGoodTools[serverName] = cp
+		r.storeLastGoodToolsLocked(serverName, serverTools, sweepTicket)
 	}
 	for serverName := range r.lastGoodTools {
 		if _, ok := knownServerSet[serverName]; !ok {
 			delete(r.lastGoodTools, serverName)
+			delete(r.lastGoodToolsTicket, serverName)
 		}
 	}
 	r.lastGoodToolsMu.Unlock()
@@ -442,7 +444,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		r.applyServerDiffIfEligible(ctx, serverName, serverTools)
+		r.applyServerDiffIfEligible(ctx, serverName, serverTools, sweepTicket)
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
@@ -468,10 +470,8 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			continue
 		}
 
-		r.lastGoodToolsMu.RLock()
-		snapshot, hasSnapshot := r.lastGoodTools[serverName]
-		r.lastGoodToolsMu.RUnlock()
-		if !hasSnapshot || len(snapshot) == 0 {
+		snapshot, snapshotTicket := r.lastGoodToolsSnapshotTicket(serverName)
+		if len(snapshot) == 0 {
 			continue
 		}
 
@@ -483,7 +483,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 		// Re-checks eligibility again immediately before the write (the check
 		// above and the connection/snapshot reads are not atomic).
-		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
+		r.applyServerDiffIfEligible(ctx, serverName, snapshot, snapshotTicket)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -522,19 +522,51 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	return nil
 }
 
-// lastGoodToolsSnapshot returns a copy of the most recently discovered tool set
-// for a server, or nil when none has been captured yet. Returning a copy lets
-// callers pass it to applyDifferentialToolUpdate without holding the lock.
-func (r *Runtime) lastGoodToolsSnapshot(serverName string) []*config.ToolMetadata {
+// lastGoodToolsSnapshotTicket returns a copy of the most recently discovered
+// tool set for a server (nil when none has been captured yet) and the
+// inventory ticket it was captured under. Returning a copy lets callers pass
+// it to applyDifferentialToolUpdateCaptured without holding the lock. A
+// snapshot stored without a ticket (only tests write the map directly) gets a
+// fresh ticket, i.e. counts as captured now.
+func (r *Runtime) lastGoodToolsSnapshotTicket(serverName string) ([]*config.ToolMetadata, uint64) {
 	r.lastGoodToolsMu.RLock()
-	defer r.lastGoodToolsMu.RUnlock()
 	snapshot := r.lastGoodTools[serverName]
+	ticket := r.lastGoodToolsTicket[serverName]
+	r.lastGoodToolsMu.RUnlock()
 	if len(snapshot) == 0 {
-		return nil
+		return nil, 0
+	}
+	if ticket == 0 {
+		ticket = r.nextInventoryTicket()
 	}
 	cp := make([]*config.ToolMetadata, len(snapshot))
 	copy(cp, snapshot)
-	return cp
+	return cp, ticket
+}
+
+// storeLastGoodTools records tools (copied) as the server's last-good
+// snapshot, captured under ticket — unless a later-captured snapshot is
+// already stored: an older inventory must not replace a newer one, or the
+// approval reindex would re-apply it (UX-02).
+func (r *Runtime) storeLastGoodTools(serverName string, tools []*config.ToolMetadata, ticket uint64) {
+	r.lastGoodToolsMu.Lock()
+	r.storeLastGoodToolsLocked(serverName, tools, ticket)
+	r.lastGoodToolsMu.Unlock()
+}
+
+// storeLastGoodToolsLocked is storeLastGoodTools; the caller holds
+// lastGoodToolsMu for writing.
+func (r *Runtime) storeLastGoodToolsLocked(serverName string, tools []*config.ToolMetadata, ticket uint64) {
+	if r.lastGoodToolsTicket == nil {
+		r.lastGoodToolsTicket = make(map[string]uint64)
+	}
+	if ticket < r.lastGoodToolsTicket[serverName] {
+		return
+	}
+	cp := make([]*config.ToolMetadata, len(tools))
+	copy(cp, tools)
+	r.lastGoodTools[serverName] = cp
+	r.lastGoodToolsTicket[serverName] = ticket
 }
 
 // DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
@@ -606,6 +638,7 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 			// flight, replacing the managed client. Capturing an old client's
 			// untrusted definition under the replacement connection would make
 			// the review record lie about what is currently offered.
+			ticket := r.nextInventoryTicket()
 			if tools, err := client.ListTools(ctx); err == nil {
 				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
@@ -613,7 +646,7 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 						zap.String("server", serverName), zap.Int("attempt", attempt+1))
 					continue
 				}
-				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+				published, err := r.captureQuarantinedToolDefinitionsCaptured(serverName, client, capture, tools, ticket)
 				if err != nil {
 					return err
 				}
@@ -651,6 +684,13 @@ func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interfac
 // records. A false result is deliberately retried by the caller; no stale
 // response is persisted or announced as review.changed.
 func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
+	return r.captureQuarantinedToolDefinitionsCaptured(serverName, client, capture, tools, r.nextInventoryTicket())
+}
+
+// captureQuarantinedToolDefinitionsCaptured is
+// captureQuarantinedToolDefinitionsFromCurrentClient for an inventory listed
+// under ticket (taken before the tools/list call, UX-02).
+func (r *Runtime) captureQuarantinedToolDefinitionsCaptured(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata, ticket uint64) (bool, error) {
 	if r.quarantinedCaptureBeforePersist != nil {
 		r.quarantinedCaptureBeforePersist()
 	}
@@ -672,7 +712,7 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 		if r.discoveryGeneration(serverName) != capture {
 			return nil
 		}
-		if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+		if err := r.persistQuarantinedToolDefinitions(serverName, tools, ticket); err != nil {
 			return err
 		}
 		persisted = true
@@ -691,7 +731,7 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 }
 
 func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {
-	if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+	if err := r.persistQuarantinedToolDefinitions(serverName, tools, r.nextInventoryTicket()); err != nil {
 		return err
 	}
 	r.emitReviewChanged(serverName)
@@ -700,15 +740,16 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, 
 	return nil
 }
 
-func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
-	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
+func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata, ticket uint64) error {
+	res, err := r.checkToolApprovalsCaptured(serverName, tools, ticket)
+	if err != nil {
 		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
-	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.lastGoodToolsMu.Unlock()
+	if res != nil && res.StaleInventory {
+		// A later-captured inventory already reached the review records.
+		return nil
+	}
+	r.storeLastGoodTools(serverName, tools, ticket)
 	return nil
 }
 
@@ -770,6 +811,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// Retry logic: Sometimes connection events fire slightly before the server is fully ready
 	// We retry up to 3 times with exponential backoff (500ms, 1s, 2s)
 	var tools []*config.ToolMetadata
+	var ticket uint64
 	maxRetries := 3
 	baseDelay := 500 * time.Millisecond
 
@@ -788,7 +830,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			}
 		}
 
-		// Discover tools from this server
+		// Discover tools from this server. The inventory ticket is taken
+		// right before the capture so freshness follows capture order (UX-02).
+		ticket = r.nextInventoryTicket()
 		tools, err = client.ListTools(ctx)
 		if err == nil {
 			break // Success!
@@ -843,11 +887,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// would leave it empty, forcing the reindex path back through discovery.
 	// On an authoritative empty refresh this stores an empty slice, so
 	// lastGoodToolsSnapshot reports "no snapshot" and no stale set lingers.
-	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.lastGoodToolsMu.Unlock()
+	r.storeLastGoodTools(serverName, tools, ticket)
 
 	// TOCTOU GUARD (issue #873): the eligibility check at the top of this
 	// function ran BEFORE the seconds-wide ListTools above. The server may have
@@ -863,7 +903,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	}
 
 	// Apply differential update: compare new tools with existing indexed tools
-	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+	if err := r.applyDifferentialToolUpdateCaptured(ctx, serverName, tools, ticket); err != nil {
 		return false, fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
 	}
 
@@ -940,14 +980,29 @@ func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer m
 // - Added tools are indexed (unless blocked by tool-level quarantine)
 // - Modified tools (different hash) are re-indexed (unless blocked by tool-level quarantine)
 // - Tools blocked by quarantine are removed from the index if previously indexed
+//
+// The inventory is treated as captured now; callers that captured it before a
+// tools/list round trip use applyDifferentialToolUpdateCaptured.
 func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName string, newTools []*config.ToolMetadata) error {
+	return r.applyDifferentialToolUpdateCaptured(ctx, serverName, newTools, r.nextInventoryTicket())
+}
+
+// applyDifferentialToolUpdateCaptured is applyDifferentialToolUpdate for an
+// inventory captured under ticket (taken with nextInventoryTicket immediately
+// before the capture). An inventory older than one already applied for the
+// server changes nothing — no approval write, no index write (UX-02
+// cross-review, see checkToolApprovalsCaptured).
+func (r *Runtime) applyDifferentialToolUpdateCaptured(ctx context.Context, serverName string, newTools []*config.ToolMetadata, ticket uint64) error {
 	// Check tool-level quarantine approvals before indexing
-	approvalResult, err := r.checkToolApprovals(serverName, newTools)
+	approvalResult, err := r.checkToolApprovalsCaptured(serverName, newTools, ticket)
 	if err != nil {
 		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
 			zap.String("server", serverName),
 			zap.Error(err))
 		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
+	}
+	if approvalResult.StaleInventory {
+		return nil
 	}
 
 	// Query existing tools from the index
@@ -1073,15 +1128,18 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	// 1. Delete removed tools.
 	//
 	// UX-02 (cross-review): the removal decision above was made from this
-	// pass's inventory, which may be stale by now — a later discovery pass may
-	// have rediscovered the tool and the operator may have approved or
-	// blocked it since. Deleting the fresh record would lose that decision
-	// and, when it was the server's only baseline record, let the next pass
-	// auto-baseline the tool as enabled. So the removal (index entry, hash
-	// and approval record together) runs under the server's tool-approval
-	// lock and only while no other pass or approval write has run since this
-	// pass's checkToolApprovals. A skipped removal leaves the tool indexed,
-	// so the next pass that still misses it removes it.
+	// pass's inventory. An inventory captured BEFORE one already applied was
+	// dropped as stale in checkToolApprovalsCaptured (freshness follows
+	// capture order, not lock order). Even a current inventory may be
+	// overtaken while this pass runs: a later discovery pass may rediscover
+	// the tool and the operator may approve or block it. Deleting the fresh
+	// record would lose that decision and, when it was the server's only
+	// baseline record, let the next pass auto-baseline the tool as enabled.
+	// So the removal (index entry, hash and approval record together) runs
+	// under the server's tool-approval lock and only while no other pass or
+	// approval write has run since this pass's checkToolApprovals. A skipped
+	// removal leaves the tool indexed, so the next pass that still misses it
+	// removes it.
 	// The lock is released right after the loop (index deletes do not call
 	// back into the runtime, so approval lock -> index lock cannot invert).
 	unlockRemoval := func() {}

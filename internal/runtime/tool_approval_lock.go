@@ -37,14 +37,23 @@ import (
 //     calls back into the runtime, so the order approval lock -> storage lock
 //     cannot invert.
 
-// toolApprovalServerLock is one server's tool-approval mutex plus its
-// inventory generation. generation is bumped on every acquisition through
-// lockToolApprovals (every discovery pass and every operator/system write), so
-// a decision taken under the lock at generation g is still current exactly
-// when the generation still reads g. Both fields are guarded by mu.
+// toolApprovalServerLock is one server's tool-approval mutex plus two
+// counters, both guarded by mu:
+//
+//   - generation is bumped on every acquisition through lockToolApprovals
+//     (every discovery pass and every operator/system write), so a decision
+//     taken under the lock at generation g is still current exactly when the
+//     generation still reads g.
+//   - appliedInventory is the highest inventory ticket (see
+//     nextInventoryTicket) a discovery pass has applied for the server. The
+//     ticket is taken when the inventory is CAPTURED, before tools/list, so
+//     freshness follows capture order, not the order in which passes happen
+//     to reach the lock: an older inventory that acquires the lock after a
+//     newer one was applied is stale and is dropped (UX-02 cross-review).
 type toolApprovalServerLock struct {
-	mu         sync.Mutex
-	generation uint64
+	mu               sync.Mutex
+	generation       uint64
+	appliedInventory uint64
 }
 
 func (r *Runtime) toolApprovalLock(serverName string) *toolApprovalServerLock {
@@ -52,22 +61,40 @@ func (r *Runtime) toolApprovalLock(serverName string) *toolApprovalServerLock {
 	return v.(*toolApprovalServerLock)
 }
 
+// nextInventoryTicket returns a new inventory ticket. Take it immediately
+// BEFORE capturing a tool inventory (the tools/list call, or the sweep's
+// DiscoverTools), and hand it to applyDifferentialToolUpdateCaptured /
+// checkToolApprovalsCaptured with that inventory. Tickets are global and
+// strictly increasing, so a later capture always carries a larger ticket.
+func (r *Runtime) nextInventoryTicket() uint64 {
+	return r.inventoryTickets.Add(1)
+}
+
 // lockToolApprovals acquires the per-server tool-approval lock, bumps the
 // server's inventory generation and returns the unlock function.
 func (r *Runtime) lockToolApprovals(serverName string) func() {
-	unlock, _ := r.lockToolApprovalsGen(serverName)
-	return unlock
-}
-
-// lockToolApprovalsGen is lockToolApprovals returning the generation this
-// acquisition established. checkToolApprovals records it in its result so the
-// removal step of the same discovery pass can tell whether its inventory
-// decision is still the latest one (see lockToolApprovalsIfCurrent).
-func (r *Runtime) lockToolApprovalsGen(serverName string) (func(), uint64) {
 	l := r.toolApprovalLock(serverName)
 	l.mu.Lock()
 	l.generation++
-	return l.mu.Unlock, l.generation
+	return l.mu.Unlock
+}
+
+// lockToolApprovalsForInventory is lockToolApprovals for a discovery pass
+// applying the inventory captured under ticket. It reports the generation
+// this acquisition established and whether the inventory is stale: a
+// later-captured inventory was already applied for the server. A stale pass
+// must not write anything (its view predates one already reconciled); a
+// current one records its ticket as the newest applied inventory.
+func (r *Runtime) lockToolApprovalsForInventory(serverName string, ticket uint64) (unlock func(), gen uint64, stale bool) {
+	l := r.toolApprovalLock(serverName)
+	l.mu.Lock()
+	l.generation++
+	if ticket < l.appliedInventory {
+		stale = true
+	} else {
+		l.appliedInventory = ticket
+	}
+	return l.mu.Unlock, l.generation, stale
 }
 
 // lockToolApprovalsIfCurrent acquires the server's tool-approval lock WITHOUT

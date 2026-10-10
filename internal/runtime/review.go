@@ -109,9 +109,11 @@ type ReviewTool struct {
 	ScanVerdict    string                  `json:"scan_verdict"`
 	HeldReason     string                  `json:"held_reason"`
 	HeldSignals    []string                `json:"held_signals"`
-	// CurrentHash identifies the definition shown above (the approval
-	// record's current_hash). Clients send it back as expected_hashes so an
-	// approval applies only to the definition the operator reviewed (UX-02).
+	// CurrentHash identifies the reviewed state shown above: the approval
+	// record's current_hash, extended with the tool's safety hints when it has
+	// any (see reviewFingerprint). Clients send it back as expected_hashes so
+	// an approval applies only to the definition and tier the operator
+	// reviewed (UX-02). Treat it as opaque.
 	CurrentHash string `json:"current_hash,omitempty"`
 	// DefaultAllowed is the review screens' fail-closed default selection
 	// (D43). Always serialised, so an older core (field absent) reads as false.
@@ -240,7 +242,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 			ApprovalStatus: record.Status, Disabled: record.Disabled,
 			ScanVerdict: reviewToolScanVerdict(scanFindings, serverName, record, covered[record.ToolName]),
 			HeldReason:  record.HeldReason, HeldSignals: append([]string(nil), record.HeldSignals...),
-			CurrentHash: record.CurrentHash,
+			CurrentHash: reviewFingerprint(record),
 		}
 		tool.DefaultAllowed = reviewDefaultAllowed(tool)
 		if record.PreviousDescription != "" || record.PreviousSchema != "" || record.PreviousOutputSchema != "" || record.PreviousAnnotations != nil {

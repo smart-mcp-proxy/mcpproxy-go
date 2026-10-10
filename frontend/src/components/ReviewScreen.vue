@@ -79,7 +79,7 @@ const emit = defineEmits<{ approved: []; refreshed: [] }>()
 const review = ref<ServerReviewResponse | null>(null)
 const loading = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref(''); const staleNotice = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
-const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
+const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const lastExpected = ref<Record<string, string> | undefined>(undefined); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
 const headline = computed(() => review.value ? reviewHeadline(review.value) : { state: 'review', title: '', subtitle: '' })
 const banner = computed(() => {
@@ -131,14 +131,19 @@ function reviewedHashes(tools: ReviewTool[]): Record<string, string> | undefined
   if (tools.length === 0 || tools.some(t => !t.current_hash)) return undefined
   return Object.fromEntries(tools.map(t => [t.name, t.current_hash as string]))
 }
-// The force retry re-sends the block list of the attempt that triggered it (D43.5).
+// The force retry re-sends the decision of the attempt that triggered it (D43.5):
+// its block list AND the hashes of the review it was made on (UX-02). A review
+// that reloaded in the background while the force dialog was open (a new or
+// changed tool) therefore makes the retry fail as out of date instead of
+// pairing the old block list with definitions the operator never decided on.
 async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; staleNotice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
-  const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
-  lastBlock.value = blocked
-  const expected = reviewedHashes(review.value?.tools ?? [])
+  const retry = force && block === undefined && lastBlock.value !== null
+  const blocked = block ?? (retry && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  const expected = retry ? lastExpected.value : reviewedHashes(review.value?.tools ?? [])
+  lastBlock.value = blocked; lastExpected.value = expected
   const res = expected ? await api.securityApprove(server, force, blocked, expected) : await api.securityApprove(server, force, blocked)
   if (server !== props.serverName) return // the watcher on serverName already reset approving and the force state
   approving.value = false
@@ -169,7 +174,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
+watch(() => props.serverName, () => { choices.clear(); lastBlock.value = null; lastExpected.value = undefined; approving.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; staleNotice.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

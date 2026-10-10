@@ -63,4 +63,28 @@ describe('ReviewScreen review-bound approval (UX-02)', () => {
     // The reloaded review stays visible next to the notice.
     expect(wrapper.find('[data-test="review-approve-server"]').exists()).toBe(true)
   })
+
+  it('force retry keeps the hashes of the decision that triggered it, not a reloaded review', async () => {
+    const wrapper = await mountScreen()
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'Approval blocked: dangerous findings detected; use force' })
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    // A background reload while the force dialog is open: a new destructive
+    // tool appeared and the selected read tool's definition changed.
+    const changed = review(true)
+    changed.data.tools[0].current_hash = 'h-read-mutated'
+    changed.data.tools.push({ name: 'drop_all', description: 'drop', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false, current_hash: 'h-drop' } as any)
+    ;(api.getServerReview as any).mockResolvedValue(changed)
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    const force = wrapper.findAll('button').find(b => b.text() === 'Force approve server')
+    expect(force).toBeTruthy()
+    await force!.trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(2)
+    // The retry is the same decision: same block list AND the originally
+    // reviewed hashes, so the core rejects it as out of date (drop_all is not
+    // in the review, read_file changed) instead of approving it unseen.
+    expect(api.securityApprove).toHaveBeenLastCalledWith('fixture', true, ['remove_file'], { read_file: 'h-read', remove_file: 'h-remove' })
+  })
 })
