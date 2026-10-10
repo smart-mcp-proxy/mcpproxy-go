@@ -181,3 +181,27 @@ func TestArgv_UnchangedByTheSpawnRule(t *testing.T) {
 			"would make the write doors refuse the client's echo")
 	assert.Equal(t, argv, AuditRedaction.Argv(argv))
 }
+
+// TestSpawnArgv_BackslashNewlineContinuation: a POSIX shell deletes a
+// backslash-newline pair (outside single quotes), so `--to\<nl>ken hunter2xyz`
+// is the flag --token with value hunter2xyz. Stored args stay unchanged.
+func TestSpawnArgv_BackslashNewlineContinuation(t *testing.T) {
+	cmds := []string{
+		"exec npx srv --to\\\nken hunter2xyz",
+		"exec npx srv \"--to\\\nken\" hunter2xyz",
+		"API_\\\nKEY=hunter2xyz exec npx srv",
+		"exec npx srv \"API_\\\nKEY=hunter2xyz\"",
+	}
+	for _, cmd := range cmds {
+		argv := []string{"sh", "-c", cmd}
+		orig := append([]string(nil), argv...)
+		for name, out := range map[string]string{
+			"argv":    strings.Join(AuditRedaction.SpawnArgv(argv), " "),
+			"cmdline": AuditRedaction.CommandString(cmd),
+		} {
+			assertNoSecretFragment(t, out, "hunter2xyz", 5)
+			assert.Contains(t, out, "npx srv", name+": "+cmd)
+		}
+		assert.Equal(t, orig, argv, "stored args must be unchanged")
+	}
+}

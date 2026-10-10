@@ -218,6 +218,22 @@ describe('ReviewScreen at scale (UX-03)', () => {
     expect(blockedArg()).toContain('delete_new_pending')
   })
 
+  it('a force retry is dropped as soon as a refresh begins, even when the refresh then fails', async () => {
+    const w = await mountN(180)
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'dangerous findings present' })
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    let resolveFresh!: (v: unknown) => void
+    ;(api.getServerReview as any).mockImplementationOnce(() => new Promise(r => { resolveFresh = r }))
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    resolveFresh({ success: false, error: 'network down' }); await flushPromises()
+    const force = w.findAll('button').find(b => b.text() === 'Force approve server')
+    if (force) { await force.trigger('click'); await flushPromises() }
+    expect(api.securityApprove).toHaveBeenCalledTimes(1) // nothing was sent from the stale block list
+  })
+
   it('a force retry is dropped when an allowed pending tool changes definition during a refresh', async () => {
     const w = await mountN(180)
     await w.get('[data-test="review-allow-delete_customer_record_012"]').setValue(true)

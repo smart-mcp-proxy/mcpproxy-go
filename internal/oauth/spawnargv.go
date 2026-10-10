@@ -220,6 +220,8 @@ func shellDecodeToken(t string) string {
 			i++
 		case ansi && c == '\\' && i+1 < len(t):
 			i = decodeANSICEscape(t, i, &b)
+		case c == '\\' && quote != '\'' && i+1 < len(t) && t[i+1] == '\n':
+			i++ // line continuation: the shell deletes the backslash-newline pair
 		case c == '\\' && quote != '\'' && i+1 < len(t):
 			i++
 			b.WriteByte(t[i])
