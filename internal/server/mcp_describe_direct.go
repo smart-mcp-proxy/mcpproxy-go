@@ -87,6 +87,19 @@ func (p *MCPProxyServer) resolveDirectDescribeID(ctx context.Context, id string)
 // different catalogs — and the check-mode planner and its evaluator corpus from
 // different ones again.
 func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *directCatalog, id string) (*directCatalogEntry, bool) {
+	return p.resolveDirectDescribeIDWith(ctx, cat, id, func(e *directCatalogEntry) bool {
+		return p.directEntryVisibleToSession(ctx, e)
+	})
+}
+
+// resolveDirectDescribeIDWith is resolveDirectDescribeIDIn with the visibility
+// predicate supplied by the caller. Check mode passes membership in its
+// corpus narrowed by the effective session view (issue #1548), so an entry
+// that view hides takes no part in resolution at all — it can neither win a
+// display lookup nor shadow an authorized canonical owner — exactly as if it
+// were absent from the catalog. visible must never admit an entry
+// directEntryVisibleToSession refuses.
+func (p *MCPProxyServer) resolveDirectDescribeIDWith(ctx context.Context, cat *directCatalog, id string, visible func(*directCatalogEntry) bool) (*directCatalogEntry, bool) {
 	if cat == nil {
 		// Nothing published yet. Unlike the discovery filters — which fall back
 		// to permissive so a proxy still coming up does not serve an empty
@@ -128,7 +141,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 		if !ok || entry == nil {
 			return nil, false
 		}
-		if !p.directEntryVisibleToSession(ctx, entry) {
+		if !visible(entry) {
 			return nil, false
 		}
 		return entry, true
@@ -147,9 +160,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	// below and throughout this file); reusing it here rather than
 	// re-deriving scope alone is what keeps the two checks from drifting
 	// apart again.
-	authorized := func(e *directCatalogEntry) bool {
-		return p.directEntryVisibleToSession(ctx, e)
-	}
+	authorized := visible
 
 	// The display form is tried first, as always. A match this AGENT
 	// session cannot see does NOT end resolution here (Spec 105 FR010-G3):
@@ -157,7 +168,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	// id — one server's tool "y:z" displays as "x__y:z", which is exactly
 	// server "x__y" tool "z"'s canonical form — and the hidden display owner
 	// must never suppress the authorized canonical owner merely by existing.
-	if entry, ok := cat.Lookup(id); ok && p.directEntryVisibleToSession(ctx, entry) {
+	if entry, ok := cat.Lookup(id); ok && visible(entry) {
 		return entry, true
 	}
 
@@ -178,7 +189,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	if !ok || entry == nil {
 		return nil, false
 	}
-	if !p.directEntryVisibleToSession(ctx, entry) {
+	if !visible(entry) {
 		return nil, false
 	}
 	return entry, true
@@ -360,6 +371,10 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 	// visibility predicate — the same snapshot the evaluator's index reader
 	// gets, so a gated id and an evaluated one suggest from one corpus.
 	listed := make(map[*directCatalogEntry]struct{}, len(visible))
+	isListed := func(e *directCatalogEntry) bool {
+		_, ok := listed[e]
+		return ok
+	}
 	for _, entry := range visible {
 		listed[entry] = struct{}{}
 		plan.suggestions = append(plan.suggestions,
@@ -379,17 +394,14 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 		seen[id] = struct{}{}
 		plan.order = append(plan.order, id)
 
-		entry, ok := p.resolveDirectDescribeIDIn(ctx, cat, id)
+		// Resolution runs against the visible set itself (issue #1548: the
+		// corpus runDirectCheck narrows by the v3 session view), so an entry
+		// that view hides is treated exactly like an absent one, BEFORE
+		// evaluation: it neither answers the evaluator's connection verdict
+		// where an absent id answers not_found, nor shadows an authorized
+		// canonical owner in a display/canonical collision.
+		entry, ok := p.resolveDirectDescribeIDWith(ctx, cat, id, isListed)
 		if !ok {
-			plan.gated[id] = struct{}{}
-			continue
-		}
-		// An entry the caller's effective view excludes (issue #1548: the
-		// visible set runDirectCheck narrows by the v3 session view) is gated
-		// exactly like an absent one, BEFORE evaluation — otherwise a hidden
-		// id on a not-Ready server would answer the evaluator's connection
-		// verdict where an absent id answers the planner's not_found.
-		if _, ok := listed[entry]; !ok {
 			plan.gated[id] = struct{}{}
 			continue
 		}

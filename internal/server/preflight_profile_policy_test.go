@@ -31,6 +31,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 )
 
@@ -454,4 +455,37 @@ func TestPreflightProfilePolicy_DirectCheckHiddenEqualsAbsentInEveryState(t *tes
 			assert.Equal(t, preflight.ReasonNotFound, byID["github:read_file"].Reason)
 		})
 	}
+}
+
+// A tool the effective selection hides must not take part in direct-id
+// resolution at all: in a display/canonical collision it can neither win the
+// display lookup nor shadow the permitted canonical owner, so the answer is the
+// same whether or not the hidden tool exists.
+func TestPreflightProfilePolicy_DirectCheckHiddenToolNeverShadows(t *testing.T) {
+	check := func(t *testing.T, includeHidden bool) describeCheckResult {
+		t.Helper()
+		p := directCanonicalOverlapFixture(t, includeHidden)
+		p.preflightRecorder = func(_ internalRuntime.PreflightActivity) error { return nil }
+		switchTo := []string{"restricted"}
+		p.config.Servers = []*config.ServerConfig{{Name: "x", Enabled: true}, {Name: "x__y", Enabled: true}}
+		p.config.Profiles = []config.ProfileConfig{
+			{Name: "permissive", Servers: []string{"x", "x__y"}, MaxTier: "destructive", SwitchableTo: &switchTo},
+			{Name: "restricted", Servers: []string{"x", "x__y"}, MaxTier: "destructive", Tools: &config.ProfileToolRules{Deny: []string{"x:y:z"}}},
+		}
+		ctx := clientCtx("laptop", "permissive", auth.ProfileModeSwitchable)
+		ctx = profile.WithProfileScope(ctx, profileScopeForSlugIn(p.config, "restricted"))
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]interface{}{"tool_ids": []interface{}{"x__y:z"}, "check": true}
+		result, err := p.describeToolHandler(describeSurfaceDirect)(ctx, req)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "%v", result.Content)
+		var payload describeCheckPayload
+		require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &payload))
+		require.Len(t, payload.Results, 1)
+		return payload.Results[0]
+	}
+	without := check(t, false)
+	with := check(t, true)
+	require.Equal(t, preflight.StatusReady, without.Status, "control: the permitted canonical owner is ready")
+	assert.Equal(t, without, with, "the selection-hidden display owner must not change the answer")
 }
