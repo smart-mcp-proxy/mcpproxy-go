@@ -261,10 +261,17 @@ func printEffectiveTools(data json.RawMessage, filtered bool) error {
 	for _, t := range res.Tools {
 		known[t.Server+":"+t.Tool] = true
 		access := "hidden"
+		reason := dash(t.Access.Reason)
 		switch {
+		case !t.Access.Visible:
+		case res.Counts.Callable == nil:
+			// A non-administrator is shown the policy only; callable/held
+			// (and a held tool's reason) are administrator-only.
+			access = "allowed"
+			reason = "-"
 		case t.Access.Callable:
 			access = "callable"
-		case t.Access.Visible:
+		default:
 			// Allowed by the profile, but a later gate (tool approval, server
 			// state) still refuses the call.
 			access = "held"
@@ -273,7 +280,7 @@ func printEffectiveTools(data json.RawMessage, filtered bool) error {
 		if t.ClassificationStale {
 			note = staleNoteAnnotated
 		}
-		rows = append(rows, []string{t.Server, t.Tool, t.IntrinsicTier, t.ProfileTier, access, dash(t.Access.Reason), dash(note)})
+		rows = append(rows, []string{t.Server, t.Tool, t.IntrinsicTier, t.ProfileTier, access, reason, dash(note)})
 	}
 	fmt.Println(effectiveCountsLine(res))
 	if err := printTable([]string{"SERVER", "TOOL", "TIER", "PROFILE TIER", "ACCESS", "REASON", "NOTE"}, rows); err != nil {

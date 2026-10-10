@@ -552,3 +552,17 @@ func TestProfileShow_EffectiveNonAdminHasNoHeldClaims(t *testing.T) {
 	require.Contains(t, out, "Profile: p (allowed by profile 2, hidden 1)")
 	require.NotContains(t, out, "held")
 }
+
+func TestProfileShow_EffectiveNonAdminRowsArePolicyOnly(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{"GET /api/v1/profiles/p/effective-tools": okResp(`{"profile":"p","tools":[
+ {"server":"lib","tool":"ok","intrinsic_tier":"read","profile_tier":"read","access":{"visible":true,"callable":true,"reason":""},"classification_stale":false},
+ {"server":"lib","tool":"pending","intrinsic_tier":"read","profile_tier":"read","access":{"visible":true,"callable":false,"reason":"tool_approval"},"classification_stale":false}],
+ "counts":{"visible":2,"hidden":0}}`)})
+	out, _, err := runCLI(t, GetProfileCommand, "table", "show", "p", "--effective")
+	require.NoError(t, err)
+	require.Regexp(t, `ok\s+read\s+read\s+allowed\s+-`, out)
+	require.Regexp(t, `pending\s+read\s+read\s+allowed\s+-`, out)
+	require.NotContains(t, out, "held")
+	require.NotContains(t, out, "callable")
+	require.NotContains(t, out, "tool_approval")
+}

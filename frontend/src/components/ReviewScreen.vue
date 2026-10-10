@@ -97,7 +97,10 @@ const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.
 function recordChoice(tool: ReviewTool, allowed: boolean) { choices.set(tool.name, { allowed, tool }) }
 function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema: tool.input_schema, output_schema: tool.output_schema, annotations: tool.annotations }, null, 2) }
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
-async function load() { if (typeof api.getServerReview !== 'function') return; loading.value = true; error.value = ''; const res = await api.getServerReview(props.serverName); loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed') }
+// Only the newest load may write: a slower earlier response (other server or an overlapping reload) is dropped,
+// so the review and the selection that approval blocks against always belong to the server on screen.
+let loadGeneration = 0
+async function load() { if (typeof api.getServerReview !== 'function') return; const generation = ++loadGeneration; const server = props.serverName; loading.value = true; error.value = ''; const res = await api.getServerReview(server); if (generation !== loadGeneration || server !== props.serverName) return; loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   rescanning.value = true
