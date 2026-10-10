@@ -182,8 +182,12 @@ describe('ReviewScreen default selection (D43)', () => {
     expect(forceDialog.close).toHaveBeenCalled()
     await wrapper.findAll('dialog')[1].get('button.btn-error').trigger('click')
     await flushPromises()
-    // Never fail open: the forced call uses the new server's own default block list, not [] from the old attempt.
-    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', true, ['write_x'])
+    // Never fail open: the old attempt's block list is gone and a force click without a fresh decision is refused.
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    // A fresh approval derives the new server's own default block list, not [] from the old attempt.
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', false, ['write_x'])
   })
 
   it('a late dangerous 409 for the previous server does not open the force dialog on the next one', async () => {

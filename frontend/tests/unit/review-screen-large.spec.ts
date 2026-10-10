@@ -196,6 +196,44 @@ describe('ReviewScreen at scale (UX-03)', () => {
     expect(blockedArg()).toContain('delete_new_pending')
   })
 
+  it('a force retry is dropped when a refresh changes the reviewed snapshot (stale block list never reused)', async () => {
+    const w = await mountN(180)
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'dangerous findings present' })
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    const fresh = payload(181)
+    fresh.data.tools.push({ name: 'delete_new_pending', description: 'Delete everything', tier: 'destructive', approval_status: 'pending', disabled: false, scan_verdict: 'clean', default_allowed: false } as any)
+    ;(api.getServerReview as any).mockResolvedValueOnce(fresh)
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    const force = w.findAll('button').find(b => b.text() === 'Force approve server')!
+    await force.trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1) // the stale retry was refused, nothing was sent
+    expect(w.get('[data-test="review-stale-force-notice"]').text()).toContain('approve again')
+    // A fresh decision derives its block list from the refreshed snapshot, so the new tool stays blocked.
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(blockedArg()).toContain('delete_new_pending')
+  })
+
+  it('a force retry is dropped when an allowed pending tool changes definition during a refresh', async () => {
+    const w = await mountN(180)
+    await w.get('[data-test="review-allow-delete_customer_record_012"]').setValue(true)
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'dangerous findings present' })
+    await w.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    const changed = payload(180)
+    changed.data.tools = changed.data.tools.map(t => t.name === 'read_customer_record_001' ? { ...t, description: 'CHANGED upstream', approval_status: 'changed', default_allowed: false } : t)
+    ;(api.getServerReview as any).mockResolvedValueOnce(changed)
+    window.dispatchEvent(new Event('mcpproxy:review-changed'))
+    await flushPromises()
+    await w.findAll('button').find(b => b.text() === 'Force approve server')!.trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+  })
+
   it('pure helpers: filter semantics and page clamping', () => {
     const t = tools(30)
     const allowed = new Set([t[1].name])

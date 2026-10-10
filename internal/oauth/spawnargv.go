@@ -195,6 +195,13 @@ func splitCommandSegmentsQuoted(s string) (segs []commandSegment, balanced bool)
 		var quote byte // 0 when outside quotes, else the opening quote char
 		for j < len(s) {
 			c := s[j]
+			// A backslash escapes the next byte unless it sits inside single
+			// quotes (where it is literal). Without this, `hunter2\ and\ more`
+			// splits into three tokens and only the first is masked.
+			if c == '\\' && quote != '\'' && j+1 < len(s) {
+				j += 2
+				continue
+			}
 			if quote != 0 {
 				if c == quote {
 					quote = 0

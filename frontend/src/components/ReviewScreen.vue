@@ -110,6 +110,7 @@
 
       <div v-if="review.server.quarantined" class="sticky bottom-0 z-10 -mx-4 sm:-mx-6 border-t border-base-300 bg-base-100 px-4 sm:px-6 py-2 space-y-2" data-test="review-decision-bar">
         <p class="text-sm" data-test="review-decision-summary" aria-live="polite"><span class="font-medium" data-test="review-allowed-count">Allowed {{ allowedTools.length }}</span> · <span class="font-medium" data-test="review-blocked-count">Blocked {{ blockedCount }}</span> of {{ review.tools.length }}</p>
+        <p v-if="notice" class="text-sm text-warning" role="status" data-test="review-stale-force-notice">{{ notice }}</p>
         <div class="flex flex-wrap gap-2">
           <button class="btn btn-primary btn-sm sm:btn-md" :disabled="approving || refreshing" data-test="review-approve-server" @click="requestApprove(false)">{{ primaryLabel }}</button>
           <button v-if="showApproveAll" class="btn btn-outline btn-sm sm:btn-md" :disabled="approving || refreshing" :title="APPROVE_ALL_HINT" data-test="review-approve-all" @click="requestApprove(true)">{{ approveAllLabel(review.tools.length) }}</button>
@@ -143,6 +144,8 @@ const emit = defineEmits<{ approved: []; refreshed: [] }>()
 const review = ref<ServerReviewResponse | null>(null)
 // refreshing: a load is in flight. The list on screen may predate a tool the server just added, and the
 // block list is the complement of what is on screen, so approval waits for the newest load to settle.
+const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Review the updated list and approve again.'
+const notice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
@@ -203,9 +206,11 @@ const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.
 function recordChoice(tool: ReviewTool, allowed: boolean) { choices.set(tool.name, { allowed, tool }) }
 function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema: tool.input_schema, output_schema: tool.output_schema, annotations: tool.annotations }, null, 2) }
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
+// A force retry is bound to the snapshot its failed attempt reviewed. Once the review is replaced the block list no longer describes it, so the retry is dropped and a fresh approval decision is required.
+function invalidateForceRetry() { if (lastBlock.value === null) return; lastBlock.value = null; if (forceDialog.value?.open) { forceDialog.value.close?.(); notice.value = STALE_FORCE_NOTICE } }
 // Each load takes a generation; only the newest response may replace the review, so an older refresh that resolves late cannot resurrect an allow the newer definitions invalidated.
 let loadGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   rescanning.value = true
@@ -234,8 +239,9 @@ function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?
 // The force retry re-sends the block list of the attempt that triggered it (D43.5).
 async function approve(force: boolean, block?: string[]) {
   if (refreshing.value) return // never derive a block list from a list a refresh is about to replace
+  if (force && !lastBlock.value) { notice.value = STALE_FORCE_NOTICE; return } // stale force retry: needs a fresh decision
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
-  closeConfirm(); forceDialog.value?.close?.(); approving.value = true
+  closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
@@ -257,7 +263,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); lastBlock.value = null; approving.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); lastBlock.value = null; notice.value = ''; approving.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

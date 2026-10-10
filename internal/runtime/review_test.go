@@ -223,6 +223,10 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 		"double quoted inline": {"-c", `exec npx srv --password="hunter2 and more"`},
 		"double quoted value":  {"-c", `exec npx srv --password "hunter2 and more"`},
 		"inline then trailing": {"-c", "exec npx srv --password='hunter2 and more' --port 80"},
+		"escaped spaces":       {"-c", `exec npx srv --password hunter2\ and\ more`},
+		"escaped spaces eq":    {"-c", `exec npx srv --password=hunter2\ and\ more --port 80`},
+		"escaped quote dq":     {"-c", `exec npx srv --password "hunter2\" and more"`},
+		"escaped quote bare":   {"-c", `exec npx srv --password hunter2\'s\ and\ more`},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -236,11 +240,20 @@ func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
 			require.NoError(t, err)
 			require.NotContains(t, string(encoded), "hunter2")
 			require.NotContains(t, string(encoded), "and more")
+			require.NotContains(t, string(encoded), "more")
+			require.NotContains(t, string(encoded), "and\\\\")
 			require.NotContains(t, string(encoded), "more'")
 			require.NotContains(t, string(encoded), `more"`)
 			require.Len(t, review.Server.Args, 2)
 			require.Equal(t, args[0], review.Server.Args[0])
 			require.Contains(t, review.Server.Args[1], "npx srv")
+			cfg, cerr := rt.GetConfig()
+			require.NoError(t, cerr)
+			for _, sc := range cfg.Servers {
+				if sc.Name == "shellwrap" {
+					require.Equal(t, args, sc.Args, "redaction must not mutate the stored configuration")
+				}
+			}
 		})
 	}
 }
