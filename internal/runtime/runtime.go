@@ -116,6 +116,13 @@ type Runtime struct {
 	// runtime), so there is no callback deadlock.
 	configCommitMu sync.Mutex
 
+	// pendingServerRemovals holds server names a committed config (apply or
+	// reload) dropped whose async cleanup has not run yet. The cleanup uses it
+	// to tell a removal an operator asked for from a stale-snapshot reap of a
+	// server added since; a deliberate re-add clears the name. Leaf lock.
+	pendingRemovalMu      sync.Mutex
+	pendingServerRemovals map[string]struct{}
+
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
 	// top of the snapshot comparison because a restart-required ApplyConfig
@@ -513,6 +520,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	rt.profilesService = newProfilesService(rt)
 
+	// Supervisor actions carry the config snapshot they were planned from; a
+	// delayed one must not re-register, reconnect or tear down a server a newer
+	// commit removed, re-configured or quarantined (UX-01 r7).
+	actorPool.SetActionGuard(rt.guardSupervisorAction)
+
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
@@ -677,6 +689,26 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 	r.updateConfigLocked(cfg, cfgPath)
 }
 
+// UpdateConfigFrom runs a read-modify-publish of the runtime configuration as one
+// config-commit: fn receives the current published snapshot (treat it as
+// read-only) and returns the replacement, all under configCommitMu, so a
+// concurrent ApplyConfig/SaveConfiguration/reload cannot land between the
+// snapshot read and the publish and be silently reverted. fn returning a nil
+// config publishes nothing; a non-nil error is returned and nothing is
+// published. fn MUST NOT call back into a method that takes configCommitMu.
+func (r *Runtime) UpdateConfigFrom(fn func(current *config.Config) (*config.Config, error)) error {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	updated, err := fn(r.Config())
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		r.updateConfigLocked(updated, "")
+	}
+	return nil
+}
+
 // updateConfigLocked performs the UpdateConfig work assuming the caller already
 // holds configCommitMu (e.g. ReloadConfiguration's legacy configSvc==nil
 // fallback, which must not re-acquire the non-reentrant mutex).
@@ -697,6 +729,20 @@ func (r *Runtime) updateConfigLocked(cfg *config.Config, cfgPath string) {
 		r.cfgPath = cfgPath
 	}
 	r.mu.Unlock()
+	r.retireStaleClients(cfg)
+}
+
+// retireStaleClients bars every upstream client the just-published
+// configuration invalidates (server removed, or its connection state changed)
+// from dialing. It runs in the same configCommitMu critical section as the
+// publication, so a connect that captured its client under an earlier
+// config-guard cannot launch the old endpoint while the manager
+// reconciliation for the new config is still queued (UX-01 r8).
+func (r *Runtime) retireStaleClients(cfg *config.Config) {
+	if cfg == nil || r.upstreamManager == nil {
+		return
+	}
+	r.upstreamManager.RetireStaleClients(cfg.Servers)
 }
 
 // UpdateListenAddress mutates the in-memory listen address used by the runtime.
@@ -1962,6 +2008,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 
 	// Apply hot-reloadable changes
 	oldCfg := r.cfg
+	r.noteServerSetChange(oldCfg, newCfg)
 	r.cfg = newCfg
 	// Skip the write when the path is unchanged: LoadConfiguredServers goroutines
 	// spawned by an earlier apply read r.cfgPath without this lock, and two
@@ -2024,6 +2071,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {
 		r.logger.Error("Failed to update config service", zap.Error(err))
 	}
+	r.retireStaleClients(&configCopy)
 
 	// Issue #1458: a profile edit is live the moment the apply returns, so its
 	// per-profile search index must be too, not after the next discovery pass.
@@ -2045,13 +2093,15 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		})
 	}
 
+	liveAtApply := r.Config()
+
 	// IMPORTANT: Pass config copy to goroutine to avoid lock dependency
 	// The goroutine will use the copied config instead of calling r.Config()
 	if serversChanged {
 		r.logger.Info("Server configuration changed, scheduling async reload")
 		// Spawn goroutine with captured config - no lock needed
-		go func(cfg *config.Config, ctx context.Context) {
-			if err := r.LoadConfiguredServers(cfg); err != nil {
+		go func(cfg, base *config.Config, ctx context.Context) {
+			if err := r.loadConfiguredServersAgainst(cfg, base); err != nil {
 				r.logger.Error("Failed to reload servers after config apply", zap.Error(err))
 				return
 			}
@@ -2068,7 +2118,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 			if err := r.DiscoverAndIndexTools(ctx); err != nil {
 				r.logger.Error("Failed to re-index tools after config apply", zap.Error(err))
 			}
-		}(&configCopy, appCtx)
+		}(&configCopy, liveAtApply, appCtx)
 	}
 
 	return result, nil
@@ -4171,4 +4221,74 @@ func knownClientAliases() map[string]bool {
 
 func isKnownClientAlias(rawNormalized string) bool {
 	return knownClientAliases()[rawNormalized]
+}
+
+// noteServerSetChange records which servers a config commit removed (in old, not
+// in next) and forgets any name it re-added. Call it while committing, under
+// configCommitMu.
+func (r *Runtime) noteServerSetChange(oldCfg, next *config.Config) {
+	if oldCfg == nil || next == nil {
+		return
+	}
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	if r.pendingServerRemovals == nil {
+		r.pendingServerRemovals = make(map[string]struct{})
+	}
+	was := make(map[string]struct{}, len(oldCfg.Servers))
+	for _, s := range oldCfg.Servers {
+		if s != nil {
+			was[s.Name] = struct{}{}
+		}
+	}
+	present := make(map[string]struct{}, len(next.Servers))
+	for _, s := range next.Servers {
+		if s != nil {
+			present[s.Name] = struct{}{}
+			// Only a name that was absent and is now present is a re-add. A
+			// name already in the old config was carried forward (e.g. a save
+			// resurrected it from its still-existing storage row), which says
+			// nothing about the operator's intent and must not cancel the
+			// pending removal (UX-01 r4).
+			if _, carried := was[s.Name]; !carried {
+				delete(r.pendingServerRemovals, s.Name)
+			}
+		}
+	}
+	for _, s := range oldCfg.Servers {
+		if s != nil {
+			if _, ok := present[s.Name]; !ok {
+				r.pendingServerRemovals[s.Name] = struct{}{}
+			}
+		}
+	}
+}
+
+// ClearPendingServerRemoval forgets a pending removal for name; a deliberate
+// create-only add calls it so the earlier removal's cleanup cannot reap the
+// new server.
+func (r *Runtime) ClearPendingServerRemoval(name string) {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	delete(r.pendingServerRemovals, name)
+}
+
+// pendingServerRemovalNames returns the servers an applied config removed whose
+// cleanup has not consumed the mark yet (a copy; does not consume).
+func (r *Runtime) pendingServerRemovalNames() map[string]struct{} {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	out := make(map[string]struct{}, len(r.pendingServerRemovals))
+	for n := range r.pendingServerRemovals {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
+func (r *Runtime) takePendingServerRemoval(name string) bool {
+	r.pendingRemovalMu.Lock()
+	defer r.pendingRemovalMu.Unlock()
+	_, ok := r.pendingServerRemovals[name]
+	delete(r.pendingServerRemovals, name)
+	return ok
 }

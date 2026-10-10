@@ -450,7 +450,11 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 		existingConfig := existingClient.GetConfig()
 
 		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
+		// A client retired at config publication (RetireStaleClients) is
+		// permanently barred from dialing, so it must be replaced even when the
+		// config it is now compared with looks unchanged (a revert).
+		configChanged := existingClient.IsRetired() ||
+			existingConfig.URL != serverConfig.URL ||
 			existingConfig.Protocol != serverConfig.Protocol ||
 			existingConfig.Command != serverConfig.Command ||
 			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
@@ -468,6 +472,9 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Permanently bar the replaced client from dialing: a goroutine
+			// that fetched it before this swap must not resurrect it.
+			existingClient.Retire()
 			// Spec 113-d FR-066: the replacement connects to a different
 			// endpoint/command/credentials, so the old client's failure
 			// history must not degrade it. Same critical section as the
@@ -586,12 +593,52 @@ func equalStringMaps(a, b map[string]string) bool {
 	return true
 }
 
+// RetireStaleClients permanently bars every registered client whose server the
+// newly published configuration removed, or whose connection state it changed,
+// from dialing. The runtime calls it under its config commit lock, in the same
+// critical section that publishes the configuration, so a connect that
+// captured a client before the publication cannot launch the old endpoint
+// while the (asynchronous) manager reconciliation is still queued. The
+// reconciliation later removes the client or replaces it; AddServerConfig
+// replaces any retired client it finds, so a revert cannot strand a server.
+func (m *Manager) RetireStaleClients(servers []*config.ServerConfig) {
+	desired := make(map[string]*config.ServerConfig, len(servers))
+	for _, s := range servers {
+		if s != nil {
+			desired[s.Name] = s
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id, client := range m.clients {
+		if client == nil || client.IsRetired() {
+			continue
+		}
+		want, ok := desired[id]
+		if !ok || !config.ConnectionEquivalent(client.GetConfig(), want) {
+			client.Retire()
+		}
+	}
+}
+
 // AddServer adds a new upstream server and connects to it (legacy method)
 func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
 	if err := m.AddServerConfig(id, serverConfig); err != nil {
 		return err
 	}
+	return m.connectAdded(id, serverConfig, true)
+}
 
+// ConnectServer connects the client currently registered under id, if any. It
+// is the connect half of AddServer for a caller that registered the config
+// under its own lock (AddServerConfig) and must not hold that lock across a
+// slow dial. A client that is gone (removed by a newer commit) is skipped
+// quietly: whatever replaced or removed it owns the connection now.
+func (m *Manager) ConnectServer(id string, serverConfig *config.ServerConfig) error {
+	return m.connectAdded(id, serverConfig, false)
+}
+
+func (m *Manager) connectAdded(id string, serverConfig *config.ServerConfig, logMissing bool) error {
 	if !serverConfig.Enabled {
 		m.logger.Debug("Skipping connection for disabled server",
 			zap.String("id", id),
@@ -601,6 +648,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 
 	// Check if client exists and is already connected
 	if client, exists := m.GetClient(id); exists {
+		if cc := client.GetConfig(); cc != nil && !cc.Enabled {
+			return nil
+		}
 		if client.IsConnected() {
 			m.logger.Debug("Server is already connected, skipping connection attempt",
 				zap.String("id", id),
@@ -613,6 +663,11 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
+			// Removed or replaced between lookup and dial: the new owner
+			// connects; nothing failed here.
+			if errors.Is(err, managed.ErrClientRetired) {
+				return nil
+			}
 			// The supervisor's reconcile usually owns the connect at startup;
 			// LoadConfiguredServers' AddServer for the same unchanged server then
 			// hits the in-flight guard. Nothing failed.
@@ -641,7 +696,7 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			// For non-OAuth errors, still return error
 			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
 		}
-	} else {
+	} else if logMissing {
 		m.logger.Error("Client not found after AddServerConfig - this should not happen",
 			zap.String("id", id),
 			zap.String("name", serverConfig.Name))
@@ -661,6 +716,8 @@ func (m *Manager) RemoveServer(id string) {
 		// Remove from map immediately to prevent new operations
 		delete(m.clients, id)
 		if client != nil {
+			// Permanent retirement barrier (see managed.Client.Retire).
+			client.Retire()
 			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
 				callStatsName = cfg.Name
 			}
@@ -1882,6 +1939,11 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			zap.Bool("is_connecting", client.IsConnecting()),
 			zap.String("current_state", client.GetState().String()),
 			zap.Bool("quarantined", client.GetConfig().Quarantined))
+
+		if client.IsRetired() {
+			// Removed or replaced by a newer commit; the reconciliation owns it.
+			continue
+		}
 
 		if !client.GetConfig().Enabled {
 			m.logger.Debug("Skipping disabled client",

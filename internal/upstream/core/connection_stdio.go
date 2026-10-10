@@ -256,8 +256,21 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	// Start stdio transport with a persistent background context so the child
 	// process keeps running even if the connect context is short-lived.
 	persistentCtx := context.Background()
-	if err := c.client.Start(persistentCtx); err != nil {
-		return fmt.Errorf("failed to start stdio client: %w", err)
+	// The spawn happens here, on a background context that cancellation of
+	// ctx cannot reach: admission must be decided by the owner at this exact
+	// point (UX-01 r8).
+	releaseDial, gateErr := c.admitSpawn()
+	if gateErr != nil {
+		c.client = nil
+		return gateErr
+	}
+	startErr := c.client.Start(persistentCtx)
+	releaseDial()
+	if startErr != nil {
+		return fmt.Errorf("failed to start stdio client: %w", startErr)
+	}
+	if AfterLaunchHook != nil {
+		AfterLaunchHook(c.config.Name)
 	}
 
 	// Extract the process group ID (Windows: assign to a Job Object) IMMEDIATELY

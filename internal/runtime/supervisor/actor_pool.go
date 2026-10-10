@@ -18,6 +18,11 @@ type ActorPoolSimple struct {
 	manager *upstream.Manager
 	logger  *zap.Logger
 
+	// guard validates supervisor actions against the live configuration under
+	// the runtime's config commit lock (see ServerActionGuard). Nil = unguarded.
+	guardMu sync.RWMutex
+	guard   ServerActionGuard
+
 	// Event forwarding
 	eventCh   chan Event
 	listeners []chan Event
@@ -41,6 +46,63 @@ func NewActorPoolSimple(manager *upstream.Manager, logger *zap.Logger) *ActorPoo
 	manager.AddNotificationHandler(pool)
 
 	return pool
+}
+
+// SetActionGuard installs the live-config guard used for every supervisor action.
+func (p *ActorPoolSimple) SetActionGuard(g ServerActionGuard) {
+	p.guardMu.Lock()
+	p.guard = g
+	p.guardMu.Unlock()
+}
+
+func (p *ActorPoolSimple) currentGuard() ServerActionGuard {
+	p.guardMu.RLock()
+	defer p.guardMu.RUnlock()
+	return p.guard
+}
+
+// GuardServerAction runs apply atomically with a live-config check (see
+// ServerActionGuard). Without an installed guard it runs apply unchecked.
+func (p *ActorPoolSimple) GuardServerAction(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error {
+	if g := p.currentGuard(); g != nil {
+		return g(name, want, apply)
+	}
+	return apply(want)
+}
+
+// connectAfterCaptureHook is a test seam fired after ConnectServerIfCurrent
+// captured its client under the guard, before it dials.
+var connectAfterCaptureHook func(name string)
+
+// ConnectServerIfCurrent connects the client registered under name only while
+// the live config still holds want's connection state. The client is looked up
+// inside the guard, and a client a later commit replaces is retired, so a delayed
+// connect never dials a replaced, removed or newly quarantined server.
+func (p *ActorPoolSimple) ConnectServerIfCurrent(ctx context.Context, name string, want *config.ServerConfig) error {
+	var client interface{ Connect(context.Context) error }
+	if err := p.GuardServerAction(name, want, func(*config.ServerConfig) error {
+		c, exists := p.manager.GetClient(name)
+		if !exists {
+			return fmt.Errorf("server %s not found", name)
+		}
+		client = c
+		return nil
+	}); err != nil {
+		return err
+	}
+	if connectAfterCaptureHook != nil {
+		connectAfterCaptureHook(name)
+	}
+	// A commit published after the capture above has already retired this
+	// client (Runtime.retireStaleClients runs in the publishing critical
+	// section), so Connect refuses to launch even though the manager
+	// reconciliation for that commit has not run yet.
+	if err := client.Connect(ctx); err != nil {
+		p.logger.Debug("Connect returned error (may be already connecting/connected)",
+			zap.String("server", name),
+			zap.Error(err))
+	}
+	return nil
 }
 
 // SendNotification implements upstream.NotificationHandler interface
