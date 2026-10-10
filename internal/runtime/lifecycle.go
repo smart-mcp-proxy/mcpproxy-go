@@ -1323,6 +1323,17 @@ var serverRemovalCleanupHook func(name string)
 //
 //nolint:unparam // maintained for parity with previous implementation
 func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
+	return r.loadConfiguredServers(cfg, false)
+}
+
+// loadConfiguredServersKeepSetHook is a test seam fired right after the
+// orphan-GC keep-set has been captured from the live config, before the prunes.
+var loadConfiguredServersKeepSetHook func()
+
+// loadConfiguredServers is LoadConfiguredServers; commitHeld is true when the
+// caller already holds configCommitMu (ReloadConfiguration), so the orphan GC
+// must not take the non-reentrant lock again.
+func (r *Runtime) loadConfiguredServers(cfg *config.Config, commitHeld bool) error {
 	if cfg == nil {
 		cfg = r.Config()
 		if cfg == nil {
@@ -1389,6 +1400,15 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		// state: count every server the live config holds as configured too,
 		// or a stale reload would delete a blocked tool's record and let
 		// rediscovery recreate it as approved (UX-01 r3).
+		//
+		// The keep-set capture and both prunes run under the config commit
+		// lock, which create-only add holds from storage write to publish: a
+		// server is either already in the live config (kept) or its records do
+		// not exist yet, never created between the capture and the prune
+		// (UX-01 r4).
+		if !commitHeld {
+			r.configCommitMu.Lock()
+		}
 		keep := make(map[string]struct{}, len(configuredServers))
 		for name := range configuredServers {
 			keep[name] = struct{}{}
@@ -1403,6 +1423,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		configuredNames := make([]string, 0, len(keep))
 		for name := range keep {
 			configuredNames = append(configuredNames, name)
+		}
+		if loadConfiguredServersKeepSetHook != nil {
+			loadConfiguredServersKeepSetHook()
 		}
 		if pruned, perr := r.storageManager.PruneOrphanToolApprovals(configuredNames); perr != nil {
 			r.logger.Warn("Failed to prune orphan tool approvals", zap.Error(perr))
@@ -1419,6 +1442,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			r.logger.Warn("Failed to prune orphan tool-call history", zap.Error(perr))
 		} else if pruned > 0 {
 			r.logger.Info("Pruned orphan tool-call history", zap.Int("servers_removed", pruned))
+		}
+		if !commitHeld {
+			r.configCommitMu.Unlock()
 		}
 	}
 
@@ -2012,7 +2038,7 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.reconcileProfileIndexes()
 	}
 
-	if err := r.LoadConfiguredServers(nil); err != nil {
+	if err := r.loadConfiguredServers(nil, true); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}

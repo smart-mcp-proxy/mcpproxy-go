@@ -4213,11 +4213,24 @@ func (r *Runtime) noteServerSetChange(oldCfg, next *config.Config) {
 	if r.pendingServerRemovals == nil {
 		r.pendingServerRemovals = make(map[string]struct{})
 	}
+	was := make(map[string]struct{}, len(oldCfg.Servers))
+	for _, s := range oldCfg.Servers {
+		if s != nil {
+			was[s.Name] = struct{}{}
+		}
+	}
 	present := make(map[string]struct{}, len(next.Servers))
 	for _, s := range next.Servers {
 		if s != nil {
 			present[s.Name] = struct{}{}
-			delete(r.pendingServerRemovals, s.Name)
+			// Only a name that was absent and is now present is a re-add. A
+			// name already in the old config was carried forward (e.g. a save
+			// resurrected it from its still-existing storage row), which says
+			// nothing about the operator's intent and must not cancel the
+			// pending removal (UX-01 r4).
+			if _, carried := was[s.Name]; !carried {
+				delete(r.pendingServerRemovals, s.Name)
+			}
 		}
 	}
 	for _, s := range oldCfg.Servers {
