@@ -87,7 +87,7 @@ Env values and headers whose names look like secrets default to **Secret**, whic
 
 ### Review before approval
 
-Quarantined servers wait on the [Review queue](/features/security-quarantine). The review screen lists every tool read-only with its tier, annotations and scan verdict before you approve, and lets you leave tools out. Approving always goes through the scan gate.
+Quarantined servers wait on the [Review queue](/features/security-quarantine). The review screen lists every tool read-only with its tier, annotations and scan verdict before you approve, and lets you leave tools out. Approving always goes through the scan gate. The queue lists every server that is owed a review, including disabled ones (marked **Disabled**). It opens on **Active blockers** (enabled servers and tool changes that hold a live agent) when there are any, with **All reviews** one click away, plus a search box and a sort menu. The Home attention list counts only the active blockers, so its number is smaller than the full queue.
 
 ## Tool Search
 

@@ -191,6 +191,20 @@ func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	}
 }
 
+func TestFormatReviewResponseTableQueueShowsEnabledState(t *testing.T) {
+	raw := []byte(`{"data":{"servers":[{"server":"live","kind":"server_review","quarantined":true,"enabled":true},{"server":"parked","kind":"server_review","quarantined":true,"enabled":false},{"server":"legacy","kind":"server_review","quarantined":true}]}}`)
+	output := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
+	require.Contains(t, output, "ENABLED")
+	for _, line := range strings.Split(output, "\n") {
+		switch {
+		case strings.HasPrefix(line, "parked"):
+			require.Contains(t, line, "false")
+		case strings.HasPrefix(line, "live"), strings.HasPrefix(line, "legacy"):
+			require.Contains(t, line, "true", line)
+		}
+	}
+}
+
 func TestReviewAliasHelpPointsToReviewWorkflow(t *testing.T) {
 	for _, command := range []*cobra.Command{
 		newToolsApproveCmd(),

@@ -27,9 +27,15 @@ type ReviewQueue struct {
 }
 
 type ReviewQueueRow struct {
-	Server        string                 `json:"server"`
-	Kind          string                 `json:"kind"`
-	Quarantined   bool                   `json:"quarantined"`
+	Server      string `json:"server"`
+	Kind        string `json:"kind"`
+	Quarantined bool   `json:"quarantined"`
+	// Enabled is the server's configured enabled state. A disabled server
+	// stays in the queue (its review is still owed) but is not blocking any
+	// live agent, which is how the Web UI and CLI tell it from an active
+	// blocker. Always serialised, so an older core (field absent) reads as
+	// "unknown" and clients treat that as enabled.
+	Enabled       bool                   `json:"enabled"`
 	ToolsCaptured int                    `json:"tools_captured,omitempty"`
 	TierCounts    map[contracts.Tier]int `json:"tier_counts,omitempty"`
 	Pending       int                    `json:"pending,omitempty"`
@@ -147,7 +153,7 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 		if err != nil {
 			return nil, fmt.Errorf("list tool reviews for %q: %w", server.Name, err)
 		}
-		row := ReviewQueueRow{Server: server.Name, Quarantined: server.Quarantined}
+		row := ReviewQueueRow{Server: server.Name, Quarantined: server.Quarantined, Enabled: server.Enabled}
 		if server.Quarantined {
 			row.ToolsCaptured = len(records)
 		}

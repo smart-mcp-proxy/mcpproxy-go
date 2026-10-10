@@ -32,9 +32,11 @@ mcpproxy review list
 ```
 
 ```
-SERVER      KIND           QUARANTINED  PENDING  CHANGED  TIERS               SCAN
-filesystem  server_review  true         0        0        map[destructive:1]  map[verdict:clean]
+SERVER      KIND           QUARANTINED  ENABLED  PENDING  CHANGED  TIERS               SCAN
+filesystem  server_review  true         true     0        0        map[destructive:1]  map[verdict:clean]
 ```
+
+`ENABLED` is the server's configured state. A disabled quarantined server stays in the queue (its review is still owed) but no live agent is waiting on it, so `ENABLED=false` rows are deferred reviews, while `ENABLED=true` rows are active blockers. The Home attention list counts only enabled servers; the queue counts every row.
 
 ## review show
 

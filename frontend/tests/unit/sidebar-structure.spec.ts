@@ -127,6 +127,18 @@ describe('sidebar structure (Spec 109-i FR-050)', () => {
     expect(wrapper.get('[data-test="sidebar-item-review"]').text()).toContain('7')
   })
 
+  it('explains the Review badge: whole queue versus active blockers (UX-04)', async () => {
+    mocks.getReviewQueue.mockResolvedValue({ success: true, data: { count: 3, servers: [
+      { server: 'a', kind: 'server_review', quarantined: true, enabled: true },
+      { server: 'b', kind: 'server_review', quarantined: true, enabled: false },
+      { server: 'c', kind: 'server_review', quarantined: true, enabled: false },
+    ] } })
+    const wrapper = await mountSidebar()
+    const badge = wrapper.get('[data-test="sidebar-review-badge"]')
+    expect(badge.text()).toBe('3')
+    expect(badge.attributes('title')).toBe('3 reviews: 1 active blocker, 2 on disabled servers.')
+  })
+
   it('keeps the Clients badge live: tool-call activity and a 30 s tick refresh presence', async () => {
     vi.useFakeTimers()
     try {

@@ -192,6 +192,27 @@ func TestReviewPayload_QueueAndUncapturedDefinitions(t *testing.T) {
 	require.Empty(t, review.Tools)
 }
 
+// UX-04: a disabled quarantined server stays in the queue (it is still owed a
+// review) but is labelled so operators can tell it from an active blocker.
+func TestReviewQueue_ReportsServerEnabledState(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "live", Enabled: true, Quarantined: true},
+		{Name: "parked", Enabled: false, Quarantined: true},
+	})
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 2, queue.Count)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.True(t, byName["live"].Enabled)
+	require.False(t, byName["parked"].Enabled)
+	raw, err := json.Marshal(byName["parked"])
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"enabled":false`)
+}
+
 func TestReviewPayload_RedactsServerSecretsUnconditionally(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
 		Name: "private", Enabled: true, Quarantined: true,

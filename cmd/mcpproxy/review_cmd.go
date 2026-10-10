@@ -333,9 +333,14 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 		rows := make([][]string, 0, len(servers))
 		for _, item := range servers {
 			row, _ := item.(map[string]interface{})
-			rows = append(rows, []string{fmt.Sprint(row["server"]), fmt.Sprint(row["kind"]), fmt.Sprint(row["quarantined"]), fmt.Sprint(row["pending"]), fmt.Sprint(row["changed"]), fmt.Sprint(row["tier_counts"]), fmt.Sprint(row["scan"])})
+			// A core that predates the field omits "enabled"; read that as enabled.
+			enabled := "true"
+			if v, ok := row["enabled"].(bool); ok {
+				enabled = fmt.Sprint(v)
+			}
+			rows = append(rows, []string{fmt.Sprint(row["server"]), fmt.Sprint(row["kind"]), fmt.Sprint(row["quarantined"]), enabled, fmt.Sprint(row["pending"]), fmt.Sprint(row["changed"]), fmt.Sprint(row["tier_counts"]), fmt.Sprint(row["scan"])})
 		}
-		out, err := table.FormatTable([]string{"SERVER", "KIND", "QUARANTINED", "PENDING", "CHANGED", "TIERS", "SCAN"}, rows)
+		out, err := table.FormatTable([]string{"SERVER", "KIND", "QUARANTINED", "ENABLED", "PENDING", "CHANGED", "TIERS", "SCAN"}, rows)
 		if err != nil {
 			return err
 		}
