@@ -1793,6 +1793,30 @@ func (r *Runtime) registerCurrentServer(want *config.ServerConfig) *config.Serve
 	return cur
 }
 
+// guardSupervisorAction runs a supervisor action's manager mutation under the
+// commit lock, only while the live config still matches the state it was planned
+// from (want), or still lacks the server for a removal (want == nil). Otherwise
+// it returns supervisor.ErrStaleAction and the action is dropped.
+func (r *Runtime) guardSupervisorAction(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	if want == nil {
+		if live := r.Config(); live != nil {
+			for _, s := range live.Servers {
+				if s != nil && s.Name == name {
+					return supervisor.ErrStaleAction
+				}
+			}
+		}
+		return apply(nil)
+	}
+	cur := r.liveServerFor(want)
+	if cur == nil {
+		return supervisor.ErrStaleAction
+	}
+	return apply(cur)
+}
+
 // registerServerIdentityIfCurrent records the server identity used for tool
 // call tracking, unless a newer commit removed or changed the server since.
 func (r *Runtime) registerServerIdentityIfCurrent(cfg *config.ServerConfig, cfgPath string) {
@@ -1806,6 +1830,67 @@ func (r *Runtime) registerServerIdentityIfCurrent(cfg *config.ServerConfig, cfgP
 			zap.Error(err),
 			zap.String("server", cfg.Name))
 	}
+}
+
+// removeServerAfterStorageDeleteHook is a test seam fired inside
+// RemoveServerCommitted right after the storage row is deleted, while the
+// commit lock is held.
+var removeServerAfterStorageDeleteHook func(name string)
+
+// ErrServerNotFound is returned by RemoveServerCommitted for an unknown server.
+var ErrServerNotFound = fmt.Errorf("server not found")
+
+// RemoveServerCommitted removes a server (client, storage row, OAuth state,
+// search index, tool approvals) and republishes the configuration as ONE commit
+// under configCommitMu. Doing the destructive steps outside the lock left a
+// window, while the live config still held the server, in which a concurrent
+// reconciliation re-created the deleted storage row and reconnected it, and the
+// removal's own save then republished that row (UX-01 r7).
+func (r *Runtime) RemoveServerCommitted(name string) error {
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
+	if r.storageManager == nil || r.upstreamManager == nil {
+		return fmt.Errorf("runtime managers not initialized")
+	}
+	existing, err := r.storageManager.GetUpstreamServer(name)
+	if err != nil || existing == nil {
+		return fmt.Errorf("%w: '%s'", ErrServerNotFound, name)
+	}
+
+	r.upstreamManager.RemoveServer(name)
+
+	if err := r.storageManager.RemoveUpstream(name); err != nil {
+		return fmt.Errorf("failed to remove server from storage: %w", err)
+	}
+	if removeServerAfterStorageDeleteHook != nil {
+		removeServerAfterStorageDeleteHook(name)
+	}
+
+	if err := r.storageManager.ClearOAuthState(name); err != nil {
+		r.logger.Warn("Failed to clear OAuth state for removed server",
+			zap.String("server", name), zap.Error(err))
+	}
+	if r.refreshManager != nil {
+		r.refreshManager.OnTokenCleared(name)
+	}
+	if r.indexManager != nil {
+		if err := r.indexManager.DeleteServerTools(name); err != nil {
+			r.logger.Warn("Failed to remove server tools from index",
+				zap.String("server", name), zap.Error(err))
+		}
+	}
+	if err := r.storageManager.DeleteServerToolApprovals(name); err != nil {
+		r.logger.Warn("Failed to clear tool approvals for removed server",
+			zap.String("server", name), zap.Error(err))
+	}
+
+	// The save rebuilds the server list from storage, so it drops the removed
+	// server from the live config and the file in the same commit.
+	if err := r.saveConfigurationLocked(); err != nil {
+		r.logger.Warn("Failed to save configuration after removing server", zap.Error(err))
+	}
+	return nil
 }
 
 // SaveConfiguration persists the runtime configuration to disk.

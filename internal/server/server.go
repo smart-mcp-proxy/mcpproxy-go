@@ -2135,58 +2135,16 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 }
 
 // RemoveServer removes an upstream server from the configuration.
-// This stops the server if running and removes it from storage.
+// This stops the server if running and removes it from storage. The removal is
+// one commit under the runtime's config commit lock (UX-01 r7).
 func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	s.logger.Info("Removing upstream server", zap.String("name", serverName))
 
-	// Check if server exists
-	storageManager := s.runtime.StorageManager()
-	existing, err := storageManager.GetUpstreamServer(serverName)
-	if err != nil || existing == nil {
-		return fmt.Errorf("server '%s' not found", serverName)
-	}
-
-	// Remove from upstream manager (stops the server)
-	s.runtime.UpstreamManager().RemoveServer(serverName)
-
-	// Remove from storage
-	if err := storageManager.RemoveUpstream(serverName); err != nil {
-		return fmt.Errorf("failed to remove server from storage: %w", err)
-	}
-
-	// Clear OAuth state (tokens, client registration) for the removed server
-	// This prevents orphaned tokens from accumulating in the database
-	if err := storageManager.ClearOAuthState(serverName); err != nil {
-		s.logger.Warn("Failed to clear OAuth state for removed server",
-			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - this is cleanup, not critical for removal
-	}
-
-	// Notify RefreshManager to stop tracking this server's token refresh
-	if refreshManager := s.runtime.RefreshManager(); refreshManager != nil {
-		refreshManager.OnTokenCleared(serverName)
-	}
-
-	// Remove from search index
-	if err := s.runtime.IndexManager().DeleteServerTools(serverName); err != nil {
-		s.logger.Warn("Failed to remove server tools from index",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
-	// Clean up tool approval records for the removed server
-	// This prevents orphaned approval records from accumulating
-	if err := storageManager.DeleteServerToolApprovals(serverName); err != nil {
-		s.logger.Warn("Failed to clear tool approvals for removed server",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after removing server",
-			zap.Error(err))
+	if err := s.runtime.RemoveServerCommitted(serverName); err != nil {
+		if errors.Is(err, runtime.ErrServerNotFound) {
+			return fmt.Errorf("server '%s' not found", serverName)
+		}
+		return err
 	}
 
 	// Notify about upstream server change

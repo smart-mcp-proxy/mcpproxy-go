@@ -520,6 +520,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	rt.profilesService = newProfilesService(rt)
 
+	// Supervisor actions carry the config snapshot they were planned from; a
+	// delayed one must not re-register, reconnect or tear down a server a newer
+	// commit removed, re-configured or quarantined (UX-01 r7).
+	actorPool.SetActionGuard(rt.guardSupervisorAction)
+
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)

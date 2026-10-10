@@ -6058,27 +6058,31 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 	}
 
-	// Remove from storage
-	if err := p.storage.RemoveUpstream(serverID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to remove upstream: %v", err)), nil
-	}
-
-	// Remove from upstream manager
-	p.upstreamManager.RemoveServer(serverID)
-
-	// Remove tools from search index
-	if err := p.index.DeleteServerTools(serverID); err != nil {
-		p.logger.Error("Failed to remove server tools from index", zap.String("server", serverID), zap.Error(err))
-	} else {
-		p.logger.Info("Removed server tools from search index", zap.String("server", serverID))
-	}
-
-	// Trigger configuration save and update
-	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after removing server", zap.Error(err))
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		// One commit under the config commit lock: client, storage, index,
+		// approvals and the saved config change together (UX-01 r7).
+		if err := p.mainServer.runtime.RemoveServerCommitted(serverID); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to remove upstream: %v", err)), nil
 		}
+	} else {
+		// Remove from storage
+		if err := p.storage.RemoveUpstream(serverID); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to remove upstream: %v", err)), nil
+		}
+
+		// Remove from upstream manager
+		p.upstreamManager.RemoveServer(serverID)
+
+		// Remove tools from search index
+		if err := p.index.DeleteServerTools(serverID); err != nil {
+			p.logger.Error("Failed to remove server tools from index", zap.String("server", serverID), zap.Error(err))
+		} else {
+			p.logger.Info("Removed server tools from search index", zap.String("server", serverID))
+		}
+	}
+
+	// Notify and record the change
+	if p.mainServer != nil {
 		p.mainServer.OnUpstreamServerChange()
 
 		// Spec 024: Emit config change activity for server removal

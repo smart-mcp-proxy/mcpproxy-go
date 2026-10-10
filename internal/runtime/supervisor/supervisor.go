@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -187,6 +188,42 @@ type inspectionFailureInfo struct {
 	consecutiveFailures int
 	lastFailureTime     time.Time
 	cooldownUntil       time.Time
+}
+
+// ErrStaleAction is returned (wrapped) by a server-action guard when the live
+// configuration no longer matches the snapshot an action was planned from: a
+// newer commit removed, re-configured, quarantined or disabled the server. The
+// stale action is dropped; the newer commit's own reconcile owns the server.
+var ErrStaleAction = errors.New("stale supervisor action: live configuration has moved on")
+
+// ServerActionGuard validates a planned action against the live configuration
+// and runs apply atomically with that check (under the runtime's config commit
+// lock). want is the server config the action was planned from, or nil for a
+// removal, which is valid only while the live config no longer holds the server.
+// apply receives the live entry (nil for a removal).
+type ServerActionGuard func(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error
+
+// guardedUpstream is implemented by upstream adapters that can validate an
+// action against the live configuration before mutating the manager.
+type guardedUpstream interface {
+	GuardServerAction(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error
+	ConnectServerIfCurrent(ctx context.Context, name string, want *config.ServerConfig) error
+}
+
+// guard runs apply under the adapter's live-config guard, or directly with the
+// planned config when the adapter has none (tests, standalone use).
+func (s *Supervisor) guard(name string, want *config.ServerConfig, apply func(live *config.ServerConfig) error) error {
+	if g, ok := s.upstream.(guardedUpstream); ok {
+		return g.GuardServerAction(name, want, apply)
+	}
+	return apply(want)
+}
+
+func (s *Supervisor) connectIfCurrent(ctx context.Context, name string, want *config.ServerConfig) error {
+	if g, ok := s.upstream.(guardedUpstream); ok {
+		return g.ConnectServerIfCurrent(ctx, name, want)
+	}
+	return s.upstream.ConnectServer(ctx, name)
 }
 
 // UpstreamInterface defines the interface for upstream adapters.
@@ -586,7 +623,13 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 			return fmt.Errorf("server config not found: %s", serverName)
 		}
 
-		if err := s.upstream.AddServer(serverName, serverConfig); err != nil {
+		if err := s.guard(serverName, serverConfig, func(live *config.ServerConfig) error {
+			return s.upstream.AddServer(serverName, live)
+		}); err != nil {
+			if errors.Is(err, ErrStaleAction) {
+				s.logger.Debug("Dropping stale connect action", zap.String("server", serverName))
+				return nil
+			}
 			return fmt.Errorf("failed to add server: %w", err)
 		}
 
@@ -598,7 +641,10 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 					zap.String("server", serverName))
 			}
 
-			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
+			if err := s.connectIfCurrent(ctx, serverName, serverConfig); err != nil {
+				if errors.Is(err, ErrStaleAction) {
+					return nil
+				}
 				s.logger.Warn("Failed to connect server (will retry)",
 					zap.String("server", serverName),
 					zap.Error(err))
@@ -609,24 +655,39 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 		return nil
 
 	case ActionDisconnect:
+		if want := configSnapshot.GetServer(serverName); want != nil {
+			err := s.guard(serverName, want, func(*config.ServerConfig) error {
+				return s.upstream.DisconnectServer(serverName)
+			})
+			if errors.Is(err, ErrStaleAction) {
+				return nil
+			}
+			return err
+		}
 		return s.upstream.DisconnectServer(serverName)
 
 	case ActionReconnect:
-		// Disconnect then reconnect
-		if err := s.upstream.DisconnectServer(serverName); err != nil {
-			s.logger.Warn("Failed to disconnect server during reconnect",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
-
 		// Get updated config
 		serverConfig := configSnapshot.GetServer(serverName)
 		if serverConfig == nil {
 			return fmt.Errorf("server config not found: %s", serverName)
 		}
 
-		// Add with new config
-		if err := s.upstream.AddServer(serverName, serverConfig); err != nil {
+		// Disconnect, then add with the new config, as one step that is valid
+		// only while the live config still holds this state; a stale action must
+		// neither tear down nor re-register a newer commit's client.
+		if err := s.guard(serverName, serverConfig, func(live *config.ServerConfig) error {
+			if err := s.upstream.DisconnectServer(serverName); err != nil {
+				s.logger.Warn("Failed to disconnect server during reconnect",
+					zap.String("server", serverName),
+					zap.Error(err))
+			}
+			return s.upstream.AddServer(serverName, live)
+		}); err != nil {
+			if errors.Is(err, ErrStaleAction) {
+				s.logger.Debug("Dropping stale reconnect action", zap.String("server", serverName))
+				return nil
+			}
 			return fmt.Errorf("failed to add server: %w", err)
 		}
 
@@ -638,7 +699,10 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 					zap.String("server", serverName))
 			}
 
-			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
+			if err := s.connectIfCurrent(ctx, serverName, serverConfig); err != nil {
+				if errors.Is(err, ErrStaleAction) {
+					return nil
+				}
 				s.logger.Warn("Failed to reconnect server (will retry)",
 					zap.String("server", serverName),
 					zap.Error(err))
@@ -648,7 +712,14 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 		return nil
 
 	case ActionRemove:
-		return s.upstream.RemoveServer(serverName)
+		err := s.guard(serverName, nil, func(*config.ServerConfig) error {
+			return s.upstream.RemoveServer(serverName)
+		})
+		if errors.Is(err, ErrStaleAction) {
+			s.logger.Debug("Dropping stale remove action", zap.String("server", serverName))
+			return nil
+		}
+		return err
 
 	default:
 		return fmt.Errorf("unknown action: %s", action)

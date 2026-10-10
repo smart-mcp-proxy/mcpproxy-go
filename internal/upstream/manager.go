@@ -468,6 +468,9 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 			// Remove from map immediately to prevent new operations
 			delete(m.clients, id)
+			// Permanently bar the replaced client from dialing: a goroutine
+			// that fetched it before this swap must not resurrect it.
+			existingClient.Retire()
 			// Spec 113-d FR-066: the replacement connects to a different
 			// endpoint/command/credentials, so the old client's failure
 			// history must not degrade it. Same critical section as the
@@ -628,6 +631,11 @@ func (m *Manager) connectAdded(id string, serverConfig *config.ServerConfig, log
 		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
+			// Removed or replaced between lookup and dial: the new owner
+			// connects; nothing failed here.
+			if errors.Is(err, managed.ErrClientRetired) {
+				return nil
+			}
 			// The supervisor's reconcile usually owns the connect at startup;
 			// LoadConfiguredServers' AddServer for the same unchanged server then
 			// hits the in-flight guard. Nothing failed.
@@ -676,6 +684,8 @@ func (m *Manager) RemoveServer(id string) {
 		// Remove from map immediately to prevent new operations
 		delete(m.clients, id)
 		if client != nil {
+			// Permanent retirement barrier (see managed.Client.Retire).
+			client.Retire()
 			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
 				callStatsName = cfg.Name
 			}

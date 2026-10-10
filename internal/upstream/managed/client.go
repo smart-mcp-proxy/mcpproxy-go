@@ -67,6 +67,7 @@ type Client struct {
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
+	retired       atomic.Bool
 	connectMu     sync.Mutex
 	connectCancel context.CancelFunc
 
@@ -429,6 +430,26 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// ErrClientRetired is returned by Connect on a client the manager has removed or
+// replaced. Retirement is permanent: unlike Disconnect, which resets the client
+// to a connectable state, a retired client never dials again, so a goroutine
+// that looked the client up before its removal cannot resurrect it afterwards.
+var ErrClientRetired = errors.New("client retired: removed or replaced by the manager")
+
+// Retire permanently bars this client from connecting. The manager calls it
+// when it drops the client from its map (remove or same-name replacement),
+// BEFORE Disconnect, so a delayed Connect on a pointer fetched earlier fails
+// closed instead of launching a process or handshake for an upstream the
+// manager no longer owns.
+func (mc *Client) Retire() {
+	mc.retired.Store(true)
+}
+
+// IsRetired reports whether Retire was called.
+func (mc *Client) IsRetired() bool {
+	return mc.retired.Load()
+}
+
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
@@ -436,6 +457,11 @@ var ErrConnectAlreadyActive = errors.New("connection already in progress or esta
 func (mc *Client) Connect(ctx context.Context) error {
 	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
+
+	if mc.retired.Load() {
+		mc.mu.Unlock()
+		return ErrClientRetired
+	}
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
@@ -502,6 +528,17 @@ func (mc *Client) Connect(ctx context.Context) error {
 		mc.connectMu.Unlock()
 	}()
 
+	// Retire stores the flag BEFORE Disconnect reads connectCancel, and this
+	// publishes connectCancel BEFORE reading the flag, so either the retire is
+	// seen here (no dial) or Disconnect sees the cancel func and aborts the dial.
+	if mc.retired.Load() {
+		cancel()
+		mc.mu.Lock()
+		mc.StateManager.Reset()
+		mc.mu.Unlock()
+		return ErrClientRetired
+	}
+
 	// Phase 3: Execute the actual connection (potentially slow - OAuth, MCP initialize)
 	// mc.mu is NOT held here, so Disconnect/SetConfig/GetConfig won't block
 	mc.logger.Debug("Invoking core client Connect for managed client",
@@ -511,6 +548,17 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Phase 4: Re-acquire lock to update state based on result
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// Retired while dialing (a Disconnect that ran first would otherwise be
+	// overwritten by the Ready transition below): tear the transport down and
+	// publish nothing for the removed upstream.
+	if mc.retired.Load() {
+		if mc.coreClient != nil {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.StateManager.Reset()
+		return ErrClientRetired
+	}
 
 	if connectErr != nil {
 		// A rate-limited upstream (429, or 503 with a hint) told us when to come
