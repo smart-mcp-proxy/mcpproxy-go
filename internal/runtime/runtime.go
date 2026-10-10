@@ -235,6 +235,8 @@ type Runtime struct {
 	lastCaptureAt map[string]time.Time
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
+	// reviewAfterRecords is a test hook run after GetServerReview lists records.
+	reviewAfterRecords func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when

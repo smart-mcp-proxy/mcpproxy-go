@@ -223,26 +223,44 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		Quarantined: server.Quarantined, TrustMode: string(server.EffectiveTrustMode()),
 		SourceRegistryID: server.SourceRegistryID, SourceRegistryProvenance: server.SourceRegistryProvenance,
 	}
-	records, err := r.storageManager.ListToolApprovals(serverName)
-	if err != nil {
-		return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
+	// Stored records and the live capture state are published by different
+	// writers. Read the capture stamp, then the records, then the stamp again;
+	// a changed stamp means a capture landed in between, so read again.
+	var records []*storage.ToolApprovalRecord
+	for attempt := 0; ; attempt++ {
+		r.lastGoodToolsMu.RLock()
+		stampBefore, hadStamp := r.lastCaptureAt[serverName]
+		r.lastGoodToolsMu.RUnlock()
+		var err error
+		records, err = r.storageManager.ListToolApprovals(serverName)
+		if err != nil {
+			return nil, fmt.Errorf("list tool reviews for %q: %w", serverName, err)
+		}
+		if hook := r.reviewAfterRecords; hook != nil {
+			hook()
+		}
+		r.lastGoodToolsMu.RLock()
+		stampAfter, hasStamp := r.lastCaptureAt[serverName]
+		if (hadStamp == hasStamp && stampBefore.Equal(stampAfter)) || attempt >= 4 {
+			if hasStamp {
+				at := stampAfter
+				reviewServer.LastCaptureAt = &at
+			}
+			liveNames := make(map[string]struct{}, len(r.lastGoodTools[serverName]))
+			for _, t := range r.lastGoodTools[serverName] {
+				liveNames[config.RawToolName(t)] = struct{}{}
+			}
+			r.lastGoodToolsMu.RUnlock()
+			for _, rec := range records {
+				if _, ok := liveNames[rec.ToolName]; ok {
+					reviewServer.LiveToolCount++
+				}
+			}
+			break
+		}
+		r.lastGoodToolsMu.RUnlock()
 	}
 	reviewServer.DefinitionsCaptured = len(records) > 0
-	r.lastGoodToolsMu.RLock()
-	if at, ok := r.lastCaptureAt[serverName]; ok {
-		at := at
-		reviewServer.LastCaptureAt = &at
-	}
-	liveNames := make(map[string]struct{}, len(r.lastGoodTools[serverName]))
-	for _, t := range r.lastGoodTools[serverName] {
-		liveNames[config.RawToolName(t)] = struct{}{}
-	}
-	r.lastGoodToolsMu.RUnlock()
-	for _, rec := range records {
-		if _, ok := liveNames[rec.ToolName]; ok {
-			reviewServer.LiveToolCount++
-		}
-	}
 	reviewScan, scanFindings, covered := r.reviewScanFor(ctx, serverName, server.Quarantined, records)
 	reviewServer.Scan = reviewScan
 	result := &ServerReview{Server: reviewServer, Tools: make([]ReviewTool, 0, len(records))}
