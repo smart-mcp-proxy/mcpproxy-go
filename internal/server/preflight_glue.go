@@ -271,8 +271,15 @@ func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.
 // dangling binding or anonymous base) — must also admit the server, and its
 // compiled policy must admit the tool. When the legacy resolver names a
 // different profile (the name toolVisibleToSession's policy gate reads), that
-// profile's policy applies too. The non-recording resolver is used: a check is
-// observational and must not rewrite the session's recorded resolution.
+// profile's policy applies too. The non-recording resolver is used, so the
+// check writes no recorded resolution of its own. It is not a pure read: like
+// every request, it re-validates a stored set_profile selection and clears one
+// that is no longer admissible (FR-022). That adds nothing the request has not
+// already done — mcp-go runs the WithToolFilter chain (filterProfileV3Tools,
+// on the indexed and direct servers alike) at tools/call ahead of this
+// handler, and that filter resolves through the recording resolver — and the
+// verdict never depends on it: an inadmissible selection resolves to the
+// fail-closed base view either way.
 //
 // A nil scope means unrestricted, and is returned only when there is no auth
 // context and no profile in effect under either resolver.

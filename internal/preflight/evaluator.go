@@ -258,6 +258,17 @@ func Evaluate(ctx context.Context, ec EvalContext, refs []ToolRef) ([]Result, er
 // evaluateOne walks the FR-004 precedence chain for a single id. The order of
 // the blocks below IS the normative chain — do not reorder without changing the
 // spec.
+// identityRefusal is the verdict the registration identity gate (step 4b)
+// answers for an Unresolved identity: server_initializing while discovery for
+// the live connection is pending, otherwise the one not_found construction.
+func identityRefusal(corpus *visibleCorpus, id, serverName string, identity ToolIdentity) (Result, error) {
+	if !identity.DiscoveryDone {
+		return unavailable(id, ReasonServerInitializing,
+			fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
+	}
+	return corpus.notFoundResult(id)
+}
+
 func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, error) {
 	id := strings.TrimSpace(ref.ID)
 
@@ -328,13 +339,11 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	//     set leaks through the shape. A server the snapshot does not hold,
 	//     or holds not connected, makes no identity claim here and keeps
 	//     the chain that always owned it (connectionVerdict).
+	var identity ToolIdentity
 	if ec.State != nil {
-		if identity := ec.State.ToolIdentity(serverName, toolName); identity.Unresolved() {
-			if !identity.DiscoveryDone {
-				return unavailable(id, ReasonServerInitializing,
-					fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
-			}
-			return corpus.notFoundResult(id)
+		identity = ec.State.ToolIdentity(serverName, toolName)
+		if identity.Unresolved() {
+			return identityRefusal(corpus, id, serverName, identity)
 		}
 	}
 
@@ -371,6 +380,18 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	// server answers for an absent id — so the index or an approval record can
 	// never make a hidden id answer differently from one that does not exist.
 	hiddenFromAgent := profileDecision.Blocked && ec.Tier == TierAgentToken
+	if hiddenFromAgent {
+		// The identity gate above let this id through because the snapshot
+		// LISTS it. An absent id under the same identity would have been
+		// refused there (Sol r1 finding 1): replay that gate with Found
+		// cleared, so authoritative identity data cannot tell a hidden tool
+		// from an unknown one either.
+		absent := identity
+		absent.Found = false
+		if absent.Unresolved() {
+			return identityRefusal(corpus, id, serverName, absent)
+		}
+	}
 	if (indexed == nil && approval == nil) || hiddenFromAgent {
 		res, notReady, cerr := connectionVerdict(ec, id, serverName)
 		if cerr != nil {

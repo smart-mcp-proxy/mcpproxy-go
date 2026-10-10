@@ -489,3 +489,165 @@ func TestPreflightProfilePolicy_DirectCheckHiddenToolNeverShadows(t *testing.T) 
 	require.Equal(t, preflight.StatusReady, without.Status, "control: the permitted canonical owner is ready")
 	assert.Equal(t, without, with, "the selection-hidden display owner must not change the answer")
 }
+
+// Sol r1 finding 1, end to end: when the snapshot holds AUTHORITATIVE
+// identity data for the server (connected, discovery stamped, the tool
+// listed) but the published runtime state is not ready, an absent id exits
+// at the registration identity gate as not_found while a profile-hidden id
+// the snapshot lists used to fall through to the connection verdict
+// (server_unhealthy, server_initializing, oauth_required) — confirming the
+// hidden tool exists. Both surfaces a pinned agent reads (REST and the
+// indexed describe_tool check) must answer the two identically, and must
+// never suggest a hidden tool.
+func TestPreflightProfilePolicy_HiddenEqualsAbsentWithAuthoritativeIdentity(t *testing.T) {
+	f := newPreflightPolicyFixture(t, func(cfg *config.Config) { cfg.RequireMCPAuth = true })
+	key := f.mint("ro-agent", restV3ReadonlyID)
+	allPerms := []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
+	pinned := agentCtx([]string{"*"}, allPerms, restV3ReadonlyID)
+	hidden := []string{"github:create_issue", "github:get_secret_scanning_alert", "github:search_code"}
+	const absentID = "github:no_such_tool"
+
+	norm := func(r describeCheckResult) describeCheckResult { r.ID = ""; r.DidYouMean = nil; return r }
+	assertNoHiddenSuggested := func(t *testing.T, r describeCheckResult) {
+		t.Helper()
+		for _, h := range hidden {
+			assert.NotContains(t, r.DidYouMean, h, "a hidden tool must never be suggested")
+		}
+	}
+
+	for _, state := range []string{"error", "connecting", "disconnected", "pending auth", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			f.rt.Supervisor().StateView().UpdateServer("github", func(s *stateview.ServerStatus) {
+				s.State = state
+				s.Connected = true
+				s.ToolsDiscovered = true
+			})
+			t.Cleanup(func() {
+				f.rt.Supervisor().StateView().UpdateServer("github", func(s *stateview.ServerStatus) { s.State = "ready" })
+			})
+			// The precondition the finding needs: the snapshot lists every
+			// hidden tool and does not list the absent one.
+			for _, id := range hidden {
+				server, tool, _ := strings.Cut(id, ":")
+				require.True(t, f.proxy.resolveExactToolIdentity(server, tool).Found, id)
+			}
+			require.False(t, f.proxy.resolveExactToolIdentity("github", "no_such_tool").Found)
+
+			ids := append([]string{absentID}, hidden...)
+			body := map[string]interface{}{"tools": func() []map[string]string {
+				out := make([]map[string]string, 0, len(ids))
+				for _, id := range ids {
+					out = append(out, map[string]string{"id": id})
+				}
+				return out
+			}()}
+			rec := f.do(http.MethodPost, "/api/v1/preflight", key, body, "")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var env struct {
+				Data struct {
+					Tools []describeCheckResult `json:"tools"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+			rest := map[string]describeCheckResult{}
+			for _, r := range env.Data.Tools {
+				rest[r.ID] = r
+			}
+			mcpRes := checkResultsByID(inBandCheck(t, f.proxy, pinned, ids...))
+
+			for surface, got := range map[string]map[string]describeCheckResult{"rest": rest, "mcp check": mcpRes} {
+				want := got[absentID]
+				require.NotEmpty(t, want.Status, "%s: no result for the absent id", surface)
+				assertNoHiddenSuggested(t, want)
+				for _, id := range hidden {
+					assert.Equal(t, norm(want), norm(got[id]), "%s: %s must answer exactly what an absent id answers", surface, id)
+					assertNoHiddenSuggested(t, got[id])
+				}
+			}
+			assert.Zero(t, f.totalDispatched(), "preflight never dispatches")
+		})
+	}
+}
+
+// Sol r1 finding 2 (rejected as a defect; this test pins the evidence): a
+// stored set_profile selection that is no longer admissible — its profile was
+// deleted, or a policy edit removed it from the base's switchable_to — is
+// cleared by the v3 resolver's per-request re-validation (FR-022). mcp-go runs
+// the server's WithToolFilter chain (filterProfileV3Tools, registered on the
+// indexed AND the direct servers) at tools/call BEFORE the describe_tool
+// handler, and that filter resolves through the RECORDING resolver, so by the
+// time a check runs the same request has already cleared the selection and
+// recorded the effective resolution. The check therefore changes nothing a
+// request does not already change: selection and recorded resolution are the
+// same after the handler as after the filter, and the verdict is the
+// fail-closed base view with zero upstream dispatch.
+func TestPreflightProfilePolicy_CheckAddsNoSessionMutationBeyondTheRequest(t *testing.T) {
+	f := newPreflightPolicyFixture(t, nil)
+	allPerms := []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
+	surfaces := map[string]func(ctx context.Context, ids ...string) map[string]describeCheckResult{
+		"indexed": func(ctx context.Context, ids ...string) map[string]describeCheckResult {
+			return checkResultsByID(inBandCheck(t, f.proxy, ctx, ids...))
+		},
+		"direct": func(ctx context.Context, ids ...string) map[string]describeCheckResult {
+			raw := make([]interface{}, 0, len(ids))
+			for _, id := range ids {
+				raw = append(raw, id)
+			}
+			req := mcp.CallToolRequest{}
+			req.Params.Arguments = map[string]interface{}{"tool_ids": raw, "check": true}
+			result, err := f.proxy.describeToolHandler(describeSurfaceDirect)(ctx, req)
+			require.NoError(t, err)
+			require.False(t, result.IsError, "%v", result.Content)
+			var payload describeCheckPayload
+			require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &payload))
+			return checkResultsByID(payload)
+		},
+	}
+	selections := map[string]string{
+		"deleted profile":                 "no-such-profile",
+		"not in the base's switchable_to": "legacy",
+	}
+	for surface, run := range surfaces {
+		for name, sel := range selections {
+			t.Run(surface+"/"+name, func(t *testing.T) {
+				sid := "sess-" + surface + "-" + strings.ReplaceAll(name, " ", "-")
+				f.proxy.sessionStore.SetSession(sid, "laptop", "1", false, false, nil)
+				f.proxy.sessionStore.SetActiveProfile(sid, sel)
+				ctx := sessionCtx(clientCtx("laptop", restV3ReadonlyID, auth.ProfileModeSwitchable), sid)
+				ctx = auth.WithAuthContext(ctx, func() *auth.AuthContext {
+					ac := auth.AuthContextFromContext(ctx)
+					ac.Permissions = allPerms
+					return ac
+				}())
+
+				// What mcp-go does at tools/call, ahead of the handler.
+				f.proxy.filterProfileV3Tools(ctx, []mcp.Tool{{Name: "describe_tool"}})
+				afterFilter := f.proxy.sessionStore.GetActiveProfile(sid)
+				info := f.proxy.sessionStore.GetSession(sid)
+				require.NotNil(t, info)
+				recProfile, recSource := info.Profile, info.ProfileSource
+				assert.Empty(t, afterFilter, "the request's own tool filter already clears an inadmissible selection")
+				assert.Equal(t, restV3ReadonlyID, recProfile, "and records the base resolution")
+
+				before := f.totalDispatched()
+				got := run(ctx, "github:list_issues", "github:create_issue", "github:no_such_tool")
+
+				assert.Equal(t, afterFilter, f.proxy.sessionStore.GetActiveProfile(sid), "the check adds no selection change")
+				info = f.proxy.sessionStore.GetSession(sid)
+				assert.Equal(t, recProfile, info.Profile, "the check adds no recorded-resolution change")
+				assert.Equal(t, recSource, info.ProfileSource)
+
+				// Fail-closed effective view: the base, never the stale selection.
+				if surface == "indexed" {
+					// (This fixture builds no direct catalog, so the direct
+					// surface answers every id not_found; the hidden-vs-absent
+					// equality below is what it pins.)
+					assert.Equal(t, preflight.StatusReady, got["github:list_issues"].Status, "%+v", got["github:list_issues"])
+				}
+				assert.Equal(t, preflight.ReasonNotFound, got["github:create_issue"].Reason, "%+v", got["github:create_issue"])
+				assert.Equal(t, got["github:no_such_tool"].Detail, got["github:create_issue"].Detail)
+				assert.Equal(t, before, f.totalDispatched(), "a check never dispatches")
+			})
+		}
+	}
+}

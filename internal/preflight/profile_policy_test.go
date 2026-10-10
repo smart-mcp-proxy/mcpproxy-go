@@ -150,3 +150,41 @@ func TestEvaluate_ProfileHidden_IndistinguishableFromAbsentInEveryState(t *testi
 		})
 	}
 }
+
+// Sol r1 finding 1: with AUTHORITATIVE identity data (a known, hydrated
+// server whose discovery completed) an absent id exits at the registration
+// identity gate as not_found, while a hidden id the snapshot lists passed that
+// gate. The hidden id must still answer exactly what the absent one does, in
+// every runtime state the snapshot can pair with that identity.
+func TestEvaluate_ProfileHidden_IndistinguishableWithAuthoritativeIdentity(t *testing.T) {
+	states := []ServerRuntimeState{RuntimeStateReady, RuntimeStateConnecting, RuntimeStateDiscovering, RuntimeStateAuthenticating, RuntimeStateDisconnected, RuntimeStatePendingAuth, RuntimeStateError}
+	identities := map[string]ToolIdentity{
+		"hydrated, discovery done":    {Known: true, Hydrated: true, DiscoveryDone: true},
+		"hydrated, discovery pending": {Known: true, Hydrated: true},
+		"known, not hydrated":         {Known: true, DiscoveryDone: true},
+		"no claim":                    {},
+	}
+	for idName, base := range identities {
+		for _, state := range states {
+			t.Run(idName+"/"+string(state), func(t *testing.T) {
+				listed, unlisted := base, base
+				listed.Found = base.Known
+				unlisted.Found = false
+
+				seed := func(w *world, identity ToolIdentity) *world {
+					w.tier = TierAgentToken
+					w.state.identities = map[string]ToolIdentity{id: identity}
+					return w
+				}
+				absent := seed(healthyWorld().runtime(state).unindex().forget(), unlisted)
+				want := evalOne(t, absent, ToolRef{ID: id})
+
+				hiddenIndexed := seed(healthyWorld().runtime(state).blockByProfile(), listed)
+				hiddenRecordOnly := seed(healthyWorld().runtime(state).unindex().blockByProfile(), listed)
+
+				assert.Equal(t, want, evalOne(t, hiddenIndexed, ToolRef{ID: id}), "indexed hidden tool")
+				assert.Equal(t, want, evalOne(t, hiddenRecordOnly, ToolRef{ID: id}), "approval-record-only hidden tool")
+			})
+		}
+	}
+}
