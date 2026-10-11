@@ -220,7 +220,9 @@ final class ReviewPresentationTests: XCTestCase {
         let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h1, allowed: ["read"], everything: false))
         // A review load (H2: drop changed, a new tool) lands after the click.
         let h2 = try hashedReview(server: "A", tools: [("read", "h1-read"), ("drop", "h2-drop"), ("late", "h2-late")])
-        _ = h2
+        let late = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h2, allowed: ["read"], everything: false))
+        XCTAssertNotEqual(late, decision, "a decision built from the late review differs (zcode r1 #4)")
+        XCTAssertEqual(late.expected, ["read": "h1-read", "drop": "h2-drop", "late": "h2-late"])
         XCTAssertEqual(decision, ReviewPresentation.ApprovalDecision(server: "A", block: ["drop"], expected: ["read": "h1-read", "drop": "h1-drop"], blind: false),
                        "the request carries H1's hashes and block list, so the core answers 409 when definitions changed")
 
@@ -298,7 +300,7 @@ final class ReviewPresentationTests: XCTestCase {
         guard let toggle = source.range(of: "Toggle(\"Allow this tool\"") else { return XCTFail("no allow toggle") }
         let after = source[toggle.upperBound...]
         guard let style = after.range(of: ".toggleStyle(.checkbox)") else { return XCTFail("no checkbox style") }
-        XCTAssertTrue(after[style.upperBound...].prefix(400).contains(".disabled(attempts.isApproving)"),
+        XCTAssertTrue(after[style.upperBound...].prefix(400).contains(".disabled(attempts.isLocked)"),
                       "the allow toggles must be disabled while an approval is in flight (UX-02 r6)")
     }
 
@@ -353,11 +355,51 @@ final class ReviewPresentationTests: XCTestCase {
         let source = try sheetSource()
         let button = try XCTUnwrap(source.range(of: "Button(\"Approve\") {"))
         let after = source[button.upperBound...].prefix(700)
-        let begin = try XCTUnwrap(after.range(of: "guard toolApprovals.begin(tool.name) else { return }"))
+        let begin = try XCTUnwrap(after.range(of: "guard !attempts.isLocked, toolApprovals.begin(tool.name) else { return }"))
         let task = try XCTUnwrap(after.range(of: "Task {"))
         XCTAssertLessThan(begin.lowerBound, task.lowerBound)
-        XCTAssertTrue(after.contains(".disabled(toolApprovals.isApproving(tool.name))"))
+        XCTAssertTrue(after.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
         let approveTool = try body(of: "private func approveTool(_ name: String, expected: [String: String]?) async {", in: source)
         XCTAssertTrue(approveTool.contains("defer { toolApprovals.finish(name) }"))
+    }
+
+    /// After a "dangerous" answer the sheet stays locked until the force
+    /// confirmation is answered, so a click before the alert presents cannot
+    /// consume the candidate and leave "Force Approve" a dead button (zcode r1 #3).
+    func testPendingForceConfirmationLocksTheSheetUntilAnswered() throws {
+        let decision = ReviewPresentation.ApprovalDecision(server: "A", block: ["w"], expected: ["r": "h"], blind: false)
+        var attempts = ReviewPresentation.ApprovalAttempts()
+        XCTAssertFalse(attempts.isLocked)
+        XCTAssertTrue(attempts.begin(decision))
+        XCTAssertTrue(attempts.isLocked)
+        attempts.finish(decision, dangerous: true)
+        XCTAssertFalse(attempts.isApproving)
+        XCTAssertTrue(attempts.isLocked, "the force confirmation is still open")
+        attempts.dropForceCandidate()
+        XCTAssertFalse(attempts.isLocked, "Cancel unlocks the sheet")
+        XCTAssertNil(attempts.takeForceCandidate())
+
+        XCTAssertTrue(attempts.begin(decision))
+        attempts.finish(decision, dangerous: true)
+        XCTAssertEqual(attempts.takeForceCandidate(), decision)
+        XCTAssertFalse(attempts.isLocked)
+    }
+
+    /// Controls lock on the pending force confirmation too, per-tool controls
+    /// lock during a server approval, and Cancel drops the candidate (zcode r1 #2, #3).
+    func testSheetControlsHonourTheApprovalLock() throws {
+        let source = try sheetSource()
+        XCTAssertFalse(source.contains(".disabled(attempts.isApproving)"), "controls must use isLocked, which covers the pending force confirmation")
+        XCTAssertTrue(source.contains("guard !attempts.isLocked, let decision = ReviewPresentation.approvalDecision("))
+        XCTAssertTrue(source.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
+        XCTAssertTrue(source.contains(#"Button("Cancel", role: .cancel) { attempts.dropForceCandidate() }; Button("Force Approve""#))
+    }
+
+    /// The stale notice is set before the reload, so a newer attempt started
+    /// while the reload is suspended is not shown "out of date" (zcode r1 #1).
+    func testStaleNoticeIsSetBeforeTheReload() throws {
+        let source = try sheetSource()
+        XCTAssertFalse(source.contains("await load(); staleNotice = stale"))
+        XCTAssertEqual(source.components(separatedBy: "staleNotice = stale; await load()").count - 1, 2)
     }
 }

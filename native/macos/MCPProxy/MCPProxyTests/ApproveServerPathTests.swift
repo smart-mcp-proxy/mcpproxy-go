@@ -70,7 +70,7 @@ final class ApproveServerPathTests: XCTestCase {
 
     /// One hashless tool on a newer core is left out of the binding, not
     /// allowed to unbind the whole approval (the core then refuses it as not in
-    /// the review unless it is blocked) — same as the CLI and the Web screen.
+    /// the review unless it is blocked), per the backend contract in #1566.
     func testHashlessToolIsLeftOutOfAnOtherwiseBoundApproval() throws {
         let tools = [try reviewTool("a", hash: "h1"), try reviewTool("b", hash: nil)]
         XCTAssertEqual(ReviewPresentation.expectedHashes(tools), ["a": "h1"])
@@ -136,12 +136,12 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertTrue(source.contains("guard generation == loadGeneration, value.server.name == server else { return }"))
         XCTAssertTrue(source.contains("decision.server == serverName"))
         XCTAssertTrue(source.contains("ReviewPresentation.staleReviewMessage(error)"))
-        XCTAssertTrue(source.contains("await load(); staleNotice = stale"))
+        XCTAssertTrue(source.contains("staleNotice = stale; await load()"))
         // UX-02 cross-review r5: approvals are serialized and the force
         // confirmation re-sends the attempt that failed.
         XCTAssertTrue(source.contains("guard attempts.begin(decision) else { return }"))
         XCTAssertTrue(source.contains("attempts.takeForceCandidate()"))
-        XCTAssertTrue(source.contains(".disabled(attempts.isApproving)"))
+        XCTAssertTrue(source.contains(".disabled(attempts.isLocked)"))
         XCTAssertFalse(source.contains("if let decision = pendingDecision { Task { await approve(decision, force: true) } }"))
     }
 
