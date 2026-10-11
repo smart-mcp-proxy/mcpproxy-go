@@ -638,7 +638,10 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	if tx.disk != nil && tx.disk.path != "" {
 		path = tx.disk.path
 	}
-	diskNeeded := path != "" && !tx.skipDisk && (configChanged || tx.forceDisk || tx.disk != nil)
+	// A path change writes the committed config at the new path (review
+	// round 4): publishing a path whose file is missing, or holds other
+	// content, would make the next reload fail or import that content.
+	diskNeeded := path != "" && !tx.skipDisk && (configChanged || pathChanged || tx.forceDisk || tx.disk != nil)
 
 	// Skip rule (FR-001a): nothing to do unless something changed or was forced.
 	if !configChanged && !storageNeeded && !diskNeeded && !tx.bootstrap && !pathChanged && len(tx.hooks) == 0 {
@@ -669,6 +672,19 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	}
 	if batch != nil {
 		for _, n := range batch.Removes {
+			lockSet[n] = true
+		}
+		// Every row step 6 writes takes its server's lock (review round 4,
+		// #1571): a projection repair of a server the commit did not change
+		// still rewrites the stored trust/quarantine policy discovery reads
+		// under that lock, and a quarantine repair purges its index.
+		for _, s := range batch.Saves {
+			lockSet[s.Config.Name] = true
+		}
+		for _, n := range batch.Replaces {
+			lockSet[n] = true
+		}
+		for _, n := range batch.OAuthClears {
 			lockSet[n] = true
 		}
 		// FR-008c: a global approval-policy change takes every server's lock.

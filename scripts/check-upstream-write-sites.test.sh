@@ -5,7 +5,7 @@
 # Builds temp trees: a planted direct SaveUpstreamServer in internal/server
 # (must exit 1), each AsyncManager queue writer (SaveServerAsync,
 # DeleteServerAsync, EnableServerAsync, QuarantineServerAsync; must exit 1), the same call in a test file, in internal/storage and in
-# internal/runtime/commit.go (must exit 0), and a whole-line comment (must
+# internal/runtime/commit.go (must exit 0), the AddUpstream alias (exit 1), and a whole-line comment (must
 # exit 0). Then runs the real script on the repository (must exit 0).
 set -uo pipefail
 
@@ -52,8 +52,16 @@ for m in 'SaveServerAsync(sc)' 'DeleteServerAsync(name)' 'EnableServerAsync(name
   expect "planted ${m%%(*} in internal/server" 1 "$r"
 done
 
+# Exported aliases that write a row (internal/storage/manager.go): AddUpstream
+# calls SaveUpstreamServer (review round 4).
+alias="$(mkroot planted-alias)"
+echo '	_, _ = s.runtime.StorageManager().AddUpstream(sc)' > "$alias/internal/server/a.go"
+expect "planted AddUpstream in internal/server" 1 "$alias"
+
 allowed="$(mkroot allowed)"
 echo '	_ = m.SaveUpstreamServer(sc)' > "$allowed/internal/storage/manager.go"
+echo '	_, err := m.AddUpstream(sc)' > "$allowed/internal/storage/alias.go"
+echo '	_, _ = st.AddUpstream(sc)' > "$allowed/internal/server/c_test.go"
 echo '	err := r.storageManager.ApplyServerCommit(batch)' > "$allowed/internal/runtime/commit.go"
 echo '	require.NoError(t, st.SaveUpstreamServer(sc))' > "$allowed/internal/server/a_test.go"
 echo '	// a direct SaveUpstreamServer( here would be a second source' > "$allowed/internal/server/b.go"

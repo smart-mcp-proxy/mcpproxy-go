@@ -8,7 +8,8 @@
 #
 # Fails when a non-test Go file outside internal/storage/ and
 # internal/runtime/commit*.go calls one of the row-writing storage methods,
-# including the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
+# including the exported alias AddUpstream (it calls SaveUpstreamServer) and
+# the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
 # EnableServerAsync, QuarantineServerAsync), which write rows from a worker.
 # Whole-line comments are ignored.
 #
@@ -19,7 +20,7 @@ set -uo pipefail
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT" || { echo "cannot enter $ROOT" >&2; exit 2; }
 
-methods='SaveUpstreamServer|CreateUpstreamServer|UpdateUpstream|DeleteUpstreamServer|RemoveUpstream|EnableUpstreamServer|QuarantineUpstreamServer|SaveUpstreamKeepingQuarantine|ApplyServerCommit|SaveUpstream|CreateUpstream|DeleteUpstream|EnableServerSync|QuarantineServerSync|SaveServerAsync|DeleteServerAsync|EnableServerAsync|QuarantineServerAsync'
+methods='SaveUpstreamServer|AddUpstream|CreateUpstreamServer|UpdateUpstream|DeleteUpstreamServer|RemoveUpstream|EnableUpstreamServer|QuarantineUpstreamServer|SaveUpstreamKeepingQuarantine|ApplyServerCommit|SaveUpstream|CreateUpstream|DeleteUpstream|EnableServerSync|QuarantineServerSync|SaveServerAsync|DeleteServerAsync|EnableServerAsync|QuarantineServerAsync'
 
 dirs=()
 for d in internal cmd; do
