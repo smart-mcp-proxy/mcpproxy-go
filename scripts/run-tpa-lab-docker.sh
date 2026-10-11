@@ -152,7 +152,7 @@ done
 log "running TPA scan on tpa-lab-attacker (expect verdict: dangerous)"
 scan_ok=0
 for attempt in 1 2 3; do
-  if "$PROJECT_DIR/mcpproxy" security scan tpa-lab-attacker --config "$CONFIG"; then
+  if "$PROJECT_DIR/mcpproxy" security scan tpa-lab-attacker --config "$CONFIG" 2>&1 | tee "$LOG_DIR/scan.txt"; then
     scan_ok=1
     break
   fi
@@ -163,6 +163,15 @@ done
 
 log "scan report for tpa-lab-attacker"
 "$PROJECT_DIR/mcpproxy" security report tpa-lab-attacker --config "$CONFIG"
+
+# A completed scan is not a passing baseline: the full attack catalog must
+# scan dangerous, and the verdict must come from THIS scan's job (Sol r7 P2).
+"$PROJECT_DIR/mcpproxy" security report tpa-lab-attacker -o json --config "$CONFIG" >"$LOG_DIR/report.json" 2>/dev/null || true
+if ! baseline_verdict="$(baseline_scan_verdict_ok "$LOG_DIR/scan.txt" "$LOG_DIR/report.json")"; then
+  echo "ERROR: baseline scan verdict is '$baseline_verdict', expected dangerous for job $(scan_job_id "$LOG_DIR/scan.txt") — report: $LOG_DIR/report.json, daemon log: $LOG_DIR/mcpproxy.log" >&2
+  exit 1
+fi
+log "baseline verdict: $baseline_verdict (job $(scan_job_id "$LOG_DIR/scan.txt"))"
 
 log "verify the upstreams really are sandboxed containers:"
 docker ps --filter "name=mcpproxy-tpa-lab" --format 'table {{.Names}}\t{{.Image}}\t{{.Networks}}' || true

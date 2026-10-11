@@ -143,38 +143,12 @@ scan_and_verdict() {
   lab_config_require "$cfg" 2>"$out" || { echo "scan-failed"; return; }
   "$BINARY" security scan tpa-lab-attacker --config "$cfg" >"$out" 2>&1
   rc=$?
-  job="$(sed -nE 's/.*[(, ]job (scan-[^) ]+)\).*/\1/p' "$out" | head -1)"
+  job="$(scan_job_id "$out")"
   if [[ $rc -ne 0 || -z "$job" ]]; then
     echo "scan-failed"; return
   fi
   "$BINARY" security report tpa-lab-attacker -o json --config "$cfg" 2>/dev/null >"$out.json"
-  python3 - "$out.json" "$job" <<'PY'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    print("unknown"); raise SystemExit
-data = d.get("data") if isinstance(d, dict) else None
-if not isinstance(data, dict) or data.get("job_id") != sys.argv[2]:
-    print("stale-report"); raise SystemExit
-if data.get("verdict") in ("dangerous", "warnings", "clean"):
-    print(data["verdict"]); raise SystemExit
-found = set()
-def walk(o):
-    if isinstance(o, dict):
-        for k, v in o.items():
-            if isinstance(v, str) and v in ("dangerous", "warnings", "clean") and (
-                "verdict" in k.lower() or "threat" in k.lower() or "status" in k.lower()):
-                found.add(v)
-            walk(v)
-    elif isinstance(o, list):
-        for v in o: walk(v)
-walk(d)
-for want in ("dangerous", "warnings", "clean"):
-    if want in found:
-        print(want); raise SystemExit
-print("unknown")
-PY
+  scan_report_verdict "$out.json" "$job"
 }
 
 approve_all() {
@@ -463,27 +437,63 @@ if want_only EXP-3; then
 fi
 
 # ==================================================================== EXP-4
+# exp4_ingested <out-prefix> — polls (≤30s) the stored approval records for
+# proof that discovery ingested the poisoned list-1 contract
+# (exp4_poison_recorded); echoes yes/no.
+exp4_ingested() {
+  local got="no"
+  for i in $(seq 1 30); do
+    curl -s -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/tools/export" >"$1-export.json" 2>/dev/null
+    curl -s -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/tools/summarize_text/diff" >"$1-diff.json" 2>/dev/null
+    got="$(exp4_poison_recorded "$1-export.json" "$1-diff.json")"
+    [[ "$got" == "yes" ]] && break
+    sleep 1
+  done
+  echo "$got"
+}
+
 if want_only EXP-4; then
   log "EXP-4 (hole B): TOCTOU — poisoned contract at discovery (list #1), clean contract to the scan export (list #2+)"
   log "server runs UNQUARANTINED so discovery's auto-baseline ingests list #1"
-  cfg="$(make_config exp4 toctou 1 "$RUN_DIR/exp4-data" "" noquarantine)" || config_failed EXP-4; CURRENT_CONFIG="$cfg"
-  start_daemon "$cfg" "$RUN_DIR/exp4.log" || { record "EXP-4: INCONCLUSIVE (daemon)"; exit 1; }
-  v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp4-scan.txt")"
-  log "scan verdict: $v (the scan's export call saw the CLEAN contract — list #2+)"
-  stored="$(wait_status summarize_text)"
-  baseline_lines="$(grep -c 'auto-baseline' "$RUN_DIR/exp4.log" || true)"
-  flap_lines="$(grep -c 'changed since approval' "$RUN_DIR/exp4.log" || true)"
-  log "stored tool status: $stored (auto-baseline approvals: $baseline_lines, rug-pull flags: $flap_lines)"
-  if [[ "$v" == "scan-failed" || "$v" == "stale-report" || "$v" == "unknown" ]]; then
-    record "EXP-4 INCONCLUSIVE: scan=$v, stored=$stored"
-  elif [[ "$v" != "dangerous" && "$stored" == "changed" ]]; then
-    hole "EXP-4 PARTIAL: scan export is attacker-controllable (verdict=$v on a poisoned server; poisoned contract WAS auto-baselined) — the flap itself was caught here, but a session-fingerprinting variant would scan clean without flapping"
-    record "EXP-4 PARTIAL-HOLE: scan=$v on poisoned server; poisoned list auto-baselined; flap caught (changed)"
-  elif [[ "$stored" == "changed" ]]; then
-    pass "EXP-4 scan flagged the poisoned discovery contract ($v) and the flap was caught"
-    record "EXP-4 HOLDS: scan=$v, stored=changed"
+  # The fixture answers its FIRST tools/list with the poisoned contract. When
+  # that list goes to a caller that does not ingest contracts (a REST tool
+  # listing, the token-savings count), discovery baselines the clean one and
+  # the experiment proves nothing. Verify the precondition from the stored
+  # records before scanning, and retry with a fresh process and data dir
+  # (bounded) instead of reporting an unverified result (Sol r7 P2).
+  ingested="no"; attempt=0; EXP4_ATTEMPTS="${EXP4_ATTEMPTS:-4}"
+  while [[ "$ingested" != "yes" && $attempt -lt $EXP4_ATTEMPTS ]]; do
+    attempt=$((attempt + 1))
+    sfx=""; [[ $attempt -gt 1 ]] && sfx="-retry$attempt"
+    cfg="$(make_config "exp4$sfx" toctou 1 "$RUN_DIR/exp4$sfx-data" "" noquarantine)" || config_failed EXP-4; CURRENT_CONFIG="$cfg"
+    EXP4_LOG="$RUN_DIR/exp4$sfx.log"
+    start_daemon "$cfg" "$EXP4_LOG" || { record "EXP-4: INCONCLUSIVE (daemon)"; exit 1; }
+    ingested="$(exp4_ingested "$RUN_DIR/exp4$sfx-precondition")"
+    log "attempt $attempt: poisoned list-1 contract ingested by discovery: $ingested"
+    [[ "$ingested" == "yes" ]] || stop_daemon
+  done
+  if [[ "$ingested" != "yes" ]]; then
+    record "EXP-4 INCONCLUSIVE: precondition not met in $attempt attempts (discovery never ingested the poisoned list-1 contract)"
   else
-    record "EXP-4 INCONCLUSIVE: scan=$v, stored=$stored"
+    v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp4-scan.txt")"
+    log "scan verdict: $v (the scan's export call saw the CLEAN contract — list #2+)"
+    stored="$(wait_status summarize_text)"
+    baseline_lines="$(grep -c 'auto-baseline' "$EXP4_LOG" || true)"
+    flap_lines="$(grep -c 'changed since approval' "$EXP4_LOG" || true)"
+    log "stored tool status: $stored (auto-baseline approvals: $baseline_lines, rug-pull flags: $flap_lines)"
+    case "$(exp4_verdict "$ingested" "$v" "$stored")" in
+      HOLDS)
+        pass "EXP-4 scan flagged the poisoned discovery contract ($v)"
+        record "EXP-4 HOLDS: ingested=yes (attempt $attempt), scan=$v, stored=$stored" ;;
+      PARTIAL-HOLE)
+        hole "EXP-4 PARTIAL: scan export is attacker-controllable (verdict=$v on a poisoned server; poisoned contract WAS ingested) — the flap was caught, but a session-fingerprinting variant would scan clean without flapping"
+        record "EXP-4 PARTIAL-HOLE: scan=$v on poisoned server; poisoned list ingested; flap caught ($stored)" ;;
+      HOLE)
+        hole "EXP-4 scan=$v on a server whose poisoned contract was ingested, and stored=$stored"
+        record "EXP-4 HOLE: scan=$v, stored=$stored (poisoned list ingested)" ;;
+      *)
+        record "EXP-4 INCONCLUSIVE: scan=$v, stored=$stored" ;;
+    esac
   fi
   stop_daemon
 fi

@@ -82,6 +82,113 @@ exp3_verdict() {
   esac
 }
 
+# scan_job_id <scan-output-file> — the job id "mcpproxy security scan"
+# printed for the scan it ran ("... (job scan-…)"), or empty.
+scan_job_id() {
+  sed -nE 's/.*[(, ]job (scan-[^) ]+)\).*/\1/p' "$1" | head -1
+}
+
+# scan_report_verdict <report.json> <job_id> — the verdict of the stored
+# "security report -o json" document, bound to the scan job that produced
+# it: dangerous|warnings|clean, "stale-report" when the report belongs to
+# another job (or no job id is known), "unknown" when it is unreadable or
+# carries no recognised verdict.
+scan_report_verdict() {
+  python3 - "$1" "${2:-}" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("unknown"); raise SystemExit
+data = d.get("data") if isinstance(d, dict) else None
+if not sys.argv[2] or not isinstance(data, dict) or data.get("job_id") != sys.argv[2]:
+    print("stale-report"); raise SystemExit
+if data.get("verdict") in ("dangerous", "warnings", "clean"):
+    print(data["verdict"]); raise SystemExit
+found = set()
+def walk(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if isinstance(v, str) and v in ("dangerous", "warnings", "clean") and (
+                "verdict" in k.lower() or "threat" in k.lower() or "status" in k.lower()):
+                found.add(v)
+            walk(v)
+    elif isinstance(o, list):
+        for v in o: walk(v)
+walk(data)
+for want in ("dangerous", "warnings", "clean"):
+    if want in found:
+        print(want); raise SystemExit
+print("unknown")
+PY
+}
+
+# baseline_scan_verdict_ok <scan-output-file> <report.json> — 0 only when
+# the baseline runner's scan produced a job id and that job's stored report
+# says "dangerous" (the full attack catalog must never scan clean,
+# warnings, unknown or from another job's report — Sol r7 P2). Prints the
+# verdict it found.
+baseline_scan_verdict_ok() {
+  local job v
+  job="$(scan_job_id "$1")"
+  v="$(scan_report_verdict "$2" "$job")"
+  echo "$v"
+  [[ "$v" == "dangerous" ]]
+}
+
+# EXP4_POISON_MARKER is a phrase only the toctou fixture's POISONED
+# summarize_text contract carries (tests/tpa-attack-lab/profiles.go).
+EXP4_POISON_MARKER="ignore all previous instructions"
+
+# exp4_poison_recorded <tools-export.json> <summarize_text-diff.json> —
+# "yes" when the proxy's stored approval records prove discovery ingested
+# the poisoned summarize_text contract: the stored export's current
+# description carries the marker (still baselined), or the change diff's
+# PREVIOUS description does (baselined, then the flap to clean was caught).
+# Anything else — the first tools/list went to a caller that does not ingest
+# contracts, so discovery baselined the clean one — is "no" (Sol r7 P2).
+exp4_poison_recorded() {
+  python3 - "$1" "$2" "$EXP4_POISON_MARKER" <<'PY'
+import json, sys
+export_path, diff_path, marker = sys.argv[1], sys.argv[2], sys.argv[3].lower()
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f).get("data") or {}
+    except Exception:
+        return {}
+export = load(export_path)
+for tool in export.get("tools") or []:
+    if tool.get("tool_name") == "summarize_text" and marker in (tool.get("description") or "").lower():
+        print("yes"); sys.exit()
+diff = load(diff_path)
+if diff.get("tool_name") == "summarize_text" and marker in (diff.get("previous_description") or "").lower():
+    print("yes"); sys.exit()
+print("no")
+PY
+}
+
+# exp4_verdict <poison_ingested> <scan_verdict> <stored_status> — EXP-4
+# (TOCTOU: poisoned contract to discovery, clean contract to the scan's own
+# tools/list). The experiment only means something when discovery verifiably
+# ingested the poisoned contract (exp4_poison_recorded = yes); otherwise it
+# is INCONCLUSIVE, never a pass (Sol r7 P2). With the precondition met, a
+# dangerous scan HOLDS (RT-06: the scan analyses what was ingested); a
+# non-dangerous scan is a HOLE, PARTIAL-HOLE when the flap itself was held
+# (changed). A failed, stale or unreadable scan is INCONCLUSIVE.
+exp4_verdict() {
+  local ingested="$1" scan="$2" stored="$3"
+  if [[ "$ingested" != "yes" ]]; then
+    echo INCONCLUSIVE; return
+  fi
+  case "$scan" in
+    dangerous) echo HOLDS ;;
+    clean | warnings)
+      if is_pulled "$stored"; then echo PARTIAL-HOLE; else echo HOLE; fi ;;
+    *) echo INCONCLUSIVE ;;
+  esac
+}
+
 # lab_config_data_dir <config.json> <base_dir> — prints the config's data_dir
 # as an absolute path, resolving a relative one against base_dir (the
 # directory the daemon and CLI are run from).
