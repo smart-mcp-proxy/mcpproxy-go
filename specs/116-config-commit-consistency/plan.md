@@ -1,0 +1,234 @@
+# Implementation Plan: Config Commit Consistency, Atomic Removal and Upstream Retirement
+
+**Branch**: `116-config-commit-consistency` | **Date**: 2026-10-11 | **Spec**: [spec.md](spec.md)
+**Input**: issues #1558, #1559, #1560, #1562, #1563, #1564, plus the new findings B1 and B2 ([research.md](research.md) §2)
+
+## Summary
+
+One primitive, `Runtime.Commit`, serializes every change to the server set or
+to a server's fields. It reads the live config inside `configCommitMu`, mutates
+a copy, and runs one pipeline: gate, prepare generations, disk, one bbolt
+transaction (with the purge on removal), advance the manager (retire stale
+instances), publish. The live config becomes the only source. Storage is a
+projection written in the same commit, and `SaveConfiguration` no longer
+rebuilds anything from storage, so there is nothing to resurrect from. Each
+server carries a generation that changes when its entry changes, and an
+incarnation that changes only on remove followed by create. Asynchronous
+workers and the supervisor act through manager methods that check the
+generation inside the manager's own registration lock. Approval writers check
+the incarnation under the server's approval lock against the storage row. Each
+client instance owns a dial gate that the commit retires before it publishes,
+so a retired instance can start no process launch, dial or connection write,
+OAuth requests and `net/http` retries included.
+
+The work ships as **four independently mergeable PRs from `main`**, in order
+(§PR split). PR2 and PR3 depend only on PR1. PR4 depends on PR3.
+
+## Technical Context
+
+**Language/Version**: Go 1.26 (backend). The Web UI changes only to send `expected_incarnation` (PR2).
+**Primary Dependencies**: existing only: bbolt, bleve, zap, mark3labs/mcp-go v1.0.0, `net/http`. **No new dependencies.**
+**Storage**: bbolt `config.db`. Additive fields `UpstreamRecord.Generation` and `.Incarnation`, meta key `config_commit_generation`. No migration.
+**Testing**: `go test -race` with deterministic hook-gated tests (test seams in §Test seams). They are run at `-count=20` and at `GOMAXPROCS=1` and `4`. `./scripts/test-api-e2e.sh`. The CI unit-tests `-skip` lane with `-tags server`. Live verification on the qa070 harness ([quickstart.md](quickstart.md)).
+**Target Platform**: both editions. The server edition shares the runtime paths unchanged. Linux, macOS and Windows: the dial gate is pure Go, and stdio admission wraps `cmd.Start` on every OS, including the Windows Job Object path.
+**Performance Goals**: SC-004 (commit p99 < 50 ms without index work, removal < 500 ms with a 320-tool purge, retirement adds < 100 ms).
+**Constraints**: no `native/` changes. Both lint passes stay clean. The #1570/#1571/#937/#1061 test assertions stay unchanged.
+
+## Constitution Check
+
+| Principle | Status | Note |
+|---|---|---|
+| I. Performance at scale | ✅ | The commit path is rare. The request path gains one `RLock` per connection `Write` on gated conns, which is uncontended outside `Retire`. A benchmark in PR4 (T4xx) |
+| II. Actor-based concurrency | ⚠️ justified | Adds no new long-held lock. It reuses `configCommitMu` and adds a per-instance `RWMutex` barrier in `dialgate`. See Complexity Tracking |
+| III. Configuration-driven | ✅ | No new config keys. The config file stays the source of truth at boot |
+| IV. Security by default | ✅ | Closes the TPA purge bypass (B1), inheritance of trust and credentials on re-add (#1562), and dials after retirement (#1564). Fail-closed quarantine invariant kept |
+| V. TDD | ✅ | Each task group starts with failing hook-gated tests ([tasks.md](tasks.md)) |
+| VI. Documentation hygiene | ✅ | `docs/architecture.md` (commit pipeline, lock order), `docs/api/rest-api.md` + `oas/swagger.yaml` (PR2 fields), a CLAUDE.md Recent Changes line per PR |
+| Core + tray split | ✅ | The tray is untouched. It reads the same REST |
+| Event-driven updates | ✅ | Events are sent after the commit, once per commit |
+| DDD layering | ✅ | Commit logic lives in `internal/runtime`. `internal/server` and `internal/httpapi` become thin adapters |
+| Upstream 3-layer design | ✅ | The gate is created in `managed`, passed to `core`, and used by `transport` and `oauth`. The CLI client gets an always-open gate |
+
+## Project Structure
+
+### Documentation (this feature)
+
+```text
+specs/116-config-commit-consistency/
+├── spec.md
+├── plan.md            # this file
+├── research.md        # code facts, rejected-branch lessons, decisions D1-D11
+├── data-model.md      # types, generations, purge set, gate
+├── quickstart.md      # deterministic test recipes + live harness checks per PR
+├── contracts/
+│   └── surfaces.md    # REST/MCP/CLI error and field deltas
+└── tasks.md           # grouped by PR, TDD order
+```
+
+### Source code (touched, by PR)
+
+```text
+PR1  internal/runtime/commit.go (new), commit_reconcile.go (new; replaces LoadConfiguredServers' storage phase)
+     internal/runtime/configsvc/{service.go,snapshot.go}      # Prepare/Publish, ServerGenerations, SeedVersion
+     internal/runtime/{runtime.go,lifecycle.go,server_sharing.go,config_load_admission_gate.go}
+     internal/storage/{manager.go,bbolt.go,models.go}           # ApplyServerCommit, Generation/Incarnation, meta key
+     internal/config/server_entry_equal.go (new)
+     internal/server/{server.go,config_cow.go,mcp.go,add_registry_source.go,edit_registry_source.go,remove_registry_source.go}
+     internal/httpapi/server.go                                 # PATCH resolution moves into the callback
+     scripts/check-upstream-write-sites.sh (new) + .github/workflows wiring
+PR2  internal/storage/{purge.go (new), manager.go (ClearOAuthState exact match)}
+     internal/runtime/{commit.go (RemoveServer purge), tool_quarantine.go, tool_approval_lock.go}
+     internal/server/{prompt_quarantine.go, server.go, mcp.go}  # removal callers collapse onto Commit
+     internal/security/scanner/service.go                       # incarnation-bound approve + ExpectIncarnation unquarantine
+     internal/httpapi/*approval*  frontend/src/** (send expected_incarnation)  oas/swagger.yaml  docs/api/rest-api.md
+PR3  internal/upstream/manager.go (desired, *At, AdvanceGenerations)
+     internal/upstream/managed/client.go (Generation)
+     internal/runtime/supervisor/{supervisor.go,actor_pool.go}
+     internal/runtime/{commit.go (step 6), lifecycle.go (workers, RestartServer, capture)}
+PR4  internal/upstream/dialgate/ (new)
+     internal/upstream/managed/client.go, internal/upstream/core/{client.go,connection_stdio.go,connection_http.go,connection_launcher.go,connection_oauth.go}
+     internal/transport/http.go, internal/oauth/{config.go,transport_wrapper.go}
+     internal/upstream/manager.go (Retire in AdvanceGenerations; RefreshOAuthToken/StartManualOAuth refuse retired)
+```
+
+## Commit pipeline
+
+Steps 1-7 run inside `configCommitMu`. Steps 5-7 are skipped when nothing
+changed.
+
+| # | Step | Failure behaviour |
+|---|---|---|
+| 1 | **Build**: `base := configSvc.Current()`, `next := deep clone`, run `fn(tx)` | `fn` error → abort, nothing written |
+| 2 | **Gate**: admission gate on `next` against the stored view. Force `Quarantined=true` where storage keeps a quarantine without an explicit decision. Validate (`ValidateDetailed`, trust modes, forward headers) | validation error → abort |
+| 3 | **Prepare**: `configSvc.Prepare(next)` runs the pre-publish hook and computes `G`, generations and incarnations. Compute `Changes` | — |
+| 4 | **Disk** (when a path exists): pending-aware write plus the self-write marker | abort, nothing else written |
+| 5 | **Storage**: approval locks for changed names (sorted), then `ApplyServerCommit` (one bbolt tx: saves, deletes and purges, stamps, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk write of `base`, abort |
+| 6 | **Advance manager** (PR3/PR4): `AdvanceGenerations(changes)` unregisters, retires (PR4) and restamps | cannot fail (in-memory) |
+| 7 | **Publish**: `configSvc.Publish(prepared)` and the legacy `r.cfg`/`desiredCfg` swap | `ErrConcurrentPublish` is an invariant bug: logged as an error, the commit returns an error, and the state is still consistent because nothing else can publish |
+| 8 | **After unlock**: spawn workers bound to `(name, g)` for created and reconnecting servers, asynchronous `Disconnect` of retired instances, events, telemetry, activity | logged |
+
+Steps 6 and 7 always run in that order, so publication never comes before
+retirement. Before PR3 lands, step 6 is a no-op and the after-unlock workers
+use today's manager methods.
+
+## Lock order
+
+Normative. It extends [research.md](research.md) D9.
+
+```text
+L0 configCommitMu                                   (runtime; outermost; only Commit takes it)
+L1 server approval lock(name)  [sorted when >1]     (runtime.toolApprovalLocks; also guards prompt approvals after PR2)
+L2 storage.Manager.mu → bbolt tx                    (leaf)
+L1' index (bleve) writes                            (taken under L1 in step 5; leaf w.r.t. L0-L2)
+L3 upstream.Manager.captureMu (W in commit, R in capture) → L4 Manager.mu
+L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
+L6 configsvc.updateMu (pre-publish hook + observers run here)
+L7 Runtime.mu                                        (leaf: field swaps only)
+```
+
+**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5; L0→L6; L0→L7;
+L3(R)→L1(one)→L2 (capture path, unchanged); L1(one)→L2 / L1' / L4(R) (discovery, approvals).
+
+**Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):
+1. Calling `Commit` (directly or through `SaveConfiguration`, `ApplyConfig`, `ReloadConfiguration`, `UpdateConfig`, `QuarantineServer`, `EnableServer`, `RemoveServer`, scanner unquarantine) while holding any of L1-L7. Enforced by `TestLockOrder_*`, which drive each forbidden pairing concurrently with a commit under a 5 s watchdog that dumps all goroutines on timeout. Same-goroutine re-entry is caught by a `commitOwner` goroutine-id check that is compiled only under the `commitlockcheck` test build tag.
+2. Taking L1 while holding L3 for **writing**. The commit releases L1 before step 6.
+3. Taking more than one L1 outside `Commit`.
+4. Taking L0-L5 inside a `configsvc` hook or observer (L6).
+5. Taking any runtime lock from `upstream`, `managed`, `core`, `transport`, `oauth` or `supervisor`. These packages never call back into the runtime synchronously, except through the existing tool-discovery callback, which takes only L1(one).
+
+**`createMu`** is deleted in PR1, because `configCommitMu` subsumes it. **`asyncMgr`**
+storage operations (`EnableUpstreamServer`/`QuarantineUpstreamServer`) are no
+longer used by daemon paths, so the commit writes rows directly in its
+transaction.
+
+**Why there is no cycle.** Within a commit, L1 is released before L3 is taken
+for writing. The only other L3→L1 holder is the capture path (L3 R). It can
+wait for L1 while the commit holds L1, and the commit does not need L3 until
+L1 is released. Discovery holds L1 and may take L4 (read) through `GetClient`,
+but never L3 for writing. `AdvanceGenerations` takes L3 for writing and L4 and
+never L1.
+
+## Test seams
+
+These are package-private hook fields, set only in tests and nil in
+production, following the `toolApprovalReadHook` and
+`quarantinedCaptureBeforePersist` precedent:
+
+| Seam | Where | Used by |
+|---|---|---|
+| `commitHooks.afterBuild`, `.afterPrepare`, `.afterDisk`, `.afterStorage`, `.afterAdvance` | `runtime/commit.go` | T1.x, T2.x |
+| `beforeWorkerAct(name, gen)` | runtime worker closure | T3.1, T3.2 |
+| `supervisor.beforeExecuteAction(name, action)` | supervisor | T3.3 |
+| `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4, T2.5 |
+| `restPatchAfterParse` | httpapi PATCH handler | T1.3 |
+| `dialgate.TestHooks.beforeAdmit` / `afterAdmitBeforeAct` | dialgate | T4.x |
+| `transport` test RoundTripper that fails the first write on a reused connection | `transport` tests | T4.3 |
+
+## PR split
+
+Each PR merges from `main` independently in this order, ships its own tests,
+and leaves `main` green. The scope stated for each PR is binding: a reviewer
+finding outside it is filed against the later PR that owns it and is not fixed
+in place. This is the guard against the rejected branch's scope creep.
+
+### PR1: Commit critical section and generations (#1558, #1560, root of #1559; B1)
+
+- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added.
+- **Not in scope**: the full purge set (PR2), generation checks in workers or the supervisor (PR3), retirement (PR4). Removal still deletes only what each path deletes today, but now synchronously inside the commit for **all** paths (this closes the resurrection window).
+- **Failing-first tests**: T1.1-T1.7 ([quickstart.md](quickstart.md) §T1).
+- **Live verification**: L1 (concurrent apply, add and PATCH; B1 quarantine purge).
+- **Size estimate**: about 1,400 LOC production code and 1,200 LOC tests.
+- **Risk**: the widest diff. Mitigations: the write-site script, unchanged #1570/#1571/#937/#1061 assertions, and `./scripts/test-api-e2e.sh`.
+
+### PR2: Atomic removal, purge and incarnation-bound approvals (#1559 remainder, #1562; B2)
+
+- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
+- **Depends on**: PR1.
+- **Failing-first tests**: T2.1-T2.7.
+- **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
+- **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
+
+### PR3: Generation-bound workers and supervisor (#1563)
+
+- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`, `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 6, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
+- **Depends on**: PR1 (generations). Independent of PR2.
+- **Failing-first tests**: T3.1-T3.5.
+- **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
+- **Size estimate**: about 500 LOC production code and 700 LOC tests.
+
+### PR4: Retirement barrier, OAuth included (#1564)
+
+- **Scope**: the `dialgate` package, the per-instance gate and transport, stdio/Docker/launcher admission, the HTTP/SSE gated transport, the OAuth `WithBaseTransport`, `Retire` called in `AdvanceGenerations` before publish, refresh and manual OAuth refusing retired instances, tool calls and probes on retired instances mapped to unavailable, and the benchmark.
+- **Depends on**: PR3 (`AdvanceGenerations` is the retirement point).
+- **Failing-first tests**: T4.1-T4.7.
+- **Live verification**: L4 (marker-file stdio launcher, an HTTP fixture counting requests and `Authorization` headers, a fake OAuth token endpoint).
+- **Size estimate**: about 600 LOC production code and 800 LOC tests.
+
+### Review protocol per PR
+
+The reviewer is opencode `github-copilot/gpt-6.1-sol` (the default per maintainer
+memory, 2026-10-07). The brief is split into file-named chunks (commit and
+storage, writers, manager and supervisor, transport and OAuth). The cap is 10
+rounds per PR. A round counts only when a genuine finding is fixed and
+re-reviewed. Findings outside the PR's declared scope are recorded against the
+owning later PR (see "Scope is binding" above).
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| A missed writer keeps writing storage directly, and its change is lost because `SaveConfiguration` no longer rebuilds from storage | `check-upstream-write-sites.sh` in CI (FR-009). The PR1 inventory in research §1 is exhaustive for `main` at `ee7834e71`. The script turns any new site into a CI failure |
+| The commit holds `configCommitMu` longer (bbolt, bleve, retire) | SC-004 budgets. The index purge happens only for removal and quarantine. `Retire` is bounded with a 1 s warning |
+| Changing `ApplyConfig` from "save disk, then async reconcile" to "reconcile in the commit" slows `PUT /config` | Measured in PR1. Storage writes take milliseconds, and connects stay asynchronous |
+| Deadlock from a new edge | The lock order above, the `TestLockOrder_*` watchdog tests, and the `commitlockcheck` re-entry check |
+| A per-instance `http.Transport` changes connection reuse | Distinct hosts per upstream in practice. Idle connections close on `Retire` and on `Disconnect` |
+| Generation counter reset (meta lost) | `SeedVersion(max(meta, max row generation))` |
+| Spurious 409 on approval during an unrelated edit | Approvals bind to the incarnation, not the generation (spec Definitions) |
+
+## Complexity Tracking
+
+| Item | Why needed | Simpler alternative rejected because |
+|---|---|---|
+| Keep and widen `configCommitMu` (a mutex, against principle II) | The commit must be synchronous for its callers (REST returns after the commit) and must serialize disk, bbolt and publish | A commit actor goroutine with a request channel gives the same serialization but loses re-entrancy detection, and callers still block on the reply. The mutex already exists and every whole-config path uses it |
+| `dialgate.Gate` `RWMutex` barrier | `Retire` must establish a happens-before edge against every connection write and launch: "nothing starts after `Retire` returns" | Channels or context alone cannot order an in-progress `Write` or `cmd.Start` against retirement. Sol rejected flag and context approaches in r8, r9 and r10 |
+| Generation **and** incarnation | Workers need "this exact config". Approvals need "this exact server identity" | Generation alone gives spurious approval rejections on unrelated edits. Incarnation alone lets stale workers install an old endpoint |
