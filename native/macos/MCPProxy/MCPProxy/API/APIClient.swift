@@ -288,9 +288,14 @@ actor APIClient {
     }
 
     /// Approve a quarantined server through the scan gate. This is the only
-    /// native path that may release quarantine.
-    func securityApproveServer(_ id: String, force: Bool = false, block: [String] = []) async throws {
-        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: ["force": force, "block": block])
+    /// native path that may release quarantine. `expectedHashes` (tool name ->
+    /// the review's `current_hash`) binds the approval to the reviewed
+    /// definitions: the core answers 409 "out of date" and approves nothing when
+    /// one changed or an unreviewed tool appeared. Nil sends an unbound request.
+    func securityApproveServer(_ id: String, force: Bool = false, block: [String] = [], expectedHashes: [String: String]? = nil) async throws {
+        var body: [String: Any] = ["force": force, "block": block]
+        if let expectedHashes { body["expected_hashes"] = expectedHashes }
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: body)
     }
 
     /// Reject a quarantined server after reviewing its captured definitions.
@@ -1120,8 +1125,11 @@ actor APIClient {
     }
 
     /// Approve specific tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
-    func approveSpecificTools(_ id: String, tools: [String]) async throws {
-        let body: [String: Any] = ["tools": tools]
+    /// `expectedHashes` binds the approval to the reviewed definitions, as on
+    /// `securityApproveServer`.
+    func approveSpecificTools(_ id: String, tools: [String], expectedHashes: [String: String]? = nil) async throws {
+        var body: [String: Any] = ["tools": tools]
+        if let expectedHashes { body["expected_hashes"] = expectedHashes }
         try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/approve", body: body)
     }
 
