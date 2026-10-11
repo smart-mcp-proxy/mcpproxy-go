@@ -6091,7 +6091,15 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 	}
 
 	// Remove from storage
-	if err := p.storage.RemoveUpstream(serverID); err != nil {
+	removeStorage := func() error { return p.storage.RemoveUpstream(serverID) }
+	if p.mainServer != nil {
+		// Also drops the server from the runtime config synchronously so an
+		// immediate re-add of the same name is not refused as a duplicate.
+		err = p.mainServer.removeServerStorage(serverID, removeStorage)
+	} else {
+		err = removeStorage()
+	}
+	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to remove upstream: %v", err)), nil
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -114,4 +115,61 @@ func TestServerAddServer_CreateOnly(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, n, "runtime config must hold exactly one entry")
+}
+
+func TestConfigWithoutServer(t *testing.T) {
+	cur := &config.Config{Servers: []*config.ServerConfig{{Name: "a"}, {Name: "b"}}}
+	updated := configWithoutServer(cur, "a")
+	require.Len(t, updated.Servers, 1)
+	assert.Equal(t, "b", updated.Servers[0].Name)
+	assert.Len(t, cur.Servers, 2, "published snapshot untouched")
+	assert.Nil(t, configWithoutServer(cur, "zzz"))
+	assert.Nil(t, configWithoutServer(nil, "a"))
+}
+
+// UX-01 regression: removing a server and immediately adding the same name must
+// succeed even when the runtime config snapshot is not refreshed by the async
+// config sync (no config file path), while a duplicate of a LIVE server is still
+// refused and a duplicate racing the re-add yields exactly one success.
+func TestServerAddServer_DeleteThenReaddSucceeds(t *testing.T) {
+	// No config file path: SaveConfiguration cannot refresh the runtime config
+	// snapshot after a removal, so the removal itself must.
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	srv, err := NewServer(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	ctx := context.Background()
+	add := func() error {
+		return srv.AddServer(ctx, &config.ServerConfig{Name: "cycle", Command: "true", Protocol: "stdio", Quarantined: true})
+	}
+
+	require.NoError(t, add())
+	var exists *ServerExistsError
+	require.ErrorAs(t, add(), &exists, "live duplicate stays refused")
+
+	// The storage-removal door shared by Server.RemoveServer and the MCP remove
+	// operation. (Server.RemoveServer itself is avoided here: a concurrent
+	// config reconcile may prune the not-yet-synced record first and make it
+	// report "not found", which is unrelated to this test.)
+	st := srv.runtime.StorageManager()
+	require.NoError(t, srv.removeServerStorage("cycle", func() error { return st.RemoveUpstream("cycle") }))
+	for _, s := range srv.runtime.Config().Servers {
+		require.NotEqual(t, "cycle", s.Name, "removal must drop the runtime config entry synchronously")
+	}
+
+	var wins int32
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if add() == nil {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), wins, "re-add after delete: exactly one of the racing adds wins")
 }

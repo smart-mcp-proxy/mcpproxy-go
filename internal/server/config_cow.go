@@ -95,3 +95,49 @@ func (s *Server) createServer(sc *config.ServerConfig) error {
 	}
 	return nil
 }
+
+// configWithoutServer returns a NEW *config.Config that omits the named server,
+// or nil when current is nil or does not list it. Copy-on-write for the same
+// reason as configWithAppendedServer.
+func configWithoutServer(current *config.Config, name string) *config.Config {
+	if current == nil {
+		return nil
+	}
+	found := false
+	servers := make([]*config.ServerConfig, 0, len(current.Servers))
+	for _, existing := range current.Servers {
+		if existing != nil && existing.Name == name {
+			found = true
+			continue
+		}
+		servers = append(servers, existing)
+	}
+	if !found {
+		return nil
+	}
+	updated := *current
+	updated.Servers = servers
+	return &updated
+}
+
+// removeServerStorage runs removeStorage (the storage deletion of a server) and,
+// on success, synchronously drops the server from the runtime config snapshot,
+// both under createMu. createServer treats the runtime config as an existence
+// source, so without this a delete followed immediately by an add of the same
+// name would be refused until the async config sync caught up (and forever when
+// no config file path is available). Holding createMu across both steps makes a
+// racing create see the server either fully present or fully gone.
+func (s *Server) removeServerStorage(name string, removeStorage func() error) error {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+
+	if err := removeStorage(); err != nil {
+		return err
+	}
+	if s.runtime != nil {
+		if updated := configWithoutServer(s.runtime.Config(), name); updated != nil {
+			s.runtime.UpdateConfig(updated, "")
+		}
+	}
+	return nil
+}

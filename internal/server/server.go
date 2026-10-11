@@ -2150,7 +2150,9 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	s.runtime.UpstreamManager().RemoveServer(serverName)
 
 	// Remove from storage
-	if err := storageManager.RemoveUpstream(serverName); err != nil {
+	if err := s.removeServerStorage(serverName, func() error {
+		return storageManager.RemoveUpstream(serverName)
+	}); err != nil {
 		return fmt.Errorf("failed to remove server from storage: %w", err)
 	}
 
