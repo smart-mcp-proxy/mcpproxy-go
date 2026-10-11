@@ -83,7 +83,8 @@ internal/toolreview/baseline.go                # NEW leaf pkg: BaselineDecision 
 internal/storage/tool_baseline_decision.go     # NEW: Mark/Get + tx-scoped delete helper
 internal/storage/bbolt.go                      # DeleteServerToolApprovals, PruneToolApprovalsNotIn also drop markers
 internal/storage/manager.go                    # Manager wrappers
-internal/runtime/tool_quarantine.go            # serverHasBaseline OR marker; mark at end of pass (FR-022)
+internal/runtime/tool_quarantine.go            # serverHasBaseline OR marker; inferred mark before the loop, discovery mark after it (FR-022, FR-027a)
+internal/runtime/lifecycle.go                  # FR-027 abort path; sweep StateView batch omits aborted servers (FR-027a)
 internal/runtime/tool_approval_lock.go         # CommitServerApproval (PR-1 form: lock, mark, commit)
 internal/security/scanner/service.go           # ServerApprovalCommitter capability, both commit branches
 internal/server/server.go                      # adapter implements ServerApprovalCommitter
