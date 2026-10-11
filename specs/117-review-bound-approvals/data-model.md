@@ -126,6 +126,8 @@ type toolApprovalServerLock struct {
 }
 ```
 
+`applied` is advanced by every current capture, complete or not (the fence). `published`, `definitions`, the `lastGoodTools` snapshot and the capture stamp are **staged** during the apply and committed together, in the publish step, only after the StateView publication is accepted (no error and `published == true`); a failed or rejected publication discards them (FR-018, spec review r5 #2).
+
 `lockToolApprovals` keeps its signature. A new `lockToolApprovalsForCapture(server, seq) (unlock func(), stale bool)` is added.
 
 `lastGoodTools` (`runtime.go`) becomes `map[string]lastGoodSnapshot{tools []*config.ToolMetadata; capture managed.InventoryCapture}`. It keeps the **complete** capture identity (seq, epoch, client), not only the sequence (design review r1 #4). Re-applying the snapshot validates that identity with `WithCaptureCurrent`. A snapshot whose client was replaced or retired, or whose epoch moved (reconnect), is not re-applied: the approval reindex re-lists instead (`RefreshServerTools`, the existing fallback at `tool_quarantine.go:1990-1995`), and the sweep fallback skips the server, since its connect discovery lists it. The `lastGoodToolsSnapshot` accessor returns both.
@@ -136,5 +138,5 @@ type toolApprovalServerLock struct {
 |---|---|---|
 | pending → approved by server approval | after unquarantine, for every pending record at that time | inside the commit section, only for records present (and, if bound, validated) at commit |
 | pending → approved by baseline pass | when no approved/changed record exists | when no approved/changed record exists AND no marker |
-| any → (deleted) by absent-tool removal | from any pass | only from a pass whose capture is current (`seq >= applied`) |
+| any → (deleted) by absent-tool removal | from any pass, only for names still in the index | only from a pass whose capture is current (`seq >= applied`); the workset also includes every absent `approved && !Disabled` record, so a record left by a partial removal is reconciled by the next eligible capture (FR-032a) |
 | quarantined → unquarantined (security approval) | separate step after the commit | storage flip inside the commit section; config/events after |
