@@ -194,6 +194,9 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
@@ -237,6 +240,9 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
