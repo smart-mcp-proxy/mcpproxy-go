@@ -248,3 +248,10 @@ See spec.md A1-A10 and O1-O4.
 1. **High, a manager.mu/epochMu inversion through retirement and the generation check**: retirement now runs after `manager.mu` is released, still under `captureMu` (W). The epoch-held callback must not look up the manager or supervisor; the generation check moves before `WithCaptureCurrent`. A deadlock test was added (T303).
 2. **High, a failed record write leaves the old binding valid**: FR-018 makes such a capture uncommitted (nothing published) and marks the server review-dirty. Bound approvals return 409 and unbound ones 503 until a full capture succeeds. The restart limitation is stated. Fault-injection test T205c.
 3. **Medium, the observation fence blocks operator reindex**: a `definitions` sequence lets the retained snapshot be reconciled without moving the fences. Test T306(5r).
+
+## Design review round 9 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, a failed capture did not fence older captures or replays**: an incomplete capture now advances `applied` as an observation fence. Dirty records F, and only a fully recorded capture with seq > F clears it. Replays never clear it and are replaced by a re-list while the server is dirty. Because this needs the capture sequence, FR-018 moved to PR-3. The PR-2 interim residual risk is recorded as O5 (pre-existing on main).
+2. **High, legacy approvals bypassed the dirty guard**: the guard is in the common locked approval path, covering `approveToolsLocked`, `ApproveAllTools`, baseline promotion and `CommitServerApproval`, with `ErrReviewNotRecorded` → 503. T306d(d) tests the legacy methods directly.
+3. **Medium, the supervisor republishes retained tools for disabled servers**: PR-3 scope now includes the supervisor change, and T306(9c) runs a reconciliation after the purge.
+4. **Low, T306(5r) is not failing-first on main**: reclassified as a composition regression.

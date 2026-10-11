@@ -115,7 +115,9 @@ internal/runtime/tool_approval_lock.go         # toolApprovalServerLock{mu, appl
 internal/runtime/lifecycle.go                  # applyInventory (locked phase + tail); sweep per-server publish; QuarantineServer purge under lock; lastGoodTools seq
 internal/runtime/runtime.go                    # lastGoodTools type
 internal/runtime/tool_quarantine.go            # checkToolApprovalsLocked (body without lock); reindexFromLastGoodSnapshot uses seq
-internal/runtime/supervisor/*                  # (read only) confirm publish does not call back synchronously
+internal/runtime/supervisor/supervisor.go      # drop retained Tools for disabled/quarantined servers in reconcile + StateView (design review r9 #3)
+internal/toolreview/errors.go                  # ErrReviewNotRecorded (FR-018)
+internal/httpapi/*                             # 503 mapping for ErrReviewNotRecorded
 ```
 
 ## Phasing and merge order
