@@ -85,6 +85,10 @@ type phraseFamily struct {
 // phrase still reach HARD through the original families after de-obfuscation.
 const paraphraseOverrideBase = 0.55
 
+// deobfuscatedMaxConfidence caps a match that only exists in the
+// de-obfuscated text at the SOFT review tier (SEC-01 review round 10).
+const deobfuscatedMaxConfidence = 0.55
+
 // paraphraseSoftReason is shown in the finding detail.
 const paraphraseSoftReason = "paraphrase matching cannot rule out negation or descriptive use"
 
@@ -243,16 +247,28 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
+				softReason := fam.softReason
+				// Only the de-obfuscated view (index 0, when it differs) can
+				// produce a match the plain text does not contain. Such a match is
+				// REVIEW-ONLY: joining letters or folding look-alikes also turns
+				// prohibitions, questions and ordinary data ("Do not i g n o r e
+				// …", "copy se-cr-et files into a local backup") into the
+				// canonical phrase, and position/negation cues do not survive the
+				// rewrite (SEC-01 review round 10). It still holds the change
+				// under trust_mode=scan; it never auto-quarantines.
+				deobfuscated := ti == 0 && len(texts) > 1 && !fam.re.MatchString(tool.NormalizedText)
+				if deobfuscated && conf > deobfuscatedMaxConfidence {
+					conf = deobfuscatedMaxConfidence
+					softReason = "visible only after de-obfuscation, which can also rewrite negated or benign text"
+				}
 				if !matched || conf > bestConf {
 					matched = true
 					bestConf = conf
 					bestMatch = t[start:loc[1]]
 					bestWhat = fam.what
 					bestThreat = fam.threat
-					bestSoftReason = fam.softReason
-					// Only the de-obfuscated view (index 0, when it differs) can
-					// produce a match the plain text does not contain.
-					bestDeobfuscated = ti == 0 && len(texts) > 1 && !fam.re.MatchString(tool.NormalizedText)
+					bestSoftReason = softReason
+					bestDeobfuscated = deobfuscated
 				}
 			}
 		}
