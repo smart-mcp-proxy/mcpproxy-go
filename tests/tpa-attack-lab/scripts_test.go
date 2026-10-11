@@ -290,3 +290,117 @@ func TestLabConfigDataDirResolvesRelativeAgainstBase(t *testing.T) {
 		t.Errorf("absolute data_dir = %q (exit %d)", got, code)
 	}
 }
+
+// TestHeldUnquarantinedVerdictRequiresProvenTrustedGate (Sol r5 P2): EXP-5
+// and EXP-6 records may already read "changed" from the quarantined
+// verification at restart, so a hold counts only when the step that trusted
+// the server succeeded, the server is not quarantined, the trusted gate is
+// proven to have run, and every held tool is out of the index.
+func TestHeldUnquarantinedVerdictRequiresProvenTrustedGate(t *testing.T) {
+	lib := verdictsLib(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"single tool held after a proven unquarantine", []string{"1", "false", "yes", "changed", "no"}, "HOLDS"},
+		{"two tools held", []string{"1", "false", "yes", "changed", "no", "changed(blocked)", "no"}, "HOLDS"},
+		{"unquarantine failed (hold from quarantined discovery)", []string{"0", "true", "no", "changed", "no"}, "INCONCLUSIVE"},
+		{"unquarantine ok but still quarantined", []string{"1", "true", "yes", "changed", "no"}, "INCONCLUSIVE"},
+		{"post-unquarantine discovery unproven", []string{"1", "false", "no", "changed", "no"}, "INCONCLUSIVE"},
+		{"discovery proof stale (indexed before)", []string{"1", "false", "unproven(indexed-before=yes)", "changed", "no"}, "INCONCLUSIVE"},
+		{"trusted gate never logged", []string{"1", "false", "no(notes_export)", "changed", "no"}, "INCONCLUSIVE"},
+		{"stale approval", []string{"1", "false", "yes", "approved", "no"}, "HOLE"},
+		{"held but indexed", []string{"1", "false", "yes", "changed", "yes"}, "HOLE"},
+		{"second tool approved", []string{"1", "false", "yes", "changed", "no", "approved", "no"}, "HOLE"},
+		{"index unknown", []string{"1", "false", "yes", "changed", "unknown"}, "INCONCLUSIVE"},
+		{"pending", []string{"1", "false", "yes", "pending", "no"}, "INCONCLUSIVE"},
+		{"no tools", []string{"1", "false", "yes"}, "INCONCLUSIVE"},
+		{"odd pair", []string{"1", "false", "yes", "changed"}, "INCONCLUSIVE"},
+	} {
+		got, code := runLib(t, lib, `held_unquarantined_verdict "$@"`, tc.args...)
+		if code != 0 || got != tc.want {
+			t.Errorf("%s: held_unquarantined_verdict = %q (exit %d), want %q", tc.name, got, code, tc.want)
+		}
+	}
+}
+
+// labConfigVariant writes a copy of the checked-in lab config with mutate
+// applied to the attacker's isolation block.
+func labConfigVariant(t *testing.T, mutate func(iso map[string]interface{}, server map[string]interface{})) string {
+	t.Helper()
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(project, "tests", "tpa-lab-config-docker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range cfg["mcpServers"].([]interface{}) {
+		s := raw.(map[string]interface{})
+		if s["name"] == "tpa-lab-attacker" {
+			iso, _ := s["isolation"].(map[string]interface{})
+			mutate(iso, s)
+		}
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+var isolationVariants = map[string]func(iso, server map[string]interface{}){
+	"network_mode bridge": func(iso, _ map[string]interface{}) { iso["network_mode"] = "bridge" },
+	"network_mode unset":  func(iso, _ map[string]interface{}) { delete(iso, "network_mode") },
+	"isolation mode none": func(iso, _ map[string]interface{}) { iso["mode"] = "none" },
+	"no isolation block":  func(_, server map[string]interface{}) { delete(server, "isolation") },
+}
+
+// TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream (Sol r5 P2).
+func TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream(t *testing.T) {
+	lib := verdictsLib(t)
+	ok := labConfigVariant(t, func(map[string]interface{}, map[string]interface{}) {})
+	if _, code := runLib(t, lib, `lab_config_check_isolation "$1"`, ok); code != 0 {
+		t.Fatal("the checked-in config must pass")
+	}
+	for name, mutate := range isolationVariants {
+		cfg := labConfigVariant(t, mutate)
+		if _, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>/dev/null`, cfg); code == 0 {
+			t.Errorf("%s: must be refused", name)
+		}
+	}
+}
+
+// TestRunLabDockerRejectsUnisolatedConfig (Sol r5 P2): the baseline runner
+// validated only the isolation image, so a config with network_mode bridge
+// ran the attacker with network access. The preflight must refuse it.
+func TestRunLabDockerRejectsUnisolatedConfig(t *testing.T) {
+	verdictsLib(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "run-tpa-lab-docker.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range isolationVariants {
+		cfg := labConfigVariant(t, mutate)
+		cmd := exec.Command("bash", script)
+		cmd.Env = append(os.Environ(), "IMAGE=tpa-attack-lab:lab", "TPA_LAB_PREFLIGHT_ONLY=1", "TPA_LAB_CONFIG="+cfg)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("%s: preflight must refuse the config; output:\n%s", name, out)
+			continue
+		}
+		if !strings.Contains(string(out), "does not Docker-isolate every server") {
+			t.Errorf("%s: unexpected failure:\n%s", name, out)
+		}
+	}
+}

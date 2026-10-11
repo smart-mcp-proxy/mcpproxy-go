@@ -278,6 +278,41 @@ stored_tool_desc_contains() {  # greps the proxy's STORED tool export for a mark
 
 want_only() { [[ -z "$ONLY" || "$ONLY" == "$1" ]]; }
 
+# unquarantine_and_prove — unquarantines tpa-lab-attacker and proves the
+# post-unquarantine discovery ran (Sol r4/r5 P2): sets UNQ_OK (1 when the API
+# reported success), QUARANTINED (server state after it) and DISCOVERED
+# ("yes" only when benign_calculator — unchanged, approved — was NOT in the
+# index before the unquarantine and reached it afterwards; the startup guard
+# removes a quarantined server's tools from the index, so a "yes" is fresh).
+unquarantine_and_prove() {
+  local pre
+  pre="$(tool_indexed benign_calculator)"
+  UNQ_OK=0; unquarantine && UNQ_OK=1
+  QUARANTINED="$(server_quarantined)"
+  DISCOVERED="$(wait_indexed benign_calculator 90)"
+  [[ "$pre" == "no" ]] || DISCOVERED="unproven(indexed-before=$pre)"
+}
+
+# gate_held_logged <log> <tool>... — "yes" when the daemon log shows the
+# TRUSTED-server change gate holding every named tool and no quarantined
+# verification ran (that path would also mark them changed).
+gate_held_logged() {
+  local logf="$1" t
+  shift
+  grep -q 'Verified quarantined server tool contracts' "$logf" && { echo "no(quarantined-verify-ran)"; return; }
+  for t in "$@"; do
+    grep -E 'changed since approval|held for operator confirmation' "$logf" | grep -q "\"tool\": \"$t\"" \
+      || { echo "no($t)"; return; }
+  done
+  echo yes
+}
+
+# copy_data_dir <src> <dst> — clone a stopped daemon's data dir (approved
+# baseline) for a variant run; the stale socket is dropped.
+copy_data_dir() {
+  rm -rf "$2" && cp -R "$1" "$2" && rm -f "$2/mcpproxy.sock"
+}
+
 trap stop_daemon EXIT
 
 # ------------------------------------------------------------------ build --
@@ -365,9 +400,8 @@ if want_only EXP-2; then
   # post-unquarantine flow itself (Sol r4 P2): the unquarantine succeeded,
   # the server is no longer quarantined, discovery ran (the unchanged
   # benign_calculator reached the index) and the held tools stayed out of it.
-  unq_ok=0; unquarantine && unq_ok=1
-  quarantined="$(server_quarantined)"
-  discovered="$(wait_indexed benign_calculator 90)"
+  unquarantine_and_prove
+  unq_ok="$UNQ_OK" quarantined="$QUARANTINED" discovered="$DISCOVERED"
   cal="$(wait_status_not calendar_get_events approved 90)"
   stock="$(wait_status_not stock_quote approved 30)"
   cal_idx="$(tool_indexed calendar_get_events)"
@@ -446,25 +480,52 @@ if want_only EXP-5; then
 
   if [[ $approve_ok != 1 || "$n1" != "approved" ]]; then
     record "EXP-5 INCONCLUSIVE: stage-1 baseline not approved (approve ok=$approve_ok, notes_export=$n1)"
+    record "EXP-5b INCONCLUSIVE: stage-1 baseline not approved"
   else
+  copy_data_dir "$RUN_DIR/exp5-data" "$RUN_DIR/exp5b-data"
   cfg="$(make_config exp5 facade 2 "$RUN_DIR/exp5-data")"; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp5-2.log" || { record "EXP-5: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
-  unquarantine  # re-discovery must run for the change gate to see anything
-  # The annotation flip keeps desc+schema identical: the hash CANNOT change.
-  # Wait out the full sweep window — if it is still approved after 90s, the
-  # flip is genuinely invisible to the gate.
+  # The restart re-quarantines the server, so the quarantined verification
+  # (RT-05) may already have marked the flip changed. Prove the
+  # post-unquarantine gate itself (Sol r5 P2): the unquarantine succeeded,
+  # discovery ran for the trusted server, and the held tool is not indexed.
+  unquarantine_and_prove
   n2="$(wait_status_not notes_export approved 90)"
-  log "after annotation flip: notes_export status=$n2"
-  if is_pulled "$n2"; then
-    pass "EXP-5 annotation flip surfaced ($n2)"
-    record "EXP-5 HOLDS: notes_export=$n2"
-  elif [[ "$n2" == "approved" ]]; then
-    hole "EXP-5 destructive→readOnly-lying flip INVISIBLE to the change gate (still $n2)"
-    record "EXP-5 HOLE: annotation flip unseen (notes_export=$n2)"
-  else
-    record "EXP-5 INCONCLUSIVE: notes_export=$n2 (neither held nor approved)"
-  fi
+  n2_idx="$(tool_indexed notes_export)"
+  log "after annotation flip + unquarantine (ok=$UNQ_OK quarantined=$QUARANTINED discovered=$DISCOVERED): notes_export=$n2 (indexed=$n2_idx)"
+  case "$(held_unquarantined_verdict "$UNQ_OK" "$QUARANTINED" "$DISCOVERED" "$n2" "$n2_idx")" in
+    HOLDS)
+      pass "EXP-5 annotation flip held after unquarantine ($n2, not indexed)"
+      record "EXP-5 HOLDS: notes_export=$n2 (unquarantined, discovered, not indexed)" ;;
+    HOLE)
+      hole "EXP-5 destructive→readOnly-lying flip NOT held after unquarantine (notes_export=$n2 indexed=$n2_idx)"
+      record "EXP-5 HOLE: annotation flip unseen (notes_export=$n2 indexed=$n2_idx)" ;;
+    *)
+      record "EXP-5 INCONCLUSIVE: unquarantine ok=$UNQ_OK quarantined=$QUARANTINED discovered=$DISCOVERED notes_export=$n2 indexed=$n2_idx" ;;
+  esac
+  stop_daemon
+
+  # EXP-5b: the approved contract changes while the server is ALREADY
+  # trusted — the stage-2 restart never quarantines it, so only the trusted
+  # server's discovery gate can hold the flip (Sol r5 P2).
+  cfg="$(make_config exp5b facade 2 "$RUN_DIR/exp5b-data" "" noquarantine)"; CURRENT_CONFIG="$cfg"
+  start_daemon "$cfg" "$RUN_DIR/exp5b.log" || { record "EXP-5b: INCONCLUSIVE (restart)"; exit 1; }
+  q="$(server_quarantined)"
+  n3="$(wait_status_not notes_export approved 90)"
+  n3_idx="$(tool_indexed notes_export)"
+  proof="$(gate_held_logged "$RUN_DIR/exp5b.log" notes_export)"
+  log "EXP-5b (trusted throughout, quarantined=$q gate=$proof): notes_export=$n3 (indexed=$n3_idx)"
+  case "$(held_unquarantined_verdict 1 "$q" "$proof" "$n3" "$n3_idx")" in
+    HOLDS)
+      pass "EXP-5b annotation flip held on an already-trusted server ($n3, not indexed)"
+      record "EXP-5b HOLDS: notes_export=$n3 (trusted throughout, gate held it, not indexed)" ;;
+    HOLE)
+      hole "EXP-5b annotation flip NOT held on an already-trusted server (notes_export=$n3 indexed=$n3_idx)"
+      record "EXP-5b HOLE: notes_export=$n3 indexed=$n3_idx" ;;
+    *)
+      record "EXP-5b INCONCLUSIVE: quarantined=$q gate=$proof notes_export=$n3 indexed=$n3_idx" ;;
+  esac
   stop_daemon
   fi
 fi
@@ -490,31 +551,54 @@ if want_only EXP-6; then
 
   if [[ $baseline_ok != 1 ]]; then
     record "EXP-6 INCONCLUSIVE: stage-1 baseline not approved (approve ok=$approve_ok, calendar=$pre)"
+    record "EXP-6b INCONCLUSIVE: stage-1 baseline not approved"
   else
+  copy_data_dir "$RUN_DIR/exp6-data" "$RUN_DIR/exp6b-data"
   cfg="$(make_config exp6 facade 3 "$RUN_DIR/exp6-data" scan)"; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6-2.log" || { record "EXP-6: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
-  unquarantine  # re-discovery + scan-mode change gate re-scan
-  # Distinguish a genuine scan-approved re-approval from a stale record by
-  # waiting out the sweep AND checking the gate's own log lines.
+  # As in EXP-5: the quarantined verification may already hold the pull, so
+  # prove the post-unquarantine scan-mode gate itself (Sol r5 P2).
+  unquarantine_and_prove
   post="$(wait_status_not calendar_get_events approved 90)"
   postq="$(wait_status_not stock_quote approved 30)"
-  gate_log="$(grep -cE 'scan-approved|changed since approval|auto-baseline' "$RUN_DIR/exp6-2.log" || true)"
-  log "after paraphrased rug pull: calendar=$post stock=$postq (gate log hits: $gate_log)"
-  if is_pulled "$post" && is_pulled "$postq"; then
-    pass "EXP-6 paraphrased pull held for review (calendar=$post stock=$postq)"
-    record "EXP-6 HOLDS: calendar=$post stock=$postq"
-  elif [[ "$post" == "approved" || "$postq" == "approved" ]]; then
-    if [[ "$gate_log" -gt 0 ]]; then
-      hole "EXP-6 paraphrased rug pull AUTO-APPROVED under trust_mode=scan (silent)"
-      record "EXP-6 HOLE: scan-mode auto-approved the pull (calendar=$post stock=$postq, gate re-ran)"
-    else
-      log "EXP-6 inconclusive: still approved but gate never re-ran"
-      record "EXP-6 INCONCLUSIVE: approved without gate activity (calendar=$post stock=$postq)"
-    fi
-  else
-    record "EXP-6 INCONCLUSIVE: calendar=$post stock=$postq (not both held)"
-  fi
+  post_idx="$(tool_indexed calendar_get_events)"
+  postq_idx="$(tool_indexed stock_quote)"
+  log "after paraphrased rug pull + unquarantine (ok=$UNQ_OK quarantined=$QUARANTINED discovered=$DISCOVERED): calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)"
+  case "$(held_unquarantined_verdict "$UNQ_OK" "$QUARANTINED" "$DISCOVERED" "$post" "$post_idx" "$postq" "$postq_idx")" in
+    HOLDS)
+      pass "EXP-6 paraphrased pull held for review after unquarantine (calendar=$post stock=$postq, not indexed)"
+      record "EXP-6 HOLDS: calendar=$post stock=$postq (unquarantined, discovered, not indexed)" ;;
+    HOLE)
+      hole "EXP-6 paraphrased rug pull NOT held under trust_mode=scan (calendar=$post/$post_idx stock=$postq/$postq_idx)"
+      record "EXP-6 HOLE: calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)" ;;
+    *)
+      record "EXP-6 INCONCLUSIVE: unquarantine ok=$UNQ_OK quarantined=$QUARANTINED discovered=$DISCOVERED calendar=$post stock=$postq" ;;
+  esac
+  stop_daemon
+
+  # EXP-6b: the paraphrased pull reaches a server that is ALREADY trusted
+  # (trust_mode=scan, never re-quarantined), so only the trusted server's
+  # scan-mode gate can hold it (Sol r5 P2).
+  cfg="$(make_config exp6b facade 3 "$RUN_DIR/exp6b-data" scan noquarantine)"; CURRENT_CONFIG="$cfg"
+  start_daemon "$cfg" "$RUN_DIR/exp6b.log" || { record "EXP-6b: INCONCLUSIVE (restart)"; exit 1; }
+  q="$(server_quarantined)"
+  post="$(wait_status_not calendar_get_events approved 90)"
+  postq="$(wait_status_not stock_quote approved 30)"
+  post_idx="$(tool_indexed calendar_get_events)"
+  postq_idx="$(tool_indexed stock_quote)"
+  proof="$(gate_held_logged "$RUN_DIR/exp6b.log" calendar_get_events stock_quote)"
+  log "EXP-6b (trusted throughout, quarantined=$q gate=$proof): calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)"
+  case "$(held_unquarantined_verdict 1 "$q" "$proof" "$post" "$post_idx" "$postq" "$postq_idx")" in
+    HOLDS)
+      pass "EXP-6b paraphrased pull held on an already-trusted server (calendar=$post stock=$postq)"
+      record "EXP-6b HOLDS: calendar=$post stock=$postq (trusted throughout, gate held them, not indexed)" ;;
+    HOLE)
+      hole "EXP-6b paraphrased pull NOT held on an already-trusted server (calendar=$post/$post_idx stock=$postq/$postq_idx)"
+      record "EXP-6b HOLE: calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)" ;;
+    *)
+      record "EXP-6b INCONCLUSIVE: quarantined=$q gate=$proof calendar=$post stock=$postq" ;;
+  esac
   stop_daemon
   fi
 fi

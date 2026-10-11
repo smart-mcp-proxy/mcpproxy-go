@@ -22,27 +22,51 @@ exp2a_verdict() {
   fi
 }
 
-# exp2b_verdict <unquarantine_ok> <quarantined> <discovered> <cal> <stock>
-#               <cal_indexed> <stock_indexed>
-# EXP-2b (operator unquarantines the re-quarantined server). The EXP-2a
-# records already read "changed", so the statuses alone prove nothing about
-# the post-unquarantine flow (Sol r4 P2): HOLDS needs a successful
-# unquarantine (1), the server reported not quarantined (false), proof that
-# post-unquarantine discovery ran (discovered=yes: an unchanged approved tool
-# reached the index), both rug-pulled tools held AND absent from the index
-# (indexed=no). A held tool that is indexed, or a stale "approved", is the
-# hole; anything unproven is INCONCLUSIVE.
-exp2b_verdict() {
-  local unq="$1" quarantined="$2" discovered="$3" cal="$4" stock="$5" cal_idx="$6" stock_idx="$7"
-  if [[ "$unq" != "1" || "$quarantined" != "false" || "$discovered" != "yes" ]]; then
+# held_unquarantined_verdict <step_ok> <quarantined> <proof> <status> <indexed>
+#                           [<status> <indexed>]...
+# A rug pull is held on an UNQUARANTINED server (Sol r4/r5 P2). Records may
+# already read "changed" from the quarantined verification that ran at
+# restart (RT-05), so the statuses alone prove nothing about the gate that
+# protects a trusted server: HOLDS needs the step that made the server
+# trusted to have succeeded (step_ok=1: the unquarantine call, or a config
+# that never quarantined it), the server reported not quarantined (false),
+# proof that discovery/the gate ran for the trusted server (proof=yes), and
+# every listed tool held (changed/blocked) AND absent from the index
+# (indexed=no). On a trusted server a stale "approved" or an indexed tool is
+# the hole; anything unproven is INCONCLUSIVE.
+held_unquarantined_verdict() {
+  local ok="$1" quarantined="$2" proof="$3" st idx all_held=1
+  shift 3
+  if [[ "$ok" != "1" || "$quarantined" != "false" || "$proof" != "yes" || $# -eq 0 || $(($# % 2)) -ne 0 ]]; then
     echo INCONCLUSIVE
-  elif [[ "$cal" == "approved" || "$stock" == "approved" || "$cal_idx" == "yes" || "$stock_idx" == "yes" ]]; then
-    echo HOLE
-  elif is_pulled "$cal" && is_pulled "$stock" && [[ "$cal_idx" == "no" && "$stock_idx" == "no" ]]; then
+    return
+  fi
+  local -a args=("$@")
+  local i
+  for ((i = 0; i < ${#args[@]}; i += 2)); do
+    st="${args[i]}" idx="${args[i + 1]}"
+    if [[ "$st" == "approved" || "$idx" == "yes" ]]; then
+      echo HOLE
+      return
+    fi
+    if ! is_pulled "$st" || [[ "$idx" != "no" ]]; then
+      all_held=0
+    fi
+  done
+  if [[ $all_held == 1 ]]; then
     echo HOLDS
   else
     echo INCONCLUSIVE
   fi
+}
+
+# exp2b_verdict <unquarantine_ok> <quarantined> <discovered> <cal> <stock>
+#               <cal_indexed> <stock_indexed>
+# EXP-2b (operator unquarantines the re-quarantined server):
+# held_unquarantined_verdict with discovered=yes (an unchanged approved tool
+# that was not indexed before the unquarantine reached the index) as proof.
+exp2b_verdict() {
+  held_unquarantined_verdict "$1" "$2" "$3" "$4" "$6" "$5" "$7"
 }
 
 # exp3_verdict <scan_verdict> — EXP-3 (served detector-evasion mutants).
@@ -105,12 +129,35 @@ for s in cfg.get("mcpServers", []):
 PY
 }
 
+# lab_config_check_isolation <config.json> — 0 only when the config has
+# servers and every one of them is Docker-isolated (isolation.mode docker)
+# with network_mode none; otherwise non-zero with the reason on stderr. The
+# lab's malicious upstreams must never run bare or with network access, so
+# both lab scripts refuse a config that fails it (Sol r5 P2).
+lab_config_check_isolation() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.exit("lab config %s is unreadable: %s" % (sys.argv[1], e))
+servers = cfg.get("mcpServers", [])
+if not servers:
+    sys.exit("lab config has no servers")
+for s in servers:
+    iso = s.get("isolation") or {}
+    if iso.get("mode") != "docker" or iso.get("network_mode") != "none":
+        sys.exit("server %s is not Docker-isolated with network_mode none" % s.get("name"))
+PY
+}
+
 # lab_config_use_image <config.json> <image> — rewrites the isolation image of
 # every server in place, so an IMAGE override runs the image that was built
 # rather than a stale tpa-attack-lab:lab. Refuses (non-zero, file untouched)
 # when any server is not Docker-isolated with network_mode none — the lab's
 # malicious upstreams must never run bare.
 lab_config_use_image() {
+  lab_config_check_isolation "$1" || return 1
   python3 - "$1" "$2" <<'PY'
 import json, sys
 path, image = sys.argv[1], sys.argv[2]
@@ -118,10 +165,6 @@ cfg = json.load(open(path))
 servers = cfg.get("mcpServers", [])
 if not servers or not image:
     sys.exit("lab config has no servers or the image is empty")
-for s in servers:
-    iso = s.get("isolation") or {}
-    if iso.get("mode") != "docker" or iso.get("network_mode") != "none":
-        sys.exit("server %s is not Docker-isolated with network_mode none" % s.get("name"))
 for s in servers:
     s["isolation"]["image"] = image
 json.dump(cfg, open(path, "w"), indent=2)

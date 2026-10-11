@@ -22,7 +22,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG="$PROJECT_DIR/tests/tpa-lab-config-docker.json"
+# TPA_LAB_CONFIG overrides the config for the preflight tests
+# (tests/tpa-attack-lab/scripts_test.go); it is validated like the default.
+CONFIG="${TPA_LAB_CONFIG:-$PROJECT_DIR/tests/tpa-lab-config-docker.json}"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
 DATA_DIR="$PROJECT_DIR/test-data-tpa-lab-docker"
 API_KEY="tpa-lab-key"
@@ -34,6 +36,13 @@ log() { echo "[tpa-lab] $*"; }
 
 # shellcheck source=lib/tpa-lab-verdicts.sh
 source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
+
+# Every upstream must be Docker-isolated with network_mode none: the
+# malicious lab server never runs bare or with network access (Sol r5 P2).
+lab_config_check_isolation "$CONFIG" || {
+  echo "ERROR: $CONFIG does not Docker-isolate every server with network_mode none; refusing to run the lab." >&2
+  exit 1
+}
 
 # The checked-in config pins its isolation image; an IMAGE override would
 # build one tag and run another (a stale fixture). Refuse it rather than
