@@ -388,7 +388,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the backfill must not baseline a never-baselined record blind")
 			assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
 			assert.Equal(t, oldDesc, rec.PreviousDescription)
-			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion, "adoption raises the hash version so the migration still completes")
+			assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion, "adoption raises the hash version so the migration still completes")
 
 			gate := proxy.evaluateToolGate("a", "ns:erase")
 			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus)

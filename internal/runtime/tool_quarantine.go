@@ -1291,6 +1291,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.Status = storage.ToolApprovalStatusChanged
 			existing.PreviousDescription = oldDesc
 			existing.PreviousAnnotations = cloneToolAnnotations(existing.CurrentAnnotations)
+			if existing.PreviousAnnotations == nil && existing.HashSchemaVersion >= storage.AnnotationHashSchemaVersion {
+				// The approved contract's hints were hashed: nil means "all
+				// defaults", which the revert check must still compare (RT-03).
+				existing.PreviousAnnotations = &config.ToolAnnotations{}
+			}
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
 			existing.CurrentHash = currentHash
@@ -1369,8 +1374,10 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	}
 	// RT-03: an annotation-only flip keeps description and schemas equal, so
 	// the hints must match too or the flip would be "reverted" on the very
-	// next pass.
-	if !storedSafetyHintsMatch(existing.PreviousAnnotations, existing.HashSchemaVersion, annotations) {
+	// next pass. A nil Previous snapshot is not evidence (a record marked
+	// changed by an older release, or adopted from one): the mark-changed path
+	// below always records a non-nil snapshot once the hints are hashed.
+	if existing.PreviousAnnotations != nil && safetyHintsFingerprint(existing.PreviousAnnotations) != safetyHintsFingerprint(annotations) {
 		return false
 	}
 	if existing.PreviousSchema != "" && normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {

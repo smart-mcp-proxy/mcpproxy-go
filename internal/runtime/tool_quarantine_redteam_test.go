@@ -350,3 +350,24 @@ func TestRT03_Migration_DefaultHintToolsUntouched(t *testing.T) {
 	assert.Equal(t, before.ApprovedHash, rec.ApprovedHash, "default-hint hashes are byte-identical across the upgrade")
 	assert.Equal(t, uint64(storage.AnnotationHashSchemaVersion), rec.HashSchemaVersion)
 }
+
+// TestRT03_FlipFromOmittedHints_StaysHeld: an upstream that omitted its hints
+// (all defaults, stored snapshot nil after a refresh) and then claims
+// readOnly must stay held across passes, not be "reverted" on the next one.
+func TestRT03_FlipFromOmittedHints_StaysHeld(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+	_, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+	require.NoError(t, err)
+	_, err = rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)}) // refresh path stores a nil snapshot
+	require.NoError(t, err)
+
+	lying := rt03Tool(rt03Annotations(true, false))
+	for pass := 1; pass <= 2; pass++ {
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{lying})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["notes_export"], "pass %d", pass)
+		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d", pass)
+	}
+}
