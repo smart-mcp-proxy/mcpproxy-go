@@ -3,6 +3,8 @@ package checks
 import (
 	"fmt"
 	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -63,7 +65,16 @@ type phraseFamily struct {
 	base   float64
 	threat string
 	what   string
+	// leadingBoundary marks a pattern whose match begins with a consumed
+	// non-letter boundary character (the non-English families, SEC-01).
+	leadingBoundary bool
 }
+
+// overrideVerbs are imperative base forms of "stop obeying" (normalized:
+// lowercased, contraction-expanded). Third-person and gerund forms ("ignores",
+// "ignoring", "overrides") normalize to stems ("ignor", "overrid") that are
+// deliberately NOT listed, which keeps descriptive prose off the hard tier.
+const overrideVerbs = `ignore|disregard|forget|override|discard|bypass|abandon|neglect|dismiss|set aside|put aside|throw out|pay no (?:attention|heed|mind) to|do not (?:follow|obey|heed|honou?r|adhere to|comply with|listen to)|stop (?:follow|obey|heed|honou?r)\w*|no longer (?:follow|obey|heed|honou?r|adhere to|comply with)|cease (?:follow|obey)\w*`
 
 // phraseFamilies are matched against NORMALIZED text. Patterns use lowercase,
 // contraction-expanded, lightly-stemmed forms (e.g. "instruction" matches the
@@ -128,6 +139,44 @@ var phraseFamilies = []phraseFamily{
 		threat: detect.ThreatExfiltration,
 		what:   "secret-exfiltration directive",
 	},
+	{ // Paraphrased instruction override (SEC-01): an override verb (imperative
+		// base form only — "ignores"/"ignoring" normalize to "ignor" and do not
+		// match, so descriptive third-person prose stays out) + determiners + a
+		// PRIOR/SYSTEM qualifier + a directive noun: "disregard every prior
+		// directive", "pay no attention to any earlier guidance", "no longer
+		// follow your original instructions", "abandon all of the preceding
+		// directives". Nouns are restricted to directive words (not
+		// rule/command/order/context) so "drop the previous rule set" or "starts a
+		// new chat, ignoring previous context" never reach the hard tier.
+		re:     regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|this|of|your|my|its|whatever|such|other|of the) )*(?:previous|prior|above|earlier|preced\w*|initial|original|forego\w*|former|old|past|system|developer|operator) (?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|brief|programm)\w*`),
+		base:   0.88,
+		threat: detect.ThreatPromptInjection,
+		what:   "paraphrased instruction-override directive",
+	},
+	{ // Override of directives qualified as the agent's OWN earlier input (SEC-01):
+		// "set aside the rules you were given previously", "override the
+		// instructions you received earlier", "disregard the guidance above". The
+		// "you were given / you received / above / before" qualifier is what makes
+		// the broader noun set (rules, orders, constraints, …) safe at the hard tier.
+		re:     regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|of|your|of the) )*(?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|rul|order|command|constraint|restriction|polic|brief|programm)\w* (?:(?:that |which )?(?:you|i|we) (?:were|was|have been|has been|had been|have|ha|got|receiv)\w* (?:given|told|sent|provid|receiv|issu|shown)\w*|you (?:receiv|got|were given|have receiv)\w*|(?:given |provid |stat |written )?(?:above|before this|earlier|previously|so far|until now|up to now))`),
+		base:   0.88,
+		threat: detect.ThreatPromptInjection,
+		what:   "instruction-override directive (agent's prior directives)",
+	},
+	{ // "Forget everything you were told", "ignore anything said above" (SEC-01):
+		// an override of the agent's whole prior context without a directive noun.
+		re:     regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:everyth\w*|anyth\w*|all) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct|taught|programm)\w*|(?:said |written |stat )?(?:above|before this|so far|until now|up to now))`),
+		base:   0.88,
+		threat: detect.ThreatPromptInjection,
+		what:   "context-wipe directive",
+	},
+	{ // "Treat everything you were told before as void" (SEC-01): declaring the
+		// agent's prior directives void, then (by implication) replacing them.
+		re:     regexp.MustCompile(`\b(?:treat|consider|regard|deem) (?:everyth\w*|anyth\w*|all(?: of)?(?: the| your)?(?: previous| prior| earlier)?(?: instruction\w*| directiv\w*| messag\w*)?) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct)\w*)?[^.!?]{0,30}?\bas (?:void|null|invalid|obsolete|cancel\w*|irrelevant|outdat\w*|moot|supersed\w*|non-?binding)\b`),
+		base:   0.88,
+		threat: detect.ThreatPromptInjection,
+		what:   "instruction-voiding directive",
+	},
 	{ // System-prompt / instruction exfiltration: "reveal your system prompt", "print these instructions".
 		re:     regexp.MustCompile(`\b(?:reveal|expos\w*|print|output|send|leak|disclos\w*|repeat|show|dump) (?:your |the |me |us |all )*(?:system prompt|hidden instruction|these instruction|your instruction|initial prompt|secret instruction)`),
 		base:   0.85,
@@ -147,7 +196,7 @@ var phraseFamilies = []phraseFamily{
 //     therefore never silently dropped, no matter what framing cue precedes it.
 //   - nothing matched → no signal.
 func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) []detect.Signal {
-	text := tool.NormalizedText
+	text := tool.MatchText()
 	if text == "" {
 		return nil
 	}
@@ -157,21 +206,40 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	bestMatch := ""
 	bestWhat := ""
 	bestThreat := ""
-	for _, fam := range phraseFamilies {
+	var bestRe *regexp.Regexp
+	for _, fam := range allPhraseFamilies {
 		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
-			conf := fam.base * detect.ClassifyPositionForRecall(text, loc[0]).Discount()
+			// The non-English families spell their word boundary as a consumed
+			// non-letter (Go's \b is ASCII-only); for those only, start the match
+			// and the position window at the first letter so a quote right before
+			// the phrase still counts as quoting it. Other families keep their
+			// match start exactly as before.
+			start := loc[0]
+			if fam.leadingBoundary {
+				start += len(text[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(text[loc[0]:loc[1]], isNotWordRune))
+			}
+			conf := fam.base * detect.ClassifyPositionForRecall(text, start).Discount()
 			if !matched || conf > bestConf {
 				matched = true
 				bestConf = conf
-				bestMatch = text[loc[0]:loc[1]]
+				bestMatch = text[start:loc[1]]
 				bestWhat = fam.what
 				bestThreat = fam.threat
+				bestRe = fam.re
 			}
 		}
 	}
 
 	if !matched {
-		return nil
+		return c.inspectSquashed(text)
+	}
+
+	// SEC-01: say so when the directive only became visible after
+	// de-obfuscation (homoglyphs, leet digits, separator/letter spacing), so an
+	// operator understands why the raw description does not read that way.
+	obfuscated := ""
+	if tool.NormalizedText != "" && text != tool.NormalizedText && bestRe != nil && !bestRe.MatchString(tool.NormalizedText) {
+		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -179,13 +247,13 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	// to the review floor so it always surfaces (never-fully-suppress invariant).
 	tier := detect.TierHard
 	conf := bestConf
-	detail := fmt.Sprintf("Description contains a high-confidence %s (%q) — an instruction to the agent, not a tool description.", bestWhat, bestMatch)
+	detail := fmt.Sprintf("Description contains a high-confidence %s%s (%q) — an instruction to the agent, not a tool description.", bestWhat, obfuscated, bestMatch)
 	if bestConf < phraseHardMinConfidence {
 		tier = detect.TierSoft
 		if conf < phraseSoftFloor {
 			conf = phraseSoftFloor
 		}
-		detail = fmt.Sprintf("Description references a %s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, bestMatch)
+		detail = fmt.Sprintf("Description references a %s%s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, obfuscated, bestMatch)
 	}
 
 	return []detect.Signal{{
@@ -197,3 +265,42 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		Detail:     detail,
 	}}
 }
+
+// allPhraseFamilies is the English curated set followed by the non-English
+// override families (SEC-01). Order is fixed for determinism.
+var allPhraseFamilies = append(append([]phraseFamily{}, phraseFamilies...), multilingualOverrideFamilies()...)
+
+// squashedFamilies run over the LETTERS-ONLY form of the de-obfuscated text
+// (detect.Squash), so no spacing or punctuation scheme can split the directive
+// ("r e v e a l your s y s t e m p r o m p t" squashes to
+// "revealyoursystemprompt"). Without word boundaries or positions this pass is
+// SOFT only: it holds the change for review under trust_mode=scan but never
+// auto-quarantines (SEC-01).
+var squashedFamilies = []struct {
+	re   *regexp.Regexp
+	what string
+}{
+	{regexp.MustCompile(`(?:ignore|disregard|forget|bypass|override)(?:all|any|every|the|of|your|these)*(?:previous|prior|above|earlier|preced|initial|original)\w*?(?:instruction|directiv|direction|prompt|guidelin|guidance)`), "instruction-override directive"},
+	{regexp.MustCompile(`(?:reveal|print|output|leak|repeat|recite|show|dump|disclose)(?:me|us|all|the|your)*(?:systemprompt|hiddeninstruction|initialprompt|initialinstruction|originalinstruction|secretinstruction)`), "system-prompt exfiltration directive"},
+}
+
+// inspectSquashed is the soft, spacing-agnostic last pass (see squashedFamilies).
+func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
+	squashed := detect.Squash(text)
+	for _, fam := range squashedFamilies {
+		if loc := fam.re.FindStringIndex(squashed); loc != nil {
+			match := squashed[loc[0]:loc[1]]
+			return []detect.Signal{{
+				CheckID:    c.ID(),
+				Tier:       detect.TierSoft,
+				ThreatType: detect.ThreatPromptInjection,
+				Confidence: 0.5,
+				Evidence:   detect.CapEvidence(match),
+				Detail:     fmt.Sprintf("Description spells out a %s once spacing and punctuation are removed (%q) — surfaced for review, not auto-blocked.", fam.what, match),
+			}}
+		}
+	}
+	return nil
+}
+
+func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }

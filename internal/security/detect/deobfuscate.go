@@ -1,0 +1,435 @@
+package detect
+
+import (
+	"regexp"
+	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
+)
+
+// NormalizeForPhrase is Normalize preceded by a de-obfuscation pass that undoes
+// the cheap, reversible tricks an attacker uses to keep an injection directive
+// readable to a model while hiding it from literal phrase matchers (SEC-01):
+//
+//   - homoglyphs: Cyrillic/Greek/Armenian look-alike letters mixed into a Latin
+//     word ("іgnоrе") are folded to Latin; Latin look-alikes mixed into a
+//     Cyrillic word ("игнoрируй") are folded to Cyrillic. A token is folded only
+//     when it MIXES scripts, or when it is made entirely of look-alike letters
+//     inside predominantly-Latin text, so ordinary Russian/Greek/Ukrainian prose
+//     keeps its spelling and stays matchable by the non-English families.
+//   - leet digits inside a letter word ("1gn0r3", "pr3v10u5"): only tokens that
+//     mix letters with the digits 0 1 3 4 5 7 are touched, so version strings,
+//     hashes and identifiers like "sha256", "utf8" or "oauth2" are left alone.
+//   - separator interleaving ("i.g.n.o.r.e", "ig-no-re", "i_g_n_o_r_e"): a token
+//     made of three or more 1–2 letter segments joined by one repeated separator
+//     is joined. Two-segment forms ("e.g.", "i.e.", "co-op") are untouched, which
+//     keeps the example cues the position classifier relies on.
+//   - letter spacing ("i g n o r e"): a run of three or more single letters
+//     separated by single spaces is joined; a wider gap ends the run, so
+//     "I G N O R E  A L L" yields "ignore all".
+//
+// The result is consumed ONLY by the phrase matchers (phrase.injection,
+// directive.imperative) through ToolView.PhraseText. NormalizedText is unchanged,
+// so capability/shadowing checks and every existing consumer see the same text
+// as before. Pure and deterministic, like Normalize.
+func NormalizeForPhrase(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = norm.NFKC.String(s)
+	s = stripFormatRunes(s)
+	s = foldConfusables(s)
+	s = foldLeetTokens(s)
+	s = joinSeparatedLetters(s)
+	s = joinSpacedLetters(s)
+	return Normalize(s)
+}
+
+// Squash reduces text to its letters only. Phrase checks use it as a last,
+// soft-tier pass that is indifferent to ANY spacing or punctuation scheme the
+// earlier steps did not anticipate ("s y s t e m p r o m p t").
+func Squash(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// toLatin maps Cyrillic, Greek and Armenian letters that render like a Latin
+// letter (a subset of Unicode confusables.txt) to that Latin letter. Both cases
+// are listed because folding runs before lowercasing.
+var toLatin = map[rune]rune{
+	// Cyrillic
+	'а': 'a', 'А': 'A', 'в': 'b', 'В': 'B', 'е': 'e', 'Е': 'E', 'ё': 'e', 'Ё': 'E',
+	'і': 'i', 'І': 'I', 'ї': 'i', 'Ї': 'I', 'ј': 'j', 'Ј': 'J', 'к': 'k', 'К': 'K',
+	'м': 'm', 'М': 'M', 'н': 'h', 'Н': 'H', 'о': 'o', 'О': 'O', 'р': 'p', 'Р': 'P',
+	'с': 'c', 'С': 'C', 'т': 't', 'Т': 'T', 'у': 'y', 'У': 'Y', 'х': 'x', 'Х': 'X',
+	'ѕ': 's', 'Ѕ': 'S', 'һ': 'h', 'Һ': 'H', 'ԁ': 'd', 'ԛ': 'q', 'Ԛ': 'Q', 'ԝ': 'w',
+	'Ԝ': 'W', 'ӏ': 'l', 'Ӏ': 'I', 'ɡ': 'g', 'ү': 'y', 'Ү': 'Y',
+	// Greek
+	'α': 'a', 'Α': 'A', 'β': 'b', 'Β': 'B', 'ε': 'e', 'Ε': 'E', 'ζ': 'z', 'Ζ': 'Z',
+	'η': 'n', 'Η': 'H', 'ι': 'i', 'Ι': 'I', 'κ': 'k', 'Κ': 'K', 'μ': 'u', 'Μ': 'M',
+	'ν': 'v', 'Ν': 'N', 'ο': 'o', 'Ο': 'O', 'ρ': 'p', 'Ρ': 'P', 'τ': 't', 'Τ': 'T',
+	'υ': 'u', 'Υ': 'Y', 'χ': 'x', 'Χ': 'X', 'ϲ': 'c', 'Ϲ': 'C', 'ϳ': 'j',
+	// Armenian
+	'օ': 'o', 'Օ': 'O', 'ս': 'u', 'Ս': 'U', 'հ': 'h', 'ո': 'n', 'զ': 'q', 'ց': 'g',
+	'ա': 'w', 'ե': 'e', 'ւ': 'l',
+	// Latin-script look-alikes (same script, folded unconditionally below)
+	'ı': 'i', 'ɑ': 'a', 'ɩ': 'i', 'ʟ': 'l',
+}
+
+// latinLookalikes are Latin-script letters folded wherever they appear: they
+// are not plain ASCII but render as one, and they never form a mixed-script
+// token on their own.
+var latinLookalikes = map[rune]rune{'ı': 'i', 'ɑ': 'a', 'ɩ': 'i', 'ʟ': 'l', 'ɡ': 'g'}
+
+// toCyrillic maps Latin letters that render like a Cyrillic letter, for the
+// reverse trick: Latin letters mixed into a Cyrillic word.
+var toCyrillic = map[rune]rune{
+	'a': 'а', 'A': 'А', 'e': 'е', 'E': 'Е', 'o': 'о', 'O': 'О', 'p': 'р', 'P': 'Р',
+	'c': 'с', 'C': 'С', 'x': 'х', 'X': 'Х', 'y': 'у', 'Y': 'У', 'i': 'і', 'I': 'І',
+	'k': 'к', 'K': 'К', 'M': 'М', 'H': 'Н', 'T': 'Т', 'B': 'В',
+}
+
+type scriptCount struct{ latin, cyrillic, other int }
+
+func classifyLetter(r rune) int {
+	switch {
+	case unicode.Is(unicode.Latin, r):
+		return 0
+	case unicode.Is(unicode.Cyrillic, r):
+		return 1
+	case unicode.Is(unicode.Greek, r), unicode.Is(unicode.Armenian, r):
+		return 2
+	default:
+		return -1
+	}
+}
+
+// foldConfusables applies the homoglyph folding described on
+// NormalizeForPhrase, one letter-run (word) at a time.
+func foldConfusables(s string) string {
+	runes := []rune(s)
+
+	// Document script balance: decides whether a token made ENTIRELY of
+	// look-alike letters is a disguised Latin word (Latin-majority text) or a
+	// genuine word of a Cyrillic/Greek text.
+	var doc scriptCount
+	for _, r := range runes {
+		switch classifyLetter(r) {
+		case 0:
+			doc.latin++
+		case 1:
+			doc.cyrillic++
+		case 2:
+			doc.other++
+		}
+	}
+	latinMajority := doc.latin > doc.cyrillic+doc.other
+
+	changed := false
+	for i := 0; i < len(runes); {
+		if !unicode.IsLetter(runes[i]) {
+			i++
+			continue
+		}
+		j := i
+		var tc scriptCount
+		// canLatin: every non-Latin letter has a Latin look-alike, so folding
+		// yields a pure Latin word. canCyr: every Latin letter has a Cyrillic
+		// look-alike and the rest is Cyrillic, so folding yields a pure
+		// Cyrillic word.
+		canLatin, canCyr := true, true
+		for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.Is(unicode.Mn, runes[j])) {
+			r := runes[j]
+			switch classifyLetter(r) {
+			case 0:
+				tc.latin++
+				if _, ok := toCyrillic[r]; !ok {
+					canCyr = false
+				}
+			case 1:
+				tc.cyrillic++
+				if _, ok := toLatin[r]; !ok {
+					canLatin = false
+				}
+			case 2:
+				tc.other++
+				canCyr = false
+				if _, ok := toLatin[r]; !ok {
+					canLatin = false
+				}
+			default:
+				if unicode.IsLetter(r) {
+					canLatin, canCyr = false, false
+				}
+			}
+			j++
+		}
+		nonLatin := tc.cyrillic + tc.other
+		mixed := tc.latin > 0 && nonLatin > 0
+		toLat := false
+		toCyr := false
+		switch {
+		case mixed && canLatin && canCyr:
+			toLat = latinMajority
+			toCyr = !latinMajority
+		case mixed && canLatin:
+			toLat = true
+		case mixed && canCyr:
+			toCyr = true
+		case tc.latin == 0 && nonLatin > 0 && canLatin && latinMajority:
+			// A whole word of look-alikes inside Latin text: a disguised Latin word.
+			toLat = true
+		}
+		for k := i; k < j; k++ {
+			c := classifyLetter(runes[k])
+			if toLat && c != 0 {
+				if l, ok := toLatin[runes[k]]; ok {
+					runes[k] = l
+					changed = true
+				}
+			}
+			if toCyr && c == 0 {
+				if cy, ok := toCyrillic[runes[k]]; ok {
+					runes[k] = cy
+					changed = true
+				}
+			}
+		}
+		for k := i; k < j; k++ {
+			if l, ok := latinLookalikes[runes[k]]; ok {
+				runes[k] = l
+				changed = true
+			}
+		}
+		i = j
+	}
+	if !changed {
+		return s
+	}
+	return string(runes)
+}
+
+// leetDigits are the digit substitutions a model still reads as letters.
+var leetDigits = map[rune]rune{'0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't'}
+
+// foldLeetTokens rewrites letter+digit words ("1gn0r3", "pr10r", "4ll") whose
+// digits are all leet substitutes and which carry at least two letters. Any
+// other digit (2, 6, 8, 9) leaves the token alone, which keeps identifiers such
+// as "sha256", "utf8", "oauth2", "x86" and "i18n" intact.
+func foldLeetTokens(s string) string {
+	runes := []rune(s)
+	changed := false
+	for i := 0; i < len(runes); {
+		if !unicode.IsLetter(runes[i]) && !unicode.IsDigit(runes[i]) {
+			i++
+			continue
+		}
+		j := i
+		letters, digits, foreignDigit := 0, 0, false
+		for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j])) {
+			switch {
+			case unicode.IsLetter(runes[j]):
+				letters++
+			default:
+				digits++
+				if _, ok := leetDigits[runes[j]]; !ok {
+					foreignDigit = true
+				}
+			}
+			j++
+		}
+		if digits > 0 && letters >= 2 && !foreignDigit && j-i >= 3 {
+			for k := i; k < j; k++ {
+				if l, ok := leetDigits[runes[k]]; ok {
+					runes[k] = l
+					changed = true
+				}
+			}
+		}
+		i = j
+	}
+	if !changed {
+		return s
+	}
+	return string(runes)
+}
+
+// separatedLetters matches a whole token core of three or more 1–2 letter
+// segments joined by ONE repeated separator character.
+var separatedLetters = func() []*regexp.Regexp {
+	seps := []string{`\.`, `-`, `_`, `·`, `•`, `\*`, `~`, `\|`, `/`, `\+`, `‧`, `∙`}
+	out := make([]*regexp.Regexp, 0, len(seps))
+	for _, sep := range seps {
+		out = append(out, regexp.MustCompile(`^(?:\p{L}{1,2}`+sep+`){2,}\p{L}{1,2}$`))
+	}
+	return out
+}()
+
+var separatorRunes = ".-_·•*~|/+‧∙"
+
+// joinSeparatedLetters joins separator-interleaved tokens ("i.g.n.o.r.e",
+// "ig-no-re", "in-st-ru-ct-io-ns") while preserving the token's leading and
+// trailing punctuation and every whitespace character.
+func joinSeparatedLetters(s string) string {
+	if !strings.ContainsAny(s, separatorRunes) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	for _, tok := range splitKeepSpaces(s) {
+		if tok.space {
+			b.WriteString(tok.text)
+			continue
+		}
+		lead, core, trail := trimPunct(tok.text)
+		joined := core
+		for _, re := range separatedLetters {
+			if re.MatchString(core) {
+				joined = strings.Map(func(r rune) rune {
+					if strings.ContainsRune(separatorRunes, r) {
+						return -1
+					}
+					return r
+				}, core)
+				break
+			}
+		}
+		if joined != core {
+			changed = true
+		}
+		b.WriteString(lead)
+		b.WriteString(joined)
+		b.WriteString(trail)
+	}
+	if !changed {
+		return s
+	}
+	return b.String()
+}
+
+// joinSpacedLetters joins runs of three or more single letters separated by
+// exactly one ASCII space ("i g n o r e" → "ignore"). The first letter of a
+// run may carry leading punctuation and the last may carry trailing
+// punctuation; a gap of two or more spaces, or any other whitespace, ends a
+// run (that is how "I G N O R E  A L L" keeps its word boundary).
+func joinSpacedLetters(s string) string {
+	toks := splitKeepSpaces(s)
+	type wordTok struct {
+		idx                int // index into toks
+		lead, letter, tail string
+		single             bool
+	}
+	words := make([]wordTok, 0, len(toks))
+	for i, t := range toks {
+		if t.space {
+			continue
+		}
+		lead, core, tail := trimPunct(t.text)
+		single := len([]rune(core)) == 1 && unicode.IsLetter([]rune(core)[0])
+		words = append(words, wordTok{idx: i, lead: lead, letter: core, tail: tail, single: single})
+	}
+
+	// joinedAt[k] = replacement for toks[k]; skip[k] = drop toks[k].
+	replace := map[int]string{}
+	skip := map[int]bool{}
+	for w := 0; w < len(words); {
+		if !words[w].single || words[w].tail != "" {
+			w++
+			continue
+		}
+		end := w
+		for end+1 < len(words) {
+			next := words[end+1]
+			gap := toks[next.idx-1]
+			if !next.single || next.lead != "" || !gap.space || gap.text != " " {
+				break
+			}
+			end++
+			if next.tail != "" {
+				break
+			}
+		}
+		if end-w+1 >= 3 {
+			var b strings.Builder
+			b.WriteString(words[w].lead)
+			for k := w; k <= end; k++ {
+				b.WriteString(words[k].letter)
+			}
+			b.WriteString(words[end].tail)
+			replace[words[w].idx] = b.String()
+			for k := words[w].idx + 1; k <= words[end].idx; k++ {
+				skip[k] = true
+			}
+			w = end + 1
+			continue
+		}
+		w++
+	}
+	if len(replace) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i, t := range toks {
+		if skip[i] {
+			continue
+		}
+		if r, ok := replace[i]; ok {
+			b.WriteString(r)
+			continue
+		}
+		b.WriteString(t.text)
+	}
+	return b.String()
+}
+
+type spaceTok struct {
+	text  string
+	space bool
+}
+
+// splitKeepSpaces splits s into alternating whitespace and non-whitespace
+// tokens, preserving every character.
+func splitKeepSpaces(s string) []spaceTok {
+	var out []spaceTok
+	start := 0
+	inSpace := false
+	for i, r := range s {
+		sp := unicode.IsSpace(r)
+		if i == 0 {
+			inSpace = sp
+			continue
+		}
+		if sp != inSpace {
+			out = append(out, spaceTok{text: s[start:i], space: inSpace})
+			start = i
+			inSpace = sp
+		}
+	}
+	if start < len(s) {
+		out = append(out, spaceTok{text: s[start:], space: inSpace})
+	}
+	return out
+}
+
+// trimPunct splits a token into leading punctuation, core, trailing
+// punctuation, where punctuation is anything that is not a letter or digit.
+func trimPunct(tok string) (lead, core, trail string) {
+	runes := []rune(tok)
+	i, j := 0, len(runes)
+	for i < j && !unicode.IsLetter(runes[i]) && !unicode.IsDigit(runes[i]) {
+		i++
+	}
+	for j > i && !unicode.IsLetter(runes[j-1]) && !unicode.IsDigit(runes[j-1]) {
+		j--
+	}
+	return string(runes[:i]), string(runes[i:j]), string(runes[j:])
+}

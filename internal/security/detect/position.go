@@ -296,12 +296,15 @@ func classifyPosition(text string, matchStart int, honorExampleLabel bool) Posit
 }
 
 // oddQuoteCount reports whether the window contains an odd number of quote
-// characters, i.e. the match lies inside an open quote.
+// characters, i.e. the match lies inside an open quote. Besides ASCII and
+// curly quotes it counts the German low quote („), guillemets («» ‹›) and CJK
+// corner brackets (「」『』), so a non-English phrase that is QUOTED rather than
+// commanded gets the same example discount as an English one (SEC-01).
 func oddQuoteCount(window string) bool {
 	count := 0
 	for _, r := range window {
 		switch r {
-		case '"', '\'', '`', '“', '”', '‘', '’':
+		case '"', '\'', '`', '“', '”', '‘', '’', '„', '‚', '«', '»', '‹', '›', '「', '」', '『', '』':
 			count++
 		}
 	}

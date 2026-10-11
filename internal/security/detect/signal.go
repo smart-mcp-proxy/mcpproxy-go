@@ -70,6 +70,20 @@ type ToolView struct {
 	InputSchema    json.RawMessage
 	OutputSchema   json.RawMessage
 	NormalizedText string // precomputed Normalize(description + schema text)
+	// PhraseText is NormalizeForPhrase(description + schema text): the
+	// normalized text after homoglyph, leet, separator and letter-spacing
+	// de-obfuscation (SEC-01). Only the phrase matchers read it; when it is
+	// empty (a hand-built ToolView) they fall back to NormalizedText.
+	PhraseText string
+}
+
+// MatchText returns the text the phrase matchers scan: PhraseText when it was
+// precomputed, otherwise NormalizedText.
+func (tv ToolView) MatchText() string {
+	if tv.PhraseText != "" {
+		return tv.PhraseText
+	}
+	return tv.NormalizedText
 }
 
 // RegistryView is a read-only snapshot of every server's current tools, built
@@ -91,6 +105,9 @@ func NewRegistryView(tools []ToolView) RegistryView {
 	for i, tv := range tools {
 		if tv.NormalizedText == "" {
 			tv.NormalizedText = Normalize(combinedText(tv))
+		}
+		if tv.PhraseText == "" {
+			tv.PhraseText = NormalizeForPhrase(combinedText(tv))
 		}
 		out[i] = tv
 		byName[tv.Name] = append(byName[tv.Name], tv)
