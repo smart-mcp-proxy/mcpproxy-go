@@ -102,25 +102,22 @@ func (r *Runtime) StartBackgroundInitialization() {
 			// upstream connect. Monotonic; cheap; safe to call on every event.
 			r.MarkFirstConnectedServerForActivation()
 
-			// Deduplication: Check if discovery is already in progress for this server
-			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
-				r.logger.Debug("Tool discovery already in progress for server, skipping duplicate",
-					zap.String("server", serverName))
-				return
-			}
+			// Deduplicated against a discovery already in flight for this
+			// server; a trigger arriving meanwhile is coalesced into one
+			// follow-up run rather than dropped (Sol r3 P2).
+			r.runCoalescedDiscovery(serverName, func() error {
+				ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
+				defer cancel()
 
-			// Ensure we clean up the in-progress marker
-			defer r.discoveryInProgress.Delete(serverName)
-
-			ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
-			defer cancel()
-
-			r.logger.Info("Reactive tool discovery triggered", zap.String("server", serverName))
-			if err := r.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
-				r.logger.Error("Failed to discover tools for connected server",
-					zap.String("server", serverName),
-					zap.Error(err))
-			}
+				r.logger.Info("Reactive tool discovery triggered", zap.String("server", serverName))
+				if err := r.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
+					r.logger.Error("Failed to discover tools for connected server",
+						zap.String("server", serverName),
+						zap.Error(err))
+					return err
+				}
+				return nil
+			})
 		})
 		r.logger.Info("Reactive tool discovery callback registered")
 
@@ -616,20 +613,66 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 // callback for notifications/tools/list_changed: it re-runs single-server
 // discovery (which, for a quarantined server with an approved baseline,
 // verifies its contracts without indexing them — RT-05), deduplicated against
-// a discovery already in flight for the same server.
+// a discovery already in flight for the same server. A notification that
+// arrives during an in-flight discovery is coalesced into a follow-up run of
+// that discovery (Sol r3 P2): the in-flight run may already have listed the
+// tools the notification announces as replaced, and periodic discovery skips
+// quarantined servers, so dropping it could leave a stale approval in place
+// indefinitely.
 func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName string) error {
-	// Deduplication: Check if discovery is already in progress for this server
+	var err error
+	r.runCoalescedDiscovery(serverName, func() error {
+		r.logger.Info("Tool discovery triggered by notification", zap.String("server", serverName))
+		err = r.DiscoverAndIndexToolsForServer(ctx, serverName)
+		return err
+	})
+	return err
+}
+
+// maxCoalescedDiscoveryFollowUps bounds how many follow-up runs one owner
+// performs for triggers coalesced while it ran, so a server that signals
+// tools/list_changed continuously cannot pin a discovery goroutine forever.
+const maxCoalescedDiscoveryFollowUps = 4
+
+// runCoalescedDiscovery runs run under the per-server discovery marker. When
+// a discovery for serverName is already in flight, the trigger is recorded as
+// pending and this call returns immediately; the in-flight owner then re-runs
+// once after it finishes (several coalesced triggers collapse into one
+// follow-up), so a trigger that raced the owner's tools/list is never lost
+// (Sol r3 P2).
+//
+// Ordering: a trigger records the pending flag BEFORE it tries to take the
+// marker, and the owner checks the flag AFTER it releases the marker. Either
+// the trigger saw the marker held — then its flag was stored before the
+// owner's check — or it took the marker itself and runs.
+func (r *Runtime) runCoalescedDiscovery(serverName string, run func() error) {
+	r.discoveryRerunPending.Store(serverName, struct{}{})
 	if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
-		r.logger.Debug("Tool discovery already in progress for server (notification), skipping duplicate",
+		r.logger.Debug("Tool discovery already in progress for server; coalescing this trigger into a follow-up run",
 			zap.String("server", serverName))
-		return nil
+		return
 	}
-
-	// Ensure we clean up the in-progress marker
-	defer r.discoveryInProgress.Delete(serverName)
-
-	r.logger.Info("Tool discovery triggered by notification", zap.String("server", serverName))
-	return r.DiscoverAndIndexToolsForServer(ctx, serverName)
+	for followUps := 0; ; followUps++ {
+		// Clear before running: a trigger recorded from here on is either
+		// covered by this run's tools/list or re-arms the flag.
+		r.discoveryRerunPending.Delete(serverName)
+		_ = run()
+		r.discoveryInProgress.Delete(serverName)
+		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
+			return
+		}
+		if followUps >= maxCoalescedDiscoveryFollowUps {
+			r.logger.Warn("Tool discovery follow-up limit reached; a coalesced trigger is left to the next connect or notification",
+				zap.String("server", serverName))
+			return
+		}
+		if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+			// Another trigger took ownership; it runs for the pending flag.
+			return
+		}
+		r.logger.Info("Re-running tool discovery for a trigger that arrived while it was in flight",
+			zap.String("server", serverName))
+	}
 }
 
 // verifyQuarantinedServerContracts runs the tool-approval gate over a

@@ -114,12 +114,9 @@ func TestRT05_QuarantinedServer_ContractChangeDetectedOnListChanged(t *testing.T
 	// the upstream manager calls for the notification.
 	mcpSrv.DeleteTools("calendar_get_events")
 	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
-	require.Eventually(t, func() bool {
-		return rt.onUpstreamToolsListChanged(context.Background(), "quarantined") == nil && func() bool {
-			rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
-			return err == nil && rec.Status == storage.ToolApprovalStatusChanged
-		}()
-	}, 10*time.Second, 100*time.Millisecond)
+	// The handler is invoked exactly once — never re-triggered — so a lost
+	// notification cannot be masked by a retry (Sol r3 P2).
+	require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
 
 	requireRT05Changed(t, rt, "the list_changed handler must detect the armed contract while the server is still quarantined")
 }
@@ -219,4 +216,72 @@ func approvedRT05Server() *mcpserver.StreamableHTTPServer {
 		return mcp.NewToolResultText("ok"), nil
 	})
 	return mcpserver.NewStreamableHTTPServer(srv)
+}
+
+// TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp (Sol r3 P2): a
+// single tools/list_changed notification arrives while a verification of the
+// same server is in flight — after that verification already listed the
+// approved contract. The notification must not be dropped by the in-progress
+// dedup: the in-flight owner runs one follow-up verification that sees the
+// armed contract. Periodic discovery skips quarantined servers, so nothing
+// else would. Deterministic: one outer trigger, one notification, no polling.
+func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	mcpSrv := mcpserver.NewMCPServer("stage", "0.0.1", mcpserver.WithToolCapabilities(true))
+	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("ok"), nil
+	}
+	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("Lists calendar events.")), handler)
+	upstream := httptest.NewServer(mcpserver.NewStreamableHTTPServer(mcpSrv))
+	t.Cleanup(upstream.Close)
+
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	seedRT05Approval(t, rt)
+
+	rt.StartBackgroundInitialization()
+	settleQuarantinedCapture(t, rt, "quarantined", upstream.URL)
+	require.Eventually(t, func() bool {
+		_, busy := rt.discoveryInProgress.Load("quarantined")
+		return !busy
+	}, 10*time.Second, 20*time.Millisecond)
+	rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+
+	// While the outer verification is between its tools/list (approved
+	// contract) and persisting it, the server arms the tool and sends ONE
+	// notification. The dedup marker is held, so the notification returns
+	// at once — it must be coalesced, not dropped.
+	var notified atomic.Int32
+	var coalescedReturned atomic.Bool
+	rt.quarantinedCaptureBeforePersist = func() {
+		if !notified.CompareAndSwap(0, 1) {
+			return
+		}
+		mcpSrv.DeleteTools("calendar_get_events")
+		mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
+		_, busy := rt.discoveryInProgress.Load("quarantined")
+		require.True(t, busy, "the notification must race an in-flight verification")
+		require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
+		coalescedReturned.Store(true)
+	}
+
+	require.NoError(t, rt.onUpstreamToolsListChanged(context.Background(), "quarantined"))
+	require.True(t, coalescedReturned.Load(), "the single notification was delivered during the in-flight verification")
+	assert.Equal(t, int32(1), notified.Load())
+
+	// No polling: the outer call returns only after its follow-up ran.
+	rec, err = rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the coalesced notification triggered an automatic follow-up verification")
+	assert.Equal(t, "armed definition", rec.CurrentDescription)
+	assert.True(t, rt.serverIsQuarantined("quarantined"))
+	indexed, err := rt.indexManager.GetToolsByServer("quarantined")
+	require.NoError(t, err)
+	assert.Empty(t, indexed, "a quarantined server's tools must never be indexed")
+	_, busy := rt.discoveryInProgress.Load("quarantined")
+	assert.False(t, busy, "the marker is released after the follow-up")
 }

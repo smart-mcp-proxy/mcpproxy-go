@@ -225,6 +225,11 @@ type Runtime struct {
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
+	// discoveryRerunPending records a discovery trigger (connect or
+	// tools/list_changed) that arrived while a discovery for the same server
+	// was in flight; the in-flight owner runs one follow-up for it instead of
+	// the trigger being dropped (Sol r3 P2). Key: serverName.
+	discoveryRerunPending sync.Map
 
 	// toolApprovalLocks serializes every read-modify-write of one server's
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
