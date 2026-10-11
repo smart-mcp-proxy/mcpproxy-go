@@ -387,6 +387,82 @@ var isolationVariants = map[string]func(iso, server map[string]interface{}){
 	"extra_args pid host":      func(iso, _ map[string]interface{}) { appendArgs(iso, "--pid=host") },
 	"extra_args device":        func(iso, _ map[string]interface{}) { appendArgs(iso, "--device=/dev/mem") },
 	"extra_args tmpfs non-tmp": func(iso, _ map[string]interface{}) { appendArgs(iso, "--tmpfs", "/etc") },
+	// Sol r7 P2: the mandatory protections must be present — the launcher
+	// only appends extra_args, so missing ones are simply absent.
+	"extra_args missing":   func(iso, _ map[string]interface{}) { delete(iso, "extra_args") },
+	"extra_args empty":     func(iso, _ map[string]interface{}) { iso["extra_args"] = []interface{}{} },
+	"no --read-only":       func(iso, _ map[string]interface{}) { removeArgs(iso, "--read-only") },
+	"no --cap-drop=ALL":    func(iso, _ map[string]interface{}) { removeArgs(iso, "--cap-drop=ALL") },
+	"no no-new-privileges": func(iso, _ map[string]interface{}) { removeArgs(iso, "--security-opt", "no-new-privileges") },
+	"only tmpfs hardening": func(iso, _ map[string]interface{}) { iso["extra_args"] = []interface{}{"--tmpfs", "/tmp"} },
+	"cap-drop of one capability": func(iso, _ map[string]interface{}) {
+		removeArgs(iso, "--cap-drop=ALL")
+		appendArgs(iso, "--cap-drop=NET_RAW")
+	},
+}
+
+// removeArgs drops every listed argument from the isolation extra_args.
+func removeArgs(iso map[string]interface{}, args ...string) {
+	drop := make(map[string]bool, len(args))
+	for _, a := range args {
+		drop[a] = true
+	}
+	existing, _ := iso["extra_args"].([]interface{})
+	kept := []interface{}{}
+	for _, a := range existing {
+		if s, ok := a.(string); ok && drop[s] {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	iso["extra_args"] = kept
+}
+
+// TestLabConfigCheckIsolationRequiresHardening (Sol r7 P2): each mandatory
+// protection is refused when absent and accepted in either argument form,
+// from the per-server or the global extra_args.
+func TestLabConfigCheckIsolationRequiresHardening(t *testing.T) {
+	lib := verdictsLib(t)
+	for name, args := range map[string][]interface{}{
+		"split value forms": {"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"},
+		"equals forms":      {"--read-only", "--cap-drop=all", "--security-opt=no-new-privileges"},
+	} {
+		cfg := labConfigVariant(t, func(iso, _ map[string]interface{}) { iso["extra_args"] = args })
+		if out, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>&1`, cfg); code != 0 {
+			t.Errorf("%s: hardened config must pass: %s", name, out)
+		}
+	}
+	for _, flag := range []string{"--read-only", "--cap-drop=ALL", "--security-opt no-new-privileges"} {
+		cfg := labConfigVariant(t, func(iso, _ map[string]interface{}) {
+			removeArgs(iso, strings.Fields(flag)...)
+		})
+		out, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>&1`, cfg)
+		if code == 0 || !strings.Contains(out, flag) {
+			t.Errorf("missing %s must be refused naming it; exit %d output %q", flag, code, out)
+		}
+	}
+
+	// Protections supplied globally reach every wrapped docker run.
+	data, err := os.ReadFile(filepath.Join("..", "tpa-lab-config-docker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["docker_isolation"].(map[string]interface{})["extra_args"] = []interface{}{"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges"}
+	for _, raw := range cfg["mcpServers"].([]interface{}) {
+		raw.(map[string]interface{})["isolation"].(map[string]interface{})["extra_args"] = []interface{}{}
+	}
+	out, _ := json.Marshal(cfg)
+	path := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>&1`, path); code != 0 {
+		t.Errorf("global hardening must satisfy every server: %s", got)
+	}
 }
 
 func appendArgs(iso map[string]interface{}, args ...string) {

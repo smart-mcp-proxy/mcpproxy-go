@@ -133,7 +133,9 @@ PY
 # servers and every one of them is a stdio command that mcpproxy wraps in
 # Docker (isolation.mode docker, not disabled) with network_mode none, and
 # every extra docker run argument (per-server and global) is one of the
-# lab's hardening flags; otherwise non-zero with the reason on stderr. The
+# lab's hardening flags, and the effective (global + per-server) arguments
+# include --read-only, --cap-drop=ALL and --security-opt no-new-privileges
+# (Sol r7 P2); otherwise non-zero with the reason on stderr. The
 # lab's malicious upstreams must never run bare, with network access, or
 # with a confinement escape, so both lab scripts refuse a config that fails
 # it (Sol r5 P2). Sol r6 P1: a server whose own command is docker is NOT
@@ -162,9 +164,21 @@ VALUE_FLAGS = {
 }
 BARE_FLAGS = {"--read-only"}
 
+# Protections every wrapped docker run MUST carry (Sol r7 P2): the launcher
+# only appends extra_args (internal/upstream/core/isolation.go), so a config
+# with extra_args missing or [] would run the attacker with a writable
+# rootfs, default capabilities and setuid escalation available.
+REQUIRED = {
+    "read-only": "--read-only",
+    "cap-drop-all": "--cap-drop=ALL",
+    "no-new-privileges": "--security-opt no-new-privileges",
+}
+
 def check_args(args, where):
+    """Refuses any non-allowlisted flag; returns the REQUIRED keys present."""
+    present = set()
     if args is None:
-        return
+        return present
     if not isinstance(args, list):
         sys.exit("%s: extra_args is not a list" % where)
     i = 0
@@ -173,6 +187,8 @@ def check_args(args, where):
         if not isinstance(a, str):
             sys.exit("%s: extra_args holds a non-string %r" % (where, a))
         if a in BARE_FLAGS:
+            if a == "--read-only":
+                present.add("read-only")
             i += 1
             continue
         flag, eq, val = a.partition("=")
@@ -184,16 +200,21 @@ def check_args(args, where):
                 val = args[i]
             if not isinstance(val, str) or not VALUE_FLAGS[flag](val):
                 sys.exit("%s: extra_args %s %r is not an allowed hardening value" % (where, flag, val))
+            if flag == "--cap-drop":
+                present.add("cap-drop-all")
+            elif flag == "--security-opt":
+                present.add("no-new-privileges")
             i += 1
             continue
         sys.exit("%s: extra_args %r is not an allowed hardening flag (unsafe docker run arguments could escape confinement)" % (where, a))
+    return present
 
 def is_docker_command(cmd):
     # Mirrors config.IsDockerCommand: such a command is never wrapped.
     return os.path.basename(cmd) == "docker" or "docker" in cmd or os.path.basename(cmd) == "podman"
 
 glob = cfg.get("docker_isolation") or {}
-check_args(glob.get("extra_args"), "docker_isolation")
+global_present = check_args(glob.get("extra_args"), "docker_isolation")
 
 servers = cfg.get("mcpServers", [])
 if not servers:
@@ -212,7 +233,10 @@ for s in servers:
         sys.exit("server %s has no command" % name)
     if is_docker_command(cmd):
         sys.exit("server %s is not Docker-isolated: its own command %r runs docker, which mcpproxy does not wrap" % (name, cmd))
-    check_args(iso.get("extra_args"), "server %s" % name)
+    present = global_present | check_args(iso.get("extra_args"), "server %s" % name)
+    missing = [REQUIRED[k] for k in sorted(REQUIRED) if k not in present]
+    if missing:
+        sys.exit("server %s is not hardened: its docker run lacks %s" % (name, ", ".join(missing)))
 PY
 }
 
