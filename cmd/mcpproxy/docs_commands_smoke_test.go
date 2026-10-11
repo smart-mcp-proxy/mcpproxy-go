@@ -74,7 +74,12 @@ func extractMCPProxyCommands(path string) ([]struct {
 		if inFence {
 			c := strings.TrimPrefix(trim, "$ ")
 			if strings.HasPrefix(c, "mcpproxy ") {
-				out = append(out, hit{n, c})
+				start := n
+				for strings.HasSuffix(c, "\\") && sc.Scan() {
+					n++
+					c = strings.TrimSpace(strings.TrimSuffix(c, "\\")) + " " + strings.TrimSpace(sc.Text())
+				}
+				out = append(out, hit{start, strings.TrimSpace(strings.TrimSuffix(c, "\\"))})
 			}
 			continue
 		}
@@ -132,45 +137,53 @@ func checkDocCommand(root *cobra.Command, line string) string {
 	if len(toks) < 2 || toks[0] != "mcpproxy" {
 		return ""
 	}
-	// Placeholders / continuations / pipelines: only check up to them.
 	cmd := root
-	i := 1
-	for ; i < len(toks); i++ {
+	for i := 1; i < len(toks); i++ {
 		t := toks[i]
-		if strings.HasPrefix(t, "-") || strings.HasPrefix(t, "<") || strings.HasPrefix(t, "[") || isElision(t) {
-			break
-		}
-		next := findSub(cmd, t)
-		if next == nil {
-			if cmd.HasSubCommands() && cmd.Args == nil && cmd != root {
-				// A group command with no positional-args contract: an
-				// unknown word is a missing subcommand.
-				return fmt.Sprintf("unknown subcommand %q under %q", t, cmd.CommandPath())
-			}
-			break
-		}
-		cmd = next
-	}
-	if cmd == root && len(toks) > 1 && !strings.HasPrefix(toks[1], "-") && !strings.HasPrefix(toks[1], "<") {
-		return fmt.Sprintf("unknown command %q", toks[1])
-	}
-	for _, t := range toks[i:] {
 		// "--" ends flag parsing: the rest is the upstream server's own command line.
 		if t == "--" || t == "|" || t == "&&" || t == ">" || t == "\\" || isElision(t) {
 			break
 		}
-		if strings.HasPrefix(t, "--") {
+		var fl *pflag.Flag
+		switch {
+		case strings.HasPrefix(t, "--"):
 			name := strings.SplitN(strings.TrimPrefix(t, "--"), "=", 2)[0]
 			if name == "" || name == "help" {
 				continue
 			}
-			if cmd.Flag(name) == nil && root.PersistentFlags().Lookup(name) == nil {
+			if fl = cmd.Flag(name); fl == nil {
+				fl = root.PersistentFlags().Lookup(name)
+			}
+			if fl == nil {
 				return fmt.Sprintf("flag --%s does not exist on %q", name, cmd.CommandPath())
 			}
-		} else if len(t) == 2 && t[0] == '-' && t[1] != '-' && !isDigit(t[1]) {
-			if lookupShort(cmd, t[1:]) == nil {
+			if fl.Value.Type() != "bool" && !strings.Contains(t, "=") {
+				i++ // the next token is the flag's value
+			}
+			continue
+		case len(t) == 2 && t[0] == '-' && t[1] != '-' && !isDigit(t[1]):
+			if fl = lookupShort(cmd, t[1:]); fl == nil {
 				return fmt.Sprintf("flag %s does not exist on %q", t, cmd.CommandPath())
 			}
+			if fl.Value.Type() != "bool" {
+				i++
+			}
+			continue
+		case strings.HasPrefix(t, "-") || strings.HasPrefix(t, "<") || strings.HasPrefix(t, "["):
+			continue // placeholder or negative number
+		}
+		// A plain word: a subcommand, or a positional argument of a leaf command.
+		if next := findSub(cmd, t); next != nil {
+			cmd = next
+			continue
+		}
+		if cmd == root {
+			return fmt.Sprintf("unknown command %q", t)
+		}
+		if cmd.HasSubCommands() && cmd.Args == nil {
+			// A group command with no positional-args contract: an unknown
+			// word is a missing subcommand.
+			return fmt.Sprintf("unknown subcommand %q under %q", t, cmd.CommandPath())
 		}
 	}
 	return ""
@@ -243,6 +256,9 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy client set-profile cursor work-full",
 		"mcpproxy upstream add fs -- npx -y pkg",
 		"mcpproxy review approve fs --yes # comment",
+		"mcpproxy --json client list",
+		"mcpproxy -o json upstream list",
+		"mcpproxy upstream patch obsidian --env \"A=B\" --env-remove OLD",
 	}
 	for _, g := range good {
 		if msg := checkDocCommand(root, g); msg != "" {
@@ -254,6 +270,9 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy connect cursor --no-such-flag",
 		"mcpproxy nosuchcommand",
 		"mcpproxy review approve fs --bogus",
+		"mcpproxy --json client frobnicate",
+		"mcpproxy --no-such-global client list",
+		"mcpproxy upstream patch obsidian --env A=B --no-such-flag",
 	}
 	for _, b := range bad {
 		if msg := checkDocCommand(root, b); msg == "" {
@@ -278,5 +297,25 @@ func TestConnectClientsGuideStatesMinimumRelease(t *testing.T) {
 	// The client and connect --profile commands first shipped in v0.70.0.
 	if string(m[1]) != "0.70.0" {
 		t.Errorf("minimum release = v%s, want v0.70.0 (first release with `mcpproxy client` and `connect --profile`)", m[1])
+	}
+}
+
+// Continuation lines of a fenced command are part of that command, so flags on
+// them are checked too.
+func TestDocsExtractorJoinsContinuationLines(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "g.md")
+	doc := "```bash\nmcpproxy upstream patch obsidian-pilot \\\n  --env \"A=B\" --no-such-flag\n```\n"
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmds, err := extractMCPProxyCommands(p)
+	if err != nil || len(cmds) != 1 {
+		t.Fatalf("cmds=%v err=%v", cmds, err)
+	}
+	if !strings.Contains(cmds[0].Cmd, "--no-such-flag") {
+		t.Fatalf("continuation line dropped: %q", cmds[0].Cmd)
+	}
+	if msg := checkDocCommand(docsSmokeRoot(), cmds[0].Cmd); msg == "" {
+		t.Errorf("bad flag on a continuation line accepted: %q", cmds[0].Cmd)
 	}
 }

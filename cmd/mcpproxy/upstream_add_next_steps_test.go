@@ -100,3 +100,59 @@ func TestUpstreamAddDaemonModePrintsNextStepsForQuarantinedServer(t *testing.T) 
 		})
 	}
 }
+
+// If the add succeeds but the state readback fails or omits the server, the
+// output must still carry conditional review guidance, without claiming the
+// server is quarantined or admitted.
+func TestUpstreamAddReadbackFailureStillGivesConditionalGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list func(w http.ResponseWriter)
+	}{
+		{"list fails", func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) }},
+		{"server omitted", func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"success":true,"data":{"servers":[{"name":"other"}]}}`))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/servers":
+					_, _ = w.Write([]byte(`{"success":true,"data":{"server":"fx","action":"add","success":true}}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/servers":
+					tc.list(w)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer ts.Close()
+
+			oldFormat, oldJSON := globalOutputFormat, globalJSONOutput
+			globalOutputFormat, globalJSONOutput = "table", false
+			defer func() { globalOutputFormat, globalJSONOutput = oldFormat, oldJSON }()
+
+			oldStdout := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+			client := cliclient.NewClient(ts.URL, nil)
+			added, err := runUpstreamAddDaemonMode(context.Background(), client, &cliclient.AddServerRequest{Name: "fx", Command: "x", Protocol: "stdio"})
+			w.Close()
+			os.Stdout = oldStdout
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			if err != nil || !added {
+				t.Fatalf("added=%v err=%v", added, err)
+			}
+			out := buf.String()
+			for _, want := range []string{"mcpproxy review show fx", "mcpproxy review approve fx", "If it is waiting for review"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "is quarantined") {
+				t.Errorf("asserted quarantine without knowing:\n%s", out)
+			}
+		})
+	}
+}

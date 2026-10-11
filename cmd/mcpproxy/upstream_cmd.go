@@ -1675,8 +1675,13 @@ func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req
 		fmt.Println(output)
 	} else {
 		fmt.Printf("✅ Added server '%s'\n", req.Name)
-		if daemonServerNeedsReview(ctx, client, req.Name, result) {
+		switch needs, known := daemonServerNeedsReview(ctx, client, req.Name, result); {
+		case needs:
 			printQuarantineNextSteps(os.Stdout, req.Name, true)
+		case !known:
+			// The state could not be read back; do not claim it is quarantined
+			// or admitted, only say what to run if it is waiting for review.
+			printConditionalNextSteps(os.Stdout, req.Name, true)
 		}
 	}
 
@@ -1687,7 +1692,7 @@ func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req
 // review. POST /api/v1/servers answers with a ServerActionResponse that carries
 // no quarantine state, so the real state is read back from the server list;
 // the add result's own flag is only the fallback when that read fails.
-func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name string, result *cliclient.AddServerResult) bool {
+func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name string, result *cliclient.AddServerResult) (needs, known bool) {
 	servers, err := client.GetServers(ctx)
 	if err == nil {
 		for _, srv := range servers {
@@ -1695,20 +1700,25 @@ func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name
 				continue
 			}
 			if q, _ := srv["quarantined"].(bool); q {
-				return true
+				return true, true
 			}
 			if h, ok := srv["health"].(map[string]interface{}); ok {
 				if st, _ := h["admin_state"].(string); st == "quarantined" {
-					return true
+					return true, true
 				}
 				if st, _ := h["status"].(string); st == "needs_review" {
-					return true
+					return true, true
 				}
 			}
-			return false
+			return false, true
 		}
 	}
-	return result != nil && result.Quarantined
+	// Readback failed or the server is not listed: only the add result's own
+	// flag (normally absent) says anything.
+	if result != nil && result.Quarantined {
+		return true, true
+	}
+	return false, false
 }
 
 // printQuarantineNextSteps tells a terminal user how to review and admit a
@@ -1716,6 +1726,19 @@ func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name
 func printQuarantineNextSteps(w io.Writer, name string, daemonRunning bool) {
 	fmt.Fprintf(w, "   ⚠️  '%s' is quarantined: its tools stay hidden and uncallable until you approve it.\n", name)
 	fmt.Fprintln(w, "   Next steps:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+// printConditionalNextSteps is the guidance for when the server's admission
+// state could not be read back after the add: it asserts neither quarantine
+// nor admission.
+func printConditionalNextSteps(w io.Writer, name string, daemonRunning bool) {
+	fmt.Fprintf(w, "   Could not confirm whether '%s' needs review. New servers are usually quarantined.\n", name)
+	fmt.Fprintln(w, "   If it is waiting for review:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+func printReviewSteps(w io.Writer, name string, daemonRunning bool) {
 	step := func(cmd, why string) { fmt.Fprintf(w, "     %-*s # %s\n", 36+len(name), cmd, why) }
 	if !daemonRunning {
 		step("mcpproxy serve", "start the daemon (review commands talk to it)")
