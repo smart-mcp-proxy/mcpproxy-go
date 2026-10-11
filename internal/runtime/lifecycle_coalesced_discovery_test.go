@@ -110,3 +110,85 @@ func TestToolsListChangedFollowUp_GetsFreshContext(t *testing.T) {
 	assert.Error(t, ctxErrs[0], "the first run uses the notification's own (expired) context")
 	assert.NoError(t, ctxErrs[1], "the follow-up runs with a fresh context")
 }
+
+// TestToolsListChanged_CappedContinuation_NoDataRace (Sol r5 P2): a burst of
+// tools/list_changed notifications reaches the follow-up cap through the real
+// notification handler, so the remaining trigger runs in a deferred worker
+// after the handler returned. That worker must not write the handler's state
+// (run with -race).
+func TestToolsListChanged_CappedContinuation_NoDataRace(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "burst", Enabled: true}})
+	rt.coalescedDiscoveryContinuationDelay = 5 * time.Millisecond
+	notifyingRuns := int32(maxCoalescedDiscoveryFollowUps + 2)
+	var runs atomic.Int32
+	rt.notificationDiscoverHook = func(ctx context.Context, server string) error {
+		if runs.Add(1) <= notifyingRuns {
+			_ = rt.onUpstreamToolsListChanged(ctx, server) // coalesced
+		}
+		return assert.AnError
+	}
+
+	err := rt.onUpstreamToolsListChanged(context.Background(), "burst")
+	// No synchronising operation until the continuation ran: an atomic or
+	// sync.Map access here would order the handler's read of its error
+	// before the worker's write and hide the race from the detector.
+	time.Sleep(200 * time.Millisecond)
+	assert.ErrorIs(t, err, assert.AnError, "the handler reports its own run's error")
+	require.Eventually(t, func() bool { return runs.Load() == notifyingRuns+1 }, 5*time.Second, 5*time.Millisecond,
+		"the deferred continuation runs the pending trigger")
+	require.Eventually(t, func() bool {
+		_, busy := rt.discoveryInProgress.Load("burst")
+		_, pending := rt.discoveryRerunPending.Load("burst")
+		return !busy && !pending
+	}, 5*time.Second, 5*time.Millisecond)
+}
+
+// TestCoalescedDiscovery_OwnerReachesCapAfterClose_NoContinuation (Sol r5
+// P2): Close replaces the app context with context.Background(). An owner
+// that is paused in a run while the runtime closes and reaches the cap only
+// afterwards must not schedule a continuation that runs after closure.
+func TestCoalescedDiscovery_OwnerReachesCapAfterClose_NoContinuation(t *testing.T) {
+	// Not setupQuarantineRuntime: this test closes the runtime itself.
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{{Name: "burst", Enabled: true}}}, "", zap.NewNop())
+	require.NoError(t, err)
+	rt.coalescedDiscoveryContinuationDelay = 10 * time.Millisecond
+
+	capRun := int32(maxCoalescedDiscoveryFollowUps + 1)
+	paused := make(chan struct{})
+	release := make(chan struct{})
+	var runs atomic.Int32
+	var run func(bool) error
+	run = func(bool) error {
+		n := runs.Add(1)
+		rt.runCoalescedDiscovery("burst", run) // notify during every run
+		if n == capRun {
+			close(paused)
+			<-release
+		}
+		return nil
+	}
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		rt.runCoalescedDiscovery("burst", run)
+	}()
+
+	<-paused
+	require.NoError(t, rt.Close())
+	close(release)
+	<-ownerDone
+	require.Equal(t, capRun, runs.Load())
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, capRun, runs.Load(), "no continuation runs after closure")
+}
+
+// TestToolsListChangedFollowUp_ContextCancelledAfterClose: a follow-up that
+// starts after Close gets a cancelled context, not one derived from the
+// replacement context.Background().
+func TestToolsListChangedFollowUp_ContextCancelledAfterClose(t *testing.T) {
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{{Name: "notify", Enabled: true}}}, "", zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, rt.Close())
+	assert.Error(t, rt.lifetimeContext().Err(), "the lifetime context stays cancelled after Close")
+	assert.NoError(t, rt.AppContext().Err(), "precondition: Close replaced the app context")
+}

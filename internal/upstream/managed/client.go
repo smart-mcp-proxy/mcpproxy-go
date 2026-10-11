@@ -64,6 +64,11 @@ type Client struct {
 	listToolsWaitCh     chan struct{}
 	listToolsLastResult []*config.ToolMetadata
 	listToolsLastErr    error
+	// listToolsLeaderSeq numbers ListTools leaders (incremented each time
+	// acquireListToolsContext grants one) so ListToolsFresh can tell an
+	// in-flight upstream call that started before it from one that started
+	// after it.
+	listToolsLeaderSeq uint64
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -977,6 +982,7 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	}
 
 	mc.listToolsInProgress = true
+	mc.listToolsLeaderSeq++
 	mc.listToolsWaitCh = make(chan struct{})
 	mc.listToolsLastResult = nil
 	mc.listToolsLastErr = nil
@@ -1015,6 +1021,27 @@ func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	return mc.listTools(ctx, false, 0)
+}
+
+// ListToolsFresh is ListTools for a caller that must see the tools as they
+// are AFTER the call was made — a contract verification triggered by
+// notifications/tools/list_changed (RT-05, Sol r5 P2). It never joins an
+// upstream tools/list that was already in flight when it was called (that
+// request may have been answered before the change the notification
+// announces): it waits for such a request to finish and then lists again,
+// joining only a request that started after the call.
+func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, error) {
+	mc.listToolsMu.Lock()
+	entrySeq := mc.listToolsLeaderSeq
+	mc.listToolsMu.Unlock()
+	return mc.listTools(ctx, true, entrySeq)
+}
+
+// listTools implements ListTools and ListToolsFresh. With fresh set, an
+// in-flight leader numbered at or below entrySeq started before the caller,
+// so its result is not accepted.
+func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1036,6 +1063,7 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		mc.listToolsMu.Lock()
 		waitCh := mc.listToolsWaitCh
 		inProgress := mc.listToolsInProgress
+		leaderSeq := mc.listToolsLeaderSeq
 		mc.listToolsMu.Unlock()
 
 		if !inProgress {
@@ -1057,6 +1085,10 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-waitCh:
+			if fresh && leaderSeq <= entrySeq {
+				// That request predates the caller: list again.
+				continue
+			}
 			mc.listToolsMu.Lock()
 			res := mc.listToolsLastResult
 			err := mc.listToolsLastErr

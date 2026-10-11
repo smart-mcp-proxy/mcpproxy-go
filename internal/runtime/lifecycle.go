@@ -578,7 +578,9 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 			// flight, replacing the managed client. Capturing an old client's
 			// untrusted definition under the replacement connection would make
 			// the review record lie about what is currently offered.
-			if tools, err := client.ListTools(ctx); err == nil {
+			// A fresh list: an explicit inspection must not reuse a
+			// tools/list that was already in flight (Sol r5 P2).
+			if tools, err := client.ListToolsFresh(ctx); err == nil {
 				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
 					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
@@ -619,8 +621,13 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 // tools the notification announces as replaced, and periodic discovery skips
 // quarantined servers, so dropping it could leave a stale approval in place
 // indefinitely.
+//
+// The returned error is that of the notification's own run only. Follow-ups
+// may run in a deferred worker after this handler returned, so they never
+// write the handler's state: their failures are logged where they run
+// (Sol r5 P2, data race).
 func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName string) error {
-	var err error
+	var ownErr error
 	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
 		runCtx := ctx
 		if followUp {
@@ -628,9 +635,10 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 			// outlive the notification's 30s deadline: give it a fresh
 			// runtime-scoped timeout, as connect-owned discovery does, so an
 			// expired notification context never turns the follow-up into a
-			// silent no-op (Sol r4 P2).
+			// silent no-op (Sol r4 P2). It derives from the lifetime context
+			// so a follow-up started after shutdown is already cancelled.
 			var cancel context.CancelFunc
-			runCtx, cancel = context.WithTimeout(r.AppContext(), discoveryRunTimeout)
+			runCtx, cancel = context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
 			defer cancel()
 		}
 		r.logger.Info("Tool discovery triggered by notification",
@@ -639,10 +647,18 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 		if r.notificationDiscoverHook != nil {
 			discover = r.notificationDiscoverHook
 		}
-		err = discover(runCtx, serverName)
-		return err
+		runErr := discover(runCtx, serverName)
+		if followUp {
+			if runErr != nil {
+				r.logger.Warn("Coalesced tool discovery follow-up failed",
+					zap.String("server", serverName), zap.Error(runErr))
+			}
+			return runErr
+		}
+		ownErr = runErr
+		return runErr
 	})
-	return err
+	return ownErr
 }
 
 // discoveryRunTimeout bounds one coalesced discovery run that owns its context.
@@ -707,6 +723,10 @@ func (r *Runtime) ownCoalescedDiscovery(serverName string, run func(followUp boo
 		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
 			return
 		}
+		if r.lifetimeContext().Err() != nil {
+			// The runtime shut down: no further follow-ups (Sol r5 P2).
+			return
+		}
 		if followUps >= maxCoalescedDiscoveryFollowUps {
 			r.logger.Warn("Tool discovery follow-up limit reached; deferring the coalesced trigger to a fresh worker",
 				zap.String("server", serverName),
@@ -726,15 +746,26 @@ func (r *Runtime) ownCoalescedDiscovery(serverName string, run func(followUp boo
 // scheduleCoalescedDiscoveryContinuation runs a pending coalesced trigger in a
 // fresh, bounded worker after coalescedContinuationDelay. If another
 // owner holds the marker by then, that owner covers the pending flag.
+//
+// It waits on the lifetime context, not AppContext: Close replaces the app
+// context with context.Background(), so an owner that reaches the cap after
+// shutdown started would otherwise schedule an uncancellable continuation
+// (Sol r5 P2).
 func (r *Runtime) scheduleCoalescedDiscoveryContinuation(serverName string, run func(followUp bool) error) {
-	appCtx := r.AppContext()
+	lifetime := r.lifetimeContext()
+	if lifetime.Err() != nil {
+		return
+	}
 	go func() {
 		timer := time.NewTimer(r.coalescedContinuationDelay())
 		defer timer.Stop()
 		select {
-		case <-appCtx.Done():
+		case <-lifetime.Done():
 			return
 		case <-timer.C:
+		}
+		if lifetime.Err() != nil {
+			return
 		}
 		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
 			return
@@ -778,7 +809,11 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 	if !ok || client == nil || !client.IsConnected() {
 		return false
 	}
-	tools, err := client.ListTools(ctx)
+	// A fresh list (Sol r5 P2): joining a tools/list already in flight
+	// when tools/list_changed arrived could verify the contract as it was
+	// BEFORE the change, and periodic discovery never re-verifies a
+	// quarantined server.
+	tools, err := client.ListToolsFresh(ctx)
 	if err != nil {
 		r.logger.Debug("Quarantined contract verification: tools/list failed",
 			zap.String("server", serverName), zap.Error(err))

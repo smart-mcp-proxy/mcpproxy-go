@@ -348,6 +348,11 @@ type Runtime struct {
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
+	// lifetimeCtx is the runtime's original application context. Close
+	// cancels it and, unlike appCtx (which Close replaces with
+	// context.Background()), it is never replaced, so work scheduled or
+	// started after shutdown still observes the cancellation (Sol r5 P2).
+	lifetimeCtx context.Context
 }
 
 // New creates a runtime helper for the given config and prepares core managers.
@@ -533,6 +538,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		previousShutdown:   previousShutdown,
 		appCtx:             appCtx,
 		appCancel:          appCancel,
+		lifetimeCtx:        appCtx,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -987,6 +993,17 @@ func (r *Runtime) ActivityService() *ActivityService {
 func (r *Runtime) AppContext() context.Context {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.appCtx
+}
+
+// lifetimeContext returns the runtime context that Close cancels and never
+// replaces. A Runtime built without New falls back to AppContext.
+func (r *Runtime) lifetimeContext() context.Context {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.lifetimeCtx != nil {
+		return r.lifetimeCtx
+	}
 	return r.appCtx
 }
 

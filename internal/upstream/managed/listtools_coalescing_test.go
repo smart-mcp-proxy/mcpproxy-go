@@ -212,3 +212,63 @@ func TestListTools_AcquireContextResetsCachedResult(t *testing.T) {
 	assert.Nil(t, mc.listToolsLastResult, "leader acquisition must clear stale results")
 	assert.Nil(t, mc.listToolsLastErr, "leader acquisition must clear stale error")
 }
+
+// TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall (Sol r5 P2): a
+// tools/list_changed verification must not join a tools/list that was already
+// in flight when it was called — that request may have been answered before
+// the change. It waits for that request and accepts only a request that
+// started after the call.
+func TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall(t *testing.T) {
+	mc := newTestReadyClient(t)
+	stale := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a", Description: "pre-change"}}
+	fresh := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a", Description: "post-change"}}
+
+	// Leader 1 is in flight before the verification is called.
+	_, release1, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok)
+	mc.publishListToolsResult(stale, nil)
+	mc.listToolsMu.Lock()
+	entrySeq := mc.listToolsLeaderSeq
+	waitCh1 := mc.listToolsWaitCh
+	mc.listToolsMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	freshDone := make(chan []*config.ToolMetadata, 1)
+	go func() {
+		tools, err := mc.listTools(ctx, true, entrySeq)
+		assert.NoError(t, err)
+		freshDone <- tools
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// Hand off atomically from leader 1 to leader 2 (started after the call),
+	// so the fresh caller cannot become a leader itself.
+	mc.listToolsMu.Lock()
+	close(waitCh1)
+	mc.listToolsLeaderSeq++
+	waitCh2 := make(chan struct{})
+	mc.listToolsWaitCh = waitCh2
+	mc.listToolsMu.Unlock()
+
+	select {
+	case got := <-freshDone:
+		t.Fatalf("fresh list returned the pre-call leader's result: %v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mc.publishListToolsResult(fresh, nil)
+	mc.listToolsMu.Lock()
+	close(waitCh2)
+	mc.listToolsWaitCh = nil
+	mc.listToolsInProgress = false
+	mc.listToolsMu.Unlock()
+	_ = release1 // leader 1 was handed off by hand above
+
+	select {
+	case got := <-freshDone:
+		assert.Equal(t, fresh, got, "the fresh list takes the result of a request started after the call")
+	case <-ctx.Done():
+		t.Fatal("fresh ListTools did not return")
+	}
+}
