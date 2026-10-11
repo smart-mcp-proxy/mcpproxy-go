@@ -1112,8 +1112,14 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			}
 		}
 
-		// Discover tools from this server
-		tools, err = client.ListTools(ctx)
+		// Discover tools from this server with a fresh list (Sol r6 P2):
+		// this path serves connect and notifications/tools/list_changed, so
+		// joining a tools/list that was already in flight when the trigger
+		// fired (e.g. a tool-count refresh) could hash the contract as it was
+		// BEFORE the change and keep a stale approval — which persists when
+		// periodic discovery is disabled. ListToolsFresh waits for such a
+		// request and lists again.
+		tools, err = client.ListToolsFresh(ctx)
 		if err == nil {
 			break // Success!
 		}

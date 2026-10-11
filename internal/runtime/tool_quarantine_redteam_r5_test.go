@@ -98,8 +98,23 @@ func TestRT03_LegacyHeldStamp_IsIdempotent(t *testing.T) {
 	require.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.CurrentHashSchemaVersion)
 	require.NotNil(t, rec.CurrentAnnotations)
 	snapshot := rec.CurrentAnnotations
-	rt.refreshHeldContractSnapshot("notes", "notes_export", rec, false, live, schema, "", heldHash)
-	assert.Same(t, snapshot, rec.CurrentAnnotations, "a stamped, unchanged held snapshot is left alone")
+	stored, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+	require.NoError(t, err)
+	require.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), stored.CurrentHashSchemaVersion, "the first pass persists the stamp")
+
+	// Mark the persisted record out of band (Sol r6 P3): any further write
+	// from the in-memory record would overwrite the marker, so it detects a
+	// re-save even when the in-memory state looks unchanged.
+	stored.ApprovedBy = "write-detector"
+	require.NoError(t, rt.storageManager.SaveToolApproval(stored))
+
+	for pass := 1; pass <= 3; pass++ {
+		rt.refreshHeldContractSnapshot("notes", "notes_export", rec, false, live, schema, "", heldHash)
+		assert.Same(t, snapshot, rec.CurrentAnnotations, "pass %d: a stamped, unchanged held snapshot is left alone", pass)
+		after, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, "write-detector", after.ApprovedBy, "pass %d: a stamped, unchanged held snapshot is not re-saved", pass)
+	}
 }
 
 // TestRT01_LegacySiblingDeclaredNoneOutputSchema_DoesNotAdoptPoison (Sol r5

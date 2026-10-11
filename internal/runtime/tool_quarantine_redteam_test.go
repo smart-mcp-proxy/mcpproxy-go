@@ -254,6 +254,67 @@ func TestRT03_NonSafetyAnnotationChanges_DoNotHold(t *testing.T) {
 	}
 }
 
+// rt03SingleFlips are the four safety hints of the annotation contract, each
+// flipped alone away from its default (readOnly=false, destructive=true,
+// idempotent=false, openWorld=true) with every other hint at its default.
+func rt03SingleFlips() map[string]*config.ToolAnnotations {
+	on, off := true, false
+	return map[string]*config.ToolAnnotations{
+		"readOnlyHint":    {ReadOnlyHint: &on},
+		"destructiveHint": {DestructiveHint: &off},
+		"idempotentHint":  {IdempotentHint: &on},
+		"openWorldHint":   {OpenWorldHint: &off},
+	}
+}
+
+// TestRT03_EachHintFlipAlone_ChangesHash (Sol r6 P3): every one of the four
+// hints is part of the hashed contract on its own.
+func TestRT03_EachHintFlipAlone_ChangesHash(t *testing.T) {
+	base := calculateToolApprovalHashWithOutputSchema("t", "d", `{}`, "", nil)
+	seen := map[string]string{}
+	for name, ann := range rt03SingleFlips() {
+		h := calculateToolApprovalHashWithOutputSchema("t", "d", `{}`, "", ann)
+		assert.NotEqual(t, base, h, "%s flipped alone must change the hash", name)
+		for other, oh := range seen {
+			assert.NotEqual(t, oh, h, "%s and %s flips must hash differently", name, other)
+		}
+		seen[name] = h
+	}
+}
+
+// TestRT03_EachHintFlipAlone_HeldThenReverted (Sol r6 P3): at the approval
+// gate, flipping any ONE hint after approval (description and schema
+// byte-identical) is held as changed and blocked on every pass, and
+// reverting it restores the approval.
+func TestRT03_EachHintFlipAlone_HeldThenReverted(t *testing.T) {
+	for name, flipped := range rt03SingleFlips() {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			_, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+			require.NoError(t, err)
+			rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+			require.NoError(t, err)
+			require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+
+			for pass := 1; pass <= 2; pass++ {
+				result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(flipped)})
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["notes_export"], "pass %d: %s flip must be blocked", pass, name)
+				rec, err = rt.storageManager.GetToolApproval("notes", "notes_export")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d: %s flip must be held", pass, name)
+			}
+
+			result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+			require.NoError(t, err)
+			assert.False(t, result.BlockedTools["notes_export"], "%s reverted: no longer blocked", name)
+			rec, err = rt.storageManager.GetToolApproval("notes", "notes_export")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "%s reverted: approval restored", name)
+		})
+	}
+}
+
 func TestRT03_DefaultHintsKeepPreRT03Hash(t *testing.T) {
 	v3 := calculateToolApprovalHashWithOutputSchema("t", "d", `{}`, "", nil)
 	assert.Equal(t, v3, calculateToolApprovalHashWithOutputSchema("t", "d", `{}`, "", &config.ToolAnnotations{}))

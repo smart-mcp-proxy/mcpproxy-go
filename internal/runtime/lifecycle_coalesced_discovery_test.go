@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -191,4 +194,54 @@ func TestToolsListChangedFollowUp_ContextCancelledAfterClose(t *testing.T) {
 	require.NoError(t, rt.Close())
 	assert.Error(t, rt.lifetimeContext().Err(), "the lifetime context stays cancelled after Close")
 	assert.NoError(t, rt.AppContext().Err(), "precondition: Close replaced the app context")
+}
+
+// TestToolsListChangedFollowUp_StartedAfterClose_GetsCancelledContext (Sol r6
+// P3) drives the real notification handler: Close lands after the owner
+// decided to run a follow-up but before the follow-up built its context (the
+// "Re-running tool discovery" log line sits exactly there). The follow-up must
+// run with a cancelled context. A revert of the follow-up path to
+// AppContext() — which Close replaced with context.Background() — would hand
+// it a live one.
+func TestToolsListChangedFollowUp_StartedAfterClose_GetsCancelledContext(t *testing.T) {
+	var rt *Runtime
+	var closeOnce sync.Once
+	closeErr := make(chan error, 1)
+	// zap.Hooks only fires for enabled entries: use an Info-level core.
+	logger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zap.InfoLevel),
+		zap.Hooks(func(e zapcore.Entry) error {
+			if strings.HasPrefix(e.Message, "Re-running tool discovery for a trigger") {
+				closeOnce.Do(func() { closeErr <- rt.Close() })
+			}
+			return nil
+		}))
+	var err error
+	rt, err = New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{{Name: "notify", Enabled: true}}}, "", logger)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	var ctxErrs []error
+	var calls atomic.Int32
+	rt.notificationDiscoverHook = func(ctx context.Context, _ string) error {
+		mu.Lock()
+		ctxErrs = append(ctxErrs, ctx.Err())
+		mu.Unlock()
+		if calls.Add(1) == 1 {
+			_ = rt.onUpstreamToolsListChanged(context.Background(), "notify") // coalesced
+		}
+		return nil
+	}
+	_ = rt.onUpstreamToolsListChanged(context.Background(), "notify")
+	select {
+	case err := <-closeErr:
+		require.NoError(t, err)
+	default:
+		t.Fatal("precondition: Close must have run between the owner's follow-up decision and the follow-up")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, ctxErrs, 2, "the coalesced notification gets one follow-up run")
+	assert.NoError(t, ctxErrs[0], "precondition: the first run uses the notification's own live context")
+	assert.ErrorIs(t, ctxErrs[1], context.Canceled, "a follow-up that starts after Close runs with a cancelled context")
+	assert.NoError(t, rt.AppContext().Err(), "precondition: Close replaced the app context with a live one")
 }

@@ -61,9 +61,11 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
-	listToolsWaitCh     chan struct{}
-	listToolsLastResult []*config.ToolMetadata
-	listToolsLastErr    error
+	// listToolsCur is the in-flight upstream tools/list request, or nil.
+	// Waiters keep the pointer they waited on and read the result from it, so
+	// a later leader replacing listToolsCur can never hand them its (nil,
+	// not-yet-published) result (RT-05, Sol r6 P1).
+	listToolsCur *listToolsCall
 	// listToolsLeaderSeq numbers ListTools leaders (incremented each time
 	// acquireListToolsContext grants one) so ListToolsFresh can tell an
 	// in-flight upstream call that started before it from one that started
@@ -967,13 +969,22 @@ func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
 	mc.promptsChangedCallback = callback
 }
 
+// listToolsCall is one upstream tools/list request owned by a leader. The
+// leader publishes into it before release() closes done; waiters read the
+// result of the exact request they waited on.
+type listToolsCall struct {
+	done      chan struct{}
+	seq       uint64
+	tools     []*config.ToolMetadata
+	err       error
+	published bool
+}
+
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools
-// call. When successful it also allocates listToolsWaitCh and resets the cached
-// last-result, so any concurrent ListTools waiter can safely block on the
-// channel and read the published result regardless of which caller is the
-// leader. release() must be called exactly once; it cancels the timeout,
-// publishes any result via publishListToolsResult (if the caller wrote one),
-// and closes the wait channel so coalesced waiters wake up.
+// call. When successful it allocates a fresh listToolsCall, so any concurrent
+// ListTools waiter can block on its done channel and read the result that this
+// leader publishes into it. release() must be called exactly once; it cancels
+// the timeout and closes the call's done channel so coalesced waiters wake up.
 func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
 	mc.listToolsMu.Lock()
 	if mc.listToolsInProgress {
@@ -983,9 +994,8 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 
 	mc.listToolsInProgress = true
 	mc.listToolsLeaderSeq++
-	mc.listToolsWaitCh = make(chan struct{})
-	mc.listToolsLastResult = nil
-	mc.listToolsLastErr = nil
+	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	mc.listToolsCur = call
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
 	mc.listToolsMu.Unlock()
@@ -995,10 +1005,10 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 		mc.listToolsMu.Lock()
 		mc.listToolsCancel = nil
 		mc.listToolsInProgress = false
-		if mc.listToolsWaitCh != nil {
-			close(mc.listToolsWaitCh)
-			mc.listToolsWaitCh = nil
+		if mc.listToolsCur == call {
+			mc.listToolsCur = nil
 		}
+		close(call.done)
 		mc.listToolsMu.Unlock()
 		return mc.IsConnected()
 	}
@@ -1006,15 +1016,19 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	return listCtx, release, true
 }
 
-// publishListToolsResult records the outcome of an upstream ListTools call so
-// that coalesced waiters in ListTools() can read it once the wait channel is
-// closed. All call sites that go through acquireListToolsContext (ListTools,
-// the health check, and the tool-count refresh) must publish their result so
-// that an arriving ListTools waiter never reads stale or zero data.
+// publishListToolsResult records the outcome of the in-flight upstream
+// ListTools call so that coalesced waiters in ListTools() can read it once the
+// call's done channel is closed. All call sites that go through
+// acquireListToolsContext (ListTools and the tool-count refresh) must publish
+// their result; a waiter that finds no published result lists again rather
+// than treating it as an empty tool list.
 func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error) {
 	mc.listToolsMu.Lock()
-	mc.listToolsLastResult = tools
-	mc.listToolsLastErr = err
+	if call := mc.listToolsCur; call != nil {
+		call.tools = tools
+		call.err = err
+		call.published = true
+	}
 	mc.listToolsMu.Unlock()
 }
 
@@ -1061,9 +1075,8 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 		}
 
 		mc.listToolsMu.Lock()
-		waitCh := mc.listToolsWaitCh
+		call := mc.listToolsCur
 		inProgress := mc.listToolsInProgress
-		leaderSeq := mc.listToolsLeaderSeq
 		mc.listToolsMu.Unlock()
 
 		if !inProgress {
@@ -1071,10 +1084,10 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 			// Try to become the leader again.
 			continue
 		}
-		if waitCh == nil {
+		if call == nil {
 			// Defensive fallback: every leader path is supposed to allocate a
-			// wait channel via acquireListToolsContext, so this should be
-			// unreachable. Fail fast rather than block forever on a nil channel.
+			// call via acquireListToolsContext, so this should be unreachable.
+			// Fail fast rather than block forever.
 			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
@@ -1084,15 +1097,19 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-waitCh:
-			if fresh && leaderSeq <= entrySeq {
+		case <-call.done:
+			if fresh && call.seq <= entrySeq {
 				// That request predates the caller: list again.
 				continue
 			}
 			mc.listToolsMu.Lock()
-			res := mc.listToolsLastResult
-			err := mc.listToolsLastErr
+			res, err, published := call.tools, call.err, call.published
 			mc.listToolsMu.Unlock()
+			if !published {
+				// The leader ended without a result (it never reached the
+				// upstream call): that is not an empty tool list. List again.
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("ListTools failed: %w", err)
 			}
