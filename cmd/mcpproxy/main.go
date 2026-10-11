@@ -105,6 +105,16 @@ func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
 
+	rootCmd := newRootCmd()
+
+	if code := executeRoot(rootCmd, os.Stderr); code != ExitCodeSuccess {
+		os.Exit(code)
+	}
+}
+
+// newRootCmd assembles the full command tree. It is a function (not inline in
+// main) so tests can walk the real tree, e.g. the docs command smoke test.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "mcpproxy",
 		Short: "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
@@ -256,9 +266,7 @@ func main() {
 	// Default to server command for backward compatibility
 	rootCmd.RunE = runServer
 
-	if code := executeRoot(rootCmd, os.Stderr); code != ExitCodeSuccess {
-		os.Exit(code)
-	}
+	return rootCmd
 }
 
 // executeRoot runs the command tree and reports a failure exactly once. Cobra
