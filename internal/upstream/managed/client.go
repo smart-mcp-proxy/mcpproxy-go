@@ -71,6 +71,12 @@ type Client struct {
 	// in-flight upstream call that started before it from one that started
 	// after it.
 	listToolsLeaderSeq uint64
+	// listToolsObserver and listToolsBeforeWaiterRead are test seams that
+	// let coalescing tests synchronize on a leader election, a waiter
+	// attaching to a call, and the window between a waiter waking and
+	// reading its call's result, instead of sleeping. Nil in production.
+	listToolsObserver         atomic.Pointer[func(ListToolsEvent)]
+	listToolsBeforeWaiterRead atomic.Pointer[func(seq uint64)]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -969,6 +975,32 @@ func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
 	mc.promptsChangedCallback = callback
 }
 
+// ListToolsEvent reports one step of ListTools coalescing to a test observer:
+// Leader is true when the caller became the leader of call Seq, false when
+// it attached to call Seq as a waiter. Fresh marks a ListToolsFresh caller.
+type ListToolsEvent struct {
+	Seq    uint64
+	Leader bool
+	Fresh  bool
+}
+
+// SetListToolsObserver installs a test observer for ListTools coalescing
+// (nil removes it). It lets cross-package tests acknowledge that a caller has
+// attached to an in-flight tools/list before releasing it. Tests only.
+func (mc *Client) SetListToolsObserver(fn func(ListToolsEvent)) {
+	if fn == nil {
+		mc.listToolsObserver.Store(nil)
+		return
+	}
+	mc.listToolsObserver.Store(&fn)
+}
+
+func (mc *Client) observeListTools(ev ListToolsEvent) {
+	if fn := mc.listToolsObserver.Load(); fn != nil {
+		(*fn)(ev)
+	}
+}
+
 // listToolsCall is one upstream tools/list request owned by a leader. The
 // leader publishes into it before release() closes done; waiters read the
 // result of the exact request they waited on.
@@ -1071,6 +1103,12 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 	for {
 		listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
 		if ok {
+			if mc.listToolsObserver.Load() != nil {
+				mc.listToolsMu.Lock()
+				seq := mc.listToolsLeaderSeq
+				mc.listToolsMu.Unlock()
+				mc.observeListTools(ListToolsEvent{Seq: seq, Leader: true, Fresh: fresh})
+			}
 			return mc.runListToolsAsLeader(listCtx, release)
 		}
 
@@ -1093,6 +1131,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
 			zap.String("server", mc.GetConfig().Name))
+		mc.observeListTools(ListToolsEvent{Seq: call.seq, Fresh: fresh})
 
 		select {
 		case <-ctx.Done():
@@ -1101,6 +1140,9 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 			if fresh && call.seq <= entrySeq {
 				// That request predates the caller: list again.
 				continue
+			}
+			if hook := mc.listToolsBeforeWaiterRead.Load(); hook != nil {
+				(*hook)(call.seq)
 			}
 			mc.listToolsMu.Lock()
 			res, err, published := call.tools, call.err, call.published

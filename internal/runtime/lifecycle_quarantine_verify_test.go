@@ -167,23 +167,27 @@ func TestRT05_QuarantinedVerification_ReplacedClientIsReverified(t *testing.T) {
 
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
+
+	// Take the dedup marker atomically, as the reactive connect callback
+	// that started this verification does, and hold it for the whole call:
+	// no background connect or notification discovery can run (B's connect
+	// callback is coalesced and cannot mask the gap), and none can reach the
+	// interleaving hook below (Sol r7 P2). A plain Store after a !busy check
+	// would let a background owner that won the race in between run
+	// alongside this call.
 	require.Eventually(t, func() bool {
-		_, busy := rt.discoveryInProgress.Load("quarantined")
-		return !busy
-	}, 10*time.Second, 20*time.Millisecond)
+		_, loaded := rt.discoveryInProgress.LoadOrStore("quarantined", struct{}{})
+		return !loaded
+	}, 10*time.Second, 20*time.Millisecond, "the test must own discovery for the server exclusively")
+	defer rt.discoveryInProgress.Delete("quarantined")
 	rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
 	require.NoError(t, err)
 	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "A serves the approved contract")
 
-	// Hold the dedup marker for the whole call, as the reactive connect
-	// callback that started this verification does: B's connect callback is
-	// dropped and cannot mask the gap.
-	rt.discoveryInProgress.Store("quarantined", struct{}{})
-	defer rt.discoveryInProgress.Delete("quarantined")
-
-	var replaced atomic.Bool
+	// The hook fires only inside this goroutine's own discovery call.
+	var armed, replaced atomic.Bool
 	rt.quarantinedCaptureBeforePersist = func() {
-		if !replaced.CompareAndSwap(false, true) {
+		if !armed.Load() || !replaced.CompareAndSwap(false, true) {
 			return
 		}
 		cfgB := *cfgA
@@ -196,7 +200,10 @@ func TestRT05_QuarantinedVerification_ReplacedClientIsReverified(t *testing.T) {
 		waitQuarantinedCaptureBound(t, rt, "quarantined", second.URL)
 	}
 
-	require.NoError(t, rt.discoverAndIndexToolsForServer(context.Background(), "quarantined", false))
+	armed.Store(true)
+	discoverErr := rt.discoverAndIndexToolsForServer(context.Background(), "quarantined", false)
+	armed.Store(false)
+	require.NoError(t, discoverErr)
 	require.True(t, replaced.Load(), "the client must be replaced during the automatic verification")
 
 	rec, err = rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")

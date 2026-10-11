@@ -18,6 +18,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // heldToolsListHandler computes a tools/list response immediately but, while
@@ -124,6 +125,17 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	client, ok := rt.UpstreamManager().GetClient("trusted")
 	require.True(t, ok)
 
+	// Observe ListTools coalescing so the test acknowledges each step
+	// instead of sleeping (Sol r7 P3).
+	events := make(chan managed.ListToolsEvent, 64)
+	client.SetListToolsObserver(func(ev managed.ListToolsEvent) {
+		select {
+		case events <- ev:
+		default:
+		}
+	})
+	t.Cleanup(func() { client.SetListToolsObserver(nil) })
+
 	// A tools/list (e.g. a tool-count refresh) is answered with the approved
 	// contract and held in flight.
 	held.arm()
@@ -134,6 +146,17 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 		defer close(inFlight)
 		_, _ = client.ListTools(ctx)
 	}()
+	var heldSeq uint64
+	for heldSeq == 0 {
+		select {
+		case ev := <-events:
+			if ev.Leader {
+				heldSeq = ev.Seq
+			}
+		case <-ctx.Done():
+			t.Fatal("the in-flight tools/list never became a leader")
+		}
+	}
 	select {
 	case <-held.captured:
 	case <-ctx.Done():
@@ -146,7 +169,17 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	mcpSrv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("armed definition")), handler)
 	notified := make(chan error, 1)
 	go func() { notified <- rt.onUpstreamToolsListChanged(ctx, "trusted") }()
-	time.Sleep(200 * time.Millisecond) // let the notification's discovery reach its list
+	// Release the pre-change response only once the notification's
+	// discovery has attached to that in-flight list: a discovery that joins
+	// it (the old coalescing) would then adopt the stale response.
+	for attached := false; !attached; {
+		select {
+		case ev := <-events:
+			attached = !ev.Leader && ev.Seq == heldSeq
+		case <-ctx.Done():
+			t.Fatal("the notification's discovery never reached the in-flight tools/list")
+		}
+	}
 	close(held.release)
 	<-inFlight
 
