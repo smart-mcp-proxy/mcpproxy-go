@@ -163,7 +163,9 @@ The `activation` block gains one additive boolean:
 
 **Comparability.** The instrument's meaning changed at v14, with no new fields. Segment by `schema_version`: v13-and-earlier values of `first_real_tool_call_ever` and `upstream_tool_call_count_bucket` are not comparable with v14 ones, so do not graph them as one series. Flags already persisted on installs are lifetime and monotonic; they are not rewritten, so a pre-v14 install may carry a `true` stamped by a call that failed upstream. Receivers need no change: both fields already exist and `schema_version` is stored per heartbeat.
 
-**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`. Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
+**Eligible cohort (corrected success measurement).** Filtering heartbeats on `schema_version >= 14` is **not** enough: an install that stamped the flag on a v13 build after a failed upstream call reports that same `true` in its first v14 heartbeat with no successful call. Treat the flag as *unknown* for any install whose **earliest observed heartbeat** has `schema_version < 14`; the corrected measurement covers only installs first seen at v14 or later (compute `min(schema_version)` per `anonymous_id`). A fresh v14 install is eligible. The historical flag is deliberately not rewritten or split into a second field, so no receiver change is needed.
+
+**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`, within the eligible cohort above. Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
 
 ### `launch_source` = `tray`
 
