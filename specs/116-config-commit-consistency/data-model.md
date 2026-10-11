@@ -35,6 +35,10 @@ func (tx *CommitTx) ReplaceConfig(cfg *config.Config)                    // Appl
 func (tx *CommitTx) ExpectGeneration(name string, gen int64) error       // ErrServerReplaced at commit time
 func (tx *CommitTx) ExpectIncarnation(name string, inc int64) error      // ErrServerReplaced at commit time
 func (tx *CommitTx) MutateGlobal(fn func(cfg *config.Config) error) error // listen, registries, …
+// UnderApprovalLock registers fn to run in pipeline step 4 while the commit
+// holds name's approval lock (Spec 117 review-bound server approval). fn may
+// only write fail-safe state (research §6). An error aborts the commit.
+func (tx *CommitTx) UnderApprovalLock(name string, fn func() error) error
 
 type CommitResult struct {
     Generation int64
@@ -156,7 +160,8 @@ Deleted in the same transaction as the row:
 | `oauth_completion` | same exact match | new |
 | `integrity_baselines` | `name` | `DeleteIntegrityBaseline` |
 | `security_reports`, `security_scan_jobs`, `security_scan_job_index` | server `name` | `DeleteServerScanReports`, `DeleteServerScanJobs` |
-| `toolhash` | `name:` prefix with exact separator (A11: verified in T2xx) | `DeleteToolHash` |
+| `toolhash` | `name:` prefix with exact separator (A11: verified in T046) | `DeleteToolHash` |
+| Spec 117 tool-baseline marker (when it has landed) | `name` | `MarkToolBaselineDecided`'s bucket; the purge is its only clearer |
 
 Not in the set: `activity_records` (audit history), `agent_tokens` and
 client credentials (A5), `toolstats` (aggregate counters, not trust).
@@ -195,7 +200,7 @@ type GenerationChange struct {
     Config    *config.ServerConfig
 }
 
-// Called only from Commit step 6. Unregisters instances that must not survive,
+// Called only from Commit step 7. Unregisters instances that must not survive,
 // restamps the rest, records desired. Returns the unregistered instances for
 // asynchronous Disconnect. PR4 also retires them before returning.
 func (m *Manager) AdvanceGenerations(changes []GenerationChange) []*managed.Client

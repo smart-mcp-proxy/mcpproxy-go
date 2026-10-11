@@ -5,7 +5,7 @@
 **Status**: Design (draft). Implementation is split into four PRs (see [plan.md](plan.md) §PR split)
 **Input**: GitHub issues [#1558](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1558), [#1559](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1559), [#1560](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1560), [#1562](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1562), [#1563](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1563), [#1564](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1564). OpenCode Sol 6.1 found all six while cross-reviewing the oversized UX-01/UX-02 PRs (#1553, #1555). They were verified on `origin/main` and kept out of the minimal core PRs that landed as #1570 (create-only add) and #1571 (per-server tool-approval lock).
 
-**Related**: Spec 032 (tool-level quarantine), Spec 100 (prompt approvals), Spec 093 (per-server limits), Spec 113 (upstream resilience), Spec 115 (credentials service, for the facade pattern), issue #937 (admission gate), #1061 (quarantine index purge), #1176 (call-history GC). Issue #1569 (tray) is handled separately in #1572. This spec does not touch `native/`.
+**Related**: Spec 032 (tool-level quarantine), Spec 100 (prompt approvals), Spec 093 (per-server limits), Spec 113 (upstream resilience), Spec 115 (credentials service, for the facade pattern), issue #937 (admission gate), #1061 (quarantine index purge), #1176 (call-history GC). Issue #1569 (tray) is handled separately in #1572. This spec does not touch `native/`. **Spec 117** (#1565-#1567, review-bound approvals) is designed in parallel. [research.md](research.md) §6 fixes the integration points: server approval as `Commit` + `UnderApprovalLock`, the baseline marker in the purge set, one `Retire()`, and an acyclic lock-order union.
 
 ## Context and Motivation
 
@@ -143,7 +143,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 
 ### Functional Requirements: Commit (PR1)
 
-- **FR-001**: `Runtime.Commit(reason string, fn func(*CommitTx) error) (*CommitResult, error)` MUST hold `configCommitMu` from reading the live config until publication. Steps 1-7 MUST run in the order given in [plan.md](plan.md) §Commit pipeline.
+- **FR-001**: `Runtime.Commit(reason string, fn func(*CommitTx) error) (*CommitResult, error)` MUST hold `configCommitMu` from reading the live config until publication. Steps 1-8 MUST run in the order given in [plan.md](plan.md) §Commit pipeline.
 - **FR-002**: `CommitTx` MUST provide `Server`, `CreateServer`, `UpdateServer(name, fn)`, `SetEnabled`, `SetQuarantined`, `RemoveServer`, `ReplaceConfig`, `MutateGlobal`, `ExpectGeneration(name, g)` and `ExpectIncarnation(name, inc)`. Existence and `exists` checks MUST use the commit's working copy of the live config, never storage alone.
 - **FR-003**: these MUST be `Commit` callers: `ApplyConfig`, `ReloadConfiguration` (one publish: the raw file is never published unpinned), the boot reconcile, `UpdateConfig`, `UpdateListenAddress`, `SaveConfiguration`, REST add/update/patch/enable/disable/quarantine/unquarantine/remove, MCP `upstream_servers` add/update/patch/remove, MCP `quarantine_security quarantine_server`, `BulkEnableServers`, `SetServerShared`, registry source add/edit/remove, the `RestartServer` disk refresh, and `gateInitialConfig`.
 - **FR-004**: `SaveConfiguration` MUST NOT read the server list from storage. It MUST persist the live snapshot, keeping today's pending-aware handling.
@@ -152,6 +152,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-007**: every server change MUST land in one bbolt transaction, together with the generation stamps and `meta.config_commit_generation`.
 - **FR-008**: a newly quarantined server MUST be purged from the global and per-profile indexes inside the commit, whatever path set the flag (fixes B1 and r10-C #2).
 - **FR-009**: `scripts/check-upstream-write-sites.sh` MUST fail when `upstreams` rows are written outside `internal/storage`, `internal/runtime/commit*.go` and tests. It MUST run in CI.
+- **FR-010a**: `CommitTx.UnderApprovalLock(name, fn)` MUST run `fn` in step 4 while holding `name`'s approval lock, in the same lock hold as step 6's row write. It is the integration point for Spec 117's review-bound server approval. The storage quarantine flip MUST only ever be the commit's row write.
 - **FR-010**: `configsvc` MUST compute `ServerGenerations` at prepare time. An unchanged entry keeps its generation, and a new or changed entry gets `G`. Generations MUST be monotonic across restarts.
 
 ### Functional Requirements: Removal and purge (PR2)
@@ -166,14 +167,14 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 
 ### Functional Requirements: Generation-bound workers (PR3)
 
-- **FR-018**: `upstream.Manager` MUST keep `desired map[string]desiredGen` that only the commit sets (step 6), and MUST offer `AddServerConfigAt`, `RemoveServerAt` and `ConnectServerAt`. These return `ErrStaleGeneration` unless the generation matches, checked under `captureMu`+`mu` in the same section as the map change.
-- **FR-019**: the commit's step 6 MUST, for each server whose generation moved, either (a) unregister the instance under `captureMu` (for removal or for a change to connection fields, `Enabled` or `Quarantined`), or (b) restamp it and call `SetConfig` (for any other change).
+- **FR-018**: `upstream.Manager` MUST keep `desired map[string]desiredGen` that only the commit sets (step 7), and MUST offer `AddServerConfigAt`, `RemoveServerAt` and `ConnectServerAt`. These return `ErrStaleGeneration` unless the generation matches, checked under `captureMu`+`mu` in the same section as the map change.
+- **FR-019**: the commit's step 7 MUST, for each server whose generation moved, either (a) unregister the instance under `captureMu` (for removal or for a change to connection fields, `Enabled` or `Quarantined`), or (b) restamp it and call `SetConfig` (for any other change).
 - **FR-020**: the connect/disconnect workers spawned after a commit, supervisor `executeAction`, `ActorPoolSimple`, `RestartServer` and `postConfigReload`'s `ConnectAll` MUST use the `*At` methods with the generation from the snapshot or commit result they act on. `ErrStaleGeneration` is logged at debug level and is not an error.
 - **FR-021**: the capture and discovery publish paths MUST carry the instance's generation and drop results whose generation is no longer desired.
 
 ### Functional Requirements: Retirement barrier (PR4)
 
-- **FR-022**: each `managed.Client` instance MUST own a `dialgate.Gate`. Step 6 MUST call `Retire()` on every instance it unregisters, before publishing.
+- **FR-022**: each `managed.Client` instance MUST own a `dialgate.Gate`. Step 7 MUST call `Retire()` on every instance it unregisters, before publishing (step 8).
 - **FR-023**: `exec.Cmd.Start` for stdio, the Docker isolation launch and the launcher spawn MUST run under `Gate.Admit`.
 - **FR-024**: HTTP and SSE MCP traffic MUST use a per-instance `*http.Transport` whose `DialContext` is gated and whose connections gate every `Write`. The OAuth `HTTPClient` (metadata, DCR, authorization-code exchange, refresh) MUST use the same instance transport. `Manager.RefreshOAuthToken` and manual OAuth MUST refuse to run against an unregistered or retired instance.
 - **FR-025**: `Retire()` MUST be bounded. It sets the latch, cancels the gate context, closes tracked connections, then runs a write-lock barrier. It MUST log a warning when it takes more than 1 s.

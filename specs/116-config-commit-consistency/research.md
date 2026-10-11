@@ -260,25 +260,30 @@ Inside `configCommitMu`:
 2. **Gate**: run the admission gate against the stored view. It forces
    `Quarantined=true` where storage keeps a quarantine without an explicit
    decision, which is the same predicate as `SaveUpstreamKeepingQuarantine`.
-   The storage write in step 5 then never silently diverges from what is
+   The storage write in step 6 then never silently diverges from what is
    published.
 3. **Prepare**: `configsvc.Prepare(next)` runs the pre-publish hook, assigns
-   generation `G = version+1`, and computes per-server generations (D6). Nothing
-   is visible yet.
-4. **Disk**: write the pending-aware file and record the self-write marker.
-   This is done first so that a failure leaves nothing changed. ApplyConfig
+   generation `G = version+1`, and computes per-server generations and
+   incarnations (D6). Nothing is visible yet.
+4. **Lock and hooks**: take the approval lock of every server whose
+   generation changes, sorted by name. Run the approval hooks registered with
+   `tx.UnderApprovalLock(name, fn)`. These are the review-bound server
+   approval steps from Spec 117 (validate, record the decision, baseline and
+   blocks, promote). A hook error aborts the commit. Hooks may write only in
+   the fail-safe direction (§6), because steps 5-6 can still fail after them.
+5. **Disk**: write the pending-aware file and record the self-write marker.
+   A failure aborts the commit before any server row changes. ApplyConfig
    already saves first (`runtime.go:1930`).
-5. **Storage**: for each server whose generation changed, take its approval
-   lock (sorted by name). Run **one** bbolt transaction with the row
-   saves/deletes, the purge, the generation stamp on each row and the meta key
+6. **Storage**: run **one** bbolt transaction with the row saves/deletes, the
+   purge, the generation and incarnation stamps, and the meta key
    `config_commit_generation = G`. Purge the index for removed or newly
-   quarantined servers. Release the approval locks. On failure, rewrite the
-   previous config to disk (compensating write), return the error and publish
-   nothing.
-6. **Advance manager** (PR3/PR4): unregister and retire instances whose
+   quarantined servers, then do the in-memory purge. Release the approval
+   locks. On failure, rewrite the previous config to disk (compensating
+   write), return the error and publish nothing.
+7. **Advance manager** (PR3/PR4): unregister and retire instances whose
    generation moved with a connection-relevant change. Restamp instances with a
    generation-only change.
-7. **Publish**: `configsvc.Publish(pending)` and the legacy `r.cfg` and
+8. **Publish**: `configsvc.Publish(pending)` and the legacy `r.cfg` and
    `desiredCfg` swap.
 
 After unlock: start the workers (bound to `G` in PR3), send events
@@ -307,7 +312,7 @@ stores both (additive `UpstreamRecord.Generation` and `.Incarnation`,
 **Who checks it.**
 - *Manager* (PR3): `AddServerConfigAt(name, cfg, gen)`,
   `RemoveServerAt(name, gen)` and `ConnectServerAt(ctx, name, gen)` compare
-  against `Manager.desired[name]`, which only the commit sets (step 6) under
+  against `Manager.desired[name]`, which only the commit sets (step 7) under
   `captureMu`+`mu`. A mismatch returns `ErrStaleGeneration`. The check happens
   in the same critical section as the map edit, so it has no
   time-of-check/time-of-use gap.
@@ -317,7 +322,7 @@ stores both (additive `UpstreamRecord.Generation` and `.Incarnation`,
   incarnation instead of the per-change generation means an unrelated edit
   (say, `disabled_tools`) never rejects an approval in flight, while a remove
   and re-add always does. Approvals already survive an endpoint edit today
-  (they are keyed by name and hash), and changing that is out of scope. Step 5
+  (they are keyed by name and hash), and changing that is out of scope. Step 6
   writes that generation in the same transaction as the purge, so the approval
   lock plus the bbolt row are the linearization point. The approval lock does
   not have to be held across manager or publish steps.
@@ -333,12 +338,14 @@ stores both (additive `UpstreamRecord.Generation` and `.Incarnation`,
 
 ### D7. Retirement unregisters under `captureMu` before publication
 
-In step 6 the manager removes the stale instance from `clients` while holding
+In step 7 the manager removes the stale instance from `clients` while holding
 `captureMu` for writing. A capture section that is already running either
 finishes before the commit proceeds, or sees the instance missing and drops
 its result. This answers r9-A #2. The commit takes `captureMu` **after**
-releasing the approval locks. That respects the existing order
-`captureMu` → approval lock (§1.2), so the two cannot deadlock.
+releasing the approval locks, and never holds both. That makes it compatible
+with today's capture order `captureMu`(R) → approval lock (§1.2) **and** with
+Spec 117 PR-3's inverted order (approval lock → `captureMu`(R) → `epochMu`,
+§6). Neither can deadlock with the commit.
 
 ### D8. Retirement barrier: a per-instance dial gate at the byte level
 
@@ -384,11 +391,11 @@ instance). Upstreams are distinct hosts in practice, so pooling barely changes.
 
 ```
 configCommitMu
-  ├─ approval lock(s), sorted by server name   [step 5 only; released before step 6]
+  ├─ approval lock(s), sorted by server name   [steps 4-6; released before step 7]
   │    └─ storage.Manager.mu → bbolt tx
   │    └─ index (bleve) delete
-  ├─ upstream.Manager.captureMu (W) → Manager.mu → dialgate (W, Retire)   [step 6]
-  └─ configsvc.updateMu (observers run here) ; Runtime.mu   [step 7, leaves]
+  ├─ upstream.Manager.captureMu (W) → Manager.mu → dialgate (W, Retire)   [step 7]
+  └─ configsvc.updateMu (observers run here) ; Runtime.mu   [step 8, leaves]
 
 Outside a commit (unchanged):
   captureMu (R) → approval lock(one) → storage.Manager.mu
@@ -441,3 +448,18 @@ absent, the handler uses the incarnation it read when the request started.
 | Q3 | Should index purge stay synchronous inside the commit? | Yes for removal and quarantine (security). The index is the TPA control (#1061). Measure it in PR2. If a 1k-tool server takes over 1 s, revisit (A8) |
 | Q4 | Generation across restarts? | Persisted in `meta.config_commit_generation`, seeded at startup (D6) |
 | Q5 | Cap on `Retire` duration? | All of its steps are bounded. A `Retire` slower than 1 s logs a warning with the instance and the step (A9) |
+
+## 6. Coordination with Spec 117 (#1565-#1567, branch `117-review-bound-approvals`)
+
+Spec 117 is being designed in parallel and touches the same seams. These are
+the integration points. Whichever spec's PR lands second adapts, as stated
+here.
+
+| Spec 117 element | Interaction with this spec | Rule |
+|---|---|---|
+| `CommitServerApproval` (one hold of the approval lock: validate `expected_hashes`, mark baseline, commit baseline and blocks, promote, **flip storage quarantine**) + `FinishServerApproval` (`SaveConfiguration`, `LoadConfiguredServers`) | After 116 PR1, a storage flip outside `Commit` is lost, because `SaveConfiguration` no longer reads storage, and the write-site script fails CI | The server approval becomes `Commit(fn)`, where `fn` does `ExpectIncarnation(name, inc)` + `SetQuarantined(name, false)` + `UnderApprovalLock(name, validate→decide→baseline/blocks→promote)`. The flip is the commit's row write in step 6, in the same approval-lock hold as the hooks (step 4). `FinishServerApproval` reduces to the after-unlock events. If 117 PR-2 merges first, 116 PR1 task T029a converts it. If 116 PR1 merges first, 117 PR-2 builds on `UnderApprovalLock` |
+| Hooks write before the disk and row steps | Steps 5-6 can still fail | **Fail-safe rule**: a hook may only write state that is harmless if the server stays quarantined (tool records, baseline marker, blocks). The quarantine flip itself is only ever the commit's row write |
+| Durable tool-baseline marker (117 PR-1), "cleared only by removing the server" | Must be in the removal purge | Added to the PurgeSet (data-model §PurgeSet). The purge is the only path that clears it |
+| Capture sequence and `managed.Client.Retire()` / `CaptureIsCurrent` (117 PR-3), "manager retires replaced clients" | Same retirement point as 116 PR3/PR4 | There is one `Retire()` per instance. 116 PR3's `AdvanceGenerations` is the manager-side retirement point for commit-driven replacement. 117's `Retire()` (capture invalid) and 116 PR4's `Gate.Retire()` (dial barrier) are one method: whichever lands second extends it |
+| Lock order `captureSnapMu → approval lock → captureMu(R) → epochMu` | 116 adds `configCommitMu → approval locks` (released) `→ captureMu(W)` | The union is acyclic: `Commit` never takes `captureSnapMu`, never holds an approval lock while taking `captureMu`, and no holder of `captureSnapMu`, an approval lock, `captureMu` or `epochMu` calls `Commit` |
+| `QuarantineServer` purge moved under the approval lock (117) | 116 runs the index purge in step 6 under the approval lock | Same outcome. The 116 commit subsumes it |

@@ -84,7 +84,7 @@ PR2  internal/storage/{purge.go (new), manager.go (ClearOAuthState exact match)}
 PR3  internal/upstream/manager.go (desired, *At, AdvanceGenerations)
      internal/upstream/managed/client.go (Generation)
      internal/runtime/supervisor/{supervisor.go,actor_pool.go}
-     internal/runtime/{commit.go (step 6), lifecycle.go (workers, RestartServer, capture)}
+     internal/runtime/{commit.go (step 7), lifecycle.go (workers, RestartServer, capture)}
 PR4  internal/upstream/dialgate/ (new)
      internal/upstream/managed/client.go, internal/upstream/core/{client.go,connection_stdio.go,connection_http.go,connection_launcher.go,connection_oauth.go}
      internal/transport/http.go, internal/oauth/{config.go,transport_wrapper.go}
@@ -93,7 +93,7 @@ PR4  internal/upstream/dialgate/ (new)
 
 ## Commit pipeline
 
-Steps 1-7 run inside `configCommitMu`. Steps 5-7 are skipped when nothing
+Steps 1-8 run inside `configCommitMu`. Steps 4-8 are skipped when nothing
 changed.
 
 | # | Step | Failure behaviour |
@@ -101,14 +101,15 @@ changed.
 | 1 | **Build**: `base := configSvc.Current()`, `next := deep clone`, run `fn(tx)` | `fn` error → abort, nothing written |
 | 2 | **Gate**: admission gate on `next` against the stored view. Force `Quarantined=true` where storage keeps a quarantine without an explicit decision. Validate (`ValidateDetailed`, trust modes, forward headers) | validation error → abort |
 | 3 | **Prepare**: `configSvc.Prepare(next)` runs the pre-publish hook and computes `G`, generations and incarnations. Compute `Changes` | — |
-| 4 | **Disk** (when a path exists): pending-aware write plus the self-write marker | abort, nothing else written |
-| 5 | **Storage**: approval locks for changed names (sorted), then `ApplyServerCommit` (one bbolt tx: saves, deletes and purges, stamps, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk write of `base`, abort |
-| 6 | **Advance manager** (PR3/PR4): `AdvanceGenerations(changes)` unregisters, retires (PR4) and restamps | cannot fail (in-memory) |
-| 7 | **Publish**: `configSvc.Publish(prepared)` and the legacy `r.cfg`/`desiredCfg` swap | `ErrConcurrentPublish` is an invariant bug: logged as an error, the commit returns an error, and the state is still consistent because nothing else can publish |
-| 8 | **After unlock**: spawn workers bound to `(name, g)` for created and reconnecting servers, asynchronous `Disconnect` of retired instances, events, telemetry, activity | logged |
+| 4 | **Lock and hooks**: approval locks for changed names (sorted; a name with a hook counts as changed), then `tx.UnderApprovalLock` hooks (Spec 117 review-bound server approval: validate, decide, baseline and blocks, promote) | hook error (for example a stale review) → release locks, abort, nothing written |
+| 5 | **Disk** (when a path exists): pending-aware write plus the self-write marker | abort. Hook writes from step 4 stay, which is fail-safe: a promoted tool on a still-quarantined server is unreachable |
+| 6 | **Storage**: `ApplyServerCommit` (one bbolt tx: saves, deletes and purges, stamps, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk write of `base`, abort |
+| 7 | **Advance manager** (PR3/PR4): `AdvanceGenerations(changes)` unregisters, retires (PR4) and restamps | cannot fail (in-memory) |
+| 8 | **Publish**: `configSvc.Publish(prepared)` and the legacy `r.cfg`/`desiredCfg` swap | `ErrConcurrentPublish` is an invariant bug: logged as an error, the commit returns an error, and the state is still consistent because nothing else can publish |
+| — | **After unlock**: spawn workers bound to `(name, g)` for created and reconnecting servers, asynchronous `Disconnect` of retired instances, events, telemetry, activity | logged |
 
-Steps 6 and 7 always run in that order, so publication never comes before
-retirement. Before PR3 lands, step 6 is a no-op and the after-unlock workers
+Steps 7 and 8 always run in that order, so publication never comes before
+retirement. Before PR3 lands, step 7 is a no-op and the after-unlock workers
 use today's manager methods.
 
 ## Lock order
@@ -119,7 +120,7 @@ Normative. It extends [research.md](research.md) D9.
 L0 configCommitMu                                   (runtime; outermost; only Commit takes it)
 L1 server approval lock(name)  [sorted when >1]     (runtime.toolApprovalLocks; also guards prompt approvals after PR2)
 L2 storage.Manager.mu → bbolt tx                    (leaf)
-L1' index (bleve) writes                            (taken under L1 in step 5; leaf w.r.t. L0-L2)
+L1' index (bleve) writes                            (taken under L1 in step 6; leaf w.r.t. L0-L2)
 L3 upstream.Manager.captureMu (W in commit, R in capture) → L4 Manager.mu
 L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
 L6 configsvc.updateMu (pre-publish hook + observers run here)
@@ -127,11 +128,11 @@ L7 Runtime.mu                                        (leaf: field swaps only)
 ```
 
 **Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5; L0→L6; L0→L7;
-L3(R)→L1(one)→L2 (capture path, unchanged); L1(one)→L2 / L1' / L4(R) (discovery, approvals).
+capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` after Spec 117 PR-3 (either is compatible, because the commit never holds L1 and L3 together); L1(one)→L2 / L1' / L4(R) (discovery, approvals). Spec 117's global `captureSnapMu` sits above L1, and `Commit` never takes it.
 
 **Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):
 1. Calling `Commit` (directly or through `SaveConfiguration`, `ApplyConfig`, `ReloadConfiguration`, `UpdateConfig`, `QuarantineServer`, `EnableServer`, `RemoveServer`, scanner unquarantine) while holding any of L1-L7. Enforced by `TestLockOrder_*`, which drive each forbidden pairing concurrently with a commit under a 5 s watchdog that dumps all goroutines on timeout. Same-goroutine re-entry is caught by a `commitOwner` goroutine-id check that is compiled only under the `commitlockcheck` test build tag.
-2. Taking L1 while holding L3 for **writing**. The commit releases L1 before step 6.
+2. Taking L1 while holding L3 for **writing**. The commit releases L1 before step 7.
 3. Taking more than one L1 outside `Commit`.
 4. Taking L0-L5 inside a `configsvc` hook or observer (L6).
 5. Taking any runtime lock from `upstream`, `managed`, `core`, `transport`, `oauth` or `supervisor`. These packages never call back into the runtime synchronously, except through the existing tool-discovery callback, which takes only L1(one).
@@ -190,7 +191,7 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR3: Generation-bound workers and supervisor (#1563)
 
-- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`, `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 6, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
+- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`, `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
 - **Depends on**: PR1 (generations). Independent of PR2.
 - **Failing-first tests**: T3.1-T3.5.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).

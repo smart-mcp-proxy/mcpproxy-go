@@ -45,13 +45,14 @@ Branch `116-pr1-config-commit` from `main`.
 - [ ] T020 [US1] `internal/config/server_entry_equal.go`: `ServerEntryEqual` (ignores Created/Updated; includes the explicit bit, Shared, AuthBroker) with a table test
 - [ ] T021 [US1] `configsvc`: `ServerGen`, `Snapshot.ServerGenerations`, `Prepare`/`Publish`/`SeedVersion`. Re-express `Update`/`UpdateIfCurrent` on top. Remove `ReloadFromFile`'s raw publish (makes T017 pass)
 - [ ] T022 [US1] storage: `UpstreamRecord.Generation/Incarnation`, `ApplyServerCommit` (one tx; saves through the quarantine-keeping invariant; deletes as today: row + call history), meta key (makes T018 pass)
-- [ ] T023 [US1] `internal/runtime/commit.go`: `Commit`, `CommitTx` ops, pipeline steps 1-5 and 7 plus after-unlock (plan §Commit pipeline). Approval locks taken in sorted order for changed names in step 5. Compensating disk write on a storage failure. Re-entry guard
-- [ ] T024 [US1] `internal/runtime/commit_reconcile.go`: move `LoadConfiguredServers`' storage phase into step 5 (diff against the stored view; OAuth-config-change clear; newly-quarantined index purge, FR-008; orphan GC on the working copy, with the empty guard at boot only). Keep `LoadConfiguredServers(nil)` as a thin `Commit("reconcile", ReplaceConfig(live))` wrapper for the boot path. Delete the removal goroutines (removal is synchronous in step 5)
+- [ ] T023 [US1] `internal/runtime/commit.go`: `Commit`, `CommitTx` ops, pipeline steps 1-6 and 8 plus after-unlock (plan §Commit pipeline). Approval locks taken in sorted order for changed names in step 4, with `UnderApprovalLock` hooks. Compensating disk write on a storage failure. Re-entry guard
+- [ ] T024 [US1] `internal/runtime/commit_reconcile.go`: move `LoadConfiguredServers`' storage phase into step 6 (diff against the stored view; OAuth-config-change clear; newly-quarantined index purge, FR-008; orphan GC on the working copy, with the empty guard at boot only). Keep `LoadConfiguredServers(nil)` as a thin `Commit("reconcile", ReplaceConfig(live))` wrapper for the boot path. Delete the removal goroutines (removal is synchronous in step 6)
 - [ ] T025 [US1] after-unlock workers: spawn connect/disconnect workers for `Changes` (still the legacy manager calls; PR3 binds them), the events, the telemetry `NotifyConfigChanged`
 - [ ] T026 [US1] `ApplyConfig`/`applyConfigLocked`, `ReloadConfiguration`, `UpdateConfig`, `UpdateListenAddress`, `SaveConfiguration` (persist the live config, no storage read), `gateInitialConfig`, `SetServerShared` → `Commit` (makes T011 pass)
 - [ ] T027 [US1] `EnableServer`, `BulkEnableServers`, `QuarantineServer` (index purge in the commit; baseline approval after the commit, unchanged), `RestartServer`'s disk refresh → `Commit` (makes T013 pass)
 - [ ] T028 [US1] `internal/server`: `createServer` → `Commit(CreateServer)` and delete `createMu`; `removeServerStorage` → `Commit(RemoveServer)` (PR1 deletes as today); `UpdateServer` → `Commit(UpdateServer)` with the in-place mutation removed; registry source add/edit/remove → `Commit(MutateGlobal)` (makes T014 and T016 pass)
 - [ ] T029 [US1] `internal/server/mcp.go`: update/patch merge inside `UpdateServer`; the result's connection status comes from the generation's worker result (bounded wait, as today); quarantine → `Commit(SetQuarantined)`; remove → `Commit(RemoveServer)` (makes T015 and the MCP half of T012 pass)
+- [ ] T029a [US1] If Spec 117 PR-2 has merged: convert `CommitServerApproval`/`FinishServerApproval` to `Commit(ExpectIncarnation(PR2: generation until then), SetQuarantined(false), UnderApprovalLock(...))` with its tests unchanged. Otherwise: add `UnderApprovalLock` with a unit test (hook runs under the lock; a hook error aborts with nothing written)
 - [ ] T030 [US1] `internal/httpapi/server.go` PATCH: move omitted-field, map-merge, isolation and forward-header resolution into a `func(cur *config.ServerConfig) error` passed down to `UpdateServer` (makes T012 pass; T002 now passes)
 - [ ] T031 [US1] `TestCommit_*` + `TestLockOrder_*` at `-race -count=20` with `GOMAXPROCS=1` and `4`; the CI skip lane under `-tags server`; both lint passes; `./scripts/test-api-e2e.sh`
 - [ ] T032 [US1] Live L1 on the qa070 harness ([quickstart.md](quickstart.md)); evidence in `evidence/s116-pr1/EVIDENCE.md`
@@ -81,7 +82,7 @@ Branch `116-pr2-atomic-removal` from `main` after PR1 merges.
 ### Implementation
 
 - [ ] T050 [US2] `internal/storage/purge.go`: `PurgeServer` inside the `ApplyServerCommit` tx for each `Removes` entry; `PurgeReport`. Rewrite `ClearOAuthState` with the exact key match (`name` or `name_` + 16 lowercase hex) (makes T045 pass)
-- [ ] T051 [US2] `commit.go` step 5: removal purge under L1; in-memory purge (index + profile reindex, `RefreshManager.OnTokenCleared`, `RevokeInspectionExemption`, toolsig drop, discovery generation reset); `CommitResult.Purged`; activity `purged` metadata (makes T040 and T042 pass)
+- [ ] T051 [US2] `commit.go` step 6: removal purge under L1; in-memory purge (index + profile reindex, `RefreshManager.OnTokenCleared`, `RevokeInspectionExemption`, toolsig drop, discovery generation reset); `CommitResult.Purged`; activity `purged` metadata (makes T040 and T042 pass)
 - [ ] T052 [US2] Collapse REST `RemoveServer` and MCP `handleRemoveUpstream` onto `Commit(RemoveServer)` and delete their ad hoc cleanup (makes T041 pass)
 - [ ] T053 [US2] Incarnation binding: `approvalHooks`; capture in `ApproveTools`, block/unblock, `approveBaselineToolsForServer`, `checkToolApprovals`/capture; re-check against the storage row under L1; `ErrServerReplaced` (makes T043 pass)
 - [ ] T054 [US2] Prompt approvals (`internal/server/prompt_quarantine.go`) under L1 with the incarnation check
@@ -112,7 +113,7 @@ independent of PR2.
 ### Implementation
 
 - [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu); `managed.Client.Generation()` (makes T064 pass)
-- [ ] T071 [US3] `commit.go` step 6 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
+- [ ] T071 [US3] `commit.go` step 7 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
 - [ ] T072 [US3] Post-commit workers use `*At` with `(name, g)` (makes T060 pass)
 - [ ] T073 [US3] Supervisor: actions carry `ServerGen.Gen` from their snapshot; `ActorPoolSimple` uses `*At`; `ErrStaleGeneration` → debug + no-op (makes T061 pass)
 - [ ] T074 [US3] `RestartServer` → `manager.ReplaceInstance(name, gen)` (retire + fresh instance at the same generation) (makes T062 pass)
@@ -163,5 +164,5 @@ main ──► PR1 ──┬──► PR2
 ```
 
 - Within a PR: Setup → Tests first (all `[P]`) → Implementation in the listed order → verification, live check, review.
-- PR2 and PR3 may be developed in parallel after PR1 merges. Whichever lands second rebases. Their files overlap only in `commit.go` (step 5 vs step 6).
+- PR2 and PR3 may be developed in parallel after PR1 merges. Whichever lands second rebases. Their files overlap only in `commit.go` (step 6 vs step 7).
 - Following the "merge early, don't stack" rule (maintainer memory), each PR branches from updated `main`, never from an unmerged sibling.

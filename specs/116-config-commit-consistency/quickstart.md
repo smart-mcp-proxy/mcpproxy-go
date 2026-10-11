@@ -73,7 +73,7 @@ tokens.
 | T3.2 | the disabled worker for `(s, g1)` at `beforeWorkerAct` | enable s (g2); its worker connects | the new client is still registered and connected after the old worker is released |
 | T3.3 | supervisor `ActionConnect` and `ActionReconnect` at `beforeExecuteAction` | remove, replace or quarantine | the action is a no-op. The manager holds only the latest generation |
 | T3.4 | `RestartServer(s)` worker parked | remove s | no client for s |
-| T3.5 | quarantined capture parked at `quarantinedCaptureDuringPersist` | replace the endpoint (commit returns) | the commit's step 6 waits for the capture section (L3 W), **or** the capture sees the instance unregistered and persists nothing. No `review.changed` for the old definitions |
+| T3.5 | quarantined capture parked at `quarantinedCaptureDuringPersist` | replace the endpoint (commit returns) | the commit's step 7 waits for the capture section (L3 W), **or** the capture sees the instance unregistered and persists nothing. No `review.changed` for the old definitions |
 
 ## T4: Retirement barrier (PR4)
 
