@@ -337,13 +337,47 @@ var squashedFamilies = []struct {
 	re   *regexp.Regexp
 	what string
 }{
-	{regexp.MustCompile(`(?:ignore|disregard|forget|bypass|override)(?:all|any|every|the|of|your|these)*(?:previous|prior|above|earlier|preced|initial|original)\w*?(?:instruction|directiv|direction|prompt|guidelin|guidance)`), "instruction-override directive"},
+	{regexp.MustCompile(`(?:ignore|disregard|forget|bypass|override)(?:all|any|every|the|of|your|these)*(?:previous|prior|above|earlier|preced|initial|original)[a-z]{0,` + squashedMaxGap + `}?(?:instruction|directiv|direction|prompt|guidelin|guidance)`), "instruction-override directive"},
 	{regexp.MustCompile(`(?:reveal|print|output|leak|repeat|recite|show|dump|disclose)(?:me|us|all|the|your)*(?:systemprompt|hiddeninstruction|initialprompt|initialinstruction|originalinstruction|secretinstruction)`), "system-prompt exfiltration directive"},
 }
 
+// squashedMaxGap bounds the letters the override family may skip between the
+// prior-qualifier and the directive noun ("previous[system]instructions",
+// "preced[ingdeveloper]instructions"). Unbounded, the gap spanned whole
+// sentences of ordinary prose (SEC-01 review round 12).
+const squashedMaxGap = "16"
+
+// squashClauseBoundary marks where one clause or field ends, so the squashed
+// pass never joins unrelated text: line breaks, JSON structure and key/value
+// quotes (schema fields are separate clauses), and sentence punctuation that
+// follows a real word of two or more letters. Punctuation after a single letter
+// ("i. g. n. o. r. e.") is letter spacing, not a sentence end, and is kept.
+var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s*"|\p{L}{2}[.!?;。！？；…]+`)
+
+// squashedClauses splits text at squashClauseBoundary and squashes each clause.
+func squashedClauses(text string) []string {
+	var out []string
+	prev := 0
+	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
+		out = append(out, detect.Squash(text[prev:loc[1]]))
+		prev = loc[1]
+	}
+	return append(out, detect.Squash(text[prev:]))
+}
+
 // inspectSquashed is the soft, spacing-agnostic last pass (see squashedFamilies).
+// It matches clause by clause, so a directive cannot be assembled from words
+// in different sentences or schema fields.
 func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
-	squashed := detect.Squash(text)
+	for _, squashed := range squashedClauses(text) {
+		if sig := c.matchSquashed(squashed); sig != nil {
+			return sig
+		}
+	}
+	return nil
+}
+
+func (c *PhraseInjection) matchSquashed(squashed string) []detect.Signal {
 	for _, fam := range squashedFamilies {
 		if loc := fam.re.FindStringIndex(squashed); loc != nil {
 			match := squashed[loc[0]:loc[1]]

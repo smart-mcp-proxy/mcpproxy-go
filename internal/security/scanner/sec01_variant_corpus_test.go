@@ -291,3 +291,14 @@ func TestSEC01_RealWorldBenignCorpora_NoNewHolds(t *testing.T) {
 		t.Logf("wrote %s", sec01RealWorldBaselinePath)
 	}
 }
+
+// TestSEC01_SquashedFallbackKeepsSchemaFieldsApart (Sol round-2 P2): an
+// override verb in one schema field and a directive noun in the next must not
+// be joined by the letters-only fallback into a scan-mode hold.
+func TestSEC01_SquashedFallbackKeepsSchemaFieldsApart(t *testing.T) {
+	schema := `{"type":"object","properties":{"fresh":{"type":"boolean","description":"Ignore previous"},"docs":{"type":"string","description":"instructions file to include"}}}`
+	verdict, coverageOK, signals := sec01Scan("s", "search", "Searches the package index.", schema)
+	if !coverageOK || verdict != "clean" {
+		t.Fatalf("want clean with coverage OK, got verdict=%s coverage=%v signals=%v", verdict, coverageOK, signals)
+	}
+}
