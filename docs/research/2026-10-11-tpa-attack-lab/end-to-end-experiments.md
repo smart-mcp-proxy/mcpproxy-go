@@ -331,6 +331,58 @@ SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh     # artifacts from the run above, n
 
 Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r3/` of the main checkout.
 
+### Review round 4 follow-ups
+
+A fourth review (Sol 6.1, REQUEST_CHANGES at `bbf6ca3b2`, four chunked
+transcripts) raised ten items, which deduplicate to nine. All nine were in
+scope and were fixed with regression tests. The cap-exhaustion finding was
+raised twice: once as a code defect and once as missing test coverage. None
+was rejected. RT-04 and RT-07 (detect engine) stay deferred to the concurrent
+SEC-01 PR, so EXP-3 is still expected to show HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-03: on the pending path and the revert path, `CurrentHash` was recomputed under the hint-aware formula while the legacy `HashSchemaVersion` was kept. An approval then copied the hash and kept the legacy version, so a later read-only-lying flip reached the unknown-hints wildcard and was content-matched to approved | Fixed. Every runtime write that recomputes `CurrentHash` now stamps the new `CurrentHashSchemaVersion`. Approve, block and the scan-approval block all go through `ToolApprovalRecord.ApproveCurrentHash`. It copies the hash and takes that version when it is known. A legacy hash that is only copied keeps its legacy version, as the round-2 fix requires. A revert stamps the current version. Tests: `TestRT03_LegacyPendingRecomputed_ApprovalCarriesCurrentVersion` (approve, block, scan-approval block; fails without the fix) and `TestRT03_LegacyChangedRecomputed_ApprovalCarriesCurrentVersion` |
+| P1 RT-01/RT-02: an empty stored output schema (or description) acted as a wildcard. The formula migration substituted the live value, and the content-match fallbacks treated empty as matching. A tool approved under the current version with no output schema could gain a poisoned one without review, in manual and scan modes | Fixed. An empty stored field is a wildcard only on records below `OutputSchemaHashSchemaVersion`, which predate complete capture. From that version on, an empty field is the declared contract. `revertedToPreviousContract` now compares the output schema literally, so gaining one is never treated as a revert. Tests: `TestOutputSchemaAddedAfterCurrentApproval_IsHeld` (default, manual and scan, two passes) and `TestDescriptionAddedAfterCurrentApproval_IsHeld`, which both fail without the fix. `TestOutputSchemaUncapturedLegacyRecord_StillMigrates` is the compatibility control |
+| P1 RT-06: the export was written to `SourceDir/tools.json`, which may be upstream-writable. The asynchronous scanner then re-read that file, so it could be swapped for clean metadata after export | Fixed. The exported document is carried in memory on the scan request as `ScanRequest.ToolDefinitions`, and the in-process baseline scanner analyses that snapshot. Docker scanners still read the mounted file (mounted `:ro`). Their result is discarded when the file does not match the snapshot before or after the run. Tests: `TestRT06_ToolsJSONSwappedAfterExport_BaselineScansSnapshot` swaps the file after export and before the scanner runs, through a storage hook on job start; it fails without the fix. Also `TestRT06_InProcessScanner_PrefersSnapshotOverFile` and `TestRT06_DockerScannerGate_DiscardsSwappedToolsJSON` |
+| P2 RT-05: the follow-up cap (4) dropped the last pending trigger and scheduled nothing to continue | Fixed. An owner that reaches the cap hands the pending trigger to a fresh worker after a short delay (2s by default). That worker is bounded the same way and stops on shutdown. Tests: `TestCoalescedDiscovery_BurstPastFollowUpCap_VerifiesFinalTrigger` (a finite burst longer than the cap ends with an armed contract, and nothing retriggers it) and `TestCoalescedDiscovery_ContinuationStopsOnShutdown`. This also covers the duplicate test-coverage item |
+| P2 RT-05: follow-ups owned by a notification reused the notification's expiring 30s context | Fixed. Every follow-up and continuation of a notification run gets a fresh `AppContext` timeout. Test: `TestToolsListChangedFollowUp_GetsFreshContext` |
+| P2 RT-06: a Pass-2 export failure aborted the whole supply-chain audit | Fixed. The pass is flagged `ToolDefinitionsUnavailable`. Scanners that may analyse `tools.json` fail with an explicit reason, and scanners that do not use tool metadata (`trivy-mcp`) still run. The stale `tools.json` is left untouched. Tests: `TestRT06_Pass2_LiveExportError_RunsOnlyMetadataIndependentScanners` replaces the old fail-closed pin, plus `TestPass2_ToolDefinitionsUnavailable_OnlyMetadataIndependentScannersRun` |
+| P2 suite: an unreadable or unknown EXP-3 report was recorded as the allowed hole, and the suite exited 0 | Fixed. `exp3_verdict` treats only `clean` and `warnings` as the deferred hole, and anything else is INCONCLUSIVE, which fails the suite. Test: `TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole` |
+| P2 suite: EXP-2b could report HOLDS without a successful unquarantine | Fixed. `unquarantine` checks the API's `success`. EXP-2b reports HOLDS only when four things hold: the unquarantine succeeded; the server reports `quarantined=false`; post-unquarantine discovery ran (`benign_calculator`, which is unchanged, reached the index); and both held tools are changed or blocked and absent from the index. Test: `TestExp2bVerdictRequiresProvenUnquarantine` |
+| P2 suite: `run-tpa-lab-docker.sh` resolved the relative `data_dir` against the caller's cwd | Fixed. The script changes to the project root and refuses a config whose `data_dir` resolves outside `$DATA_DIR`. Tests: `TestRunLabDockerResolvesDataDirFromAnyCwd` and `TestLabConfigDataDirResolvesRelativeAgainstBase`. The baseline run below was started from the scratchpad directory |
+
+Verification on the branch head after the round-4 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/security/scanner/ ./internal/storage/ ./tests/tpa-attack-lab/
+go test -timeout 25m -count=1 -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/... ./tests/tpa-attack-lab/
+#   74 packages ok, exit 0
+go test -race -count=1 ./internal/runtime/      # ok (495.1s)
+golangci-lint run --config .github/.golangci.yml ./...
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...
+#   no findings in any file this round touched; the reported issues are all in untouched files
+#   (event_bus.go reflect.Ptr, cli/output/table.go, bench/, telemetry tests, oidc_jwks, ...)
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+#   suite exit 0
+
+(cd <scratchpad> && SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh)   # artifacts from the run above, no Go change since
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection); both containers tpa-attack-lab:lab, NETWORKS none;
+#   no state written outside the worktree
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r4/` of the main checkout.
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -352,7 +404,16 @@ Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r3
   someone inspects it, as before.
 - A discovery trigger (connect or `tools/list_changed`) that arrives while a
   discovery for the same server is running is no longer dropped. It runs as a
-  follow-up, up to 4 per owner.
+  follow-up, up to 4 per owner. A trigger still pending after that limit is
+  run by a fresh worker after a short delay.
+- Tool approval records gain `current_hash_schema_version`. An approval
+  takes the version of the hash it copies. An empty stored description or
+  output schema on a current-version record is the declared contract, so a
+  tool that gains one is held for review.
+- The in-process baseline scanner analyses the exported tool definitions
+  from memory. A Docker scanner result is discarded if `tools.json` changed
+  after export. A Pass-2 audit whose export fails runs only the scanners that
+  do not use tool metadata (`trivy-mcp`).
 - A scan whose live tool export is empty now scans the contracts the proxy
   ingested. The scan fails rather than proceeding when the live export keeps
   failing with nothing ingested, or when `tools.json` cannot be written.
