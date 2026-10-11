@@ -285,7 +285,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	}
 
 	if !matched {
-		return c.inspectSquashed(text)
+		return c.inspectSquashed(tool, text)
 	}
 
 	// SEC-01: say so when the directive only became visible after
@@ -333,12 +333,30 @@ var allPhraseFamilies = append(append([]phraseFamily{}, phraseFamilies...), mult
 // "revealyoursystemprompt"). Without word boundaries or positions this pass is
 // SOFT only: it holds the change for review under trust_mode=scan but never
 // auto-quarantines (SEC-01).
+//
+// The squashed text keeps a clauseMark wherever a clause ends (see
+// squashClauseBoundary). Every directive WORD tolerates marks between its
+// letters, because punctuation inside a word is letter chunking ("re. ve. al",
+// "in. struc. tions"), never a real sentence end. Marks are NOT allowed between
+// words, nor in the bounded gap before the directive noun, so the pass cannot
+// assemble a directive from words in different sentences, lines or schema
+// fields (SEC-01 review rounds 12 and 13).
 var squashedFamilies = []struct {
 	re   *regexp.Regexp
 	what string
 }{
-	{regexp.MustCompile(`(?:ignore|disregard|forget|bypass|override)(?:all|any|every|the|of|your|these)*(?:previous|prior|above|earlier|preced|initial|original)[a-z]{0,` + squashedMaxGap + `}?(?:instruction|directiv|direction|prompt|guidelin|guidance)`), "instruction-override directive"},
-	{regexp.MustCompile(`(?:reveal|print|output|leak|repeat|recite|show|dump|disclose)(?:me|us|all|the|your)*(?:systemprompt|hiddeninstruction|initialprompt|initialinstruction|originalinstruction|secretinstruction)`), "system-prompt exfiltration directive"},
+	{regexp.MustCompile(
+		squashedAlt("ignore", "disregard", "forget", "bypass", "override") +
+			"(?:" + squashedAlt("all", "any", "every", "the", "of", "your", "these") + ")*" +
+			squashedAlt("previous", "prior", "above", "earlier", "preced", "initial", "original") +
+			"[a-z]{0," + squashedMaxGap + "}?" +
+			squashedAlt("instruction", "directiv", "direction", "prompt", "guidelin", "guidance")),
+		"instruction-override directive"},
+	{regexp.MustCompile(
+		squashedAlt("reveal", "print", "output", "leak", "repeat", "recite", "show", "dump", "disclose") +
+			"(?:" + squashedAlt("me", "us", "all", "the", "your") + ")*" +
+			squashedAlt("systemprompt", "hiddeninstruction", "initialprompt", "initialinstruction", "originalinstruction", "secretinstruction")),
+		"system-prompt exfiltration directive"},
 }
 
 // squashedMaxGap bounds the letters the override family may skip between the
@@ -347,40 +365,61 @@ var squashedFamilies = []struct {
 // sentences of ordinary prose (SEC-01 review round 12).
 const squashedMaxGap = "16"
 
-// squashClauseBoundary marks where one clause or field ends, so the squashed
-// pass never joins unrelated text: line breaks, JSON structure and key/value
-// quotes (schema fields are separate clauses), and sentence punctuation that
-// follows a real word of two or more letters. Punctuation after a single letter
-// ("i. g. n. o. r. e.") is letter spacing, not a sentence end, and is kept.
+// clauseMark separates squashed clauses. It is not a letter, so Squash never
+// produces it.
+const clauseMark = "|"
+
+// squashedAlt is a non-capturing alternation of words whose letters may be
+// separated by clause marks (letter chunking inside one word).
+func squashedAlt(words ...string) string {
+	parts := make([]string, len(words))
+	for i, w := range words {
+		var b strings.Builder
+		for j, r := range w {
+			if j > 0 {
+				b.WriteString(regexp.QuoteMeta(clauseMark) + "*")
+			}
+			b.WriteRune(r)
+		}
+		parts[i] = b.String()
+	}
+	return "(?:" + strings.Join(parts, "|") + ")"
+}
+
+// squashClauseBoundary marks where one clause or field ends: line breaks, JSON
+// structure and key/value quotes (schema fields are separate clauses), and
+// sentence punctuation after a letter pair. It runs on the RAW tool text,
+// because PhraseText has already collapsed line breaks into spaces (review
+// round 13). Punctuation after a single letter ("i. g. n. o. r. e.") is letter
+// spacing and is kept; punctuation that lands inside a directive word is
+// tolerated by squashedAlt.
 var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s*"|\p{L}{2}[.!?;。！？；…]+`)
 
-// squashedClauses splits text at squashClauseBoundary and squashes each clause.
-func squashedClauses(text string) []string {
+// squashedClauses de-obfuscates and squashes each clause of text and joins
+// them with clauseMark.
+func squashedClauses(text string) string {
 	var out []string
 	prev := 0
 	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
-		out = append(out, detect.Squash(text[prev:loc[1]]))
+		out = append(out, detect.Squash(detect.NormalizeForPhrase(text[prev:loc[1]])))
 		prev = loc[1]
 	}
-	return append(out, detect.Squash(text[prev:]))
+	out = append(out, detect.Squash(detect.NormalizeForPhrase(text[prev:])))
+	return strings.Join(out, clauseMark)
 }
 
 // inspectSquashed is the soft, spacing-agnostic last pass (see squashedFamilies).
-// It matches clause by clause, so a directive cannot be assembled from words
-// in different sentences or schema fields.
-func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
-	for _, squashed := range squashedClauses(text) {
-		if sig := c.matchSquashed(squashed); sig != nil {
-			return sig
-		}
+// It reads the raw tool text when available so line breaks still separate
+// clauses; a hand-built view with only normalized text falls back to that.
+func (c *PhraseInjection) inspectSquashed(tool detect.ToolView, normalized string) []detect.Signal {
+	raw := tool.RawText()
+	if strings.TrimSpace(raw) == "" {
+		raw = normalized
 	}
-	return nil
-}
-
-func (c *PhraseInjection) matchSquashed(squashed string) []detect.Signal {
+	squashed := squashedClauses(raw)
 	for _, fam := range squashedFamilies {
 		if loc := fam.re.FindStringIndex(squashed); loc != nil {
-			match := squashed[loc[0]:loc[1]]
+			match := strings.ReplaceAll(squashed[loc[0]:loc[1]], clauseMark, "")
 			return []detect.Signal{{
 				CheckID:    c.ID(),
 				Tier:       detect.TierSoft,

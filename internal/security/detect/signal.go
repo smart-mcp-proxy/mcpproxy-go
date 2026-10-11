@@ -86,6 +86,11 @@ func (tv ToolView) MatchText() string {
 	return tv.NormalizedText
 }
 
+// RawText is the raw description followed by the raw schema text, the input
+// NormalizedText and PhraseText are computed from. Unlike them it keeps line
+// breaks and punctuation.
+func (tv ToolView) RawText() string { return combinedText(tv) }
+
 // RegistryView is a read-only snapshot of every server's current tools, built
 // once per scan and passed to every check so cross-tool checks (shadowing) can
 // reason about collisions and references.
