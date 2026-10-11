@@ -161,11 +161,12 @@ func checkDocCommand(root *cobra.Command, line string) string {
 				i++ // the next token is the flag's value
 			}
 			continue
-		case len(t) == 2 && t[0] == '-' && t[1] != '-' && !isDigit(t[1]):
-			if fl = lookupShort(cmd, t[1:]); fl == nil {
-				return fmt.Sprintf("flag %s does not exist on %q", t, cmd.CommandPath())
+		case len(t) >= 2 && t[0] == '-' && t[1] != '-' && !isDigit(t[1]):
+			consumeNext, msg := checkShortFlags(cmd, t)
+			if msg != "" {
+				return msg
 			}
-			if fl.Value.Type() != "bool" {
+			if consumeNext {
 				i++
 			}
 			continue
@@ -187,6 +188,27 @@ func checkDocCommand(root *cobra.Command, line string) string {
 		}
 	}
 	return ""
+}
+
+// checkShortFlags validates one single-dash token: a lone shorthand (-o), an
+// attached value (-o=json, -ojson) or a cluster of boolean shorthands (-yv).
+// It returns whether the next token is the value of a trailing non-bool
+// shorthand, or a description of the first unknown shorthand.
+func checkShortFlags(cmd *cobra.Command, t string) (consumeNext bool, msg string) {
+	body := t[1:]
+	for j := 0; j < len(body); j++ {
+		fl := lookupShort(cmd, string(body[j]))
+		if fl == nil {
+			return false, fmt.Sprintf("flag -%c (in %s) does not exist on %q", body[j], t, cmd.CommandPath())
+		}
+		if fl.Value.Type() == "bool" {
+			continue
+		}
+		// A value-taking shorthand: the remainder (after an optional "=") is
+		// its value; when nothing remains, the next token is.
+		return j == len(body)-1, ""
+	}
+	return false, ""
 }
 
 // isElision reports a placeholder token such as "...", "…" or "a|b|c".
@@ -258,6 +280,8 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy review approve fs --yes # comment",
 		"mcpproxy --json client list",
 		"mcpproxy -o json upstream list",
+		"mcpproxy -o=json upstream list",
+		"mcpproxy -ojson upstream list",
 		"mcpproxy upstream patch obsidian --env \"A=B\" --env-remove OLD",
 	}
 	for _, g := range good {
@@ -272,6 +296,10 @@ func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
 		"mcpproxy review approve fs --bogus",
 		"mcpproxy --json client frobnicate",
 		"mcpproxy --no-such-global client list",
+		"mcpproxy connect cursor -Z=1",
+		"mcpproxy connect cursor -Z",
+		"mcpproxy connect cursor -Zo json",
+		"mcpproxy -oZ=1 -Z client list",
 		"mcpproxy upstream patch obsidian --env A=B --no-such-flag",
 	}
 	for _, b := range bad {
