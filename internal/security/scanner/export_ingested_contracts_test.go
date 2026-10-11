@@ -195,3 +195,155 @@ func TestRT06_IngestedLookupError_StartScanFailsOverStaleToolsJSON(t *testing.T)
 	require.NoError(t, readErr)
 	assert.Equal(t, stale, string(data), "an operator-supplied source dir is left untouched")
 }
+
+// liveFailProvider fails every live tools/list export (or answers an empty
+// one) while optionally reporting ingested contracts (Sol r3 P1).
+type liveFailProvider struct {
+	info     *ServerInfo
+	liveErr  error
+	ingested []map[string]interface{}
+}
+
+func (p *liveFailProvider) GetServerInfo(string) (*ServerInfo, error) { return p.info, nil }
+func (p *liveFailProvider) GetServerTools(string) ([]map[string]interface{}, error) {
+	if p.liveErr != nil {
+		return nil, p.liveErr
+	}
+	return []map[string]interface{}{}, nil
+}
+func (p *liveFailProvider) EnsureConnected(context.Context, string) error { return nil }
+func (p *liveFailProvider) IsConnected(string) bool                       { return true }
+func (p *liveFailProvider) GetIngestedToolContracts(string) ([]map[string]interface{}, error) {
+	return p.ingested, nil
+}
+
+const staleCleanToolsJSON = `{"tools":[{"name":"summarize_text","description":"Summarizes text."}]}`
+
+func newR3Service(t *testing.T, p ServerInfoProvider) (*Service, *mockStorage) {
+	t.Helper()
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	svc.SetServerInfoProvider(p)
+	return svc, store
+}
+
+func staleSourceDir(t *testing.T) string {
+	t.Helper()
+	source := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(source, "tools.json"), []byte(staleCleanToolsJSON), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "server.js"), []byte("// source"), 0o644))
+	return source
+}
+
+// TestRT06_EmptyLiveExport_ScansIngestedContracts (Sol r3 P1): the server
+// answers the scan's tools/list with nothing, but discovery ingested a
+// poisoned contract. The stored contract is scanned in place of the stale
+// clean tools.json, and the export claims coverage only for it by name.
+func TestRT06_EmptyLiveExport_ScansIngestedContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		liveErr error
+	}{
+		{"empty live list", nil},
+		{"live export error", errors.New("tools/list failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _ := newR3Service(t, &liveFailProvider{liveErr: tc.liveErr, ingested: []map[string]interface{}{rt06Tool(rt06Poisoned)}})
+			source := staleSourceDir(t)
+			export := svc.exportToolDefinitionsFull("toctou", source)
+			require.NoError(t, export.Err)
+			require.NoError(t, export.LiveErr, "a stored contract was available to scan")
+			assert.Equal(t, 1, export.Count)
+			assert.Equal(t, []string{"summarize_text"}, export.Names, "a non-zero count always carries names")
+
+			data, err := os.ReadFile(filepath.Join(source, "tools.json"))
+			require.NoError(t, err)
+			assert.Contains(t, string(data), "id_rsa", "the ingested contract replaces the stale file")
+			assert.Equal(t, "dangerous", verdictOf(inProcessToolScan(data, "toctou", nil, "rt06")))
+		})
+	}
+}
+
+// TestRT06_EmptyLiveExport_NoIngested_OverwritesStaleToolsJSON (Sol r3 P1): a
+// stale clean tools.json is never what gets scanned — an empty export writes
+// an empty tool list and claims no coverage.
+func TestRT06_EmptyLiveExport_NoIngested_OverwritesStaleToolsJSON(t *testing.T) {
+	svc, _ := newR3Service(t, &liveFailProvider{})
+	source := staleSourceDir(t)
+	export := svc.exportToolDefinitionsFull("srv", source)
+	require.NoError(t, export.Err)
+	assert.Zero(t, export.Count)
+	data, err := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "summarize_text", "the stale file is replaced")
+	assert.Contains(t, string(data), `"tools": []`)
+}
+
+// TestRT06_LiveExportError_StartScanFailsOverStaleToolsJSON (Sol r3 P1): the
+// live export keeps failing (also on the retry) and nothing was ingested, so
+// this pass wrote no tools.json. A manual scan of a source dir holding a
+// stale clean tools.json must refuse to start rather than scan that file.
+func TestRT06_LiveExportError_StartScanFailsOverStaleToolsJSON(t *testing.T) {
+	svc, _ := newR3Service(t, &liveFailProvider{
+		info:    &ServerInfo{Name: "toctou", Protocol: "stdio", Command: "node", Args: []string{"server.js"}},
+		liveErr: errors.New("server not found: toctou"),
+	})
+	source := staleSourceDir(t)
+	job, err := svc.StartScan(context.Background(), "toctou", false, nil, source)
+	require.Error(t, err)
+	assert.Nil(t, job)
+	assert.Contains(t, err.Error(), "export tool definitions")
+	assert.Nil(t, svc.engine.GetActiveJob("toctou"))
+	data, readErr := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, readErr)
+	assert.Equal(t, staleCleanToolsJSON, string(data), "nothing was written over the operator's file")
+}
+
+// TestRT06_ToolsJSONWriteFailure_FailsClosed (Sol r3 P1): when tools.json
+// cannot be written the export reports an error instead of a zero-count
+// success, so the scan does not fall back to whatever the dir holds.
+func TestRT06_ToolsJSONWriteFailure_FailsClosed(t *testing.T) {
+	svc, _ := newR3Service(t, &namesProvider{tools: []map[string]interface{}{rt06Tool("Summarizes text.")}})
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	export := svc.exportToolDefinitionsFull("srv", missing)
+	require.Error(t, export.Err)
+	assert.Contains(t, export.Err.Error(), "write tool definitions")
+	assert.Zero(t, export.Count)
+
+	// End to end: a manual scan over a stale tools.json whose rewrite fails
+	// must refuse to start.
+	svc2, _ := newR3Service(t, &namesProvider{
+		info:  &ServerInfo{Name: "srv", Protocol: "stdio", Command: "node", Args: []string{"server.js"}},
+		tools: []map[string]interface{}{rt06Tool("Summarizes text.")},
+	})
+	source := staleSourceDir(t)
+	toolsPath := filepath.Join(source, "tools.json")
+	require.NoError(t, os.Remove(toolsPath))
+	require.NoError(t, os.Mkdir(toolsPath, 0o755), "a directory in place of tools.json makes the write fail")
+	job, err := svc2.StartScan(context.Background(), "srv", false, nil, source)
+	require.Error(t, err)
+	assert.Nil(t, job)
+	assert.Contains(t, err.Error(), "write tool definitions")
+}
+
+// TestRT06_Pass2_LiveExportError_FailsClosed (Sol r3 P1, Pass-2 path): a
+// supply-chain pass whose live export fails with nothing ingested records a
+// failed Pass-2 job instead of scanning the stale tools.json.
+func TestRT06_Pass2_LiveExportError_FailsClosed(t *testing.T) {
+	source := staleSourceDir(t)
+	info := &ServerInfo{Name: "toctou-p2", Protocol: "stdio", Command: "node", Args: []string{"server.js"}, WorkingDir: source}
+	svc, store := newR3Service(t, &liveFailProvider{info: info, liveErr: errors.New("server not found: toctou-p2")})
+	svc.startPass2("toctou-p2", info)
+
+	jobs, err := store.ListScanJobs("toctou-p2")
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, ScanJobStatusFailed, jobs[0].Status)
+	assert.Equal(t, ScanPassSupplyChainAudit, jobs[0].ScanPass)
+	assert.Contains(t, jobs[0].Error, "export tool definitions")
+	data, readErr := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, readErr)
+	assert.Equal(t, staleCleanToolsJSON, string(data))
+}

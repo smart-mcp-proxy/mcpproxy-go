@@ -1127,11 +1127,13 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		if req.SourceDir != "" {
 			// exportInto applies a usable export to the scan context, or
 			// reports why nothing may be scanned.
+			var liveErr error
 			exportInto := func(sc *ScanContext) error {
 				e := s.exportToolDefinitionsStamped(serverName, req.SourceDir)
 				if e.Err != nil {
 					return e.Err
 				}
+				liveErr = e.LiveErr
 				e.applyTo(sc)
 				return nil
 			}
@@ -1171,6 +1173,13 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 						exportErr = exportInto(scanCtx)
 					}
 				}
+			}
+			if exportErr == nil && liveErr != nil {
+				// Fail closed (Sol r3 P1): the live export failed even on the
+				// retry and there was no ingested contract to scan, so this
+				// pass wrote no tools.json — whatever the source dir holds
+				// must not be scanned in its place.
+				exportErr = fmt.Errorf("export tool definitions: %w", liveErr)
 			}
 			if exportErr != nil {
 				// Fail closed (RT-06, Sol r2 P1): never scan a source dir
@@ -1298,7 +1307,11 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		// Export tool definitions for Cisco scanner (only when there is a real
 		// source dir to write tools.json into — image-only servers have none).
 		if s.serverInfo != nil && req.SourceDir != "" {
-			if e := s.exportToolDefinitionsFull(serverName, req.SourceDir); e.Err != nil {
+			e := s.exportToolDefinitionsFull(serverName, req.SourceDir)
+			if e.Err == nil && e.LiveErr != nil {
+				e.Err = fmt.Errorf("export tool definitions: %w", e.LiveErr)
+			}
+			if e.Err != nil {
 				// Fail closed like Pass 1 (RT-06): the source dir may hold a
 				// tools.json this pass did not write.
 				s.logger.Warn("Skipping Pass 2: tool definitions could not be exported",
@@ -2417,8 +2430,13 @@ type toolExport struct {
 	// scan would otherwise read whatever tools.json the source dir already
 	// held — a stale or planted clean file — and return a clean verdict, so
 	// the caller must abort the scan rather than continue without an export
-	// (Sol r2 P1).
+	// (Sol r2 P1). A tools.json serialization or write failure is reported
+	// the same way (Sol r3 P1).
 	Err error
+	// LiveErr is set when the live tools/list export failed and no ingested
+	// contract was available to scan instead; nothing was written. The caller
+	// may retry, but must not scan the source dir if it persists (Sol r3 P1).
+	LiveErr error
 }
 
 // applyTo records the export on the scan context.
@@ -2449,20 +2467,19 @@ func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []st
 // definition digests of what was written, so a scan can later be matched to
 // the exact definitions it analysed.
 func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolExport {
-	tools, err := s.serverInfo.GetServerTools(serverName)
-	if err != nil {
-		s.logger.Warn("Could not export tool definitions for scanning",
-			zap.String("server", serverName), zap.Error(err))
-		return toolExport{}
-	}
-	if len(tools) == 0 {
-		return toolExport{}
+	live, liveErr := s.serverInfo.GetServerTools(serverName)
+	if liveErr != nil {
+		s.logger.Warn("Could not export live tool definitions for scanning",
+			zap.String("server", serverName), zap.Error(liveErr))
+		live = nil
 	}
 
-	// Names/hashes describe the LIVE export (what the scan coverage is matched
-	// against); diverging ingested contracts are scanned in addition.
-	names, hashes := toolDefinitionNames(tools), toolDefinitionHashes(tools)
-	scanned, err := s.withDivergentIngestedContracts(serverName, tools)
+	// The contracts discovery ingested are read independently of the live
+	// export (Sol r3 P1): an empty or failed live tools/list must not hide a
+	// stored contract from the scan. Names/hashes describe the LIVE export
+	// (what the scan coverage is matched against) when there is one;
+	// diverging ingested contracts are scanned in addition.
+	scanned, err := s.withDivergentIngestedContracts(serverName, live)
 	if err != nil {
 		// Fail closed (Sol r1 P2): without the ingested contracts the scan
 		// would see only what the server chose to answer this time — the
@@ -2472,27 +2489,51 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 			zap.String("server", serverName), zap.Error(err))
 		return toolExport{Err: fmt.Errorf("read the tool contracts discovery ingested for %s: %w", serverName, err)}
 	}
+	if liveErr != nil && len(scanned) == 0 {
+		// Nothing to scan and the live export failed: leave the source dir
+		// alone and let the caller retry or fail closed (Sol r3 P1).
+		return toolExport{LiveErr: liveErr}
+	}
 
-	// Format as MCP tools/list output
+	covered := live
+	if len(covered) == 0 {
+		// The live export is empty or failed but discovery ingested
+		// contracts: those are what this scan analyses, so they are what it
+		// covers (never an empty name list with a non-zero count, which would
+		// read as a legacy whole-server coverage claim).
+		covered = scanned
+	}
+
+	// Always (re)write tools.json — also for an empty list — so a stale or
+	// planted file already in a source dir is never what gets scanned
+	// (Sol r3 P1). A write failure is fatal for the same reason.
 	toolsData := map[string]interface{}{
 		"tools": scanned,
 	}
+	if scanned == nil {
+		toolsData["tools"] = []map[string]interface{}{}
+	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return toolExport{}
+		return toolExport{Err: fmt.Errorf("serialize tool definitions for %s: %w", serverName, err)}
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
-		s.logger.Debug("Failed to write tools.json", zap.Error(err))
+		s.logger.Warn("Failed to write tools.json for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{Err: fmt.Errorf("write tool definitions for %s: %w", serverName, err)}
+	}
+	if len(covered) == 0 {
 		return toolExport{}
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
-		zap.Int("tools", len(tools)),
+		zap.Int("tools", len(covered)),
+		zap.Int("scanned_contracts", len(scanned)),
 		zap.String("path", toolsPath),
 	)
-	return toolExport{Count: len(tools), Names: names, Hashes: hashes}
+	return toolExport{Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered)}
 }
 
 // withDivergentIngestedContracts returns the live export plus every contract
