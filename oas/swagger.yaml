@@ -2599,6 +2599,7 @@ components:
       - PreflightReasonNotFound
       - PreflightReasonServerNotConfigured
       - PreflightReasonToolBlockedByProfile
+      - PreflightReasonTokenPermissionDenied
     contracts.PreflightRequest:
       properties:
         policy:

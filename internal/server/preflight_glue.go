@@ -62,7 +62,20 @@ func (p *MCPProxyServer) RunPreflight(ctx context.Context, params preflight.Para
 		tier = preflight.TierOperator
 	}
 
-	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters, nil, policies)
+	return p.evaluatePreflight(ctx, params.Tools, tier, scope, params.Filters, nil, policies, restPreflightCredential(params))
+}
+
+// restPreflightCredential is the permission-holding credential of a REST
+// preflight caller (issue #1548 follow-up): a restricted (non-administrator)
+// caller is checked against its own token permissions exactly as dispatch
+// checks it; an operator holds none and is never narrowed — a token's
+// permissions apply only to that token's own calls. The context carries only
+// what HasPermission reads for a non-administrator: its permission list.
+func restPreflightCredential(params preflight.Params) *auth.AuthContext {
+	if !params.Restricted {
+		return nil
+	}
+	return &auth.AuthContext{Type: auth.AuthTypeAgent, Permissions: params.TokenPermissions}
 }
 
 // preflightRuntimeConfig is the shared "can this process answer at all" guard:
@@ -89,7 +102,9 @@ func (p *MCPProxyServer) preflightRuntimeConfig() (*config.Config, error) {
 // search index, which is every surface except spec 102's direct describe.
 // policies are the Spec 108 profile tool policies in effect for the caller
 // (issue #1548); every one of them must admit a tool for it to be ready, and an
-// empty list means no profile policy applies.
+// empty list means no profile policy applies. credential is the caller whose
+// agent-token permission tier dispatch would check (issue #1548 follow-up);
+// nil means no token permissions restrict the caller.
 func (p *MCPProxyServer) evaluatePreflight(
 	ctx context.Context,
 	refs []preflight.ToolRef,
@@ -98,6 +113,7 @@ func (p *MCPProxyServer) evaluatePreflight(
 	filters toolannotations.Filters,
 	indexReader preflight.IndexReader,
 	policies []preflightProfilePolicy,
+	credential *auth.AuthContext,
 ) (preflight.Outcome, error) {
 	cfg, err := p.preflightRuntimeConfig()
 	if err != nil {
@@ -133,10 +149,19 @@ func (p *MCPProxyServer) evaluatePreflight(
 		// runtime with no snapshot object at all (preflightSnapshot above).
 		RequireRuntimeEntry: state != nil,
 	}
-	if len(policies) > 0 {
-		ec.ToolPolicy = &preflightToolPolicyReader{
-			policies:    policies,
-			annotations: p.preflightAnnotationSource(state),
+	if len(policies) > 0 || credential != nil {
+		annotationSource := p.preflightAnnotationSource(state)
+		if len(policies) > 0 {
+			ec.ToolPolicy = &preflightToolPolicyReader{
+				policies:    policies,
+				annotations: annotationSource,
+			}
+		}
+		if credential != nil {
+			ec.TokenPermissions = &preflightTokenPermissionReader{
+				credential:  credential,
+				annotations: annotationSource,
+			}
 		}
 	}
 
@@ -233,18 +258,28 @@ func appendProfilePolicy(policies []preflightProfilePolicy, idx *profileIndex, s
 //     no `profile`, so an agent cannot re-point or widen its own view by
 //     asking (FR-009a).
 func (p *MCPProxyServer) RunPreflightForSession(ctx context.Context, refs []preflight.ToolRef, filters toolannotations.Filters) (preflight.Outcome, error) {
-	scope, policies, err := p.sessionPreflightView(ctx)
+	view, err := p.sessionPreflightView(ctx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
-	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, scope, filters, nil, policies)
+	return p.evaluatePreflight(ctx, refs, preflight.TierAgentToken, view.scope, filters, nil, view.policies, view.credential)
 }
 
 // sessionPreflightScope projects the session's OWN visibility predicate onto a
 // preflight scope (FR-009a). See sessionPreflightView.
 func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.Scope, error) {
-	scope, _, err := p.sessionPreflightView(ctx)
-	return scope, err
+	view, err := p.sessionPreflightView(ctx)
+	return view.scope, err
+}
+
+// sessionPreflightCaller is everything an in-band check evaluates under: the
+// session's server scope, the profile tool policies in effect, and the
+// credential whose token permission tier dispatch would check (nil when no
+// token permissions restrict the session).
+type sessionPreflightCaller struct {
+	scope      *preflight.Scope
+	policies   []preflightProfilePolicy
+	credential *auth.AuthContext
 }
 
 // sessionPreflightView projects the session's OWN visibility predicate onto a
@@ -283,7 +318,14 @@ func (p *MCPProxyServer) sessionPreflightScope(ctx context.Context) (*preflight.
 //
 // A nil scope means unrestricted, and is returned only when there is no auth
 // context and no profile in effect under either resolver.
-func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (*preflight.Scope, []preflightProfilePolicy, error) {
+//
+// The credential (issue #1548 follow-up) is derived exactly as
+// handleCallToolVariant derives the caller its token permission gate checks:
+// the request's auth context through auth.ScopedView (a confined anonymous
+// caller becomes a scoped view holding every permission), restricted only when
+// auth.IsNonAdmin. An administrator or an unconfined anonymous session holds
+// no token permissions and is never narrowed by them.
+func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (sessionPreflightCaller, error) {
 	authCtx := auth.AuthContextFromContext(ctx)
 	profileName, profileScope, idx := p.resolveActiveProfileWithIndex(ctx)
 
@@ -305,13 +347,19 @@ func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (*preflight.S
 		}
 	}
 
+	confinedAnonymous := (authCtx == nil || authCtx.Anonymous) && res.anonymousConfinementActive()
+	var credential *auth.AuthContext
+	if scoped := auth.ScopedView(authCtx, confinedAnonymous); auth.IsNonAdmin(scoped) {
+		credential = scoped
+	}
+
 	if authCtx == nil && profileScope == nil && res.Scope == nil {
-		return nil, policies, nil
+		return sessionPreflightCaller{policies: policies, credential: credential}, nil
 	}
 
 	names, err := p.preflightServerUniverse()
 	if err != nil {
-		return nil, nil, err
+		return sessionPreflightCaller{}, err
 	}
 	allowed := make([]string, 0, len(names))
 	for _, name := range names {
@@ -323,7 +371,7 @@ func (p *MCPProxyServer) sessionPreflightView(ctx context.Context) (*preflight.S
 		}
 		allowed = append(allowed, name)
 	}
-	return preflight.NewScope(profileName, allowed), policies, nil
+	return sessionPreflightCaller{scope: preflight.NewScope(profileName, allowed), policies: policies, credential: credential}, nil
 }
 
 // preflightServerUniverse is every server name an evaluation could legitimately
@@ -520,6 +568,37 @@ func (r *preflightToolPolicyReader) ProfileToolDecision(serverName, toolName str
 		return preflight.ProfileToolDecision{Blocked: true, Detail: detail}
 	}
 	return preflight.ProfileToolDecision{}
+}
+
+// preflightTokenPermissionReader answers the evaluator's token permission
+// question with the decision dispatch's target-tier gate makes
+// (handleCallToolVariant): tierForAnnotations over the tool's effective
+// annotations — the same identity read the profile policy decides from — then
+// AuthContext.HasPermission on the caller's credential, with dispatch's refusal
+// text. Nothing here re-implements the tier mapping or the permission check.
+type preflightTokenPermissionReader struct {
+	credential  *auth.AuthContext
+	annotations func(serverName, toolName string) (*config.ToolAnnotations, bool)
+}
+
+func (r *preflightTokenPermissionReader) TokenPermissionDecision(serverName, toolName string) preflight.TokenPermissionDecision {
+	if r == nil || r.credential == nil {
+		return preflight.TokenPermissionDecision{}
+	}
+	annotations, found := r.annotations(serverName, toolName)
+	perm := tierForAnnotations(annotations, found)
+	if perm == "" || r.credential.HasPermission(perm) {
+		return preflight.TokenPermissionDecision{}
+	}
+	detail := tokenTierRefusalText(perm, serverName, toolName)
+	if !found {
+		// No authoritative metadata establishes the tier, so dispatch fails
+		// closed to destructive. Let the connection verdicts that own an
+		// unhydrated server answer first; the evaluator still never calls
+		// the tool ready.
+		return preflight.TokenPermissionDecision{Indeterminate: true, Detail: detail}
+	}
+	return preflight.TokenPermissionDecision{Blocked: true, Detail: detail}
 }
 
 // preflightAnnotationSource returns the effective-annotation lookup the

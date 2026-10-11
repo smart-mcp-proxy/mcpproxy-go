@@ -56,6 +56,10 @@ type Params struct {
 	// through REST auth (Spec 057 / review finding 11). It can only narrow the
 	// evaluation scope, never widen it.
 	TokenProfilePin string
+	// TokenPermissions is the agent token's permission list (read / write /
+	// destructive), applied as dispatch applies it when Restricted is true
+	// (issue #1548 follow-up). Ignored for operator callers.
+	TokenPermissions []string
 	// Filters are the caller's annotation policy filters (spec 094 semantics).
 	Filters toolannotations.Filters
 }

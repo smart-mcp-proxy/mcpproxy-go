@@ -537,10 +537,11 @@ func (p *MCPProxyServer) runDirectCheck(
 	// selected profile). Narrowing the visible corpus by the v3 scope and every
 	// policy in effect makes the id gate AND the did_you_mean corpus agree with
 	// dispatch, including when every id is gated below.
-	scope, policies, err := p.sessionPreflightView(ctx)
+	view, err := p.sessionPreflightView(ctx)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
+	scope, policies := view.scope, view.policies
 	visible := narrowDirectEntries(p.visibleDirectEntriesIn(ctx, cat), scope, policies, p.EffectiveAnnotations)
 	plan := p.planDirectCheck(ctx, cat, visible, rawIDs)
 
@@ -560,7 +561,11 @@ func (p *MCPProxyServer) runDirectCheck(
 	// The visible corpus already hides profile-excluded tools; the session's
 	// policies are passed too so the evaluator applies the same decision as
 	// the retrieve-mode check, which can only narrow (issue #1548).
-	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, policies)
+	// The listing already withholds a tool above the session's token tier, so
+	// such an id is gated to not_found above; the credential is passed too so
+	// the evaluator applies dispatch's permission decision to everything it
+	// does evaluate (issue #1548 follow-up), which can only narrow.
+	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, policies, view.credential)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}
