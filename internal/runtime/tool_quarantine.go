@@ -337,9 +337,32 @@ func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.
 // and a tool_description_changed event names the move. ApprovedHash,
 // HashSchemaVersion and the Previous* (approved-contract) evidence are kept,
 // so the record stays changed until an operator confirms or the server
-// reverts. A no-op when the live contract is the recorded one.
+// reverts. When the live contract is the recorded one the snapshot is only
+// re-stamped: a legacy held record whose hint-free CurrentHash equals the
+// hint-aware hash of the live contract (default hints) gets the current
+// CurrentHashSchemaVersion and the live annotation snapshot, so an operator
+// approval copies a versioned hash instead of keeping the legacy
+// unknown-hints wildcard a later annotation flip could match (Sol r5 P1).
 func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) {
-	if existing == nil || existing.CurrentHash == currentHash {
+	if existing == nil {
+		return
+	}
+	if existing.CurrentHash == currentHash {
+		captured := capturedToolAnnotations(tool.Annotations)
+		if existing.CurrentHashSchemaVersion >= storage.ToolApprovalHashSchemaVersion &&
+			existing.CurrentAnnotations != nil &&
+			safetyHintsFingerprint(existing.CurrentAnnotations) == safetyHintsFingerprint(captured) {
+			return
+		}
+		existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
+		existing.CurrentAnnotations = captured
+		if r.storageManager == nil {
+			return
+		}
+		if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
+			r.logger.Error("Failed to stamp the held contract snapshot",
+				zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
+		}
 		return
 	}
 	contentMoved := existing.CurrentDescription != tool.Description ||
@@ -2061,9 +2084,15 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
 		return false
 	}
+	// An empty stored schema is a wildcard only on a sibling that predates
+	// complete contract capture, exactly as in the main gate's formula
+	// migration: from storage.OutputSchemaHashSchemaVersion on an empty
+	// stored output schema is the DECLARED contract ("none"), so a later
+	// (possibly poisoned) output schema is a change, never adopted (Sol r5 P1).
+	uncaptured := sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion
 	descMatch := sibling.CurrentDescription == tool.Description
-	schemaMatch := sibling.CurrentSchema == "" || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
-	outputMatch := sibling.CurrentOutputSchema == "" || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
+	schemaMatch := (sibling.CurrentSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
+	outputMatch := (sibling.CurrentOutputSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
 	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
 	return descMatch && schemaMatch && outputMatch && hintsMatch
 }
