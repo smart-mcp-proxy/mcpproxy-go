@@ -121,7 +121,7 @@ type toolApprovalServerLock struct {
     applied   uint64 // highest capture seq applied to records+index (guarded by mu)
     published uint64 // highest capture seq published to the StateView (guarded by mu)
     definitions uint64 // seq of the newest applied NON-EMPTY capture (== retained snapshot); FR-033a
-    reviewDirtyAt uint64 // PR-3 FR-018: seq F of a capture whose record writes failed; 0 = clean. Cleared only by a COMPLETE capture with seq > F (non-empty fully recorded, or authoritative empty with removal done); a lenient-empty observation never clears it
+    reviewDirtyAt uint64 // PR-3 FR-018: seq F of a capture whose record writes failed; 0 = clean. Also set (or moved up) by a capture whose apply fails after its record writes and before its StateView publish. Cleared only by a COMPLETE capture with seq > F (non-empty fully recorded, indexed and published, or authoritative empty with removal done and published), in the publish step; a lenient-empty observation never clears it
     dirtyMirror atomic.Uint64 // copy of reviewDirtyAt, written only under mu, read lock-free by the dispatch gate (FR-018 dispatch refusal)
 }
 ```
