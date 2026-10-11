@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -134,6 +135,61 @@ type ScanRequest struct {
 	// shadowing.cross_server check can detect impersonation/collisions across
 	// servers. Populated by the Service; nil for callers that don't supply it.
 	PeerTools map[string][]map[string]interface{}
+	// ToolDefinitions is the exact tools.json document the Service exported
+	// for this scan (RT-06, Sol r4 P1): an immutable in-memory snapshot of the
+	// live + ingested contracts. The in-process baseline scanner analyses it
+	// instead of re-reading SourceDir/tools.json, which an upstream that can
+	// write its own source dir could swap for clean metadata between export
+	// and the asynchronous scanner read. Docker scanners still read the file
+	// from the mounted source dir; their result is discarded when the file no
+	// longer matches this snapshot. Nil for callers that export nothing.
+	ToolDefinitions []byte
+	// ToolDefinitionsUnavailable marks a scan whose tool definitions could not
+	// be exported (Pass 2 only, Sol r4 P2): the source dir may hold a
+	// tools.json this pass did not write, so every scanner that may analyse
+	// it is failed, while scanners independent of tool metadata (supply-chain
+	// / CVE analysis) still run.
+	ToolDefinitionsUnavailable bool
+}
+
+// toolMetadataIndependentScanners are the scanners whose analysis never uses
+// the exported tool definitions (tools.json): they audit dependencies and
+// images only, so they may run when the definitions could not be exported.
+var toolMetadataIndependentScanners = map[string]bool{
+	"trivy-mcp": true,
+}
+
+// toolDefinitionsGate decides, before a Docker scanner runs, whether the
+// tools.json it would read may be analysed: not at all when the definitions
+// could not be exported (only metadata-independent scanners run, Sol r4 P2),
+// and only while it still holds the exported snapshot (Sol r4 P1).
+func toolDefinitionsGate(s *ScannerPlugin, req ScanRequest) error {
+	if req.ToolDefinitionsUnavailable && !toolMetadataIndependentScanners[s.ID] {
+		return fmt.Errorf("scanner %s skipped: the tool definitions could not be exported for this scan, and the source dir may hold a tools.json this scan did not write", s.ID)
+	}
+	if req.ToolDefinitionsUnavailable {
+		return nil
+	}
+	if err := checkToolDefinitionsIntact(req); err != nil {
+		return fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	return nil
+}
+
+// checkToolDefinitionsIntact reports an error when the tools.json in the
+// scanned source dir no longer holds the exported snapshot (RT-06, Sol r4 P1).
+func checkToolDefinitionsIntact(req ScanRequest) error {
+	if len(req.ToolDefinitions) == 0 || req.SourceDir == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(req.SourceDir, "tools.json"))
+	if err != nil {
+		return fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	if !bytes.Equal(data, req.ToolDefinitions) {
+		return fmt.Errorf("exported tool definitions (tools.json) were modified after export; the result is discarded")
+	}
+	return nil
 }
 
 // ScanCallback receives scan lifecycle events
@@ -573,6 +629,9 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	if s.InProcess {
 		return e.runInProcessScanner(s, req)
 	}
+	if err := toolDefinitionsGate(s, req); err != nil {
+		return nil, scannerLogs{}, err
+	}
 
 	// Parse timeout
 	timeout := 120 * time.Second
@@ -699,6 +758,11 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	logs := scannerLogs{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if err != nil {
 		return nil, logs, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
+	}
+	// A swap of tools.json while the container ran would detach its verdict
+	// from the exported contracts (RT-06, Sol r4 P1).
+	if err := checkToolDefinitionsIntact(req); err != nil {
+		return nil, logs, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
 
 	e.logger.Debug("Scanner finished",

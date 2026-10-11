@@ -1135,6 +1135,8 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				}
 				liveErr = e.LiveErr
 				e.applyTo(sc)
+				// The scan analyses exactly what was exported (Sol r4 P1).
+				req.ToolDefinitions = e.Data
 				return nil
 			}
 			if !s.serverInfo.IsConnected(serverName) {
@@ -1312,15 +1314,16 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 				e.Err = fmt.Errorf("export tool definitions: %w", e.LiveErr)
 			}
 			if e.Err != nil {
-				// Fail closed like Pass 1 (RT-06): the source dir may hold a
-				// tools.json this pass did not write.
-				s.logger.Warn("Skipping Pass 2: tool definitions could not be exported",
+				// The source dir may hold a tools.json this pass did not
+				// write, so every scanner that may analyse tool metadata is
+				// failed (RT-06). Pass 2's purpose — dependency / image CVE
+				// analysis — does not depend on the definitions, so those
+				// scanners still run (Sol r4 P2).
+				s.logger.Warn("Pass 2: tool definitions could not be exported; running only scanners independent of tool metadata",
 					zap.String("server", serverName), zap.Error(e.Err))
-				if resolvedCleanup != nil {
-					resolvedCleanup()
-				}
-				s.saveFailedPass2Job(serverName, e.Err.Error())
-				return
+				req.ToolDefinitionsUnavailable = true
+			} else {
+				req.ToolDefinitions = e.Data
 			}
 		}
 	} else {
@@ -2437,6 +2440,9 @@ type toolExport struct {
 	// contract was available to scan instead; nothing was written. The caller
 	// may retry, but must not scan the source dir if it persists (Sol r3 P1).
 	LiveErr error
+	// Data is the exact tools.json document written, handed to the scan as
+	// its immutable snapshot (ScanRequest.ToolDefinitions, Sol r4 P1).
+	Data []byte
 }
 
 // applyTo records the export on the scan context.
@@ -2525,7 +2531,7 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		return toolExport{Err: fmt.Errorf("write tool definitions for %s: %w", serverName, err)}
 	}
 	if len(covered) == 0 {
-		return toolExport{}
+		return toolExport{Data: data}
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
@@ -2533,7 +2539,7 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		zap.Int("scanned_contracts", len(scanned)),
 		zap.String("path", toolsPath),
 	)
-	return toolExport{Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered)}
+	return toolExport{Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered), Data: data}
 }
 
 // withDivergentIngestedContracts returns the live export plus every contract

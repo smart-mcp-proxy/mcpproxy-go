@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -328,21 +329,26 @@ func TestRT06_ToolsJSONWriteFailure_FailsClosed(t *testing.T) {
 	assert.Contains(t, err.Error(), "write tool definitions")
 }
 
-// TestRT06_Pass2_LiveExportError_FailsClosed (Sol r3 P1, Pass-2 path): a
-// supply-chain pass whose live export fails with nothing ingested records a
-// failed Pass-2 job instead of scanning the stale tools.json.
-func TestRT06_Pass2_LiveExportError_FailsClosed(t *testing.T) {
+// TestRT06_Pass2_LiveExportError_RunsOnlyMetadataIndependentScanners (Sol r3
+// P1, narrowed by Sol r4 P2): a supply-chain pass whose live export fails with
+// nothing ingested must not let any scanner analyse the stale tools.json, but
+// the dependency / image audit itself does not depend on tool metadata and is
+// not suppressed: the pass runs, flagged ToolDefinitionsUnavailable, and the
+// stale file is left untouched.
+func TestRT06_Pass2_LiveExportError_RunsOnlyMetadataIndependentScanners(t *testing.T) {
 	source := staleSourceDir(t)
 	info := &ServerInfo{Name: "toctou-p2", Protocol: "stdio", Command: "node", Args: []string{"server.js"}, WorkingDir: source}
 	svc, store := newR3Service(t, &liveFailProvider{info: info, liveErr: errors.New("server not found: toctou-p2")})
 	svc.startPass2("toctou-p2", info)
 
+	require.Eventually(t, func() bool {
+		jobs, err := store.ListScanJobs("toctou-p2")
+		return err == nil && len(jobs) == 1 && jobs[0].Status != ScanJobStatusRunning && jobs[0].Status != ScanJobStatusPending
+	}, 10*time.Second, 20*time.Millisecond)
 	jobs, err := store.ListScanJobs("toctou-p2")
 	require.NoError(t, err)
-	require.Len(t, jobs, 1)
-	assert.Equal(t, ScanJobStatusFailed, jobs[0].Status)
 	assert.Equal(t, ScanPassSupplyChainAudit, jobs[0].ScanPass)
-	assert.Contains(t, jobs[0].Error, "export tool definitions")
+	assert.NotContains(t, jobs[0].Error, "export tool definitions", "an export failure no longer aborts the supply-chain audit")
 	data, readErr := os.ReadFile(filepath.Join(source, "tools.json"))
 	require.NoError(t, readErr)
 	assert.Equal(t, staleCleanToolsJSON, string(data))

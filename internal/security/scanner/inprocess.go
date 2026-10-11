@@ -328,14 +328,21 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 		return report, logs, nil
 	}
 
-	if req.SourceDir == "" {
-		return nil, logs, fmt.Errorf("in-process scanner %s: no source dir with exported tool definitions", s.ID)
-	}
-
-	toolsPath := filepath.Join(req.SourceDir, "tools.json")
-	data, err := os.ReadFile(toolsPath)
-	if err != nil {
-		return nil, logs, fmt.Errorf("in-process scanner %s: could not read exported tool definitions (%s): %w", s.ID, toolsPath, err)
+	// Analyse the immutable snapshot the Service exported (RT-06, Sol r4 P1):
+	// the tools.json on disk may sit in an upstream-writable source dir and be
+	// swapped for clean metadata before this asynchronous read. The file is
+	// only read for callers that supply no snapshot.
+	data := req.ToolDefinitions
+	if data == nil {
+		if req.SourceDir == "" {
+			return nil, logs, fmt.Errorf("in-process scanner %s: no source dir with exported tool definitions", s.ID)
+		}
+		toolsPath := filepath.Join(req.SourceDir, "tools.json")
+		fileData, err := os.ReadFile(toolsPath)
+		if err != nil {
+			return nil, logs, fmt.Errorf("in-process scanner %s: could not read exported tool definitions (%s): %w", s.ID, toolsPath, err)
+		}
+		data = fileData
 	}
 
 	findings := inProcessToolScan(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID)
