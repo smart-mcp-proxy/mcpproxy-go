@@ -9,7 +9,7 @@ keywords: [security, quarantine, tpa, tool poisoning]
 
 # Security Quarantine
 
-MCPProxy includes an automatic quarantine system to protect against Tool Poisoning Attacks (TPA).
+MCPProxy includes a quarantine and review system that reduces exposure to Tool Poisoning Attacks (TPA). It withholds unapproved servers and tools from agents until a person has reviewed them, and it holds later changes to approved tool definitions for review again. It is an admission and review control, not a guarantee that an approved tool is safe; see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover).
 
 ## What is a Tool Poisoning Attack?
 
@@ -203,6 +203,21 @@ Manage held prompts with the `quarantine_security` MCP tool:
 { "operation": "approve_prompt", "name": "github", "prompt_name": "summarize_pr" }
 { "operation": "approve_all_prompts", "name": "github" }
 ```
+
+## What quarantine does and does not cover {#what-quarantine-does-and-does-not-cover}
+
+What it does, with quarantine enabled (the default):
+
+- **Withholds unapproved servers and tools.** A quarantined server's tools are not indexed, not returned by `retrieve_tools`, and calls to them are refused (the refusal carries a security analysis of the tool). A new or changed tool on a trusted server is held separately until approved.
+- **Holds changed definitions for review.** Each tool's name, description and input schema are hashed. A different hash after approval is held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)).
+- **Keeps release in human hands.** There is no server-level approve over MCP, so an agent cannot release a quarantined server.
+
+What it does not do:
+
+- **It is not proof of safety.** Review is only as good as the reviewer, and the offline scanners can miss attacks. A clean scan means the checks found nothing in the captured definitions; it is not evidence that a server or tool is safe. Manual review, scanner-assisted review and agent-assisted inspection (`inspect_quarantined`) are inputs to your decision. None of them approves anything by itself.
+- **It does not see behavior outside the definition.** The hash covers name, description and schema. A server whose implementation or backend changes while its definitions stay identical is not detected, and neither is a malicious tool result returned at call time.
+- **Trust modes change the guarantee.** `manual` (default) holds every new server and every change for a human. `scan` admits a server or change automatically when the offline scan is clean, so a detector miss is admitted. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). `"quarantined": false` on a server entry, `auto_approve_tool_changes: true`, and `quarantine_enabled: false` likewise remove the hold. See [Trust modes](#trust-modes-auto--scan--manual).
+- **It is not data-loss prevention.** See [Sensitive Data Detection](./sensitive-data-detection.md) and [Output Sanitisation](./output-sanitisation.md) for what is flagged and what, if anything, is blocked.
 
 ## Managing Quarantine
 

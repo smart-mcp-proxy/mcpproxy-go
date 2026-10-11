@@ -34,6 +34,13 @@ Spotlighting wraps untrusted text as:
 «/untrusted:server/tool»
 ```
 
+### Scope and limits
+
+- **Default behavior:** nothing is redacted or blocked. Sensitive-data detection still runs and flags records in the activity log, but it does so after the call is recorded and does not change what the agent receives.
+- **Text responses only.** `redact` and `block` act on text content in tool responses. Image, audio and embedded-resource content is never modified, and tool **arguments** sent to an upstream server are not covered.
+- **Pattern-based.** Only values matching the detector's patterns are redacted, and `block` triggers only on a **critical** detection. Redaction replaces the matched span; a multi-line secret such as a PEM private key may leave surrounding lines (in a local check with a synthetic key, only the `BEGIN` line was replaced). Treat redaction as risk reduction, not a guarantee that no secret reaches the agent.
+- **A canary check you can run locally:** point a scratch instance at a fixture server that returns a fake AWS key or private key and compare the response under the default config, `response_action: redact` and `response_action: block`. Use fake values only.
+
 ## Configuration
 
 ```json
