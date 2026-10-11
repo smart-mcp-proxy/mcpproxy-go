@@ -340,7 +340,8 @@ var allPhraseFamilies = append(append([]phraseFamily{}, phraseFamilies...), mult
 // "in. struc. tions"), never a real sentence end. Marks are NOT allowed between
 // words, nor in the bounded gap before the directive noun, so the pass cannot
 // assemble a directive from words in different sentences, lines or schema
-// fields (SEC-01 review rounds 12 and 13).
+// fields (SEC-01 review rounds 12 and 13). Compound targets ("system prompt")
+// allow only a chunkMark at their join (review round 14).
 var squashedFamilies = []struct {
 	re   *regexp.Regexp
 	what string
@@ -355,7 +356,9 @@ var squashedFamilies = []struct {
 	{regexp.MustCompile(
 		squashedAlt("reveal", "print", "output", "leak", "repeat", "recite", "show", "dump", "disclose") +
 			"(?:" + squashedAlt("me", "us", "all", "the", "your") + ")*" +
-			squashedAlt("systemprompt", "hiddeninstruction", "initialprompt", "initialinstruction", "originalinstruction", "secretinstruction")),
+			squashedCompound(
+				[2]string{"system", "prompt"}, [2]string{"hidden", "instruction"}, [2]string{"initial", "prompt"},
+				[2]string{"initial", "instruction"}, [2]string{"original", "instruction"}, [2]string{"secret", "instruction"})),
 		"system-prompt exfiltration directive"},
 }
 
@@ -366,24 +369,52 @@ var squashedFamilies = []struct {
 const squashedMaxGap = "16"
 
 // clauseMark separates squashed clauses. It is not a letter, so Squash never
-// produces it.
-const clauseMark = "|"
+// produces it. chunkMark is a clause end next to a short raw token (at most
+// squashedChunkLen letters on either side), which is far more likely letter
+// chunking than a real sentence end; only compound joins treat the two
+// differently (squashedCompound).
+const (
+	clauseMark       = "|"
+	chunkMark        = "~"
+	squashedAnyMark  = `[|~]`
+	squashedChunkLen = 4
+)
 
 // squashedAlt is a non-capturing alternation of words whose letters may be
 // separated by clause marks (letter chunking inside one word).
 func squashedAlt(words ...string) string {
 	parts := make([]string, len(words))
 	for i, w := range words {
-		var b strings.Builder
-		for j, r := range w {
-			if j > 0 {
-				b.WriteString(regexp.QuoteMeta(clauseMark) + "*")
-			}
-			b.WriteRune(r)
-		}
-		parts[i] = b.String()
+		parts[i] = squashedChunk(w)
 	}
 	return "(?:" + strings.Join(parts, "|") + ")"
+}
+
+// squashedChunk is one word whose letters may be separated by clause or
+// chunk marks (letter chunking inside one word).
+func squashedChunk(w string) string {
+	var b strings.Builder
+	for j, r := range w {
+		if j > 0 {
+			b.WriteString(squashedAnyMark + "*")
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// squashedCompound is an alternation of two-word targets ("system"+"prompt").
+// Marks inside each word are chunking, as in squashedAlt. At the JOIN only a
+// chunkMark is allowed: a sentence or line end between two full-length words
+// ("Click show the system. Prompt editor opens") is a real clause end, while
+// one next to a short raw token ("sys. tem. pro. mpt", or letter spacing
+// wrapped across a line) is chunking (SEC-01 review round 14).
+func squashedCompound(pairs ...[2]string) string {
+	alts := make([]string, len(pairs))
+	for i, p := range pairs {
+		alts[i] = squashedChunk(p[0]) + regexp.QuoteMeta(chunkMark) + "*" + squashedChunk(p[1])
+	}
+	return "(?:" + strings.Join(alts, "|") + ")"
 }
 
 // squashClauseBoundary marks where one clause or field ends: line breaks, JSON
@@ -396,16 +427,64 @@ func squashedAlt(words ...string) string {
 var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s*"|\p{L}{2}[.!?;。！？；…]+`)
 
 // squashedClauses de-obfuscates and squashes each clause of text and joins
-// them with clauseMark.
+// them with clauseMark, or chunkMark where the boundary is a line or sentence
+// end beside a short raw token (see chunkMark).
 func squashedClauses(text string) string {
-	var out []string
+	var b strings.Builder
 	prev := 0
 	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
-		out = append(out, detect.Squash(detect.NormalizeForPhrase(text[prev:loc[1]])))
+		b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:loc[1]])))
+		mark := clauseMark
+		if !strings.ContainsAny(text[loc[0]:loc[1]], `{}[]"`) &&
+			(trailingLetterRun(text[:loc[1]]) <= squashedChunkLen || leadingLetterRun(text[loc[1]:]) <= squashedChunkLen) {
+			mark = chunkMark
+		}
+		b.WriteString(mark)
 		prev = loc[1]
 	}
-	out = append(out, detect.Squash(detect.NormalizeForPhrase(text[prev:])))
-	return strings.Join(out, clauseMark)
+	b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:])))
+	return b.String()
+}
+
+// trailingLetterRun is the length of the last run of letters in s, ignoring
+// trailing non-letters ("sys. tem." → 3).
+func trailingLetterRun(s string) int {
+	rs := []rune(strings.TrimRightFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }))
+	n := 0
+	for i := len(rs) - 1; i >= 0 && unicode.IsLetter(rs[i]); i-- {
+		n++
+	}
+	return n
+}
+
+// leadingLetterRun is the length of the first run of letters in s, ignoring
+// leading non-letters (" pro. mpt" → 3). Empty input counts as long.
+func leadingLetterRun(s string) int {
+	rs := []rune(strings.TrimLeftFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }))
+	if len(rs) == 0 {
+		return squashedChunkLen + 1
+	}
+	n := 0
+	for n < len(rs) && unicode.IsLetter(rs[n]) {
+		n++
+	}
+	return n
+}
+
+// jsonLineBreakEscape matches the JSON escapes for line breaks, plus an
+// escaped backslash so "\\n" (a literal backslash then n) is left alone.
+var jsonLineBreakEscape = regexp.MustCompile(`\\\\|\\[nr]|\\u(?:000[aAdD]|2028|2029|0085)`)
+
+// unescapeJSONLineBreaks turns line-break escapes inside serialized schema
+// JSON back into real line breaks, so a schema description's newline ends a
+// clause the same way a description's does (SEC-01 review round 14).
+func unescapeJSONLineBreaks(raw string) string {
+	return jsonLineBreakEscape.ReplaceAllStringFunc(raw, func(m string) string {
+		if m == `\\` {
+			return m
+		}
+		return "\n"
+	})
 }
 
 // inspectSquashed is the soft, spacing-agnostic last pass (see squashedFamilies).
@@ -416,10 +495,10 @@ func (c *PhraseInjection) inspectSquashed(tool detect.ToolView, normalized strin
 	if strings.TrimSpace(raw) == "" {
 		raw = normalized
 	}
-	squashed := squashedClauses(raw)
+	squashed := squashedClauses(unescapeJSONLineBreaks(raw))
 	for _, fam := range squashedFamilies {
 		if loc := fam.re.FindStringIndex(squashed); loc != nil {
-			match := strings.ReplaceAll(squashed[loc[0]:loc[1]], clauseMark, "")
+			match := strings.NewReplacer(clauseMark, "", chunkMark, "").Replace(squashed[loc[0]:loc[1]])
 			return []detect.Signal{{
 				CheckID:    c.ID(),
 				Tier:       detect.TierSoft,
