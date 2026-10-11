@@ -29,6 +29,7 @@ type mockToolQuarantineController struct {
 	approvals              []*storage.ToolApprovalRecord
 	approveErr             error
 	approveAllErr          error
+	approveSkip            map[string]bool
 	approvedCount          int
 	approvedTools          []string
 	approvedServer         string
@@ -74,7 +75,20 @@ func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*
 func (m *mockToolQuarantineController) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
 	m.approvedServer = serverName
 	m.approvedTools = toolNames
-	return m.approveErr
+	if m.approveErr != nil {
+		return m.approveErr
+	}
+	for _, name := range toolNames {
+		if m.approveSkip[name] {
+			continue // simulates a record the runtime could not approve
+		}
+		for _, a := range m.approvals {
+			if a.ServerName == serverName && a.ToolName == name {
+				a.Status = storage.ToolApprovalStatusApproved
+			}
+		}
+	}
+	return nil
 }
 
 func (m *mockToolQuarantineController) ApproveAllTools(serverName string, approvedBy string) (int, error) {
@@ -272,7 +286,10 @@ func TestHandleSetToolEnabled_ControllerError(t *testing.T) {
 }
 
 func TestHandleApproveTools_SpecificTools(t *testing.T) {
-	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", approvals: []*storage.ToolApprovalRecord{
+		{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending},
+		{ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusPending},
+	}}
 	logger := zap.NewNop().Sugar()
 	server := NewServer(ctrl, logger, nil)
 
@@ -292,6 +309,45 @@ func TestHandleApproveTools_SpecificTools(t *testing.T) {
 	require.NoError(t, err)
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, float64(2), data["approved"])
+	assert.Equal(t, float64(2), data["approved_count"])
+	assert.Equal(t, float64(0), data["still_pending"])
+	assert.NotContains(t, data, "not_approved")
+}
+
+// UX-02: the response reports what actually applied, not the request length.
+// A requested tool whose record is missing or still pending afterwards is
+// listed, and the server's remaining holds are counted.
+func TestHandleApproveTools_ReportsAppliedCountAndRemainingHolds(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey: "test-key",
+		approvals: []*storage.ToolApprovalRecord{
+			{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending},
+			{ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusPending},
+			{ServerName: "github", ToolName: "delete_repo", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			{ServerName: "github", ToolName: "rug", Status: storage.ToolApprovalStatusChanged},
+		},
+		approveSkip: map[string]bool{"list_repos": true},
+	}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body := `{"tools": ["create_issue", "list_repos", "no_such_tool"]}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(1), data["approved"])
+	assert.Equal(t, []interface{}{"list_repos", "no_such_tool"}, data["not_approved"])
+	assert.Equal(t, float64(1), data["approved_count"])
+	assert.Equal(t, float64(1), data["blocked_count"])
+	assert.Equal(t, float64(1), data["still_pending"])
+	assert.Equal(t, float64(1), data["still_changed"])
+	assert.Equal(t, []interface{}{"list_repos", "rug"}, data["held_tools"])
+	assert.Contains(t, data["message"], "Approved 1 of 3 requested tools")
 }
 
 func TestHandleApproveTools_ApproveAll(t *testing.T) {

@@ -1594,7 +1594,11 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 
 	format := ResolveOutputFormat()
 	if format == "json" || format == "yaml" {
-		return formatAndPrintRaw(format, respBody)
+		if err := formatAndPrintRaw(format, respBody); err != nil {
+			return err
+		}
+		warnApprovalHolds(os.Stderr, serverName, respBody)
+		return nil
 	}
 
 	if secApproveForce {
@@ -1602,6 +1606,7 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("Server %q approved.\n", serverName)
 	}
+	warnApprovalHolds(os.Stderr, serverName, respBody)
 	return nil
 }
 

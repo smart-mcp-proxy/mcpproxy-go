@@ -391,7 +391,15 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, approveErr.Error())
 		return
 	}
-	s.writeSuccess(w, map[string]string{"status": "approved", "server_name": name})
+	// UX-02: the server approval is done (status stays "approved" for
+	// compatibility); the post-approval tool-approval state is reported
+	// additively so a partial outcome — tools still pending or changed —
+	// cannot masquerade as a complete approval.
+	response := map[string]interface{}{"status": "approved", "server_name": name}
+	if _, outcome, ok := s.toolApprovalOutcomeFor(name); ok {
+		outcome.addTo(response)
+	}
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {

@@ -127,6 +127,8 @@ Using the wrong flag for the state fails with exit code 1 instead of doing somet
 
 The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`; with `--all` it reads `Allowing all pending or changed tools; previously blocked tools stay blocked`. JSON and YAML output stay the REST data object.
 
+After the write the command reports what actually applied. In table output the result line reads, for example, `Approved server memory: 6 tools approved, 3 blocked, 0 still pending, 0 changed`. If any tool on the server is still pending or changed after the approval, a warning naming those tools is printed to stderr in every output format, for example `Warning: 2 tool(s) on server 'memory' still need review (2 pending, 0 changed): a, b. Inspect them with: mcpproxy review show memory`. JSON and YAML output carry the same counts (`approved_count`, `blocked_count`, `still_pending`, `still_changed`, `held_tools`).
+
 `mcpproxy review approve <server> --yes` used to allow every tool. It now allows the default selection, so it matches the review screens; add `--all` to approve every tool.
 
 ```bash

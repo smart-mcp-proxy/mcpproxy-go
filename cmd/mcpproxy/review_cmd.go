@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -165,7 +166,38 @@ func runReviewWrite(server, operation string, value interface{}) error {
 	if resp.StatusCode != http.StatusOK {
 		return parseAPIError(response, resp.StatusCode, strings.ReplaceAll(operation, "/", " "))
 	}
-	return formatReviewResponse(ResolveOutputFormat(), response, false)
+	if err := formatReviewResponse(ResolveOutputFormat(), response, false); err != nil {
+		return err
+	}
+	warnApprovalHolds(os.Stderr, server, response)
+	return nil
+}
+
+// warnApprovalHolds prints a warning to w when an approval response reports
+// tools that still need review (UX-02): a partial outcome must not read as a
+// completed approval. It goes to stderr so JSON/YAML stdout stays parseable.
+// Responses from cores that predate the counts carry no fields and print
+// nothing.
+func warnApprovalHolds(w io.Writer, server string, raw []byte) {
+	var envelope struct {
+		Data struct {
+			StillPending int      `json:"still_pending"`
+			StillChanged int      `json:"still_changed"`
+			HeldTools    []string `json:"held_tools"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return
+	}
+	d := envelope.Data
+	if d.StillPending+d.StillChanged == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Warning: %d tool(s) on server '%s' still need review (%d pending, %d changed)", d.StillPending+d.StillChanged, server, d.StillPending, d.StillChanged)
+	if len(d.HeldTools) > 0 {
+		fmt.Fprintf(w, ": %s", strings.Join(d.HeldTools, ", "))
+	}
+	fmt.Fprintf(w, ". Inspect them with: mcpproxy review show %s\n", server)
 }
 
 var errReviewAllWithTools = fmt.Errorf("--all cannot be combined with --tools")
@@ -326,7 +358,14 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	if status, _ := value["status"].(string); status != "" {
 		if serverName, _ := value["server_name"].(string); serverName != "" {
-			fmt.Printf("%s server %s\n", strings.ToUpper(status[:1])+status[1:], serverName)
+			line := fmt.Sprintf("%s server %s", strings.ToUpper(status[:1])+status[1:], serverName)
+			if approvedCount, ok := value["approved_count"].(float64); ok {
+				blocked, _ := value["blocked_count"].(float64)
+				pending, _ := value["still_pending"].(float64)
+				changed, _ := value["still_changed"].(float64)
+				line += fmt.Sprintf(": %d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
+			}
+			fmt.Println(line)
 			return nil
 		}
 	}
