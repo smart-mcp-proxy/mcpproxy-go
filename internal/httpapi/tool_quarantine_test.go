@@ -398,6 +398,26 @@ func TestHandleApproveTools_ApproveAll(t *testing.T) {
 	assert.Equal(t, float64(5), data["approved"])
 }
 
+// UX-02 review: approve_all keeps the actual write count but flags an
+// unreadable read-back instead of implying nothing is left to review.
+func TestHandleApproveTools_ApproveAllOutcomeUnreadable(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", approvedCount: 5, listErr: fmt.Errorf("decode failure")}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(`{"approve_all": true}`))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(5), data["approved"])
+	assert.Equal(t, true, data["outcome_unavailable"])
+	assert.NotContains(t, data, "still_pending")
+}
+
 func TestHandleApproveTools_EmptyToolsAndNoApproveAll(t *testing.T) {
 	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
 	logger := zap.NewNop().Sugar()

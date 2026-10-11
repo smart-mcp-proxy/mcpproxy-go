@@ -6879,6 +6879,9 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 			if held := outcome.StillPending + outcome.StillChanged; held > 0 {
 				response["message"] = fmt.Sprintf("Approved %d tools for server %s; %d still need review", count, serverID, held)
 			}
+		} else {
+			response["outcome_unavailable"] = true
+			response["message"] = fmt.Sprintf("Approved %d tools for server %s, but the remaining tool state could not be read back; check it with GET /api/v1/servers/%s/review", count, serverID, serverID)
 		}
 		s.writeSuccess(w, response)
 		return
