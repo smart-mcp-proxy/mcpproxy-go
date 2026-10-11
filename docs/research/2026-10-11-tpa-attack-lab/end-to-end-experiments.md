@@ -438,6 +438,92 @@ scripts/tpa-lab-redteam-experiments.sh
 
 Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r5/` of the main checkout.
 
+### Review round 6 follow-ups
+
+A sixth review (Sol 6.1, REQUEST_CHANGES at `a65fd798a`, four chunked
+transcripts `rt-r6a` to `rt-r6d`) raised eight items with no duplicates. All
+eight were in scope (RT-05, RT-06, RT-03 and the lab scripts). Seven were
+fixed as asked. The errexit suggestion in the fifth item was rebutted, and its
+underlying defect was fixed another way. Every fix has a regression test that
+fails without it. RT-04 and RT-07 (detect engine) stay deferred to the
+concurrent SEC-01 PR, so EXP-3 is still expected to show HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-05: `ListToolsFresh` waiters read the client-wide `listToolsLastResult` after waking on one leader's channel. A later leader cleared or replaced it, so a waiter could get `(nil, nil)`, and quarantined verification took that as an empty success | Fixed in `managed/client.go`. Each leader owns a `listToolsCall` (done channel, sequence number, result, error, `published`). Waiters keep the pointer they waited on and read that call's result. A call that ends without a published result makes its waiters list again rather than return an empty list. Plain `ListTools` callers get the same binding. Tests: `TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall` now elects a third leader before the waiter reads, which returned nil before the fix. `TestListTools_WaiterReadsItsOwnLeadersResultAfterReplacement` and `TestListTools_UnpublishedLeaderIsNotAnEmptySuccess` are new |
+| P2 RT-05: notification-driven discovery of a trusted server used the coalescing `ListTools`, so it could join a `tools/list` answered before the change and keep a stale approval. This persists when periodic discovery is disabled | Fixed in `runtime/lifecycle.go`. `discoverAndIndexToolsForServerOnce` serves connect, `tools/list_changed` and coalesced follow-ups (connect-owned ones included), and it now uses `ListToolsFresh`. Test: `TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList`. A real streamable-HTTP upstream answers one `tools/list` with the approved contract and holds that answer in flight. The test then arms the tool and drives `onUpstreamToolsListChanged`. Without the fix the record stayed `approved` in 3 of 3 runs. With the fix it is `changed` |
+| P2 RT-06: the snapshot dir's `os.MkdirTemp` pattern contained the raw server name, so a slash-named registry server failed snapshot creation and every metadata-dependent Docker scanner with it | Fixed in `security/scanner/engine.go`. The pattern is now the constant `tools-snapshot-`, and the unused `jobID` parameter was removed. Test: `TestRT06_DockerScanner_SlashNamedServer_MountsSnapshot` runs `runSingleScanner` for `com.pulsemcp/google-flights` and checks the mounted snapshot |
+| P1 suite: the isolation preflight checked only `isolation.mode` docker and `network_mode` none. A server whose own command was `docker run --network=host ...` was never wrapped (the already-docker gate), and `extra_args` such as `--privileged`, `--network=host` or `-v /:/host` are appended to the wrapping `docker run` verbatim | Fixed in `scripts/lib/tpa-lab-verdicts.sh`. `lab_config_check_isolation` now also refuses a command that runs docker or podman (mirroring `config.IsDockerCommand`), `isolation.enabled: false`, non-stdio and URL servers, and any per-server or global `extra_args` outside a hardening allowlist: `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--tmpfs /tmp...`, `--memory`, `--cpus` and `--pids-limit`. Tests: 14 new variants in `TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream` and `TestRunLabDockerRejectsUnisolatedConfig` (unwrapped docker command, privileged, host network in both arg forms, host mount, `--mount`, `--cap-add`, seccomp off, `--pid=host`, device, non-`/tmp` tmpfs, and others), plus `TestLabConfigCheckIsolationRejectsUnsafeGlobalExtraArgs` |
+| P1 suite: the script had no errexit and ignored `make_config` failures, so `start_daemon` ran `serve --config ""`, which falls back to the user's normal config | Fixed without errexit. errexit is rebutted: the suite turns many expected failures (a refused approve, a failed scan, a probe miss) into verdicts, and errexit would abort on them or need `|| true` everywhere, which would hide real failures. Instead, a failed generation now calls `config_failed`, which records INCONCLUSIVE and exits before any daemon or CLI runs. `make_config` checks its generator's status, and `start_daemon`, `scan_and_verdict` and `tool_status` call `lab_config_require` first. That function rejects an empty, missing, `data_dir`-less or unisolated config. Test hooks `TPA_LAB_TEMPLATE`, `TPA_LAB_BINARY` and `TPA_LAB_RUN_ROOT` were added for the tests. Tests: `TestLabConfigRequireRejectsEmptyOrMissingConfig`, and `TestRedteamSuiteAbortsWhenConfigGenerationFails`, which runs the real script with a stub binary that records every invocation for an unreadable, missing and unisolated template. Without the fix the stub recorded `serve --config  --log-level=info` |
+| P3 RT-05: the shutdown-context test checked `lifetimeContext()` and `AppContext()` directly and never drove the follow-up path | Fixed. `TestToolsListChangedFollowUp_StartedAfterClose_GetsCancelledContext` drives `onUpstreamToolsListChanged`. A zap hook calls `Close` exactly between the owner's follow-up decision (the `Re-running tool discovery` log line) and the follow-up building its context. It asserts that the follow-up's context is cancelled. Reverting the follow-up to `AppContext()` fails it |
+| P3 RT-03: no isolated `idempotentHint` flip test and no gate-level test for an `openWorldHint`-only flip | Fixed. `TestRT03_EachHintFlipAlone_ChangesHash` checks that each of the four hints, flipped alone, changes the hash and that every flip hashes differently. `TestRT03_EachHintFlipAlone_HeldThenReverted` checks at the gate that each single flip is held as `changed` and blocked over two passes, and that reverting restores `approved` |
+| P3 RT-03: the idempotence test asserted pointer identity, not the absence of a write | Fixed. `TestRT03_LegacyHeldStamp_IsIdempotent` overwrites the persisted record with a marker `ApprovedBy` out of band, runs three more passes and asserts the marker survives. Removing the early return fails it at pass 1 |
+
+Verification on the branch head after the round-6 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/upstream/managed/ ./internal/security/scanner/ ./tests/tpa-attack-lab/
+go test -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/... ./tests/tpa-attack-lab/
+#   74 packages ok, 0 FAIL (internal/runtime 505.3s)
+go test -race ./internal/runtime/ ./internal/upstream/managed/   # ok (642.3s), ok (16.0s)
+golangci-lint run --config .github/.golangci.yml ./...                       # 15 issues, none in a file this round touched (unchanged baseline)
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...   # 18 issues, none in a file this round touched (unchanged baseline)
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 INCONCLUSIVE: scan=clean, stored=approved
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: FAIL, exit 1 (EXP-4 precondition not met, see below)
+
+SKIP_BUILD=1 ONLY=EXP-4 scripts/tpa-lab-redteam-experiments.sh   # x4, artifacts from the full build, no Go change since
+#   INCONCLUSIVE: scan=clean, stored=approved | HOLDS: scan=dangerous, stored=changed (x3)
+
+SKIP_BUILD=1 scripts/tpa-lab-redteam-experiments.sh   # second full run, fresh run dir, same artifacts
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+(cd <scratchpad> && SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh)
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection); both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+The EXP-4 INCONCLUSIVE results are the fixture race already described under
+"Before / after", not a hole. The toctou fixture serves the poisoned contract
+only on its first `tools/list` in the process. Every list re-registers its
+tools, which sends `tools/list_changed`. In the inconclusive runs, that first
+list was answered to a caller that does not ingest contracts (for example a
+REST tool listing or the token-savings calculation). Discovery then listed
+fresh after the resulting `tools/list_changed`, which is exactly what this
+round's P2 fix requires, and baselined the clean contract. The log shows
+`added: 2, modified: 0` and no `changed since approval` on any later clean
+list. So the proxy never ingested or indexed the poisoned contract, and the
+scan of the clean contract matched what was indexed. The verdict is
+INCONCLUSIVE because the experiment's precondition (discovery ingests list 1)
+was not met. Before this round, discovery could join that in-flight first list
+and so met the precondition more often. That join is the stale-list behavior
+the reviewer asked to remove.
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r6/`
+of the main checkout. They include `suite.log` (full build), `suite2.log`,
+`exp4-rerun1..4.log`, `unit.log`, `race.log`, the lint logs,
+`run-tpa-lab-docker.log` and the per-experiment daemon logs of both full runs
+(`run-dir-full1`, `run-dir-full2`).
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -481,3 +567,8 @@ Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r5
   list.
 - `scripts/tpa-lab-redteam-experiments.sh` now exits non-zero on any hole or
   inconclusive result, except the deferred EXP-3.
+- Reactive single-server discovery (connect, `tools/list_changed` and their
+  coalesced follow-ups) now always issues its own `tools/list` after the
+  trigger. It no longer joins a list that was already in flight. This can add
+  one upstream `tools/list` per trigger when another list is running (review
+  round 6).
