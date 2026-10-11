@@ -23,16 +23,26 @@
 #
 # IMAGE=<tag> builds that tag and runs it: every generated config's isolation
 # blocks are rewritten to the same image.
+#
+# A failed config generation aborts the suite before any daemon or CLI runs:
+# "$BINARY ... --config ''" would fall back to the user's normal config
+# discovery (~/.mcpproxy) and start unrelated upstreams (Sol r6 P1). Every
+# daemon/CLI invocation also re-checks its config with lab_config_require.
+# The script deliberately does not use errexit: many probes are expected to
+# fail and are turned into verdicts.
+#
+# Test hooks (scripts_test.go): TPA_LAB_TEMPLATE, TPA_LAB_BINARY and
+# TPA_LAB_RUN_ROOT replace the template, binary and run root.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEMPLATE="$PROJECT_DIR/tests/tpa-lab-config-docker.json"
-BINARY="$PROJECT_DIR/mcpproxy"
+TEMPLATE="${TPA_LAB_TEMPLATE:-$PROJECT_DIR/tests/tpa-lab-config-docker.json}"
+BINARY="${TPA_LAB_BINARY:-$PROJECT_DIR/mcpproxy}"
 API_KEY="tpa-lab-key"
 API_URL="http://127.0.0.1:8081/api/v1"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
-RUN_ROOT="$PROJECT_DIR/test-data-tpa-lab-docker"
+RUN_ROOT="${TPA_LAB_RUN_ROOT:-$PROJECT_DIR/test-data-tpa-lab-docker}"
 # shellcheck source=lib/tpa-lab-verdicts.sh
 source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
 ONLY="${ONLY:-}"
@@ -73,14 +83,25 @@ for s in cfg["mcpServers"]:
             s["quarantined"] = False
 json.dump(cfg, open(out, "w"), indent=2)
 PY
+  [[ $? -eq 0 ]] || { echo "lab config generation failed for $cfg" >&2; return 1; }
   # Run the image this invocation built (IMAGE override), never a stale
   # default tag; refuses a config whose upstreams are not Docker-isolated.
   lab_config_use_image "$cfg" "$IMAGE" >&2 || { echo "refusing lab config $cfg" >&2; return 1; }
   echo "$cfg"
 }
 
+# config_failed <exp> — a lab config could not be generated: abort the whole
+# suite before anything runs against an empty or unchecked config path.
+config_failed() {
+  echo "ERROR: $1: lab config generation failed — aborting before any daemon or CLI runs" >&2
+  RESULTS+=("$1: INCONCLUSIVE (config generation failed)")
+  printf '%s\n' "${RESULTS[@]-}"
+  exit 1
+}
+
 start_daemon() {
   local cfg="$1" logf="$2"
+  lab_config_require "$cfg" || { echo "refusing to start the daemon without a checked lab config"; return 1; }
   export MCPPROXY_TRAY_ENDPOINT="unix://$(python3 -c "import json;print(json.load(open('$cfg'))['data_dir'])")/mcpproxy.sock"
   "$BINARY" serve --config "$cfg" --log-level=info >"$logf" 2>&1 &
   DAEMON_PID=$!
@@ -119,6 +140,7 @@ stop_daemon() {
 # "stale-report" when the stored report belongs to another job.
 scan_and_verdict() {
   local cfg="$1" out="$2" rc job
+  lab_config_require "$cfg" 2>"$out" || { echo "scan-failed"; return; }
   "$BINARY" security scan tpa-lab-attacker --config "$cfg" >"$out" 2>&1
   rc=$?
   job="$(sed -nE 's/.*[(, ]job (scan-[^) ]+)\).*/\1/p' "$out" | head -1)"
@@ -183,6 +205,7 @@ all_approved() {
 }
 
 tool_status() {  # tool_status <tool> → status column from `upstream inspect` table
+  lab_config_require "$CURRENT_CONFIG" 2>/dev/null || { echo "unknown"; return; }
   "$BINARY" upstream inspect tpa-lab-attacker --config "$CURRENT_CONFIG" 2>/dev/null \
     | python3 -c "
 import sys
@@ -340,7 +363,7 @@ fi
 # ==================================================================== EXP-1
 if want_only EXP-1; then
   log "EXP-1 (control): full attack catalog must scan dangerous"
-  cfg="$(make_config exp1 all 1 "$RUN_DIR/exp1-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp1 all 1 "$RUN_DIR/exp1-data")" || config_failed EXP-1; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp1.log" || { record "EXP-1: INCONCLUSIVE (daemon)"; want_only EXP-1 && exit 1 || skip=1; }
   if [[ ${skip:-0} != 1 ]]; then
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp1-scan.txt")"
@@ -354,7 +377,7 @@ fi
 # ==================================================================== EXP-2
 if want_only EXP-2; then
   log "EXP-2 (control + restart observation): rug pull via restart (stage 1→2)"
-  cfg="$(make_config exp2 facade 1 "$RUN_DIR/exp2-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp2 facade 1 "$RUN_DIR/exp2-data")" || config_failed EXP-2; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp2.log" || { record "EXP-2: INCONCLUSIVE (daemon)"; exit 1; }
   unquarantine
   cal1="$(wait_status calendar_get_events)"
@@ -373,7 +396,7 @@ if want_only EXP-2; then
   # Phase 2a: restart with the armed contract while config re-quarantines the
   # server (config templates keep quarantined:true). Discovery is skipped for
   # quarantined servers, so the change gate may never see the new contract.
-  cfg="$(make_config exp2 facade 2 "$RUN_DIR/exp2-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp2 facade 2 "$RUN_DIR/exp2-data")" || config_failed EXP-2; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp2-2.log" || { record "EXP-2: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
   # Both rug-pulled tools must be held (changed/blocked); a pending or
@@ -425,7 +448,7 @@ fi
 # ==================================================================== EXP-3
 if want_only EXP-3; then
   log "EXP-3 (hole A): served evasion mutants must NOT scan dangerous"
-  cfg="$(make_config exp3 mutants 1 "$RUN_DIR/exp3-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp3 mutants 1 "$RUN_DIR/exp3-data")" || config_failed EXP-3; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp3.log" || { record "EXP-3: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp3-scan.txt")"
   log "scan verdict: $v (full output: $RUN_DIR/exp3-scan.txt)"
@@ -443,7 +466,7 @@ fi
 if want_only EXP-4; then
   log "EXP-4 (hole B): TOCTOU — poisoned contract at discovery (list #1), clean contract to the scan export (list #2+)"
   log "server runs UNQUARANTINED so discovery's auto-baseline ingests list #1"
-  cfg="$(make_config exp4 toctou 1 "$RUN_DIR/exp4-data" "" noquarantine)"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp4 toctou 1 "$RUN_DIR/exp4-data" "" noquarantine)" || config_failed EXP-4; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp4.log" || { record "EXP-4: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp4-scan.txt")"
   log "scan verdict: $v (the scan's export call saw the CLEAN contract — list #2+)"
@@ -468,7 +491,7 @@ fi
 # ==================================================================== EXP-5
 if want_only EXP-5; then
   log "EXP-5 (hole C): annotation-only flip after approval (contract hash covers desc+schema only)"
-  cfg="$(make_config exp5 facade 1 "$RUN_DIR/exp5-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp5 facade 1 "$RUN_DIR/exp5-data")" || config_failed EXP-5; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp5.log" || { record "EXP-5: INCONCLUSIVE (daemon)"; exit 1; }
   unquarantine
   n1="$(wait_status notes_export)"
@@ -483,7 +506,7 @@ if want_only EXP-5; then
     record "EXP-5b INCONCLUSIVE: stage-1 baseline not approved"
   else
   copy_data_dir "$RUN_DIR/exp5-data" "$RUN_DIR/exp5b-data"
-  cfg="$(make_config exp5 facade 2 "$RUN_DIR/exp5-data")"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp5 facade 2 "$RUN_DIR/exp5-data")" || config_failed EXP-5; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp5-2.log" || { record "EXP-5: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
   # The restart re-quarantines the server, so the quarantined verification
@@ -509,7 +532,7 @@ if want_only EXP-5; then
   # EXP-5b: the approved contract changes while the server is ALREADY
   # trusted — the stage-2 restart never quarantines it, so only the trusted
   # server's discovery gate can hold the flip (Sol r5 P2).
-  cfg="$(make_config exp5b facade 2 "$RUN_DIR/exp5b-data" "" noquarantine)"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp5b facade 2 "$RUN_DIR/exp5b-data" "" noquarantine)" || config_failed EXP-5b; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp5b.log" || { record "EXP-5b: INCONCLUSIVE (restart)"; exit 1; }
   q="$(server_quarantined)"
   n3="$(wait_status_not notes_export approved 90)"
@@ -533,7 +556,7 @@ fi
 # ==================================================================== EXP-6
 if want_only EXP-6; then
   log "EXP-6 (hole D): trust_mode=scan + paraphrased stage-3 rug pull (auto-approval chain)"
-  cfg="$(make_config exp6 facade 1 "$RUN_DIR/exp6-data" scan)"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp6 facade 1 "$RUN_DIR/exp6-data" scan)" || config_failed EXP-6; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6.log" || { record "EXP-6: INCONCLUSIVE (daemon)"; exit 1; }
   sleep 3
   unquarantine
@@ -554,7 +577,7 @@ if want_only EXP-6; then
     record "EXP-6b INCONCLUSIVE: stage-1 baseline not approved"
   else
   copy_data_dir "$RUN_DIR/exp6-data" "$RUN_DIR/exp6b-data"
-  cfg="$(make_config exp6 facade 3 "$RUN_DIR/exp6-data" scan)"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp6 facade 3 "$RUN_DIR/exp6-data" scan)" || config_failed EXP-6; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6-2.log" || { record "EXP-6: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
   # As in EXP-5: the quarantined verification may already hold the pull, so
@@ -580,7 +603,7 @@ if want_only EXP-6; then
   # EXP-6b: the paraphrased pull reaches a server that is ALREADY trusted
   # (trust_mode=scan, never re-quarantined), so only the trusted server's
   # scan-mode gate can hold it (Sol r5 P2).
-  cfg="$(make_config exp6b facade 3 "$RUN_DIR/exp6b-data" scan noquarantine)"; CURRENT_CONFIG="$cfg"
+  cfg="$(make_config exp6b facade 3 "$RUN_DIR/exp6b-data" scan noquarantine)" || config_failed EXP-6b; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6b.log" || { record "EXP-6b: INCONCLUSIVE (restart)"; exit 1; }
   q="$(server_quarantined)"
   post="$(wait_status_not calendar_get_events approved 90)"

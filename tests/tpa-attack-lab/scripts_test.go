@@ -364,6 +364,62 @@ var isolationVariants = map[string]func(iso, server map[string]interface{}){
 	"network_mode unset":  func(iso, _ map[string]interface{}) { delete(iso, "network_mode") },
 	"isolation mode none": func(iso, _ map[string]interface{}) { iso["mode"] = "none" },
 	"no isolation block":  func(_, server map[string]interface{}) { delete(server, "isolation") },
+	// Sol r6 P1: a docker command is never wrapped (already-docker gate), so
+	// its own --network=host runs unconfined despite mode docker / none.
+	"unwrapped docker command": func(_, server map[string]interface{}) {
+		server["command"] = "docker"
+		server["args"] = []interface{}{"run", "--network=host", "tpa-attack-lab:lab"}
+	},
+	"docker command by path": func(_, server map[string]interface{}) { server["command"] = "/usr/local/bin/docker" },
+	"isolation disabled":     func(iso, _ map[string]interface{}) { iso["enabled"] = false },
+	"http upstream": func(_, server map[string]interface{}) {
+		server["protocol"] = "streamable-http"
+		server["url"] = "http://127.0.0.1:1/mcp"
+	},
+	// Extra args are appended to the wrapping docker run verbatim.
+	"extra_args privileged":    func(iso, _ map[string]interface{}) { appendArgs(iso, "--privileged") },
+	"extra_args network host":  func(iso, _ map[string]interface{}) { appendArgs(iso, "--network=host") },
+	"extra_args net split":     func(iso, _ map[string]interface{}) { appendArgs(iso, "--net", "host") },
+	"extra_args host mount":    func(iso, _ map[string]interface{}) { appendArgs(iso, "-v", "/:/host") },
+	"extra_args mount flag":    func(iso, _ map[string]interface{}) { appendArgs(iso, "--mount=type=bind,src=/,dst=/host") },
+	"extra_args cap-add":       func(iso, _ map[string]interface{}) { appendArgs(iso, "--cap-add=SYS_ADMIN") },
+	"extra_args seccomp off":   func(iso, _ map[string]interface{}) { appendArgs(iso, "--security-opt", "seccomp=unconfined") },
+	"extra_args pid host":      func(iso, _ map[string]interface{}) { appendArgs(iso, "--pid=host") },
+	"extra_args device":        func(iso, _ map[string]interface{}) { appendArgs(iso, "--device=/dev/mem") },
+	"extra_args tmpfs non-tmp": func(iso, _ map[string]interface{}) { appendArgs(iso, "--tmpfs", "/etc") },
+}
+
+func appendArgs(iso map[string]interface{}, args ...string) {
+	existing, _ := iso["extra_args"].([]interface{})
+	for _, a := range args {
+		existing = append(existing, a)
+	}
+	iso["extra_args"] = existing
+}
+
+// TestLabConfigCheckIsolationRejectsUnsafeGlobalExtraArgs (Sol r6 P1): the
+// global docker_isolation.extra_args reach every wrapped docker run too.
+func TestLabConfigCheckIsolationRejectsUnsafeGlobalExtraArgs(t *testing.T) {
+	lib := verdictsLib(t)
+	data, err := os.ReadFile(filepath.Join("..", "tpa-lab-config-docker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unsafe := range [][]interface{}{{"--privileged"}, {"--network", "host"}, {"-v", "/var/run/docker.sock:/var/run/docker.sock"}} {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg["docker_isolation"].(map[string]interface{})["extra_args"] = unsafe
+		out, _ := json.Marshal(cfg)
+		path := filepath.Join(t.TempDir(), "cfg.json")
+		if err := os.WriteFile(path, out, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>/dev/null`, path); code == 0 {
+			t.Errorf("global extra_args %v must be refused", unsafe)
+		}
+	}
 }
 
 // TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream (Sol r5 P2).
@@ -402,5 +458,90 @@ func TestRunLabDockerRejectsUnisolatedConfig(t *testing.T) {
 		if !strings.Contains(string(out), "does not Docker-isolate every server") {
 			t.Errorf("%s: unexpected failure:\n%s", name, out)
 		}
+	}
+}
+
+// TestLabConfigRequireRejectsEmptyOrMissingConfig (Sol r6 P1): an empty
+// --config makes mcpproxy fall back to the user's normal config discovery, so
+// the suite's daemon/CLI guard must refuse an empty, missing, data_dir-less
+// or unisolated config.
+func TestLabConfigRequireRejectsEmptyOrMissingConfig(t *testing.T) {
+	lib := verdictsLib(t)
+	ok := labConfigVariant(t, func(map[string]interface{}, map[string]interface{}) {})
+	if out, code := runLib(t, lib, `lab_config_require "$1"`, ok); code != 0 {
+		t.Fatalf("the checked-in config must pass: %s", out)
+	}
+	noDataDir := filepath.Join(t.TempDir(), "nodata.json")
+	data, err := os.ReadFile(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	delete(cfg, "data_dir")
+	out, _ := json.Marshal(cfg)
+	if err := os.WriteFile(noDataDir, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"empty":       "",
+		"missing":     filepath.Join(t.TempDir(), "absent.json"),
+		"no data_dir": noDataDir,
+		"unisolated":  labConfigVariant(t, isolationVariants["unwrapped docker command"]),
+	} {
+		if _, code := runLib(t, lib, `lab_config_require "$1" 2>/dev/null`, path); code == 0 {
+			t.Errorf("%s: must be refused", name)
+		}
+	}
+}
+
+// TestRedteamSuiteAbortsWhenConfigGenerationFails (Sol r6 P1): the suite
+// ignored a make_config failure and ran `serve --config ""`, which falls back
+// to the user's normal config. A failed generation must abort before the
+// binary is ever invoked. The binary is a stub that records any invocation.
+func TestRedteamSuiteAbortsWhenConfigGenerationFails(t *testing.T) {
+	verdictsLib(t)
+	if _, err := exec.LookPath("lsof"); err == nil {
+		if out, _ := exec.Command("lsof", "-ti", ":8081").Output(); len(strings.TrimSpace(string(out))) > 0 {
+			t.Skip("port 8081 is in use; the suite's preflight would act on it")
+		}
+	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "tpa-lab-redteam-experiments.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreadable := filepath.Join(t.TempDir(), "broken.json")
+	if err := os.WriteFile(unreadable, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, template := range map[string]string{
+		"unreadable template": unreadable,
+		"missing template":    filepath.Join(t.TempDir(), "absent.json"),
+		"unisolated template": labConfigVariant(t, isolationVariants["network_mode bridge"]),
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "binary-invoked")
+			stub := filepath.Join(dir, "mcpproxy-stub")
+			if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", script)
+			cmd.Env = append(os.Environ(), "SKIP_BUILD=1", "ONLY=EXP-1",
+				"TPA_LAB_TEMPLATE="+template, "TPA_LAB_BINARY="+stub, "TPA_LAB_RUN_ROOT="+filepath.Join(dir, "runs"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("the suite must fail when config generation fails; output:\n%s", out)
+			}
+			if !strings.Contains(string(out), "lab config generation failed") {
+				t.Errorf("unexpected failure:\n%s", out)
+			}
+			if _, statErr := os.Stat(marker); statErr == nil {
+				invoked, _ := os.ReadFile(marker)
+				t.Fatalf("the binary ran despite the failed config generation: %s", invoked)
+			}
+		})
 	}
 }

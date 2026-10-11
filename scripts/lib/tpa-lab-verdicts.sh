@@ -130,25 +130,114 @@ PY
 }
 
 # lab_config_check_isolation <config.json> — 0 only when the config has
-# servers and every one of them is Docker-isolated (isolation.mode docker)
-# with network_mode none; otherwise non-zero with the reason on stderr. The
-# lab's malicious upstreams must never run bare or with network access, so
-# both lab scripts refuse a config that fails it (Sol r5 P2).
+# servers and every one of them is a stdio command that mcpproxy wraps in
+# Docker (isolation.mode docker, not disabled) with network_mode none, and
+# every extra docker run argument (per-server and global) is one of the
+# lab's hardening flags; otherwise non-zero with the reason on stderr. The
+# lab's malicious upstreams must never run bare, with network access, or
+# with a confinement escape, so both lab scripts refuse a config that fails
+# it (Sol r5 P2). Sol r6 P1: a server whose own command is docker is NOT
+# wrapped (ResolveIsolation's already-docker gate), so "docker run
+# --network=host" passed the old mode/network check unconfined; and extra
+# args such as --privileged, --network=host or -v /:/host are appended to
+# the wrapping docker run verbatim — the allowlist below refuses them.
 lab_config_check_isolation() {
   python3 - "$1" <<'PY'
-import json, sys
+import json, os, sys
 try:
     cfg = json.load(open(sys.argv[1]))
 except Exception as e:
     sys.exit("lab config %s is unreadable: %s" % (sys.argv[1], e))
+
+# Hardening flags the lab may pass to docker run, as (flag, value-check).
+# A flag listed with a value check takes a value, either as --flag=value or
+# as the next argument. Everything else is refused.
+VALUE_FLAGS = {
+    "--security-opt": lambda v: v in ("no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"),
+    "--cap-drop": lambda v: v.upper() == "ALL",
+    "--tmpfs": lambda v: v == "/tmp" or v.startswith("/tmp:"),
+    "--memory": lambda v: bool(v) and v.replace(".", "").rstrip("bkmgBKMG").isdigit(),
+    "--cpus": lambda v: bool(v) and v.replace(".", "").isdigit(),
+    "--pids-limit": lambda v: v.isdigit(),
+}
+BARE_FLAGS = {"--read-only"}
+
+def check_args(args, where):
+    if args is None:
+        return
+    if not isinstance(args, list):
+        sys.exit("%s: extra_args is not a list" % where)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if not isinstance(a, str):
+            sys.exit("%s: extra_args holds a non-string %r" % (where, a))
+        if a in BARE_FLAGS:
+            i += 1
+            continue
+        flag, eq, val = a.partition("=")
+        if flag in VALUE_FLAGS:
+            if not eq:
+                i += 1
+                if i >= len(args):
+                    sys.exit("%s: extra_args flag %s has no value" % (where, flag))
+                val = args[i]
+            if not isinstance(val, str) or not VALUE_FLAGS[flag](val):
+                sys.exit("%s: extra_args %s %r is not an allowed hardening value" % (where, flag, val))
+            i += 1
+            continue
+        sys.exit("%s: extra_args %r is not an allowed hardening flag (unsafe docker run arguments could escape confinement)" % (where, a))
+
+def is_docker_command(cmd):
+    # Mirrors config.IsDockerCommand: such a command is never wrapped.
+    return os.path.basename(cmd) == "docker" or "docker" in cmd or os.path.basename(cmd) == "podman"
+
+glob = cfg.get("docker_isolation") or {}
+check_args(glob.get("extra_args"), "docker_isolation")
+
 servers = cfg.get("mcpServers", [])
 if not servers:
     sys.exit("lab config has no servers")
 for s in servers:
+    name = s.get("name")
     iso = s.get("isolation") or {}
     if iso.get("mode") != "docker" or iso.get("network_mode") != "none":
-        sys.exit("server %s is not Docker-isolated with network_mode none" % s.get("name"))
+        sys.exit("server %s is not Docker-isolated with network_mode none" % name)
+    if iso.get("enabled") is False:
+        sys.exit("server %s disables isolation (isolation.enabled false)" % name)
+    if s.get("protocol", "stdio") != "stdio" or s.get("url"):
+        sys.exit("server %s is not a stdio server mcpproxy can wrap in Docker" % name)
+    cmd = s.get("command") or ""
+    if not cmd:
+        sys.exit("server %s has no command" % name)
+    if is_docker_command(cmd):
+        sys.exit("server %s is not Docker-isolated: its own command %r runs docker, which mcpproxy does not wrap" % (name, cmd))
+    check_args(iso.get("extra_args"), "server %s" % name)
 PY
+}
+
+# lab_config_require <config.json> — 0 only for a non-empty path to an
+# existing lab config that sets data_dir and passes
+# lab_config_check_isolation. Every daemon/CLI invocation of the red-team
+# suite calls it first: an empty --config makes mcpproxy fall back to the
+# user's normal config discovery (Sol r6 P1).
+lab_config_require() {
+  if [[ -z "${1:-}" ]]; then
+    echo "lab config path is empty" >&2; return 1
+  fi
+  if [[ ! -f "$1" ]]; then
+    echo "lab config $1 does not exist" >&2; return 1
+  fi
+  python3 - "$1" <<'PY' || return 1
+import json, sys
+try:
+    d = json.load(open(sys.argv[1])).get("data_dir")
+except Exception as e:
+    sys.exit("lab config %s is unreadable: %s" % (sys.argv[1], e))
+if not isinstance(d, str) or not d.strip():
+    sys.exit("lab config %s has no data_dir" % sys.argv[1])
+PY
+  lab_config_check_isolation "$1"
 }
 
 # lab_config_use_image <config.json> <image> — rewrites the isolation image of
