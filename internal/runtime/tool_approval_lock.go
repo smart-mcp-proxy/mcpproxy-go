@@ -31,7 +31,7 @@ import (
 //   - It is released before spawning reindexServerToolsAfterApprovalChange,
 //     which re-enters checkToolApprovals and takes the lock itself.
 //   - Helpers called inside a locked section (recordScanHold,
-//     scanApproveChange, adopt*, stamp*, *Locked) never take it again.
+//     adopt*, stamp*, *Locked) never take it again.
 //   - Storage calls inside take the storage manager's own lock; storage never
 //     calls back into the runtime, so the order approval lock -> storage lock
 //     cannot invert.

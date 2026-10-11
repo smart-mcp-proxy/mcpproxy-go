@@ -370,7 +370,7 @@ func init() {
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTransport, "transport", "", "Transport type: http or stdio (auto-detected if not specified)")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
-	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve only when the offline TPA scan is green), manual (human reviews every change). Unset inherits the default (manual)")
+	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve new tools only when the offline TPA scan is green; changed tools are held for review), manual (human reviews every change). Unset inherits the default (manual)")
 	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretEnvs, "secret-env", nil, "Environment variable to store in the OS keyring instead of the config, in KEY=value format (repeatable, FR-065)")
 	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretHeaders, "secret-header", nil, "HTTP header to store in the OS keyring instead of the config, in 'Name: value' format (repeatable, FR-065)")
 

@@ -417,7 +417,7 @@ new-server admission and tool-change approval (superseding the binary
 | Mode | Add time | Tool changes |
 |------|----------|--------------|
 | `auto` | Admitted without quarantine or scanning | Trusted without scanning (rug-pull risk) |
-| `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | Auto-approved only when the offline scan verdict is clean; otherwise held for review |
+| `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | New tools are auto-approved only when the offline scan verdict is clean. A **changed** tool contract (rug pull) is always held for review: the scan still runs and records its findings as hold evidence, but a clean verdict does not approve the change, because paraphrased poisoning can scan clean |
 | `manual` (default) | Quarantined for human review | Every change held for review |
 
 Config field: per-server `trust_mode`; REST: `trust_mode` on

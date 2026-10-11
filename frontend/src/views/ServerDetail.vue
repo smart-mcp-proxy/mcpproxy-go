@@ -432,8 +432,8 @@
                       class="link link-hover font-medium"
                       @click="activeTab = 'config'"
                     >set it on the Configuration tab</button>.
-                    <strong>Scan</strong> approves changes automatically only on a clean security
-                    scan; <strong>Auto</strong> trusts them without scanning.
+                    <strong>Scan</strong> approves new tools automatically only on a clean security
+                    scan and holds changes for review; <strong>Auto</strong> trusts them without scanning.
                   </span>
                   <button
                     type="button"
