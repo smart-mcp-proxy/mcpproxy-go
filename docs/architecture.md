@@ -134,13 +134,26 @@ config is published and runs one pipeline:
 3. **Prepare**: `configsvc.Prepare` assigns the commit generation `G` and
    per-server generations (`ServerGen{Gen, Incarnation}`; an unchanged entry
    keeps its generation, a re-created name gets a new incarnation).
-4. **Locks**: the approval lock of every changed server, sorted.
-5. **Disk**: the raw file is captured, then the new file is written.
+4. **Locks**: the approval lock of every server step 6 writes, sorted:
+   changed servers, servers with an `UnderApprovalLock` hook, removals,
+   replacements, OAuth-state clears and projection-repair saves of a server
+   the commit did not change (a repair can rewrite the stored trust and
+   quarantine policy a discovery pass reads under that lock). A global
+   approval-policy change (`quarantine_enabled`) takes every configured
+   server's lock. Dropping the lock for an unchanged server whose row is
+   repaired reopens the discovery-versus-repair race (#1571).
+5. **Disk** (only when a path is set and the commit writes the file): the raw
+   file is captured, then the new file is written. A file reload
+   (`ReloadConfiguration`) never writes the file, so it skips this step.
 6. **Storage**: one bbolt transaction (rows with their stamps, deletions,
    `meta.config_commit_generation`), then the index purge for removed,
    quarantined and disabled servers. The approval locks are released. On a
-   storage failure the captured file is restored byte for byte and nothing is
-   published.
+   storage failure nothing is published; when step 5 wrote the file, the
+   captured file is restored byte for byte (or removed if it did not exist).
+   A failed reload wrote nothing, so the file keeps the operator's edit
+   unapplied: the next reload applies it, but the next disk-writing commit
+   (`SaveConfiguration`, a server mutation, `ApplyConfig`) writes the live
+   config over it.
 7. **Advance**: retained instances get their new config and generation
    (`Manager.RestampRetained`).
 8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.

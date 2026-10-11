@@ -1949,6 +1949,15 @@ func (r *Runtime) applyConfigInTx(tx *CommitTx, newCfg *config.Config, cfgPath s
 		savePath = curPath
 	}
 	tx.setDisk(&commitDiskPlan{cfg: newCfg, mergeBase: baseCfg, path: savePath})
+	// A different destination becomes the commit's path (review round 5): step
+	// 8 publishes it with the snapshot and r.cfgPath follows, on every branch —
+	// hot, unchanged and restart-required-only — so ConfigPath, Save and
+	// Reload all use the file this apply wrote. Staging it only in the disk
+	// plan left the old path published, and a later reload of the old file
+	// reverted the apply.
+	if cfgPath != "" {
+		tx.setPath(cfgPath)
+	}
 
 	// Disk is now the desired configuration, whether or not this process can
 	// adopt all of it. Recorded on BOTH branches (the commit sets it once the
@@ -2025,11 +2034,7 @@ func (r *Runtime) applyConfigInTx(tx *CommitTx, newCfg *config.Config, cfgPath s
 	changedFields := append([]string(nil), result.ChangedFields...)
 	serversChanged := contains(changedFields, "mcpServers")
 	tx.publishHook(func(oldCfg, newCfg *config.Config) {
-		// Skip the write when the path is unchanged.
-		if cfgPath != "" && cfgPath != r.cfgPath {
-			r.cfgPath = cfgPath
-		}
-		// Apply live per-component side effects (logging, truncator,
+		// The path is published by step 8 (tx.setPath above). Apply live per-component side effects (logging, truncator,
 		// observability cadence) — shared with the disk-reload path
 		// (ReloadConfiguration) so the two config paths cannot drift.
 		r.applyComponentConfigLocked(oldCfg, newCfg)

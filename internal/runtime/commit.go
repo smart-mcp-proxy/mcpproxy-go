@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	goruntime "runtime"
 	"sort"
 	"strconv"
@@ -433,22 +434,76 @@ func cloneCommitConfig(cfg *config.Config) *config.Config {
 	if cfg == nil {
 		return &config.Config{}
 	}
-	next := *cfg
+	// Every exported global field is deep-copied (review round 5): MutateGlobal
+	// edits nested state (cfg.Logging.Level, a profile's servers or tool
+	// rules), and with a shallow copy that edit wrote straight into the
+	// published base — it leaked when the commit aborted or failed, and a
+	// successful one was invisible to change detection because base and next
+	// moved together. Unexported fields (load diagnostics, explicit-set
+	// markers) are copied by value; MutateGlobal cannot reach them.
+	next := deepCopyExported(reflect.ValueOf(cfg).Elem()).Interface().(config.Config)
 	next.Servers = make([]*config.ServerConfig, 0, len(cfg.Servers))
 	for _, sc := range cfg.Servers {
 		if sc != nil {
 			next.Servers = append(next.Servers, config.CopyServerConfig(sc))
 		}
 	}
-	// Global slices are copied so a MutateGlobal append never writes into the
-	// published snapshot's backing array.
-	if cfg.Registries != nil {
-		next.Registries = append(cfg.Registries[:0:0], cfg.Registries...)
-	}
-	if cfg.Profiles != nil {
-		next.Profiles = append(cfg.Profiles[:0:0], cfg.Profiles...)
-	}
 	return &next
+}
+
+// deepCopyExported returns a copy of v whose pointers, slices and maps reachable
+// through exported fields are fresh. A struct is first copied by value (which
+// carries its unexported fields as they are), then each exported field is
+// replaced by its own deep copy. The configuration types hold no cycles,
+// funcs, channels or locks.
+func deepCopyExported(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(deepCopyExported(v.Elem()))
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(deepCopyExported(v.Index(i)))
+		}
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), deepCopyExported(iter.Value()))
+		}
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(deepCopyExported(v.Elem()))
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			if t.Field(i).IsExported() {
+				out.Field(i).Set(deepCopyExported(v.Field(i)))
+			}
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func serverNameSet(cfg *config.Config) map[string]bool {
