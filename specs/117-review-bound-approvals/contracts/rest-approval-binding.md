@@ -96,8 +96,9 @@ Guarantees on 409:
 
 ## CLI surface
 
-`mcpproxy review approve <server> [--all|--tools|--except] [--force] [--yes]`:
-- Fetches the review once, uses it both for the selection and for the binding, and sends it.
+`mcpproxy review approve <server> [--all|--tools|--except] [--force] [--yes] [--from-review <file>]`:
+- `--from-review <file>` (a saved `review show -o json`): selection and binding come from the file. An operator who reviewed H1 with `review show` and approves after the upstream moved to H2 gets 409.
+- Without `--from-review`: the review is fetched once, and the interactive prompt lists every tool it will make reachable (tier, status, first description line, diff marker). The binding is that displayed fetch. With `--yes` and no file, it is "approve what the server serves now" (documented).
 - On 409 out of date it prints the core message plus `Run 'mcpproxy review show <server>' and approve again.` and exits with code 1.
 - `-o json` prints the error envelope as JSON.
 - Unchanged: `mcpproxy security approve` stays unbound (follow-up O3).

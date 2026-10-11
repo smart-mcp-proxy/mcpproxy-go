@@ -124,7 +124,8 @@ The scanner gets a new optional interface, `ReviewedServerApprover`, with these 
 **Decision**:
 - `managed.Client.ListToolsCaptured(ctx) ([]*config.ToolMetadata, InventoryCapture, error)`. `runListToolsAsLeader` takes `seq = nextCaptureSeq()` (package-level `atomic.Uint64`) right after acquiring the list, next to `listEpoch` (`client.go:1083`).
 - It stores `{seq, epoch, client}` with the published result, and waiters return the leader's capture.
-- Every path that goes through `acquireListToolsContext` also publishes a capture: the health check and the tool-count refresh.
+- Each upstream list gets an **immutable per-flight result** (`listFlight{done chan struct{}; tools; err; capture}`). The leader creates it in `acquireListToolsContext`, and each waiter keeps a pointer to the flight it joined. Today a waiter reads the client-global `listToolsLastResult` after the channel closes (`client.go:1036-1063`), and a new leader can reset that slot first (`:979-982`), so the waiter gets nil or the next flight's data. That race exists on main too, and adding a capture to the same slot would inherit it (design review r2 #4).
+- The tool-count refresh, which shares the list, publishes into its flight. The health check is ping-only and does not list (`client.go:1772-1786`), so it produces no capture (design review r2 #6).
 - `ListTools` returns only the tools.
 - The manager adds `DiscoverToolsReportCaptured` → `map[server]InventoryCapture`.
 
@@ -148,6 +149,8 @@ The scanner gets a new optional interface, `ReviewedServerApprover`, with these 
 - The sweep publishes each server through the gate instead of one batch `RefreshToolsFromDiscovery`. `markZeroToolServersDiscovered` keeps its own path.
 
 **Lock order**: `captureSnapMu` (global; already held by `commitDiscoveredTools`, `reindexFromLastGoodSnapshot` and `reapplyLastGoodSnapshot`) → per-server approval lock → manager `captureMu` (read) → client `epochMu` → storage manager lock / index lock / supervisor lock.
+
+**Nested lock-taking helpers.** The current apply calls `deleteToolApprovalLocked` (`lifecycle.go:1179`), which takes the same non-reentrant mutex (`tool_approval_lock.go:86-88`). Inside the widened locked phase, every such helper is replaced by its lock-free form (design review r2 #2).
 
 **One existing path runs in the opposite order and must be inverted** (design review r1 #2). The quarantined capture calls `WithCurrentClientOnEpoch` first (`lifecycle.go:649-663`). That holds manager `captureMu` (R) and client `epochMu` across its callback (`manager.go:1228-1237`, `client.go:741-749`), and the callback then takes `captureSnapMu` and the approval lock (`lifecycle.go:730-739`, `tool_quarantine.go:446`). PR-3 removes that outer wrapper. Every inventory path, the quarantined capture included, goes through `applyInventory`, which takes `captureSnapMu` → approval lock. Only then, still inside the locked section, does it take `captureMu` (R) + `epochMu` through a new `Manager.WithCaptureCurrent(capture, fn)`. That call checks pointer, epoch and retirement and holds both locks across the record/index writes, so the protection the wrapper gave is kept for the whole write.
 
@@ -199,3 +202,12 @@ See spec.md A1-A10 and O1-O4.
 4. **Medium, snapshot re-application cannot validate the client**: `lastGoodTools` keeps the full capture. A stale snapshot is re-listed or skipped, never re-applied (FR-037, data-model §7, T306(6b)).
 5. **Medium, T104 would not fail on main through `checkToolApprovals` alone**: it now drives the full apply path with the index, plus restart and dispatch refusal.
 6. **Medium, some PR-3 tests are already green on main**: T305(b)/(c) and T306(6) are reclassified as regression checks. The `CommitServerApproval` check is conditional on PR-2 (composition, not dependency).
+
+## Design review round 2 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, the CLI binds to a hidden fetch**: added `--from-review <file>` (binds to a saved `review show -o json`), an interactive prompt that lists what becomes reachable, and documented `--yes` semantics (FR-015, T215).
+2. **High, nested `deleteToolApprovalLocked` would self-deadlock in the widened section**: lock-free helpers inside the locked phase plus an audit (T307) and a timeout test (T306(8)).
+3. **High, config-driven quarantine bypasses the lock**: FR-035 covers the `LoadConfiguredServers` newly-quarantined branch (storage save, then purge, under the lock). Test T306(9).
+4. **Medium, coalesced waiters read a shared last-result slot**: an immutable per-flight result (research D9, T302) and a failing-first interleaving test (T301).
+5. **Medium, failing-first labels**: T305(a) and the T207 empty-review check are reclassified as composition regressions. T208's failing pair is the post-commit promotion window.
+6. **Low, the health check does not list**: removed from capture producers.

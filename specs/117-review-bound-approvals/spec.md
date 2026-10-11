@@ -177,6 +177,11 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - quarantined path: all reviewed tools, or `{}` for an empty review;
   - trusted path: the selected tools, or every held tool for the default `approve_all`.
 
+  The CLI MUST bind to what the operator actually reviewed (design review r2 #1):
+  - **`--from-review <file>`** (new): the file is the JSON output of `mcpproxy review show <server> -o json`. The selection and the binding come from that file, so a definition that changed after `review show` fails as out of date. This is the scripted and headless path.
+  - **Interactive, without `--from-review`**: before the confirmation, the prompt lists every tool it will make reachable, with tier, status and the first line of the description, plus a diff marker for changed tools. The binding is to that displayed fetch, which is then the review the operator saw.
+  - **`--yes` without `--from-review`**: binds to the review fetched at that moment. This is documented as "approve what the server serves now", and it is still protected against changes during the call.
+
   On 409 it MUST exit non-zero (exit code 1) and print the core's message plus `Run 'mcpproxy review show <server>' and approve again.`
 - **FR-016**: `docs/api/rest-api.md`, `docs/cli/review-commands.md`, `docs/features/security-quarantine.md` and `oas/swagger.yaml` MUST describe `current_hash`, `expected_hashes`, the 409 and the unbound fallback.
 
@@ -192,7 +197,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 
 ### Functional Requirements: capture order (#1565, PR-3)
 
-- **FR-030**: `managed.Client` MUST stamp each upstream `tools/list` with a capture `{seq, epoch, client}`. The leader takes it after it owns the list and before the upstream request. Coalesced waiters MUST receive the leader's capture. `ListTools` keeps its signature and delegates.
+- **FR-030**: `managed.Client` MUST stamp each upstream `tools/list` with a capture `{seq, epoch, client}`. The leader takes it after it owns the list and before the upstream request. Coalesced waiters MUST receive the result and capture of the flight they joined, held in an immutable per-flight result, never a shared last-result slot. `ListTools` keeps its signature and delegates. Ping-only health checks produce no capture.
 - **FR-031**: The sweep MUST obtain a capture per server (`DiscoverToolsReportCaptured`), not one ticket per sweep.
 - **FR-032**: Applying an inventory MUST happen in one critical section under the server's tool-approval lock, and MUST write nothing when `seq < applied` for the server. A current capture sets `applied = seq`. Applying covers:
   - the `checkToolApprovals` decisions;
@@ -202,7 +207,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - the last-good snapshot update.
 - **FR-033**: The StateView publish of an inventory MUST run under the same lock, and only while `seq >= applied` and `seq >= published`. It then sets `published = seq`. The sweep MUST publish per server through this gate.
 - **FR-034**: Before any index write, the apply MUST re-check under the lock that the server is enabled and not quarantined, in config OR storage, failing closed. A quarantined server's inventory is recorded for review only.
-- **FR-035**: `QuarantineServer(true)` MUST flip storage and purge the shared index entries in one critical section under the lock. The profile-index refresh may follow outside it.
+- **FR-035**: Every quarantine writer MUST flip storage and purge the shared index entries in one critical section under the server's approval lock: `QuarantineServer(true)` and the config-load path (`LoadConfiguredServers`, `lifecycle.go:1539-1557`: `newlyQuarantined` → purge, then `SaveUpstreamServer`). The config path saves the quarantined storage record **before** purging, inside that section, so an apply that takes the lock afterwards sees the quarantine. The profile-index refresh may follow outside the section.
 - **FR-036**: The upstream manager MUST retire a client it removes or replaces, under its capture writer lock. An inventory captured by a retired client, or under an epoch that is no longer current, MUST be discarded without writes.
 - **FR-037**: `lastGoodTools` MUST store the complete capture identity (seq, epoch, client) with the snapshot and MUST NOT be replaced by an older capture. Re-applying the snapshot (approval reindex, sweep fallback) is allowed only while that capture is still current (client not replaced or retired, epoch unchanged). Otherwise the approval reindex re-lists the server and the sweep fallback skips it.
 - **FR-038**: The profile-index refresh, signature-cache reconcile, SSE events and activity records MUST run after the lock is released.

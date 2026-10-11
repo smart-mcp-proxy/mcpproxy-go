@@ -38,7 +38,7 @@
 6. Web (Playwright, review screen):
    - change a definition between load and click → the notice shows "out of date", the reloaded rows are visible, no force dialog;
    - a force retry after "dangerous" sends the original `expected_hashes` (check the request body in the network log).
-7. CLI: `mcpproxy review approve notes2 --yes` after a change → exit 1 with the hint line; `-o json` prints the 409 envelope.
+7. CLI: run `mcpproxy review show notes2 -o json > r.json`, change the definition, then run `mcpproxy review approve notes2 --from-review r.json --yes` → exit 1 with the hint line; `-o json` prints the 409 envelope. Interactive approve without the file lists the reachable tools before asking.
 8. Tray (when #1572 is merged): repeat step 2 from the review sheet → the sheet reloads and shows the core's message.
 
 ### L3: capture order (PR-3, key `s117-pr3`)

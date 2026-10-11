@@ -101,7 +101,8 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 - [ ] T206 [PR-2] impl: `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
 - [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
   - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
-  - Bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending (marker from PR-1; fails without PR-1's mark because the pass is a baseline pass).
+  - **Composition regression** (already green on top of PR-1): bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending.
+  - The **failing-first** pair for T208 is the post-commit promotion window above: unbound, a record filed between commit and finish stays pending.
   - Bound match → promoted == the validated pending set, blocks applied by `commit`, storage unquarantined **before** unlock (assert from inside a recording `commit` that runs last and from a hook after the flip).
   - An approved+enabled tool with a hint change → Changed (the activation set).
   - Unbound → promotes the pending records present at commit only. A record filed by a pass after `CommitServerApproval` returns but before `FinishServerApproval` stays pending. On main, `approveBaselineToolsForServer` promotes it; that is the failing assertion.
@@ -138,7 +139,9 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - Quarantined path body includes `expected_hashes` (all tools, or `{}` when empty).
   - Trusted path: `tools` → expected for those tools; default → `approve_all` + expected for the pending+changed tools.
   - A 409 out of date → exit 1, the message + hint line, the JSON envelope under `-o json`.
-- [ ] T216 [PR-2] impl: `review_cmd.go` (`reviewToolState.CurrentHash`; body builders; error mapping).
+  - **Failing-first (design review r2 #1)**: save `review show -o json` at H1, change the stub server to H2, then run `review approve --from-review file --yes` → the request carries H1 and the CLI exits 1 on the stub's 409. Main has no `--from-review`, and its request carries no binding.
+  - The interactive prompt lists the reachable tools with tier and status before asking.
+- [ ] T216 [PR-2] impl: `review_cmd.go` (`reviewToolState.CurrentHash`; `--from-review`; prompt listing; body builders; error mapping); `docs/cli/review-commands.md`.
 
 ### Docs, verify, ship
 - [ ] T217 [PR-2] docs: `docs/api/rest-api.md` (review field, both approve bodies, 409, compatibility matrix), `docs/cli/review-commands.md`, `docs/features/security-quarantine.md`; CLAUDE.md Recent Changes.
@@ -155,9 +158,10 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 - [ ] T301 [P] [PR-3] test: `internal/upstream/managed/listtools_capture_test.go` (US3 scenario 5).
   - The leader's capture seq is strictly greater than any capture whose leader started earlier.
   - A coalesced waiter returns the leader's capture (same seq and epoch).
-  - The health check and tool-count refresh paths publish a capture too.
+  - The tool-count refresh publishes a capture into its flight. The health check stays ping-only and produces none (design review r2 #6).
+  - **Failing-first (design review r2 #4)**: leader 1 finishes and closes its channel; leader 2 acquires and resets before leader 1's awakened waiter reads → the waiter still gets leader 1's tools and capture. On main it reads nil or leader 2's result.
   - `ListTools` is unchanged.
-- [ ] T302 [PR-3] impl: `capture.go`, `client.go` (`runListToolsAsLeader` stamps seq next to `listEpoch`; published with the result), `ListToolsCaptured`.
+- [ ] T302 [PR-3] impl: `capture.go`; in `client.go`, an immutable per-flight result (`listFlight`) replaces `listToolsLastResult`/`listToolsWaitCh`, and `runListToolsAsLeader` stamps seq next to `listEpoch` into its flight; `ListToolsCaptured`.
 - [ ] T303 [P] [PR-3] test: `internal/upstream/managed/retire_test.go` + `internal/upstream/manager_test.go` (US3 scenario 6).
   - `Retire` makes `WithConnectionEpoch` and `CaptureIsCurrent` false.
   - `AddServerConfig` with a changed command retires the old client before the map entry is replaced.
@@ -167,12 +171,12 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 
 ### Ordered apply
 - [ ] T305 [P] [PR-3] test: `internal/runtime/inventory_lock_order_test.go`.
-  - (a) **Failing-first** deadlock test (design review r1 #2): run concurrently, with hooks forcing the overlap:
+  - (a) **Composition regression test** (design review r2 #5: main's apply does not take `captureMu`, so this cannot fail on main). Deadlock test (design review r1 #2): run concurrently, with hooks forcing the overlap:
     - a normal apply holding `captureSnapMu` + the approval lock and waiting for `captureMu`;
     - a quarantined capture;
     - an endpoint replacement (`AddServerConfig`).
 
-    On main's lock order, the quarantined capture holds `captureMu`/`epochMu` and waits for `captureSnapMu`, so the test times out once the new apply phase exists. It must pass after T307 removes the outer wrapper. Write it against T307's stubbed `applyInventory`, so the failure is the deadlock and not a compile error.
+    It fails against an intermediate T307 that widens the apply but keeps the quarantined capture's outer wrapper (record that run in the PR), and passes once the wrapper is removed.
   - (b) **Regression check** (already true on main; not failing-first): supervisor `RefreshServerToolsFromDiscovery` called under a held approval lock completes without re-entering the runtime (`supervisor.go:1214-1230`).
   - (c) **Regression check**: no function reachable from `approveToolsAndNotify` or `applyInventory`'s locked phase takes `captureSnapMu`. If PR-2 is already merged, also check `CommitServerApproval`. This is a composition check, not a PR-3 dependency.
 - [ ] T306 [P] [PR-3] test: `internal/runtime/inventory_capture_order_test.go`, with paused passes via the new hooks `inventoryBeforeApplyLock` / `inventoryAfterDecisions` (US3 scenarios 1-4):
@@ -184,11 +188,13 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - (6) **Regression check** (already true on main): re-applying the last-good snapshot after an approval (`seq == applied`, capture current) works.
   - (6b) **Failing-first**: after a reconnect (epoch moved) or endpoint replacement, the approval reindex does **not** re-apply the old snapshot; it re-lists. On main the old snapshot is re-applied (`tool_quarantine.go:2006-2027`).
   - (7) A retired client's capture → discarded.
+  - (8) **Regression check, with a timeout**: applying an inventory that removes an indexed tool completes; it does not self-deadlock on `deleteToolApprovalLocked` (design review r2 #2).
+  - (9) **Failing-first**: config-driven quarantine (edit `quarantined: true` in the config file → `LoadConfiguredServers`) races a paused pass → after the pass resumes, the shared and profile indexes have no entry for the server (design review r2 #3).
 
   (1)-(5), (6b) and (7) must fail on main for the stated reason; (6) is a regression check. For (1), C1's write-back restores read-only hints.
-- [ ] T307 [PR-3] impl: `toolApprovalServerLock{mu, applied, published}`, `lockToolApprovalsForCapture`. Extract `checkToolApprovalsLocked`. Split `applyDifferentialToolUpdate` into `applyInventoryLocked` + tail. Remove the quarantined capture's outer `WithCurrentClientOnEpoch` wrapper (`lifecycle.go:649`) and add `Manager.WithCaptureCurrent`, used inside the locked section. Store the full capture in `lastGoodTools`. Change `commitDiscoveredTools`, `discoverAndIndexToolsForServerOnce`, `captureQuarantinedToolDefinitions*` and `reindexFromLastGoodSnapshot` / `reapplyLastGoodSnapshot` to go through `applyInventory` with their capture. Add `lastGoodTools` seq. Make the sweep use `DiscoverToolsReportCaptured` and publish per server through the gate (keep `markZeroToolServersDiscovered`).
+- [ ] T307 [PR-3] impl: `toolApprovalServerLock{mu, applied, published}`, `lockToolApprovalsForCapture`. Extract `checkToolApprovalsLocked`. Split `applyDifferentialToolUpdate` into `applyInventoryLocked` + tail. Inside the locked phase, replace every helper that takes the approval lock itself with its lock-free form (design review r2 #2): `deleteToolApprovalLocked` (`lifecycle.go:1179`, `tool_approval_lock.go:86-88`) becomes a direct `storageManager.DeleteToolApproval`, and `pruneAbsentUndecidedApprovals` runs unlocked-internally. Audit every call reachable from the locked phase for `lockToolApprovals`; T306(8) pins it. Remove the quarantined capture's outer `WithCurrentClientOnEpoch` wrapper (`lifecycle.go:649`) and add `Manager.WithCaptureCurrent`, used inside the locked section. Store the full capture in `lastGoodTools`. Change `commitDiscoveredTools`, `discoverAndIndexToolsForServerOnce`, `captureQuarantinedToolDefinitions*` and `reindexFromLastGoodSnapshot` / `reapplyLastGoodSnapshot` to go through `applyInventory` with their capture. Add `lastGoodTools` seq. Make the sweep use `DiscoverToolsReportCaptured` and publish per server through the gate (keep `markZeroToolServersDiscovered`).
 - [ ] T308 [P] [PR-3] test: `internal/runtime/quarantine_purge_lock_test.go`. `QuarantineServer(true)` purges under the lock: a pass blocked on the lock observes `serverQuarantined` and writes no index entries. Fails on main: the purge runs after unlock.
-- [ ] T309 [PR-3] impl: move the storage flip + `purgeQuarantinedServerFromIndex` (shared index part) into one locked section. The profile-index refresh stays after unlock.
+- [ ] T309 [PR-3] impl: move the storage flip + `purgeQuarantinedServerFromIndex` (shared index part) into one locked section, for both `QuarantineServer(true)` and the `LoadConfiguredServers` newly-quarantined branch (save storage first, then purge, both under the lock; design review r2 #3). The profile-index refresh stays after unlock.
 - [ ] T310 [P] [PR-3] test: stress `internal/runtime/inventory_stress_test.go`. Concurrent refresh, approvals, block, quarantine toggles, sweep and reindex for 2 s under `-race`. A goroutine dump on a 30 s timeout. Final invariant: every indexed tool has an approved, enabled record, and no pending/changed record is indexed. Run the existing UX-02 concurrency suite unchanged (SC-004).
 - [ ] T311 [PR-3] impl: fixes found by T310 (if any). Remove dead code (`captureQuarantinedToolDefinitionsFromTools` if still unused).
 
