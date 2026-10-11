@@ -7,6 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
@@ -431,6 +433,7 @@ var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s
 // them with clauseMark, or chunkMark where the boundary is a line or sentence
 // end beside a short raw token (see chunkMark).
 func squashedClauses(text string) string {
+	text = foldClauseBreaks(text)
 	runs := newLetterRuns(text)
 	var b strings.Builder
 	prev := 0
@@ -446,6 +449,23 @@ func squashedClauses(text string) string {
 	}
 	b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:])))
 	return b.String()
+}
+
+// unicodeLineBreaks are the line and paragraph separators other than CR/LF:
+// VT, FF, NEL (U+0085), LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR
+// (U+2029).
+var unicodeLineBreaks = strings.NewReplacer("\v", "\n", "\f", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
+
+// foldClauseBreaks prepares raw tool text for clause splitting: NFKC folds
+// fullwidth, halfwidth and small-form punctuation ("．", "｡", "﹒") to the
+// marks squashClauseBoundary knows, and every Unicode line or paragraph
+// separator becomes "\n". Without it such a break stayed inside one clause and
+// the squashed pass joined two separate sentences ("Ignore previous search
+// results<U+2028>Instructions for installation follow") into an override
+// directive (SEC-01 review, Sol round 6). NormalizeForPhrase applies NFKC to
+// each clause anyway, so the clause text itself is unchanged.
+func foldClauseBreaks(text string) string {
+	return unicodeLineBreaks.Replace(norm.NFKC.String(text))
 }
 
 // letterRuns answers, for any rune boundary i of a text, how long the letter
@@ -519,7 +539,7 @@ func (r letterRuns) leading(i int) int { return int(r.after[i]) }
 
 // jsonLineBreakEscape matches the JSON escapes for line breaks, plus an
 // escaped backslash so "\\n" (a literal backslash then n) is left alone.
-var jsonLineBreakEscape = regexp.MustCompile(`\\\\|\\[nr]|\\u(?:000[aAdD]|2028|2029|0085)`)
+var jsonLineBreakEscape = regexp.MustCompile(`\\\\|\\[nrf]|\\u(?:000[aAbBcCdD]|2028|2029|0085)`)
 
 // unescapeJSONLineBreaks turns line-break escapes inside serialized schema
 // JSON back into real line breaks, so a schema description's newline ends a
