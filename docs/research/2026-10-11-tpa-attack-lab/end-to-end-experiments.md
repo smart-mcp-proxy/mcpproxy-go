@@ -119,6 +119,8 @@ lab containers).
 | EXP-4 | PARTIAL-HOLE: scan=clean on poisoned server; flap caught | **HOLDS**: `scan=dangerous, stored=changed`. The log shows `Scan export diverges from the tool contracts discovery ingested; scanning the ingested contracts too` for `convert_currency` and `summarize_text` |
 | EXP-5 | HOLE: `notes_export=approved` after the annotation flip | **HOLDS**: `notes_export=changed` |
 | EXP-6 | HOLE: `calendar=approved stock=approved` (scan-approved) | **HOLDS**: `calendar=changed stock=changed`. The log shows `Tool change held for operator confirmation (trust_mode: scan, clean verdict does not auto-approve a changed contract)` |
+| EXP-5b | not run (variant added in review round 5) | **HOLDS**: `notes_export=changed`, not indexed. The server was never re-quarantined, so the trusted server's gate held the flip (round 5) |
+| EXP-6b | not run (variant added in review round 5) | **HOLDS**: `calendar=changed stock=changed`, not indexed. The server was trusted throughout under `trust_mode: scan` (round 5) |
 
 On the first post-fix run, EXP-4 came out `INCONCLUSIVE: scan=clean,
 stored=approved` with `rug-pull flags: 0`. In that run the toctou fixture's
@@ -383,6 +385,59 @@ scripts/tpa-lab-redteam-experiments.sh
 
 Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r4/` of the main checkout.
 
+### Review round 5 follow-ups
+
+A fifth review (Sol 6.1, REQUEST_CHANGES at `0820e537d`, five chunked
+transcripts `rt-r5a` to `rt-r5e`) raised nine items with no duplicates. All
+nine were in scope (RT-01, RT-03, RT-05, RT-06 and the lab scripts), and each
+was fixed with a regression test. None was rebutted. RT-04 and RT-07 (detect
+engine) stay deferred to the concurrent SEC-01 PR, so EXP-3 is still expected
+to show HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-03: a legacy held (changed) record whose hint-free `CurrentHash` equals the hint-aware hash of the live contract (default hints) took the early return in `refreshHeldContractSnapshot`. It was never stamped with `CurrentHashSchemaVersion` and its annotations were never captured. An approval then kept the legacy version and the nil-snapshot wildcard, so a later read-only-lying flip was auto-approved | Fixed. When the hash is unchanged, the refresh still stamps the current version and captures the live annotation snapshot. It saves only when something changed, emits no event and keeps the hold evidence. Tests: `TestRT03_LegacyHeldUnchangedHash_RediscoverStampsBeforeApproval` covers approve, block and scan-approval block, then a flip over two passes, and fails without the fix. `TestRT03_LegacyHeldStamp_IsIdempotent` checks that a stamped record is not re-saved |
+| P1 RT-01: `legacySiblingApprovesContract` kept an unconditional empty-output-schema wildcard in its stored-text fallback. A sibling at hash version 3 that declared no output schema therefore adopted a newly added, poisoned one | Fixed. The fallback uses the same version-sensitive rule as the main gate: an empty stored schema is a wildcard only below `OutputSchemaHashSchemaVersion`. Test: `TestRT01_LegacySiblingDeclaredNoneOutputSchema_DoesNotAdoptPoison`, which also checks that a pre-capture sibling keeps the wildcard |
+| High RT-06: Docker scanners read `tools.json` from the upstream-writable source dir. A swap and restore during the run passed both the before and after integrity checks | Fixed. For every scanner that may use tool metadata, the engine writes the exported snapshot to a proxy-owned, read-only file under `<data_dir>/scanner-snapshots/`. It bind-mounts that file `:ro` over `/scan/source/tools.json` and `/src/tools.json`, and removes it after the run. The before and after checks stay as tamper evidence. Test: `TestRT06_DockerScanner_SwapDuringRunThenRestore_ReadsSnapshot` swaps the file during the run and restores it before the run ends, using a container-run seam. It asserts that the container read the poisoned snapshot and that the snapshot is read-only and removed afterwards |
+| P2 RT-06: tampering with `tools.json` after a successful export (changed or deleted) failed or discarded the metadata-independent Trivy CVE audit | Fixed. `toolDefinitionsGate` exempts the scanners that do not use tool metadata (`trivy-mcp`) from both integrity checks, and no snapshot is mounted for them. Test: `TestRT06_MetadataIndependentScanner_IgnoresToolsJSONTamper` (changed and deleted, during the run). It also checks that a metadata-dependent scanner is still refused |
+| P2 RT-05: a verification triggered by a notification could join a `ListTools` request already in flight (shared through the managed client), which had captured the contract before the change | Fixed. `managed.Client.ListToolsFresh` numbers `ListTools` leaders. It never accepts the result of a leader that started before the call: it waits for that leader and then lists again or joins a later leader. The quarantined verification and the explicit quarantined capture both use it. Test: `TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall` |
+| P2 RT-05: the deferred continuation wrote the notification handler's captured `err` after the handler had returned (a data race) | Fixed. Follow-up runs never write handler state. They log their own failures, and the handler returns only its own run's error. Test: `TestToolsListChanged_CappedContinuation_NoDataRace` reaches the cap through `onUpstreamToolsListChanged` and reports `DATA RACE` under `-race` without the fix |
+| P2 RT-05: `Close()` replaces the app context with `context.Background()`, so an owner that reached the cap after shutdown started scheduled a continuation that was never cancelled | Fixed. The runtime keeps a `lifetimeCtx`, which `Close` cancels and never replaces. The continuation waits on it and refuses to start after shutdown, owners stop following up after shutdown, and follow-up contexts derive from it. Tests: `TestCoalescedDiscovery_OwnerReachesCapAfterClose_NoContinuation` pauses a run, closes the runtime, then releases the run; it fails without the fix. Also `TestToolsListChangedFollowUp_ContextCancelledAfterClose` |
+| P2 suite: EXP-5 and EXP-6 ignored an unquarantine failure and accepted holds created by the quarantined verification at restart, so HOLDS never proved the post-unquarantine gate. The restart log confirms that path marked `notes_export` changed before any unquarantine | Fixed. EXP-2b, EXP-5 and EXP-6 share `held_unquarantined_verdict`. It requires a successful unquarantine, `quarantined=false`, fresh discovery (`benign_calculator` absent from the index before the unquarantine and present after it) and every held tool absent from the index. New variants EXP-5b and EXP-6b change the approved contract on a server that is never re-quarantined. They clone the approved stage-1 data dir and restart with `quarantined:false`, so only the trusted server's gate can hold the change. The gate's own log line is required, and so is the absence of a quarantined-verification line. Test: `TestHeldUnquarantinedVerdictRequiresProvenTrustedGate` |
+| P2 suite: `run-tpa-lab-docker.sh` validated only the isolation image, so a config with `network_mode: bridge` ran the attacker with network access | Fixed. The isolation check (`isolation.mode` docker and `network_mode` none on every server) is now its own function, `lab_config_check_isolation`, which both scripts call. The runner refuses a config that fails it before building or starting anything. `TPA_LAB_CONFIG` lets the preflight tests pass a variant config. Tests: `TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream` and `TestRunLabDockerRejectsUnisolatedConfig` (bridge, unset network mode, mode none, no isolation block) |
+
+Verification on the branch head after the round-5 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/security/scanner/ ./internal/upstream/managed/ ./tests/tpa-attack-lab/
+go test -count=1 ./internal/... ./tests/tpa-attack-lab/
+#   73 packages ok; internal/server timed out in its binary-spawning tests (known, CI skips them), so:
+go test -timeout 20m -count=1 -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/...
+#   ok internal/server (1090.0s), ok internal/server/tokens
+go test -race -count=1 ./internal/runtime/      # ok (596.3s)
+golangci-lint run --config .github/.golangci.yml ./...                       # 15 issues, none in a file this round touched
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...   # 18 issues, none in a file this round touched
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+(cd <scratchpad> && SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh)   # artifacts from the run above, no Go change since
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection); both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r5/` of the main checkout.
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -411,9 +466,14 @@ Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r4
   output schema on a current-version record is the declared contract, so a
   tool that gains one is held for review.
 - The in-process baseline scanner analyses the exported tool definitions
-  from memory. A Docker scanner result is discarded if `tools.json` changed
-  after export. A Pass-2 audit whose export fails runs only the scanners that
-  do not use tool metadata (`trivy-mcp`).
+  from memory. A Docker scanner that may use tool metadata reads a
+  proxy-owned, read-only snapshot mounted over `tools.json`, and its result
+  is discarded if the source dir's `tools.json` changed after export. A
+  Pass-2 audit whose export fails runs only the scanners that do not use tool
+  metadata (`trivy-mcp`), and those scanners ignore `tools.json` tampering.
+- Contract verification of a quarantined server (on connect,
+  `tools/list_changed` or explicit capture) always issues its own
+  `tools/list`, and never reuses one that was already in flight.
 - A scan whose live tool export is empty now scans the contracts the proxy
   ingested. The scan fails rather than proceeding when the live export keeps
   failing with nothing ingested, or when `tools.json` cannot be written.
