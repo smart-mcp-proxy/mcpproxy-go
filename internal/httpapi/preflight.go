@@ -315,7 +315,7 @@ func (s *Server) runPreflightWithWait(ctx context.Context, params preflight.Para
 	defer s.releasePreflightWaitSlot()
 
 	interval := s.preflightPollInterval()
-	start := time.Now()
+	start := s.preflightNow()
 	deadline := start.Add(time.Duration(waitMS) * time.Millisecond)
 	// Every re-evaluation is bounded by the WAIT deadline, not just by the
 	// caller's request context: the wait budget is the promise ("resolves within
@@ -379,6 +379,15 @@ func (s *Server) preflightPollInterval() time.Duration {
 		return s.preflightPollOverride
 	}
 	return preflightPollFloor
+}
+
+// preflightNow is the wait clock. Tests swap it via preflightNowOverride to
+// capture the wait start; production always reads time.Now.
+func (s *Server) preflightNow() time.Time {
+	if s.preflightNowOverride != nil {
+		return s.preflightNowOverride()
+	}
+	return time.Now()
 }
 
 // acquirePreflightWaitSlot takes one of the dedicated wait slots without
