@@ -6897,29 +6897,36 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 	// UX-02: report what actually applied. "approved" counts the requested
 	// tools whose records now read approved (it used to echo the request
 	// length even for names with no record); "not_approved" lists the rest.
-	approved := len(req.Tools)
+	// When the records cannot be read back the outcome is unknown: report 0
+	// applied with outcome_unavailable rather than echoing the request.
+	approved := 0
 	response := map[string]interface{}{"tools": req.Tools}
-	if records, outcome, ok := s.toolApprovalOutcomeFor(serverID); ok {
-		byName := make(map[string]*storage.ToolApprovalRecord, len(records))
-		for _, rec := range records {
-			if rec != nil {
-				byName[rec.ToolName] = rec
-			}
-		}
-		approved = 0
-		var notApproved []string
-		for _, name := range req.Tools {
-			if rec := byName[name]; rec != nil && rec.Status == storage.ToolApprovalStatusApproved {
-				approved++
-			} else {
-				notApproved = append(notApproved, name)
-			}
-		}
-		if len(notApproved) > 0 {
-			response["not_approved"] = notApproved
-		}
-		outcome.addTo(response)
+	records, outcome, ok := s.toolApprovalOutcomeFor(serverID)
+	if !ok {
+		response["approved"] = 0
+		response["outcome_unavailable"] = true
+		response["message"] = fmt.Sprintf("Approval of %d tools for server %s was submitted, but the resulting state could not be read back; check it with GET /api/v1/servers/%s/review", len(req.Tools), serverID, serverID)
+		s.writeSuccess(w, response)
+		return
 	}
+	byName := make(map[string]*storage.ToolApprovalRecord, len(records))
+	for _, rec := range records {
+		if rec != nil {
+			byName[rec.ToolName] = rec
+		}
+	}
+	var notApproved []string
+	for _, name := range req.Tools {
+		if rec := byName[name]; rec != nil && rec.Status == storage.ToolApprovalStatusApproved {
+			approved++
+		} else {
+			notApproved = append(notApproved, name)
+		}
+	}
+	if len(notApproved) > 0 {
+		response["not_approved"] = notApproved
+	}
+	outcome.addTo(response)
 	response["approved"] = approved
 	response["message"] = fmt.Sprintf("Approved %d of %d requested tools for server %s", approved, len(req.Tools), serverID)
 	s.writeSuccess(w, response)

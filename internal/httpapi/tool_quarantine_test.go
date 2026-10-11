@@ -30,6 +30,7 @@ type mockToolQuarantineController struct {
 	approveErr             error
 	approveAllErr          error
 	approveSkip            map[string]bool
+	listErr                error
 	approvedCount          int
 	approvedTools          []string
 	approvedServer         string
@@ -63,6 +64,9 @@ func (m *mockToolQuarantineController) GetAllServers() ([]map[string]interface{}
 }
 
 func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var result []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {
 		if a.ServerName == serverName {
@@ -348,6 +352,26 @@ func TestHandleApproveTools_ReportsAppliedCountAndRemainingHolds(t *testing.T) {
 	assert.Equal(t, float64(1), data["still_changed"])
 	assert.Equal(t, []interface{}{"list_repos", "rug"}, data["held_tools"])
 	assert.Contains(t, data["message"], "Approved 1 of 3 requested tools")
+}
+
+// UX-02 review: when the records cannot be read back after the write, the
+// response must not claim the requested tools were approved.
+func TestHandleApproveTools_OutcomeUnreadableDoesNotClaimApproval(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", listErr: fmt.Errorf("decode failure")}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(`{"tools": ["no_such_tool"]}`))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(0), data["approved"])
+	assert.Equal(t, true, data["outcome_unavailable"])
+	assert.NotContains(t, data["message"], "Approved 1")
 }
 
 func TestHandleApproveTools_ApproveAll(t *testing.T) {

@@ -541,6 +541,9 @@ it reports what actually applied:
 - `still_pending` / `still_changed`: tools on the server still held for review,
   named (sorted, at most 50) in `held_tools`. A tool that changed or appeared
   after the decision is held here by design.
+- `outcome_unavailable: true` (with `approved: 0` and no counts): the records
+  could not be read back, so the applied result is unknown; check
+  `GET /api/v1/servers/{id}/review`.
 
 `POST /api/v1/servers/{id}/security/approve` returns the same four counts (and
 `held_tools`) next to `status: "approved"` and `server_name`. `status` keeps its
