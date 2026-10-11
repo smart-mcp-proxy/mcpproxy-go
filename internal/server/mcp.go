@@ -821,6 +821,7 @@ func (p *MCPProxyServer) recordBuiltinTool(name string) {
 // This counts ATTEMPTS: it runs at the top of handleCallToolVariant, before
 // validation, quarantine checks, connectivity, and the upstream call itself.
 // Do not hang success-semantics metrics off it — see recordRealToolCallSuccess.
+// Call it through noteUpstreamDispatched (mcp_upstream_telemetry.go).
 func (p *MCPProxyServer) recordUpstreamTool() {
 	telemetry.RecordUpstreamToolOn(p.telemetryRegistry())
 }
@@ -2707,7 +2708,6 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// upstream call happens inside this function — we count it as an upstream
 	// tool call (no name recorded).
 	p.recordMCPSurface()
-	p.recordUpstreamTool()
 
 	// Spec 024: Track start time and context for internal tool call logging
 	internalStartTime := time.Now()
@@ -3329,6 +3329,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
+	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
@@ -3491,12 +3492,6 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
 
-	// The upstream returned a real result: this install has now genuinely made a
-	// real tool call. Stamped here — past every validation / quarantine /
-	// connectivity gate and past the upstream error branch above — so the
-	// activation flag means "succeeded", not merely "attempted".
-	p.recordRealToolCallSuccess()
-
 	// Issue #935: the transport hop succeeded, but the upstream may still have
 	// ANSWERED "this failed" via isError:true (bad argument value, unknown
 	// tool, server-side validation). Classify here — before encodeToonBlocks /
@@ -3632,6 +3627,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// failure invisible.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
 	p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, recResult, intentMap, "")
+
+	// Activation: only a usable result counts. Reached after the upstream
+	// error branch, the isError classification (activityStatus) and both output
+	// policy gates (sanitisation, output validation) above.
+	if activityStatus == "success" {
+		p.recordRealToolCallSuccess()
+	}
 
 	return forwarded, nil
 }

@@ -371,3 +371,25 @@ func TestInstallerPending_ClearedAfterFirstHeartbeat(t *testing.T) {
 		t.Fatalf("second resolveLaunchSource still returned installer — one-shot broken")
 	}
 }
+
+// A flag persisted by a pre-v14 build is lifetime and monotonic: it is carried
+// into later heartbeats unchanged even with no successful call since. Consumers
+// must therefore define the corrected-activation cohort by the install's first
+// observed schema_version (>= 14), not by the heartbeat's schema_version alone
+// (docs/features/telemetry.md, "Eligible cohort").
+func TestActivationStore_InheritedPreV14FlagIsCarried(t *testing.T) {
+	db, cleanup := newTestActivationDB(t)
+	defer cleanup()
+
+	var s bboltActivationStore
+	if err := s.MarkFirstRealToolCall(db); err != nil { // stamped by a "v13" build
+		t.Fatalf("MarkFirstRealToolCall: %v", err)
+	}
+	st, err := s.Load(db) // "upgrade": no upstream call since
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !st.FirstRealToolCallEver {
+		t.Fatal("persisted flag must survive upgrade (monotonic, not rewritten)")
+	}
+}

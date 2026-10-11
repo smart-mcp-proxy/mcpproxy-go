@@ -149,7 +149,18 @@ import (
 // topology). A key containing "user" would have had every heartbeat from such
 // an install refused before it left the machine. See
 // TestPayloadV13_PassesScanWithCommonUsernameBlocked.
-const SchemaVersion = 13
+//
+// v14 changes the MEANING of two existing instruments, with no new fields:
+// activation.first_real_tool_call_ever and upstream_tool_call_count_bucket now
+// share one definition across call_tool_*, direct routing and every
+// code_execution JS sub-call. The flag is stamped only for a usable upstream
+// result (not transport errors, not upstream isError:true, not policy or
+// output-policy refusals); the bucket counts one attempt per actual upstream
+// dispatch (previously: every call_tool_* invocation including ones refused
+// before dispatch, and nothing for direct routing or JS sub-calls). v13-and-
+// earlier values are not comparable with v14 ones; do not graph them as one
+// series, and do not reinterpret historical flags.
+const SchemaVersion = 14
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
