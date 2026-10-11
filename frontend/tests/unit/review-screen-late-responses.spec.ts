@@ -134,6 +134,20 @@ describe('ReviewScreen drops late responses for another server or visit (#1568)'
     expect(w.get('[data-test="review-stale-force-notice"]').text()).toContain('changed')
   })
 
+  it('blind approval confirmed after a FAILED refresh is not sent and needs a fresh review', async () => {
+    const blind = review('a', [], { definitions_captured: false })
+    const refresh = deferred()
+    ;(api.getServerReview as any).mockResolvedValueOnce(blind).mockReturnValueOnce(refresh.promise)
+    ;(api.securityApprove as any).mockResolvedValue({ success: true })
+    const w = await mountOn('a')
+    const dlg = w.findAll('dialog')[0].element as HTMLDialogElement; dlg.showModal = vi.fn()
+    await approveBtn(w).trigger('click')
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed')); await flushPromises()
+    refresh.resolve({ success: false, error: 'boom' }); await flushPromises()
+    await w.findAll('dialog')[0].get('button.btn-warning').trigger('click'); await flushPromises()
+    expect(api.securityApprove).not.toHaveBeenCalled()
+  })
+
   it('blind approval on an unchanged empty review still goes through', async () => {
     mockReviews({ a: review('a', [], { definitions_captured: false }) })
     ;(api.securityApprove as any).mockResolvedValue({ success: true })
