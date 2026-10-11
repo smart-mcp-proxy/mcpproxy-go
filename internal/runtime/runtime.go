@@ -116,6 +116,9 @@ type Runtime struct {
 	// runtime), so there is no callback deadlock.
 	configCommitMu sync.Mutex
 
+	// Spec 116 test probes and seams (commit_testhooks.go).
+	commitWaitState
+
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
 	// top of the snapshot comparison because a restart-required ApplyConfig
@@ -723,7 +726,7 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 	// ReloadConfiguration, SaveConfiguration) so configSvc and the legacy
 	// r.cfg field can't be updated in an interleaved order that leaves them
 	// divergent (PR #857 review). MUST be acquired before r.mu.
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 	r.updateConfigLocked(cfg, cfgPath)
 }
@@ -771,7 +774,7 @@ func (r *Runtime) UpdateListenAddress(addr string) error {
 	// under configCommitMu keeps configSvc and r.cfg in agreement and serializes
 	// against the other commit paths (PR #857 review). MUST be acquired before
 	// r.mu.
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 
 	snapshot := r.ConfigSnapshot()
@@ -1831,7 +1834,7 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// stores (configSvc + r.cfg/live components) can't be updated in an
 	// interleaved order that leaves them divergent. Held across save →
 	// r.cfg swap → configSvc.Update below. MUST be acquired before r.mu.
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 	return r.applyConfigLocked(newCfg, cfgPath)
 }

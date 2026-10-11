@@ -1024,6 +1024,9 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 			zap.Error(err))
 		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
 	}
+	if h := r.testHooks.discoveryBeforeIndex; h != nil {
+		h(serverName)
+	}
 
 	// Query existing tools from the index
 	existingTools, err := r.indexManager.GetToolsByServer(serverName)
@@ -1394,6 +1397,9 @@ func boolPtrEqual(a, b *bool) bool {
 //
 //nolint:unparam // maintained for parity with previous implementation
 func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
+	if h := r.testHooks.reconcileEntry; h != nil {
+		h()
+	}
 	if cfg == nil {
 		cfg = r.Config()
 		if cfg == nil {
@@ -1565,6 +1571,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		}
 	}
 	r.logger.Debug("Completed synchronous storage save phase")
+	if h := r.testHooks.reconcileExit; h != nil {
+		h()
+	}
 
 	// SECOND: Manage upstream connections asynchronously (slow, can take 30s+)
 	for _, serverCfg := range cfg.Servers {
@@ -1673,7 +1682,7 @@ func (r *Runtime) SaveConfiguration() error {
 	// and this stale-based write would clobber configSvc while r.cfg keeps the
 	// applied value — leaving the two stores divergent (PR #857 review). MUST
 	// be acquired before r.mu.
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 
 	latestServers, err := r.storageManager.ListUpstreamServers()
@@ -1866,7 +1875,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// B and leave r.cfg=A while configSvc=B persistently (PR #857 review). Held
 	// across configSvc.ReloadFromFile → r.cfg swap → live-component apply.
 	// MUST be acquired before r.mu (matches ApplyConfig's lock ordering).
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 
 	// Get current snapshot before reload

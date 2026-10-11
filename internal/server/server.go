@@ -106,6 +106,11 @@ type Server struct {
 	runtime *runtime.Runtime
 	// createMu serializes create-only server adds (see createServer).
 	createMu sync.Mutex
+
+	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
+	// runs in the create path after the runtime configuration was read and
+	// before the new server is published.
+	createAfterConfigRead func(name string)
 	// profileIndexes caches the slug → profile index of the current config
 	// snapshot for the /mcp/p/<slug> gate (Spec 105 FR-004, O(1) in the fleet).
 	profileIndexes profileIndexCache

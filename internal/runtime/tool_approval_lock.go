@@ -41,7 +41,10 @@ import (
 func (r *Runtime) lockToolApprovals(serverName string) func() {
 	v, _ := r.toolApprovalLocks.LoadOrStore(serverName, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
+	waiting := r.approvalLockWaiter(serverName)
+	waiting.Add(1)
 	mu.Lock()
+	waiting.Add(-1)
 	return mu.Unlock
 }
 

@@ -90,7 +90,11 @@ func (s *Server) createServer(sc *config.ServerConfig) error {
 	}
 	// runtime.Config() is the live immutable snapshot; copy-on-write, see
 	// configWithAppendedServer.
-	if updated := configWithAppendedServer(s.runtime.Config(), sc); updated != nil {
+	current := s.runtime.Config()
+	if h := s.createAfterConfigRead; h != nil {
+		h(sc.Name)
+	}
+	if updated := configWithAppendedServer(current, sc); updated != nil {
 		s.runtime.UpdateConfig(updated, "")
 	}
 	return nil

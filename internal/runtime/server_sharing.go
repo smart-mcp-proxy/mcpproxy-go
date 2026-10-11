@@ -13,7 +13,7 @@ import (
 // publishes it before returning. A successful unshare must not leave a file
 // watcher delay in which existing credentials can still reach the server.
 func (r *Runtime) SetServerShared(name string, shared bool) (*config.ServerConfig, error) {
-	r.configCommitMu.Lock()
+	r.lockConfigCommit()
 	defer r.configCommitMu.Unlock()
 	snapshot := r.ConfigSnapshot()
 	next := snapshot.Clone()

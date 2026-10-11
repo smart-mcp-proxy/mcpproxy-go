@@ -101,6 +101,12 @@ func apiRequestTimeout(defaultBudget time.Duration, budgets map[string]time.Dura
 	}
 }
 
+// SetPatchAfterParseHookForTest installs the PATCH /api/v1/servers/{id}
+// after-parse seam (Spec 116 T001). Test-only.
+func (s *Server) SetPatchAfterParseHookForTest(fn func(serverName string)) {
+	s.patchAfterParse = fn
+}
+
 // ServerController defines the interface for core server functionality
 type ServerController interface {
 	IsRunning() bool
@@ -295,7 +301,10 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller        ServerController
+	controller ServerController
+	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
+	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
+	patchAfterParse   func(serverName string)
 	logger            *zap.SugaredLogger
 	httpLogger        *zap.Logger // Separate logger for HTTP requests
 	router            *chi.Mux
@@ -2720,6 +2729,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	}
+
+	if h := s.patchAfterParse; h != nil {
+		h(serverName)
 	}
 
 	// Build partial update config - only set fields that were provided
