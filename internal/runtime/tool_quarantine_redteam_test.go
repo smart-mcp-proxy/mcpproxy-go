@@ -371,3 +371,230 @@ func TestRT03_FlipFromOmittedHints_StaysHeld(t *testing.T) {
 		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d", pass)
 	}
 }
+
+// --- Sol review round 1 regressions ---
+
+// RT-01 (Sol r1 P1): "required" inside literal JSON (const/enum/default/
+// examples) is data, not the JSON Schema keyword — it must never be treated as
+// an order-insensitive set or dropped when empty.
+func TestRT01_LiteralRequiredMembersAreData(t *testing.T) {
+	notEquivalent := map[string][2]string{
+		"const required reordered": {
+			`{"type":"object","const":{"required":["a","b"]}}`,
+			`{"type":"object","const":{"required":["b","a"]}}`},
+		"const empty required dropped": {
+			`{"type":"object","const":{"required":[]}}`,
+			`{"type":"object","const":{}}`},
+		"enum member required reordered": {
+			`{"type":"object","properties":{"o":{"enum":[{"required":["a","b"]}]}}}`,
+			`{"type":"object","properties":{"o":{"enum":[{"required":["b","a"]}]}}}`},
+		"default required reordered": {
+			`{"type":"object","properties":{"o":{"type":"object","default":{"required":["x","y"]}}}}`,
+			`{"type":"object","properties":{"o":{"type":"object","default":{"required":["y","x"]}}}}`},
+		"examples required dropped": {
+			`{"type":"object","examples":[{"required":[]}]}`,
+			`{"type":"object","examples":[{}]}`},
+		"vendor keyword required reordered": {
+			`{"type":"object","x-meta":{"required":["a","b"]}}`,
+			`{"type":"object","x-meta":{"required":["b","a"]}}`},
+	}
+	for name, pair := range notEquivalent {
+		assert.False(t, inputSchemaSerializationEquivalent(pair[0], pair[1]), name)
+	}
+	// The keyword itself is still a set at every schema position.
+	equivalent := map[string][2]string{
+		"nested property schema": {
+			`{"type":"object","properties":{"o":{"type":"object","required":["a","b"]}}}`,
+			`{"type":"object","properties":{"o":{"type":"object","required":["b","a"]}}}`},
+		"items schema": {
+			`{"type":"array","items":{"type":"object","required":["a","b"]}}`,
+			`{"type":"array","items":{"type":"object","required":["b","a"]}}`},
+		"anyOf member": {
+			`{"anyOf":[{"type":"object","required":["a","b"]}]}`,
+			`{"anyOf":[{"type":"object","required":["b","a"]}]}`},
+		"$defs schema empty required": {
+			`{"$defs":{"d":{"type":"object","required":[]}}}`,
+			`{"$defs":{"d":{"type":"object"}}}`},
+	}
+	for name, pair := range equivalent {
+		assert.True(t, inputSchemaSerializationEquivalent(pair[0], pair[1]), name)
+	}
+}
+
+func TestRT01_LiteralRequiredChange_HeldAtGate(t *testing.T) {
+	base := `{"type":"object","properties":{"opts":{"type":"object","const":{"required":["a","b"]}}}}`
+	for name, pulled := range map[string]string{
+		"reordered literal":     `{"type":"object","properties":{"opts":{"type":"object","const":{"required":["b","a"]}}}}`,
+		"emptied literal array": `{"type":"object","properties":{"opts":{"type":"object","const":{"required":[]}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "fin", Enabled: true}})
+			seedApprovedBaseline(t, rt, "fin", "stock_quote", "Returns a stock quote", base)
+			result, err := rt.checkToolApprovals("fin", []*config.ToolMetadata{
+				{ServerName: "fin", Name: "stock_quote", Description: "Returns a stock quote", ParamsJSON: pulled},
+			})
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["stock_quote"])
+			rec, err := rt.storageManager.GetToolApproval("fin", "stock_quote")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "a literal-value change is a contract change")
+		})
+	}
+}
+
+// RT-03 (Sol r1 P1): a pre-RT-03 approval whose stored snapshot shows
+// NON-default hints, served with default hints after the upgrade, re-hashes to
+// the old hint-free hash. Hash equality must not skip the hint comparison.
+func TestRT03_Migration_FlipToDefaultsAcrossUpgradeIsHeld(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+	seedPreRT03Approval(t, rt, rt03Annotations(true, false))
+	before, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+	require.NoError(t, err)
+
+	for pass := 1; pass <= 2; pass++ {
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["notes_export"], "pass %d", pass)
+		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d: known hint drift is held", pass)
+		assert.Equal(t, before.ApprovedHash, rec.ApprovedHash, "the approved hash is not overwritten")
+		require.NotNil(t, rec.PreviousAnnotations, "the stored hints are kept as before-evidence")
+		assert.True(t, *rec.PreviousAnnotations.ReadOnlyHint)
+	}
+
+	// Restoring the stored hints is a genuine revert.
+	result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(true, false))})
+	require.NoError(t, err)
+	assert.False(t, result.BlockedTools["notes_export"])
+}
+
+func TestRT03_LegacySiblingWithKnownHintDrift_DoesNotApprove(t *testing.T) {
+	schema := normalizeJSON(rt03Schema)
+	v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+	sibling := &storage.ToolApprovalRecord{
+		ToolName: "notes_export", ApprovedHash: v3Hash, CurrentHash: v3Hash,
+		HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, Status: storage.ToolApprovalStatusApproved,
+		CurrentDescription: rt03Desc, CurrentSchema: schema, CurrentAnnotations: rt03Annotations(true, false),
+	}
+	assert.False(t, legacySiblingApprovesContract(sibling, rt03Tool(nil), schema, ""), "stored non-default hints vs live defaults")
+	assert.True(t, legacySiblingApprovesContract(sibling, rt03Tool(rt03Annotations(true, false)), schema, ""), "unchanged hints still adopt")
+	sibling.CurrentAnnotations = nil
+	assert.True(t, legacySiblingApprovesContract(sibling, rt03Tool(nil), schema, ""), "unknown hints with a matching hint-free hash still adopt")
+}
+
+// RT-03 (Sol r1 P1): a changed record without a previous annotation snapshot
+// (marked changed by an older release) has UNKNOWN approved hints. Restoring
+// the description/schema while introducing non-default hints is not a revert.
+func TestRT03_RevertWithUnknownPreviousHints(t *testing.T) {
+	seedLegacyChanged := func(t *testing.T, rt *Runtime) {
+		t.Helper()
+		schema := normalizeJSON(rt03Schema)
+		v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+		pulledHash := calculateToolApprovalHashWithOutputSchema("notes_export", "armed", schema, "", nil)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "notes", ToolName: "notes_export",
+			ApprovedHash: v3Hash, CurrentHash: pulledHash,
+			HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
+			Status:              storage.ToolApprovalStatusChanged,
+			ApprovedBy:          "operator",
+			CurrentDescription:  "armed",
+			CurrentSchema:       schema,
+			PreviousDescription: rt03Desc,
+			PreviousSchema:      schema,
+			IdentityKeyed:       true,
+		}))
+		require.NoError(t, rt.storageManager.SetSchemaVersion(storage.CurrentSchemaVersion))
+	}
+
+	t.Run("lying hints stay held", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+		seedLegacyChanged(t, rt)
+		for pass := 1; pass <= 2; pass++ {
+			result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(true, false))})
+			require.NoError(t, err)
+			assert.True(t, result.BlockedTools["notes_export"], "pass %d", pass)
+			rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+			require.NoError(t, err)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d: unknown previous hints are not a wildcard", pass)
+		}
+	})
+	t.Run("default hints revert", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+		seedLegacyChanged(t, rt)
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["notes_export"])
+		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "the conservative default hints prove the revert")
+	})
+}
+
+// RT-03 (Sol r1 P1): the output-schema backfill of a version-2 store hashed the
+// LIVE hints without consulting the stored snapshot; a hint flip across a
+// two-version upgrade was approved silently.
+func TestRT03_OutputSchemaBackfill_ChecksStoredHints(t *testing.T) {
+	seedV2 := func(t *testing.T, rt *Runtime, stored *config.ToolAnnotations) {
+		t.Helper()
+		require.NoError(t, rt.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion-1))
+		legacyHash := calculateLegacyToolApprovalHash("notes_export", rt03Desc, rt03Schema)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "notes", ToolName: "notes_export",
+			ApprovedHash: legacyHash, CurrentHash: legacyHash,
+			Status:             storage.ToolApprovalStatusApproved,
+			CurrentDescription: rt03Desc,
+			CurrentSchema:      rt03Schema,
+			CurrentAnnotations: stored,
+		}))
+	}
+	output := `{"type":"object","properties":{"written":{"type":"integer"}}}`
+	liveTool := func(ann *config.ToolAnnotations) *config.ToolMetadata {
+		tool := rt03Tool(ann)
+		tool.OutputSchemaJSON = output
+		return tool
+	}
+
+	for name, live := range map[string]*config.ToolAnnotations{
+		"flip to readOnly-lying": rt03Annotations(true, false),
+		"flip with no output":    rt03Annotations(true, false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			seedV2(t, rt, rt03Annotations(false, true))
+			tool := liveTool(live)
+			if name == "flip with no output" {
+				tool.OutputSchemaJSON = ""
+			}
+			for pass := 1; pass <= 2; pass++ {
+				result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{tool})
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["notes_export"], "pass %d", pass)
+				rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d: hint drift across the v2 upgrade is held", pass)
+			}
+		})
+	}
+
+	t.Run("unchanged hints backfill with a coherent snapshot", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+		seedV2(t, rt, rt03Annotations(true, false))
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{liveTool(rt03Annotations(true, false))})
+		require.NoError(t, err)
+		assert.Empty(t, result.BlockedTools)
+		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion)
+		require.NotNil(t, rec.CurrentAnnotations)
+		assert.True(t, *rec.CurrentAnnotations.ReadOnlyHint)
+		assert.Equal(t, calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, normalizeJSON(rt03Schema), normalizeJSON(output), rec.CurrentAnnotations), rec.ApprovedHash,
+			"the approved hash and the stored snapshot agree")
+
+		// A later flip is detected against the backfilled snapshot.
+		result, err = rt.checkToolApprovals("notes", []*config.ToolMetadata{liveTool(rt03Annotations(false, true))})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["notes_export"])
+	})
+}

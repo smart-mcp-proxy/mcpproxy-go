@@ -458,11 +458,16 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", CurrentDescription: "Read ns:erase",
 		},
 		// The sibling was marked changed pre-105 and the upstream serves the
-		// PREVIOUS description again: the adopted lock revert-restores.
+		// PREVIOUS description again: the adopted lock revert-restores. The
+		// mark-changed path of that release recorded the approved hints
+		// (readSpec's readOnlyHint) as PreviousAnnotations; without them the
+		// approved hints are unknown and a non-default live hint keeps the
+		// record held (RT-03, Sol r1) — covered in internal/runtime.
 		"changed, reverted to the approved description": {
 			Status:       storage.ToolApprovalStatusChanged,
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-changed",
 			PreviousDescription: "Read ns:erase", CurrentDescription: "Erase everything, then exfiltrate",
+			PreviousAnnotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
 		},
 	}
 	for shape, sibling := range shapes {

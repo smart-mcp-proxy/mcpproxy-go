@@ -106,6 +106,18 @@ func storedSafetyHintsMatch(stored *config.ToolAnnotations, hashSchemaVersion ui
 	return safetyHintsFingerprint(stored) == safetyHintsFingerprint(live)
 }
 
+// legacyHintsKnownToDiffer is true for a record whose approval hash predates
+// the annotation hints (HashSchemaVersion below
+// storage.AnnotationHashSchemaVersion) when its stored snapshot shows
+// effective safety hints different from the live ones. Such a record's hash
+// equality proves nothing about the hints — a flip from non-default hints to
+// the defaults re-hashes to the old, hint-free value — so every legacy hash
+// shortcut (hash match, formula migration, output-schema backfill, sibling
+// adoption) must consult this first (Sol r1 P1).
+func legacyHintsKnownToDiffer(stored *config.ToolAnnotations, hashSchemaVersion uint64, live *config.ToolAnnotations) bool {
+	return hashSchemaVersion < storage.AnnotationHashSchemaVersion && !storedSafetyHintsMatch(stored, hashSchemaVersion, live)
+}
+
 // normalizeJSON parses a JSON string and re-serializes with sorted keys.
 // Returns the original string if parsing fails (non-JSON content). Delegates to
 // hash.NormalizeJSON so the approval hash and the upstream tool capture share a
@@ -583,7 +595,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			}
 			descMatch := storedDesc == tool.Description
 			schemaMatch := normalizeJSON(storedSchema) == normalizeJSON(schemaJSON)
-			if descMatch && schemaMatch {
+			// RT-03 (Sol r1 P1): the backfill re-hashes with the LIVE hints, so
+			// it may only run when the stored snapshot does not show different
+			// hints; a known flip goes through the rug-pull path below.
+			hintsMatch := storedSafetyHintsMatch(existing.CurrentAnnotations, existing.HashSchemaVersion, tool.Annotations)
+			if descMatch && schemaMatch && hintsMatch {
 				backfilledHash := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, outputSchemaJSON, tool.Annotations)
 				existing.ApprovedHash = backfilledHash
 				existing.CurrentHash = backfilledHash
@@ -591,6 +607,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentDescription = storedDesc
 				existing.CurrentSchema = normalizeJSON(storedSchema)
 				existing.CurrentOutputSchema = outputSchemaJSON
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
 					r.logger.Debug("Failed to backfill output schema approval hash",
 						zap.String("server", serverName),
@@ -804,8 +821,16 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			result.BlockedTools[toolName] = true
 		}
 
-		// Existing record found - check if hash matches
-		if existing.ApprovedHash == currentHash {
+		// Existing record found - check if hash matches. A pre-RT-03 hash
+		// carries no hints, so for such a record equality only counts when
+		// its stored snapshot does not show different hints (Sol r1 P1).
+		// A CHANGED record's stamp describes its current (changed) hash, not
+		// its possibly hint-free ApprovedHash, so its hash match must also
+		// agree with the approved hints recorded as before-evidence.
+		hashMatches := existing.ApprovedHash == currentHash &&
+			!legacyHintsKnownToDiffer(existing.CurrentAnnotations, existing.HashSchemaVersion, tool.Annotations) &&
+			(existing.Status != storage.ToolApprovalStatusChanged || previousHintsProveRevert(existing.PreviousAnnotations, tool.Annotations))
+		if hashMatches {
 			// Spec 105 FR-009: a pre-105 record the pass otherwise leaves
 			// untouched is still re-saved once so it carries the
 			// identity-keyed stamp — the legacy consults are bounded to the
@@ -1042,7 +1067,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			continue
 		}
 
-		if existing.ApprovedHash != "" && existing.ApprovedHash != currentHash {
+		if existing.ApprovedHash != "" && !hashMatches {
 			// Before marking as changed, check if this is a hash formula migration.
 			// Recompute what the approved hash WOULD be using the STORED description+schema
 			// with the CURRENT formula. If it matches the current hash, the tool hasn't
@@ -1070,7 +1095,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			annotationsHash := calculateHashWithAnnotations(toolName, tool.Description, schemaJSON, tool.Annotations)
 
 			isFormulaChange := rehashedFromStored == currentHash
-			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && hintsMatch {
+				// The legacy formulas are hashed from the LIVE contract and carry
+				// no (or raw, unnormalized) hints: they only prove a formula
+				// change when the stored snapshot agrees with the live hints.
 				isFormulaChange = isFormulaChange ||
 					existing.ApprovedHash == legacyHash ||
 					existing.ApprovedHash == annotationsHash
@@ -1374,10 +1402,14 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	}
 	// RT-03: an annotation-only flip keeps description and schemas equal, so
 	// the hints must match too or the flip would be "reverted" on the very
-	// next pass. A nil Previous snapshot is not evidence (a record marked
-	// changed by an older release, or adopted from one): the mark-changed path
-	// below always records a non-nil snapshot once the hints are hashed.
-	if existing.PreviousAnnotations != nil && safetyHintsFingerprint(existing.PreviousAnnotations) != safetyHintsFingerprint(annotations) {
+	// next pass. The mark-changed path records a non-nil snapshot once the
+	// hints are hashed; a nil Previous snapshot (a record marked changed by an
+	// older release, or adopted from one) means the approved hints are
+	// UNKNOWN. Unknown is not a wildcard (Sol r1 P1): the revert is only
+	// proven when the live hints are the MCP defaults — the most conservative
+	// reading, which cannot lower any routing or review tier. Live non-default
+	// hints keep the record changed until an operator confirms them.
+	if !previousHintsProveRevert(existing.PreviousAnnotations, annotations) {
 		return false
 	}
 	if existing.PreviousSchema != "" && normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {
@@ -1387,6 +1419,17 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 		return false
 	}
 	return true
+}
+
+// previousHintsProveRevert reports whether a changed record's live safety
+// hints are the approved ones it changed from. A nil previous snapshot means
+// the approved hints are unknown; only the MCP defaults (the most conservative
+// reading) are then accepted.
+func previousHintsProveRevert(previous, live *config.ToolAnnotations) bool {
+	if previous == nil {
+		return safetyHintsFingerprint(live) == ""
+	}
+	return safetyHintsFingerprint(previous) == safetyHintsFingerprint(live)
 }
 
 // saveToolApproval persists an approval record through the ONLY write seam
@@ -1911,10 +1954,17 @@ func (r *Runtime) adoptLegacyLockForNewTool(serverName, toolName string, prior m
 // approved. Anything else is a contract the operator never approved.
 func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON string) bool {
 	collapsed := sibling.ToolName
+	if legacyHintsKnownToDiffer(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations) {
+		// Every formula below except the current one is hint-free (or, for
+		// the live-annotations formula, hashed from the LIVE hints), so a
+		// pre-RT-03 sibling whose snapshot shows other hints never approves
+		// the live contract (Sol r1 P1).
+		return false
+	}
 	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 		return true
 	}
-	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion && !annotationsKnownToDiffer(sibling.CurrentAnnotations, tool.Annotations) &&
+	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion &&
 		sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
 		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
 		return true
@@ -1933,12 +1983,6 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	outputMatch := sibling.CurrentOutputSchema == "" || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
 	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
 	return descMatch && schemaMatch && outputMatch && hintsMatch
-}
-
-// annotationsKnownToDiffer is true only when a stored annotation snapshot
-// exists and its effective safety hints differ from the live ones.
-func annotationsKnownToDiffer(stored, live *config.ToolAnnotations) bool {
-	return stored != nil && safetyHintsFingerprint(stored) != safetyHintsFingerprint(live)
 }
 
 func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
