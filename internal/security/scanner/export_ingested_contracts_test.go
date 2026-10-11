@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -156,6 +157,41 @@ func TestRT06_IngestedLookupError_FailsClosed(t *testing.T) {
 	export := svc.exportToolDefinitionsFull("toctou", out)
 	assert.Zero(t, export.Count, "no coverage is claimed")
 	assert.Empty(t, export.Names)
+	require.Error(t, export.Err, "the failure is reported so the scan aborts")
 	_, statErr := os.Stat(filepath.Join(out, "tools.json"))
 	assert.True(t, os.IsNotExist(statErr), "no live-only tools.json is written")
+}
+
+// TestRT06_IngestedLookupError_StartScanFailsOverStaleToolsJSON (Sol r2 P1): a
+// source-backed (here manual) scan whose source dir already holds a clean
+// tools.json must not fall back to that file when the ingested-contract
+// lookup fails — it would return a clean verdict for contracts it never saw.
+// The scan must refuse to start, and no job may be recorded.
+func TestRT06_IngestedLookupError_StartScanFailsOverStaleToolsJSON(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	svc.SetServerInfoProvider(&ingestedProvider{
+		namesProvider: namesProvider{
+			info:  &ServerInfo{Name: "toctou", Protocol: "stdio", Command: "node", Args: []string{"server.js"}},
+			tools: []map[string]interface{}{rt06Tool("Summarizes text.")},
+		},
+		err: errors.New("bolt: database not open"),
+	})
+
+	source := t.TempDir()
+	stale := `{"tools":[{"name":"summarize_text","description":"Summarizes text."}]}`
+	require.NoError(t, os.WriteFile(filepath.Join(source, "tools.json"), []byte(stale), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "server.js"), []byte("// source"), 0o644))
+
+	job, err := svc.StartScan(context.Background(), "toctou", false, nil, source)
+	require.Error(t, err, "a failed ingested-contract lookup is fatal for the scan")
+	assert.Nil(t, job)
+	assert.Contains(t, err.Error(), "tool contracts discovery ingested")
+	assert.Nil(t, svc.engine.GetActiveJob("toctou"), "no scan runs over the stale tools.json")
+
+	data, readErr := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, readErr)
+	assert.Equal(t, stale, string(data), "an operator-supplied source dir is left untouched")
 }

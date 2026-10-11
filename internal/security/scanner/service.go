@@ -1125,6 +1125,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		}
 
 		if req.SourceDir != "" {
+			// exportInto applies a usable export to the scan context, or
+			// reports why nothing may be scanned.
+			exportInto := func(sc *ScanContext) error {
+				e := s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+				if e.Err != nil {
+					return e.Err
+				}
+				e.applyTo(sc)
+				return nil
+			}
 			if !s.serverInfo.IsConnected(serverName) {
 				s.logger.Info("Server is disconnected, attempting to connect for scan",
 					zap.String("server", serverName))
@@ -1136,7 +1146,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+			exportErr := exportInto(scanCtx)
 
 			// If export failed, retry once. Reconnect ONLY when the server is
 			// actually disconnected (that path handles quarantined servers
@@ -1145,11 +1155,11 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			// healthy connection mid-export and turned a recoverable "0 tools"
 			// into a misleading "server is disconnected" — the retry churn seen
 			// on spec-086 admission scans. A connected server just re-exports.
-			if scanCtx.ToolsExported == 0 {
+			if exportErr == nil && scanCtx.ToolsExported == 0 {
 				if s.serverInfo.IsConnected(serverName) {
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
-					s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+					exportErr = exportInto(scanCtx)
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))
@@ -1158,9 +1168,17 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 							zap.String("server", serverName), zap.Error(err))
 					} else {
 						s.waitForConnection(serverName, 30*time.Second)
-						s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+						exportErr = exportInto(scanCtx)
 					}
 				}
+			}
+			if exportErr != nil {
+				// Fail closed (RT-06, Sol r2 P1): never scan a source dir
+				// whose tools.json this pass did not write.
+				if resolvedCleanup != nil {
+					resolvedCleanup()
+				}
+				return nil, fmt.Errorf("cannot scan server %s: %w", serverName, exportErr)
 			}
 		}
 	}
@@ -1280,7 +1298,17 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		// Export tool definitions for Cisco scanner (only when there is a real
 		// source dir to write tools.json into — image-only servers have none).
 		if s.serverInfo != nil && req.SourceDir != "" {
-			_, _ = s.exportToolDefinitions(serverName, req.SourceDir)
+			if e := s.exportToolDefinitionsFull(serverName, req.SourceDir); e.Err != nil {
+				// Fail closed like Pass 1 (RT-06): the source dir may hold a
+				// tools.json this pass did not write.
+				s.logger.Warn("Skipping Pass 2: tool definitions could not be exported",
+					zap.String("server", serverName), zap.Error(e.Err))
+				if resolvedCleanup != nil {
+					resolvedCleanup()
+				}
+				s.saveFailedPass2Job(serverName, e.Err.Error())
+				return
+			}
 		}
 	} else {
 		s.logger.Warn("No server info available for Pass 2, skipping",
@@ -2384,6 +2412,13 @@ type toolExport struct {
 	Names  []string
 	Hashes map[string]string
 	At     time.Time
+	// Err is set when the export must not be scanned at all: the tool
+	// contracts discovery ingested could not be read (RT-06). A source-backed
+	// scan would otherwise read whatever tools.json the source dir already
+	// held — a stale or planted clean file — and return a clean verdict, so
+	// the caller must abort the scan rather than continue without an export
+	// (Sol r2 P1).
+	Err error
 }
 
 // applyTo records the export on the scan context.
@@ -2435,7 +2470,7 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		// producing a verdict that could support admission.
 		s.logger.Warn("Could not read the tool contracts discovery ingested; refusing to export a live-only tool list for scanning",
 			zap.String("server", serverName), zap.Error(err))
-		return toolExport{}
+		return toolExport{Err: fmt.Errorf("read the tool contracts discovery ingested for %s: %w", serverName, err)}
 	}
 
 	// Format as MCP tools/list output
