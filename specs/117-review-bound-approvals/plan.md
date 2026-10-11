@@ -20,6 +20,7 @@ Three PRs, one issue each. PR-1 and PR-3 are independent. PR-2 builds on PR-1 (i
    - The leader of each upstream `tools/list` stamps a process-global capture sequence.
    - A pass applies its inventory (records, deletes, eviction, index, last-good snapshot, StateView) in one critical section under the per-server lock, and only if its capture is not older than the last applied one.
    - The quarantine purge moves under the lock, and the manager retires replaced clients.
+   - A capture whose record writes fail marks the server review-dirty: reachability transitions and dispatch of its tools are refused until a complete newer capture (FR-018).
 
 ## Technical Context
 
@@ -118,6 +119,9 @@ internal/runtime/tool_quarantine.go            # checkToolApprovalsLocked (body 
 internal/runtime/supervisor/supervisor.go      # drop retained Tools for disabled/quarantined servers in reconcile + StateView (design review r9 #3)
 internal/toolreview/errors.go                  # ErrReviewNotRecorded (FR-018)
 internal/httpapi/*                             # 503 mapping for ErrReviewNotRecorded
+internal/runtime/tool_approval_lock.go         # (also) reviewDirtyAt atomic mirror + ToolReviewDirty accessor (FR-018 dispatch refusal)
+internal/server/tool_gate.go                   # reviewDirty verdict in evaluateExactToolGate; callable() false while dirty (spec review r1 #1)
+internal/server/access_chain.go, internal/preflight/* # report the dirty verdict in the explainer and the direct evaluator
 ```
 
 ## Phasing and merge order

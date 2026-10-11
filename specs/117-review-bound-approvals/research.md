@@ -262,3 +262,8 @@ See spec.md A1-A10 and O1-O4.
 2. **Medium, PR-3's changed → changed-again fault test depends on PR-2's FR-017**: reclassified as a composition test that runs once PR-2 is merged. PR-3's standalone failing-first suite uses only branches that write records on main.
 
 Round 10 reached the review-round cap. These two fixes were applied after the last review and **have not been re-reviewed** (no round 11, per the cap rule). The first implementation PR's review covers them.
+
+## Spec review round 1 (OpenCode gpt-6.1-sol, new review series after the design-review cap) resolutions
+
+1. **High, a failed capture left already approved+enabled tools callable with stale dispatch metadata**: genuine. FR-018 withheld the failed capture's StateView, so dispatch kept classifying by the last recorded hints while the upstream served the unrecorded definition, and the dirty guard covered only transitions that make a tool reachable, not tools that already were. FR-018 now refuses dispatch of every tool of a dirty server in the shared gate (`evaluateExactToolGate`), so the variants, the direct surface and code execution all inherit it; listing is unchanged. T306d(f) asserts zero upstream calls on all three surfaces until a complete capture.
+2. **Medium, a lenient-empty capture could clear review-dirty**: genuine. FR-018 now defines a complete capture (non-empty and fully recorded, or authoritative empty with removal completed); a lenient-empty observation advances `applied` but never clears `reviewDirtyAt`. T306d(g) covers both the refusal and the two clearing sub-cases.

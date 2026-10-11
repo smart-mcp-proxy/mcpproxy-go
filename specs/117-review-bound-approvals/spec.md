@@ -189,7 +189,19 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - The caller MUST NOT publish that capture's last-good snapshot, capture stamp, index writes or StateView.
   - The caller MUST advance `applied` to the failed capture's seq F, as an observation fence, so an older in-flight capture can no longer apply and clear the state.
   - The server MUST be marked **review-dirty at F** (in memory, under its approval lock).
-  - Dirty clears only when a **fresh upstream capture with seq > F** persists all its records. A snapshot reconciliation (approval/block reindex) never clears it and is not performed while the server is dirty: the reindex re-lists instead, so retained older definitions cannot be re-applied over a partially recorded newer one.
+  - Dirty clears only when a **complete capture with seq > F** is applied (spec review r1 #2). A capture is complete when it is either:
+    - a fresh **non-empty** upstream capture that persists all its records; or
+    - an **authoritative empty** capture (explicit refresh/discover, `lifecycle.go:913-915`) whose absent-record removal, tool-hash deletes and reconciliation all completed.
+
+    A **lenient-empty observation** (FR-033a: a transient empty result on the sweep or reactive path that keeps the retained inventory) is never complete. It writes no records, so "all its records persisted" is vacuous, and it says nothing about the definition F failed to record. It advances `applied` as a fence but leaves `reviewDirtyAt` unchanged. A snapshot reconciliation (approval/block reindex) never clears dirty either and is not performed while the server is dirty: the reindex re-lists instead, so retained older definitions cannot be re-applied over a partially recorded newer one.
+  - While dirty, **dispatch of every tool of the server is refused** (spec review r1 #1). The failed capture's StateView was not published, so the annotations dispatch classifies by (`mcp.go:2974-2976`, read from the StateView at `:8200-8205`) and the stored approval of an already approved+enabled tool can both describe the last recorded definition while the upstream already serves the unrecorded one. Without this rule a read-scoped caller could invoke a tool that has become destructive, with no new approval and no enable. The refusal:
+    - lives in the shared gate, `evaluateExactToolGate` (`internal/server/tool_gate.go`): a `reviewDirty` verdict makes `toolGate.callable()` false. Every dispatch surface already reads that gate (the `call_tool_*` variants at `mcp.go:2974`, the direct surface at `mcp.go:3776`, code execution at `mcp_code_execution.go:1339,1710`), and the preflight evaluator (`directCallabilityEvaluator`) and the access explainer (`access_chain.go:377`) MUST report the same verdict;
+    - applies to the whole server, not only to the tools whose writes failed, because no tool's StateView entry from the failed capture was published and any of them may carry stale hints;
+    - answers with the `ErrReviewNotRecorded` text ("tool definitions could not be recorded; retry the capture") as a tool error, with no upstream call;
+    - reads `reviewDirtyAt` lock-free from an atomic mirror that is written only under the server's approval lock, inside the failing capture's locked section and before it unlocks, so dispatch never waits behind an apply, and every dispatch whose gate is evaluated after that unlock is refused;
+    - does not change listing: tools stay visible (no `tools/list_changed` churn for a transient storage failure) and only calls are refused.
+
+    The refusal ends when dirty clears. After a restart the flag is gone and the StateView is rebuilt from the connect capture, which records the live definition before any tool of that server is callable again.
   - While dirty, the guard sits in **every locked transition that makes a tool reachable** (design review r10 #1). That covers:
     - `approveToolsLocked` (behind `ApproveTools`, the MCP `approve_tool` and the reviewed variants);
     - `ApproveAllTools` and `approveBaselineToolsForServerCount`;
