@@ -242,14 +242,61 @@ SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
 
 Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r1/` of the main checkout.
 
+### Review round 2 follow-ups
+
+A second review (Sol 6.1, REQUEST_CHANGES at `29c108e09`) raised five items.
+All five were fixed; none was rejected. RT-04 and RT-07 (detect engine) stay
+deferred to the concurrent SEC-01 PR, so EXP-3 is still expected to show HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-03: `approveToolsLocked`, `blockToolsLocked` and `SaveIntegrityBaselineWithBlocks` stamped `HashSchemaVersion` 4 on a copied pre-v4 (hint-free) hash. A later flip from the stored non-default hints to the defaults matched that hash, and `legacyHintsKnownToDiffer` skipped the check | Fixed. The three paths keep the record's version, because it describes the formula of the hash being copied. The next discovery pass re-hashes the record and re-stamps it. Covered by `TestRT03_ApproveOrBlockBeforeFirstDiscovery_KeepsLegacyVersion` (approve, block and scan-approval block, plus the unchanged-hints migration). Without the fix the test fails |
+| P2 RT-05: `verifyQuarantinedServerContracts` discarded a superseded capture but discovery still reported `published=true`, so the stale-generation retry never ran. The replacement connection's connect callback was dropped by the in-progress dedup, and periodic discovery skips quarantined servers | Fixed. Verification now reports when its capture was superseded, and discovery then returns unpublished, so the bounded retry re-verifies under the replacement. `TestRT05_QuarantinedVerification_ReplacedClientIsReverified` replaces the client during automatic verification while holding the dedup marker, makes exactly one discovery call and asserts without polling. Without the fix the test fails |
+| P1 RT-06: an ingested-contract lookup error exported nothing but left an existing `tools.json` in a source-backed or manual scan dir, which the in-process scanner then read as a clean verdict | Fixed. The lookup error is now returned in the export result. Pass 1 (`StartScan`) aborts with an error and starts no job. Pass 2 records a failed job and skips. The operator's source dir is not modified. `TestRT06_IngestedLookupError_StartScanFailsOverStaleToolsJSON` uses a pre-existing clean `tools.json`. Without the fix the test fails |
+| P2 suite: EXP-5 and EXP-6 could report HOLDS without a successful approve-then-changed transition | Fixed in `scripts/tpa-lab-redteam-experiments.sh`. `approve_all` returns failure unless the API reports success with nothing still pending or changed. The stage-1 baseline must be `approved` for every tool the experiment pulls (EXP-2: calendar and stock; EXP-5: notes_export; EXP-6: calendar and stock). HOLDS needs every expected tool to reach `changed` or `blocked`. `approved` is HOLE. Anything else is INCONCLUSIVE |
+| P2 suite: fixed per-experiment data dirs were reused, and `scan_and_verdict` read the latest stored report even when the scan failed | Fixed. Each invocation gets a fresh `test-data-tpa-lab-docker/xXXXX` run dir, shared by its stage restarts. A short name keeps the unix socket path under the macOS limit, and `experiments-latest` links to it. The verdict is bound to the job the scan printed. A failed scan gives `scan-failed`, and a report for another job gives `stale-report`. Both count as INCONCLUSIVE |
+
+Verification on the branch head after the round-2 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/storage/ ./internal/security/... ./tests/tpa-attack-lab/
+go test -count=1 ./internal/... ./tests/tpa-attack-lab/
+#   all packages ok except internal/runtime and internal/server, which hit the
+#   default 10m timeout when run together under load (no failing test). Re-run:
+go test -race -count=1 -timeout 30m ./internal/runtime/...          # ok
+go test -count=1 -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/   # ok
+golangci-lint run --config .github/.golangci.yml ./...                     # no findings in changed files
+golangci-lint run --config .github/.golangci.yml --build-tags server ./... # no findings in changed files
+
+# fresh run dir (new per invocation), FULL rebuild of image + binary
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+#   (stage-1 baselines validated: "approve ok=1", status approved)
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection); both containers NETWORKS none
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r2/` of the main checkout.
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
   changes as in `manual`. New tools are still admitted on a clean scan. The
   docs, the Web UI trust-mode copy and the `--trust-mode` help text were
   updated to match.
-- Tool approval records are now written at `HashSchemaVersion` 4. Preflight
-  pins become `sha256/v4:…` once a record is re-saved. Tools whose hints are
+- Tool approval records are now written at `HashSchemaVersion` 4 when this
+  binary computes their hash. Preflight pins become `sha256/v4:…` once a
+  record is re-hashed. An approve or block of a legacy record before its first
+  discovery keeps the old version, because it copies the old hash; the next
+  discovery pass re-hashes and re-stamps it. Tools whose hints are
   at their defaults keep their hash. Tools with non-default hints get a new hash
   through the formula-migration path, and their approval is kept.
 - A connected quarantined server that already has an approved baseline (one
