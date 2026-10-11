@@ -514,6 +514,14 @@
                   <!-- Spec 109 FR-027 (link map "Tools row with pending/changed"):
                        a plain path, not useScopeQuery.linkTo — /review/:server is
                        a path-param route with no sticky parameters. -->
+                  <!-- UX-07: Enabled is configuration. A pending or changed tool is
+                       enabled yet held, so agents cannot call it until it is approved. -->
+                  <span
+                    v-if="isApprovable(tool)"
+                    class="badge badge-warning badge-outline badge-xs ml-1 whitespace-nowrap"
+                    title="Enabled in configuration, but held: agents cannot call this tool until it is approved"
+                    data-test="tool-held-cue"
+                  >Held</span>
                   <router-link
                     v-if="isApprovable(tool)"
                     :to="reviewPath(tool.server_name, tool.approval_status as 'pending' | 'changed')"

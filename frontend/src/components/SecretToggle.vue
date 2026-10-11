@@ -1,15 +1,17 @@
 <template>
   <div class="flex items-start gap-2" :data-test="`secret-toggle-${kind}-${name}`">
     <div class="flex-1 min-w-0">
-      <label class="label py-0">
+      <label class="label py-0" :for="inputId">
         <span class="label-text text-xs font-mono">{{ name }}</span>
       </label>
       <div class="flex items-center gap-1">
         <input
+          :id="inputId"
+          :aria-label="inputLabel || `${kind === 'env' ? 'Environment variable' : 'Header'} ${name} value`"
           :type="masked ? 'password' : 'text'"
           class="input input-bordered input-sm w-full font-mono"
           :value="modelValue"
-          :placeholder="mode === 'secret' ? 'Value stored in the OS keyring on Add' : ''"
+          :placeholder="mode === 'secret' ? 'Value stored in the OS keyring on Add' : 'Value'"
           autocomplete="off"
           spellcheck="false"
           data-1p-ignore
@@ -56,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, useId } from 'vue'
 import { looksSecret } from '@/utils/secretLike'
 
 // One Value/Secret toggle for a single env var or header field (Spec 109
@@ -75,8 +77,12 @@ interface Props {
   mode: 'value' | 'secret'
   keyringAvailable: boolean
   keyringReason?: string
+  // Row-unique accessible name for the value input (e.g. "Header 2 value"),
+  // so duplicate or empty names never leave two inputs indistinguishable.
+  inputLabel?: string
 }
 const props = defineProps<Props>()
+const inputId = `secret-toggle-${useId()}`
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   'update:mode': [mode: 'value' | 'secret']

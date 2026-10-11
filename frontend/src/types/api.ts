@@ -1446,6 +1446,8 @@ export interface ReviewQueueRow {
   server: string
   kind: 'server_review' | 'tool_review' | string
   quarantined: boolean
+  /** Configured enabled state; absent on an older core (treat as enabled). */
+  enabled?: boolean
   tools_captured?: number
   tier_counts?: Record<string, number>
   pending?: number

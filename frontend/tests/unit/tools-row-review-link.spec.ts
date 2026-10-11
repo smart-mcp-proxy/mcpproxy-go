@@ -71,6 +71,15 @@ describe('Tools row Review link', () => {
     expect(link.attributes('href')).toBe('/review/github?change=pending')
   })
 
+  it('marks a pending or changed tool as held, and an approved one not', async () => {
+    const { wrapper } = await mountTools()
+    const cue = rowFor(wrapper, 'create_issue').find('[data-test="tool-held-cue"]')
+    expect(cue.text()).toBe('Held')
+    expect(cue.attributes('title')).toContain('cannot call')
+    expect(rowFor(wrapper, 'get_repo').find('[data-test="tool-held-cue"]').exists()).toBe(true)
+    expect(rowFor(wrapper, 'list_repos').find('[data-test="tool-held-cue"]').exists()).toBe(false)
+  })
+
   it('links a changed tool to ?change=changed', async () => {
     const { wrapper } = await mountTools()
     const link = rowFor(wrapper, 'get_repo').find('[data-test="tool-review-link"]')

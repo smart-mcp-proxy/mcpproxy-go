@@ -146,7 +146,7 @@ func newProfileShowCmd() *cobra.Command {
 		Short: "Show one profile, or its effective tools",
 		Long: `Show a profile with the effective value of every policy field and where it comes
 from. With --effective, list every tool with the verdict of the access chain
-(callable, visible or hidden) and the reason; a classification that no longer
+(callable, held or hidden) and the reason; a classification that no longer
 applies (the tool is now annotated, or gone) is flagged, with the reason taken
 from the server so a --server or --reason filter does not change it.
 
@@ -232,6 +232,25 @@ func staleNote(res runtime.EffectiveToolsResult, id string, known map[string]boo
 	return staleNoteMissing
 }
 
+// heldCount is the number of tools the profile allows but a later gate (tool
+// approval, server state) still holds. It is only known to an administrator.
+func heldCount(c runtime.EffectiveCounts) int {
+	if c.Callable == nil || c.Visible <= *c.Callable {
+		return 0
+	}
+	return c.Visible - *c.Callable
+}
+
+// effectiveCountsLine is the header of `profile show --effective`: the profile
+// preview is policy-only, so "allowed by profile" is kept apart from "callable".
+func effectiveCountsLine(res runtime.EffectiveToolsResult) string {
+	line := fmt.Sprintf("Profile: %s (allowed by profile %d, hidden %d", res.Profile, res.Counts.Visible, res.Counts.Hidden)
+	if res.Counts.Callable != nil {
+		line += fmt.Sprintf(", callable %d, held %d", *res.Counts.Callable, heldCount(res.Counts))
+	}
+	return line + ")"
+}
+
 func printEffectiveTools(data json.RawMessage, filtered bool) error {
 	var res runtime.EffectiveToolsResult
 	if err := json.Unmarshal(data, &res); err != nil {
@@ -242,25 +261,36 @@ func printEffectiveTools(data json.RawMessage, filtered bool) error {
 	for _, t := range res.Tools {
 		known[t.Server+":"+t.Tool] = true
 		access := "hidden"
+		reason := dash(t.Access.Reason)
 		switch {
+		case !t.Access.Visible:
+		case res.Counts.Callable == nil:
+			// A non-administrator is shown the policy only; callable/held
+			// (and a held tool's reason) are administrator-only.
+			access = "allowed"
+			reason = "-"
 		case t.Access.Callable:
 			access = "callable"
-		case t.Access.Visible:
-			access = "visible"
+		default:
+			// Allowed by the profile, but a later gate (tool approval, server
+			// state) still refuses the call.
+			access = "held"
 		}
 		note := ""
 		if t.ClassificationStale {
 			note = staleNoteAnnotated
 		}
-		rows = append(rows, []string{t.Server, t.Tool, t.IntrinsicTier, t.ProfileTier, access, dash(t.Access.Reason), dash(note)})
+		rows = append(rows, []string{t.Server, t.Tool, t.IntrinsicTier, t.ProfileTier, access, reason, dash(note)})
 	}
-	fmt.Printf("Profile: %s (visible %d, hidden %d)\n", res.Profile, res.Counts.Visible, res.Counts.Hidden)
+	fmt.Println(effectiveCountsLine(res))
 	if err := printTable([]string{"SERVER", "TOOL", "TIER", "PROFILE TIER", "ACCESS", "REASON", "NOTE"}, rows); err != nil {
 		return err
 	}
 	if res.Counts.Callable == nil {
 		// A non-administrator caller: only visible rows are listed.
 		fmt.Printf("Hidden: %d\n", res.Counts.Hidden)
+	} else if held := heldCount(res.Counts); held > 0 {
+		fmt.Printf("%d tool%s held: allowed by the profile but not callable yet. Run: mcpproxy access explain --profile %s --tool <server:tool>\n", held, plural(held), res.Profile)
 	}
 	if len(res.StaleClassifications) > 0 {
 		fmt.Println("Stale classifications:")

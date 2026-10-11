@@ -27,9 +27,15 @@ type ReviewQueue struct {
 }
 
 type ReviewQueueRow struct {
-	Server        string                 `json:"server"`
-	Kind          string                 `json:"kind"`
-	Quarantined   bool                   `json:"quarantined"`
+	Server      string `json:"server"`
+	Kind        string `json:"kind"`
+	Quarantined bool   `json:"quarantined"`
+	// Enabled is the server's configured enabled state. A disabled server
+	// stays in the queue (its review is still owed) but is not blocking any
+	// live agent, which is how the Web UI and CLI tell it from an active
+	// blocker. Always serialised, so an older core (field absent) reads as
+	// "unknown" and clients treat that as enabled.
+	Enabled       bool                   `json:"enabled"`
 	ToolsCaptured int                    `json:"tools_captured,omitempty"`
 	TierCounts    map[contracts.Tier]int `json:"tier_counts,omitempty"`
 	Pending       int                    `json:"pending,omitempty"`
@@ -153,7 +159,7 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 		if err != nil {
 			return nil, fmt.Errorf("list tool reviews for %q: %w", server.Name, err)
 		}
-		row := ReviewQueueRow{Server: server.Name, Quarantined: server.Quarantined}
+		row := ReviewQueueRow{Server: server.Name, Quarantined: server.Quarantined, Enabled: server.Enabled}
 		if server.Quarantined {
 			row.ToolsCaptured = len(records)
 		}
@@ -169,8 +175,7 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 			case storage.ToolApprovalStatusChanged:
 				row.Changed++
 			}
-			if (record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged) && !record.ApprovedAt.IsZero() && (row.Since == nil || record.ApprovedAt.Before(*row.Since)) {
-				since := record.ApprovedAt
+			if since := reviewOwedSince(record); !since.IsZero() && (row.Since == nil || since.Before(*row.Since)) {
 				row.Since = &since
 			}
 		}
@@ -575,4 +580,19 @@ func reviewToolScanVerdict(findings []scanner.ScanFinding, serverName string, re
 
 func reviewFindingMatchesTool(location, serverName, toolName string) bool {
 	return location == "tool:"+toolName || location == serverName+":"+toolName
+}
+
+// reviewOwedSince is when a pending or changed tool started waiting for review.
+// A changed tool keeps the ApprovedAt of its previous approval, so the change
+// stamp is the honest time; a pending tool uses PendingSince. A tool with no
+// stamp (a record filed before the stamps existed) reports none rather than an
+// approval time that predates it.
+func reviewOwedSince(record *storage.ToolApprovalRecord) time.Time {
+	switch record.Status {
+	case storage.ToolApprovalStatusChanged:
+		return record.DefinitionChangedAt
+	case storage.ToolApprovalStatusPending:
+		return record.PendingSince
+	}
+	return time.Time{}
 }

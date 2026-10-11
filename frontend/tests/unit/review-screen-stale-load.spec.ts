@@ -50,4 +50,19 @@ describe('ReviewScreen discards stale review loads', () => {
     await flushPromises()
     expect(api.securityApprove).toHaveBeenCalledWith('b', false, ['shared'])
   })
+
+  it('overlapping reloads of one server resolved out of order keep the newest', async () => {
+    let resolveFirst: (v: unknown) => void = () => {}
+    let resolveSecond: (v: unknown) => void = () => {}
+    ;(api.getServerReview as any)
+      .mockReturnValueOnce(new Promise((r) => { resolveFirst = r }))
+      .mockReturnValueOnce(new Promise((r) => { resolveSecond = r }))
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'a' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed'))
+    resolveSecond(review('a', ['new_tool'])); await flushPromises()
+    resolveFirst(review('a', ['old_tool'])); await flushPromises()
+    expect(wrapper.find('[data-test="review-allow-new_tool"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="review-allow-old_tool"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
