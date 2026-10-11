@@ -68,10 +68,14 @@ type phraseFamily struct {
 	// leadingBoundary marks a pattern whose match begins with a consumed
 	// non-letter boundary character (the non-English families, SEC-01).
 	leadingBoundary bool
-	// negationGuard marks an English family whose match is downgraded to the
-	// SOFT tier when the words right before it negate it ("do not set aside
-	// any prior guidance", "never forget everything you were told").
-	negationGuard bool
+	// imperativeOnly marks an English family that reaches the HARD tier only
+	// when it opens its sentence as a command (optionally after a short
+	// lead-in such as "First," or "You must"). Anything else in front of it —
+	// a negation in any wording ("under no circumstances", "avoid", "do (not)"),
+	// a subordinate clause, or a long run of words — downgrades it to SOFT,
+	// where it is still surfaced and still holds the change under
+	// trust_mode=scan (SEC-01 review rounds 3-8).
+	imperativeOnly bool
 	// softReason, when set, explains why this family is review-only by design
 	// (its base sits below the hard floor); it replaces the generic
 	// "quoted/described position" wording in the finding detail.
@@ -156,30 +160,30 @@ var phraseFamilies = []phraseFamily{
 		// directives". Nouns are restricted to directive words (not
 		// rule/command/order/context) so "drop the previous rule set" or "starts a
 		// new chat, ignoring previous context" never reach the hard tier.
-		re:            regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|this|of|your|my|its|whatever|such|other|of the) )*(?:previous|prior|above|earlier|preced\w*|initial|original|forego\w*|former|old|past|system|developer|operator) (?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|brief|programm)\w*`),
-		base:          0.88,
-		threat:        detect.ThreatPromptInjection,
-		what:          "paraphrased instruction-override directive",
-		negationGuard: true,
+		re:             regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|this|of|your|my|its|whatever|such|other|of the) )*(?:previous|prior|above|earlier|preced\w*|initial|original|forego\w*|former|old|past|system|developer|operator) (?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|brief|programm)\w*`),
+		base:           0.88,
+		threat:         detect.ThreatPromptInjection,
+		what:           "paraphrased instruction-override directive",
+		imperativeOnly: true,
 	},
 	{ // Override of directives qualified as the agent's OWN earlier input (SEC-01):
 		// "set aside the rules you were given previously", "override the
 		// instructions you received earlier", "disregard the guidance above". The
 		// "you were given / you received / above / before" qualifier is what makes
 		// the broader noun set (rules, orders, constraints, …) safe at the hard tier.
-		re:            regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|of|your|of the) )*(?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|rul|order|command|constraint|restriction|polic|brief|programm)\w* (?:(?:that |which )?(?:you|i|we) (?:were|was|have been|has been|had been|have|ha|got|receiv)\w* (?:given|told|sent|provid|receiv|issu|shown)\w*|you (?:receiv|got|were given|have receiv)\w*|(?:given |provid |stat |written )?(?:above|before this|earlier|previously|so far|until now|up to now))`),
-		base:          0.88,
-		threat:        detect.ThreatPromptInjection,
-		what:          "instruction-override directive (agent's prior directives)",
-		negationGuard: true,
+		re:             regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|of|your|of the) )*(?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|rul|order|command|constraint|restriction|polic|brief|programm)\w* (?:(?:that |which )?(?:you|i|we) (?:were|was|have been|has been|had been|have|ha|got|receiv)\w* (?:given|told|sent|provid|receiv|issu|shown)\w*|you (?:receiv|got|were given|have receiv)\w*|(?:given |provid |stat |written )?(?:above|before this|earlier|previously|so far|until now|up to now))`),
+		base:           0.88,
+		threat:         detect.ThreatPromptInjection,
+		what:           "instruction-override directive (agent's prior directives)",
+		imperativeOnly: true,
 	},
 	{ // "Forget everything you were told", "ignore anything said above" (SEC-01):
 		// an override of the agent's whole prior context without a directive noun.
-		re:            regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:everyth\w*|anyth\w*|all) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct|taught|programm)\w*|(?:said |written |stat )?(?:above|before this|so far|until now|up to now))`),
-		base:          0.88,
-		threat:        detect.ThreatPromptInjection,
-		what:          "context-wipe directive",
-		negationGuard: true,
+		re:             regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:everyth\w*|anyth\w*|all) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct|taught|programm)\w*|(?:said |written |stat )?(?:above|before this|so far|until now|up to now))`),
+		base:           0.88,
+		threat:         detect.ThreatPromptInjection,
+		what:           "context-wipe directive",
+		imperativeOnly: true,
 	},
 	{ // System-prompt / instruction exfiltration: "reveal your system prompt", "print these instructions".
 		re:     regexp.MustCompile(`\b(?:reveal|expos\w*|print|output|send|leak|disclos\w*|repeat|show|dump) (?:your |the |me |us |all )*(?:system prompt|hidden instruction|these instruction|your instruction|initial prompt|secret instruction)`),
@@ -233,8 +237,9 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
-				if fam.negationGuard && negatedEnglish(t[:start]) && conf > phraseSoftFloor {
-					// Negated safeguard: surfaced for review, never hard-blocked.
+				if fam.imperativeOnly && !imperativeLead(t[:start]) && conf > phraseSoftFloor {
+					// Not a sentence-initial command: surfaced for review, never
+					// hard-blocked.
 					conf = phraseSoftFloor
 				}
 				if !matched || conf > bestConf {
@@ -330,41 +335,41 @@ func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
 
 func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
 
-// negationWindow is how far back (bytes) negatedEnglish looks for a negator.
-const negationWindow = 160
+// leadInWindow bounds how far back imperativeLead looks (bytes), keeping the
+// per-match cost constant (a long punctuation-free run of repeated directives
+// must stay linear, SEC-01 review round 7).
+const leadInWindow = 80
 
-// englishNegators are normalized words that, right before an override verb,
-// turn it into a safeguard ("do not forget the previous instructions").
-var englishNegators = []string{"do not", "does not", "did not", "must not", "should not", "shall not", "will not", "cannot", "never", "not"}
+// imperativeLeadIns are the only words allowed between the start of a
+// sentence and an imperative-only override for it to stay HARD.
+var imperativeLeadIns = map[string]bool{
+	"first": true, "firstly": true, "now": true, "please": true, "also": true,
+	"then": true, "and": true, "so": true, "next": true, "finally": true,
+	"important": true, "importantly": true, "note": true, "always": true,
+	"you": true, "must": true, "should": true, "need": true, "to": true,
+	"have": true, "will": true, "instead": true, "immediately": true,
+}
 
-// negatedEnglish reports whether the current sentence of prefix (normalized
-// text before a match, cut at the last . ! ? or ;) contains
-// a negator anywhere ("do not under any circumstances set aside …", "never
-// intentionally forget …"). Conservative by design: a negated-looking clause
-// only DOWNGRADES the match to the SOFT tier — it stays visible and still holds
-// the change under trust_mode=scan — so an attacker gains nothing by adding a
-// negator except losing the hard block.
-func negatedEnglish(prefix string) bool {
-	// Bounded look-back: only the last negationWindow bytes can hold the
-	// negator, which keeps the per-match cost constant. Without the bound a
-	// long punctuation-free run of repeated directives made every match rescan
-	// the whole preceding sentence (quadratic, SEC-01 review round 7). A rune
-	// cut at the window edge decodes as RuneError, which is not a letter.
-	if len(prefix) > negationWindow {
-		prefix = prefix[len(prefix)-negationWindow:]
-	}
-	// Only sentence punctuation ends the scope: "Do not, under any
-	// circumstances, set aside …" is still negated.
-	if i := strings.LastIndexAny(prefix, ".!?;"); i >= 0 {
+// imperativeLead reports whether prefix — the normalized text before a match —
+// ends a sentence (. ! ? ; : or newline) followed only by lead-in words, i.e.
+// the override is the sentence's command. A sentence start beyond
+// leadInWindow bytes counts as "not imperative" (downgrade, never suppress).
+func imperativeLead(prefix string) bool {
+	if len(prefix) > leadInWindow {
+		prefix = prefix[len(prefix)-leadInWindow:]
+		i := strings.LastIndexAny(prefix, ".!?;:\n")
+		if i < 0 {
+			return false
+		}
+		prefix = prefix[i+1:]
+	} else if i := strings.LastIndexAny(prefix, ".!?;:\n"); i >= 0 {
 		prefix = prefix[i+1:]
 	}
-	// Words are runs of letters, so a negator wrapped in ANY punctuation —
-	// "(not)", "[not]", "not/never", "not—", "never-ever" — is still a word.
-	clause := " " + strings.Join(strings.FieldsFunc(prefix, func(r rune) bool { return !unicode.IsLetter(r) }), " ") + " "
-	for _, n := range englishNegators {
-		if strings.Contains(clause, " "+n+" ") {
-			return true
+	// Words are letter runs: punctuation around a word ("(not)") never hides it.
+	for _, w := range strings.FieldsFunc(prefix, func(r rune) bool { return !unicode.IsLetter(r) }) {
+		if !imperativeLeadIns[w] {
+			return false
 		}
 	}
-	return false
+	return true
 }
