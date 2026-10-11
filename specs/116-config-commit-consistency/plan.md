@@ -178,9 +178,9 @@ production, following the `toolApprovalReadHook` and
 | `commitHooks.afterBuild`, `.afterPrepare`, `.afterDisk`, `.afterStorage`, `.afterAdvance` | `runtime/commit.go` | T1.x, T2.x |
 | `beforeWorkerAct(name, gen)` | runtime worker closure | T3.1, T3.2 |
 | `supervisor.beforeExecuteAction(name, action)` | supervisor | T3.3, T3.6, T3.9 |
-| `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4 |
+| `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4, T2.17 |
 | `approvalHooks.afterBaselineBeforeUnquarantine(name, inc)` | scanner `approveServer`, after the L1 section exits | T2.5 (review R5.6) |
-| `oauthHooks.beforePersist(name, binding)` | token store and DCR client save | T2.9, T2.13 |
+| `oauthHooks.beforePersist(name, binding)` | token store and DCR client save | T2.9, T2.13, T2.17 |
 | `oauthHooks.beforeBindingCheck(name, sg)` | worker, before `CheckCommittedView` | T2.14 |
 | `oauthHooks.beforeRefreshDo(name, binding)` | `PersistentTokenStore` / `RefreshOAuthTokenDirect`, after the caller's bound read, before `RefreshCoordinator.Do` | T2.16 |
 | `oauthHooks.beforeClear(name, binding, op)` | `DeleteOAuthTokenIfBound` / `ClearOAuthClientIfBound` callers, before the storage tx | T2.15 |
@@ -197,18 +197,18 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR1: Commit critical section and generations (#1558, #1560, root of #1559; B1)
 
-- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added. Also from design review: the discovery final check and index writes under L1 with a generation check (D15), approval policy read from storage (D16, with global-policy changes taking every L1), `ReconcileLive` vs `ReplaceConfig` (D14), projection repair and `Bootstrap`/`ForceDisk` (D13), removal of the pre-publish hook, and instance generation stamping (`managed.Client.Generation()`). The leaf package `internal/commitview` for the value types shared by `configsvc`, `storage`, `oauth` and `upstream` (review R7.2).
+- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added. Also from design review: the discovery final check and index writes under L1 with a generation check (D15), approval policy read from storage (D16, with global-policy changes taking every L1), `ReconcileLive` vs `ReplaceConfig` (D14), projection repair and `Bootstrap`/`ForceDisk` (D13), removal of the pre-publish hook, and instance generation stamping (`managed.Client.Generation()`). The leaf package `internal/commitview` for the value types shared by `configsvc`, `storage`, `oauth` and `upstream` (review R7.2). Explicit same-name replacement: `CommitTx.replaced`, `Prepare(PrepareInput{…, Replaced})`, the `Replaced` change kind and `ServerCommitBatch.Replaces` (review R8.2).
 - **Not in scope**: the full purge set (PR2), generation checks in workers or the supervisor (PR3), retirement (PR4). Removal still deletes only what each path deletes today, but now synchronously inside the commit for **all** paths (this closes the resurrection window).
-- **Failing-first tests**: T1.1-T1.7 ([quickstart.md](quickstart.md) §T1).
+- **Failing-first tests**: T1.1-T1.7 and T1.17 ([quickstart.md](quickstart.md) §T1).
 - **Live verification**: L1 (concurrent apply, add and PATCH; B1 quarantine purge).
 - **Size estimate**: about 1,400 LOC production code and 1,200 LOC tests.
 - **Risk**: the widest diff. Mitigations: the write-site script, unchanged #1570/#1571/#937/#1061 assertions, and `./scripts/test-api-e2e.sh`.
 
 ### PR2: Atomic removal, purge and incarnation-bound approvals (#1559 remainder, #1562; B2)
 
-- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), the `oauth_tokens` record `Revision` behind every binding-conditional delete (review R7.3), refresh-coordinator flights keyed by credential binding (review R7.1), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
+- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), the `oauth_tokens` record `Revision` behind every binding-conditional delete (review R7.3), refresh-coordinator flights keyed by credential binding (review R7.1), the full purge for a same-commit replacement (review R8.2), the standalone CLI logout converted to `BoltDB.ClearOAuthTokenForStandaloneLogout` with a one-file write-site exception (review R8.3), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
 - **Depends on**: PR1.
-- **Failing-first tests**: T2.1-T2.16, plus T048e (record revision).
+- **Failing-first tests**: T2.1-T2.18, plus T048e (record revision). Both editions of `./cmd/mcpproxy` build.
 - **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
 - **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
 
@@ -216,15 +216,15 @@ in place. This is the guard against the rejected branch's scope creep.
 
 - **Scope**: `Manager.desired`, `managed.Client.InstanceID()`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`/`DisconnectServerAt(name, gen, inst)`/`ReplaceInstanceAt` (including `ForceReconnectAll` and Docker recovery), the single `unregisterLocked` path for every removal from `m.clients` (review R5.4; its `Retire` call is a no-op until PR4), instance-targeted supervisor actions bound to `(gen, InstanceID)` (review R5.2), `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
 - **Depends on**: PR1 (generations). Independent of PR2.
-- **Failing-first tests**: T3.1-T3.9.
+- **Failing-first tests**: T3.1-T3.10.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
 - **Size estimate**: about 500 LOC production code and 700 LOC tests.
 
 ### PR4: Retirement barrier, OAuth included (#1564)
 
-- **Scope**: the `dialgate` package (with retirement-aware connection registration, review R5.1), the per-instance gate and transport, stdio/Docker/launcher admission, the HTTP/SSE gated transport, the OAuth `WithBaseTransport`, `Retire` called from `unregisterLocked`, so that every unregistration retires: `AdvanceGenerations` before publish, and `ReplaceInstanceAt`/`RemoveServerAt` at the same generation (restart, `ForceReconnectAll`, Docker recovery; review R5.4), refresh and manual OAuth refusing retired instances, tool calls and probes on retired instances mapped to unavailable, and the benchmark.
+- **Scope**: the `dialgate` package (with retirement-aware connection registration, review R5.1), the capability-preserving `WrapTransport` with `Unwrap` and its consumers (`extractOAuthHandler`, `SessionSnapshot` through `core.innerTransport`, and mcp-go's bidirectional, protocol-version, connection-lost and legacy-protocol assertions; review R8.1), the per-instance gate and transport, stdio/Docker/launcher admission, the HTTP/SSE gated transport, the OAuth `WithBaseTransport`, `Retire` called from `unregisterLocked`, so that every unregistration retires: `AdvanceGenerations` before publish, and `ReplaceInstanceAt`/`RemoveServerAt` at the same generation (restart, `ForceReconnectAll`, Docker recovery; review R5.4), refresh and manual OAuth refusing retired instances, tool calls and probes on retired instances mapped to unavailable, and the benchmark.
 - **Depends on**: PR3 (`AdvanceGenerations` is the retirement point).
-- **Failing-first tests**: T4.1-T4.16.
+- **Failing-first tests**: T4.1-T4.17.
 - **Live verification**: L4 (marker-file stdio launcher, an HTTP fixture counting requests and `Authorization` headers, a fake OAuth token endpoint).
 - **Size estimate**: about 600 LOC production code and 800 LOC tests.
 

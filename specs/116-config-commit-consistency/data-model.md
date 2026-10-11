@@ -19,6 +19,7 @@ type CommitTx struct {
     next     *config.Config               // deep copy, mutated by the ops below
     removed  map[string]*config.ServerConfig
     created  map[string]bool
+    replaced map[string]bool // RemoveServer(name) then CreateServer(name) in this tx (review R8.2)
     expect   map[string]configsvc.ServerGen // Expect* preconditions
     reason   string
     // unexported bookkeeping: touched names, quarantine transitions, explicit bits
@@ -51,10 +52,10 @@ type CommitResult struct {
 }
 
 type ServerChange struct {
-    Kind      ChangeKind // Created | Updated | Removed
-    OldGen    int64      // 0 when Created
-    NewGen    int64      // 0 when Removed
-    Reconnect bool       // connection fields, Enabled or Quarantined changed (config.ConnectionEquivalent + flags)
+    Kind      ChangeKind // Created | Updated | Removed | Replaced (review R8.2)
+    Old       commitview.ServerGen // zero when Created
+    New       commitview.ServerGen // zero when Removed
+    Reconnect bool       // connection fields, Enabled or Quarantined changed (config.ConnectionEquivalent + flags); always true for Replaced
     QuarantineRaised bool
 }
 ```
@@ -64,8 +65,33 @@ Rules:
   `SaveConfiguration`, `ApplyConfig`, `QuarantineServer`, `EnableServer` or
   take an approval lock. A test hook asserts re-entry (`commitDepth`).
 - An error from `fn` aborts the commit: nothing is written.
-- A create plus a remove of one name in a single transaction is
-  `Removed(old)` + `Created(new)` (an ApplyConfig rename).
+- **Same-name replacement (review R8.2).** `RemoveServer(n)` followed by
+  `CreateServer(n)` in one transaction sets `tx.replaced[n]`. It is one
+  `Replaced` change, whose `Old` is the base `ServerGen` and whose `New` is
+  `{G, G, G}`. That holds even when the re-created entry is field-for-field
+  equal to the removed one. Every consumer handles `Replaced` exactly as
+  `Removed(Old)` followed by `Created(New)`:
+  - step 4 takes the name's approval lock;
+  - step 6 runs the full purge set for the name, then writes the new row, in
+    the same bbolt transaction (`ServerCommitBatch.Replaces`, §3);
+  - the in-memory purge runs for it;
+  - step 7 unregisters (and, from PR4, retires) the old instance and records
+    `desired = {G, present}`;
+  - after unlock, a connect worker is spawned for `(n, G)` when the new entry
+    is enabled.
+
+  Further ops on `n` in the same transaction keep the `Replaced` change.
+  `UpdateServer(n)` edits the new entry. A second `RemoveServer(n)` turns it
+  into `Removed(Old)`. `CreateServer(n)` of a name that is absent from the base,
+  followed by `RemoveServer(n)`, is no change. A rename (remove `a`, create
+  `b`) is two changes: `Removed(a)` and `Created(b)`. `ReplaceConfig` (a
+  whole-config apply or a file reload) cannot express a replacement, because a
+  config file identifies a server only by its name. An entry that keeps its
+  name there is an update, as it is on `main`. No writer on `main` removes and
+  re-creates a name in one transaction. The rule exists so that the
+  `CommitTx` API cannot express a replacement that the model then collapses
+  into "unchanged" or "updated", which would keep the old incarnation and
+  binding.
 - `CommitTx` replaces `createMu`. `createServer` becomes
   `Commit("create", tx.CreateServer)`, and storage's
   `CreateUpstreamServer` stays the atomic existence check for the row.
@@ -90,7 +116,16 @@ type PreparedSnapshot struct {
     snap   *Snapshot        // pre-publish hook applied; observers not yet run
 }
 
-func (s *Service) Prepare(cfg *config.Config, source string) (*PreparedSnapshot, error)
+// Prepare takes the transaction's replacement set explicitly (review R8.2):
+// the final config alone cannot tell a remove-and-re-create from an unchanged
+// or updated entry. Every name in in.Replaced must be present in both base and
+// in.Config; otherwise Prepare returns an invariant error and the commit aborts.
+type PrepareInput struct {
+    Config   *config.Config
+    Source   string
+    Replaced map[string]bool // from CommitTx.replaced; nil for ReplaceConfig/Bootstrap
+}
+func (s *Service) Prepare(in PrepareInput) (*PreparedSnapshot, error)
 func (s *Service) Publish(p *PreparedSnapshot) (*Snapshot, error) // ErrConcurrentPublish if Version moved
 func (s *Service) SeedVersion(v int64)                            // boot: meta.config_commit_generation
 ```
@@ -99,11 +134,15 @@ Generation rule, computed in `Prepare`:
 
 | Entry in next vs base | `ServerGenerations[name]` |
 |---|---|
+| name in `in.Replaced` (removed and re-created in one commit), checked **first**, equal or not | `{Gen: G, Incarnation: G}` (and `OAuthEpoch: G`) |
 | absent in base (created) | `{Gen: G, Incarnation: G}` |
 | present, `config.ServerEntryEqual(base, next)` | base value (kept) |
 | present, not equal | `{Gen: G, Incarnation: base.Incarnation}` |
-| removed and re-created in one commit | `{Gen: G, Incarnation: G}` |
 | absent in next | key dropped |
+
+`PreparedSnapshot` also carries the `Changes` map computed from the same
+inputs, so the snapshot, `CommitResult.Changes` and the rows written in step 6
+can never disagree about a replacement.
 
 ### Shared value types: `internal/commitview` (PR1 creates it, PR2 extends it; review R7.2)
 
@@ -190,7 +229,19 @@ type ServerCommitBatch struct {
     Generation int64
     Saves      []*config.ServerConfig // each carries its new generation
     Removes    []string               // PR1: row + call history; PR2: full PurgeSet
+    Replaces   []string               // review R8.2: delete (PR2: purge) the old row, then save the new one, in this tx
 }
+```
+
+`ApplyServerCommit` processes `Removes` and `Replaces` deletions before
+`Saves`. A name may appear in both the delete side and `Saves` only when it is
+listed in `Replaces`. Any other overlap is an invariant error that aborts the
+transaction. For a replaced name, the new row carries `Incarnation = G` and
+`OAuthEpoch = G`, so a parked old approval writer (bound to the old
+incarnation) and a parked old OAuth writer (bound to the old binding) both fail
+their conditional writes. The returned `PurgeReport` includes the name.
+
+```go
 func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) (map[string]PurgeReport, error) // ONE bbolt Update tx
 ```
 
@@ -415,14 +466,44 @@ become unexported storage primitives. The PR2 write-site grep (T055d) forbids
 calling them, or the old exported names, from `internal/upstream/**` and
 `internal/oauth/**`. `storage.Manager.ClearOAuthState` may be called only
 from the commit and from `upstream.Manager.ClearOAuthToken` (logout).
+The one non-daemon caller is converted in the same PR (review R8.3, below).
 
 **Intentional current-state clears stay separate.** These are deliberate
 operator or commit actions on whatever is current, not stale-instance
 cleanup: the commit's own OAuth-config clear and removal purge (in the
 commit transaction, which also raises the epoch), and `Manager.ClearOAuthToken`
 for logout (`upstream/manager.go:3425`). They keep the exact-key
-`ClearOAuthState` and are not binding-conditional. The CLI-only
-`cli/client.go:473` runs with no daemon and is out of scope. The logout flow's
+`ClearOAuthState` and are not binding-conditional.
+
+**Standalone CLI logout (review R8.3).** `mcpproxy auth logout` without a
+daemon (`cmd/mcpproxy/auth_cmd.go:932-939`) calls
+`internal/upstream/cli/client.go:473`, which calls
+`c.storage.DeleteOAuthToken(serverKey)` on a `*storage.BoltDB`. Unexporting
+that method would break the build of `./cmd/mcpproxy` in both editions, and
+keeping it would violate the write-site grep. PR2 therefore adds one
+supported, exported current-state clear:
+
+```go
+// ClearOAuthTokenForStandaloneLogout deletes the token record at exactly
+// serverKey (GenerateServerKey(name, url)). It is an operator action on the
+// current state, not stale-instance cleanup, so it is not binding-conditional.
+func (b *BoltDB) ClearOAuthTokenForStandaloneLogout(serverKey string) error
+```
+
+`cli.Client.ClearOAuthToken` calls it instead of `DeleteOAuthToken`. The
+semantics are unchanged from `main`: one exact key, the token record only, and
+the same error text. It needs no binding, because no instance can race it. The
+CLI path runs only when no daemon is detected, and `cli.NewClient` opens
+`config.db` itself. bbolt's exclusive file lock means that a daemon holding the
+database makes that open fail, and the CLI then has no storage and returns
+"storage not available". No live instance shares the database while the clear
+runs. The write-site grep keeps the ban on the unconditional primitives and
+their old names in `internal/upstream/**` and `internal/oauth/**`. It allows
+`ClearOAuthTokenForStandaloneLogout` in exactly one file,
+`internal/upstream/cli/client.go`. The script's self-test plants a call in
+another `internal/upstream` file and expects a failure.
+
+The logout flow's
 non-atomic flag, clear and disconnect sequence (`runtime.go:3250-3271`) is a
 pre-existing race, recorded on #1563 for PR3.
 
@@ -460,6 +541,7 @@ type GenerationChange struct {
     Gen       int64 // new generation, 0 when removed
     Present   bool
     Reconnect bool  // from ServerChange.Reconnect
+    Replaced  bool  // review R8.2: unregister (retire) the old instance even if the new entry is equal
     Config    *config.ServerConfig
 }
 
@@ -545,7 +627,9 @@ func (g *Gate) Transport(base *http.Transport) *http.Transport                //
 func (g *Gate) Context() context.Context
 func (g *Gate) Retire()                                                       // idempotent, bounded
 func (g *Gate) TrackProcess(p ProcessHandle)                                  // called inside the admitted launch section (pgid / Job handle)
-func WrapTransport(g *Gate, t transport.Interface) transport.Interface         // gates Start/SendRequest/SendNotification
+func WrapTransport(g *Gate, t transport.Interface) transport.Interface         // gates Start/SendRequest/SendNotification; capability-preserving (review R8.1)
+func Unwrap(t transport.Interface) transport.Interface                        // follows Unwrap() until a non-wrapper
+type Unwrapper interface{ Unwrap() transport.Interface }
 func (g *Gate) Retired() bool
 func (g *Gate) RetireWaiting() bool // test probe: Retire is blocked on an admitted section
 
@@ -575,6 +659,62 @@ against the barrier indefinitely.
 The read lock is held only around **one leaf operation** (a dial syscall, one
 `Write`, or `cmd.Start` + process registration + `TrackProcess`) and is never
 nested. `WrapTransport` takes no lock (review R2.3).
+
+**The wrapper preserves every capability that is asserted on the transport
+(review R8.1).** Both mcp-go and core discover optional behaviour by type
+assertion on the transport. A wrapper that only embeds `transport.Interface`
+would make each assertion fail silently. Verified against mcp-go v1.0.0 and
+`main`:
+
+| Capability | Asserted at | Inner types that have it | Lost if hidden |
+|---|---|---|---|
+| `transport.BidirectionalInterface` (`SetRequestHandler`) | mcp-go `client/client.go:201` | `*Stdio`, `*StreamableHTTP` | every server-to-client request (`ping` today; sampling, elicitation and roots if handlers are ever registered, `client.go:709-721`); unanswered, the upstream's request times out |
+| `transport.HTTPConnection` (`SetProtocolVersion`) | mcp-go `client/client.go:403` | `*StreamableHTTP`, `*SSE` | the `Mcp-Protocol-Version` header after negotiation |
+| `SetConnectionLostHandler(func(error))` | mcp-go `client/client.go:226-229`, used by core `OnConnectionLost` (`connection_http.go:249`, `:291`; `connection_oauth.go:744`) | `*SSE` | SSE connection-loss detection |
+| `RequiresLegacyProtocol() bool` | mcp-go `client/protocol.go:44` | `*StreamableHTTP` | the legacy-protocol pin for continuous listening |
+| `GetOAuthHandler()` / `IsOAuthEnabled()` | core `client.go:756-765` (`extractOAuthHandler`), used by `bindOAuthRefresher` (`oauth_refresh.go:182`), `RefreshOAuthTokenDirect` (`client.go:780`), `forcedAuthorizationRequired` (`connection_oauth.go:2047`) and `getOAuthHandlerLocked` | `*StreamableHTTP`, `*SSE` | proactive refresh ("no OAuth handler available"), the Spec 113 reactive-refresh binding, and the GH #1271 forced-login path for per-method-auth upstreams |
+| concrete `*transport.StreamableHTTP` (session id) | core `session_reinit.go:33` (`SessionSnapshot`) | `*StreamableHTTP` | Spec 113-e 404 session re-initialisation (the snapshot reports an empty id) |
+
+mcp-go's own `LoggingTransport` (`client/transport/logging.go`) shows the
+same hazard. It mirrors `BidirectionalInterface` and `HTTPConnection` but not
+the other three rows, so it is not reused.
+
+The contract has two parts:
+
+1. **Forwarding, for assertions inside mcp-go**, which core cannot change.
+   Core builds exactly three transport kinds, so `WrapTransport` switches on
+   the concrete inner type and returns one of three wrapper types:
+   `gatedStdio`, `gatedStreamableHTTP` and `gatedSSE`. Each one implements
+   exactly the capability rows of its inner kind, and each forwarding method
+   delegates to the inner transport. `SetRequestHandler` installs a handler
+   that answers with a JSON-RPC error and never calls the client's handler
+   once the gate is retired, so a retired instance does no work for the
+   upstream. The other forwarders are pure delegation. They take no
+   gate lock, and they send nothing that the gated `Write` and dial do not
+   already cover. An unknown inner type gets a generic wrapper, and the parity
+   test below fails for it, so a new transport kind cannot ship without its own
+   wrapper.
+2. **Unwrapping, for assertions inside core.** Every wrapper implements
+   `Unwrap()`. Core never asserts on `GetTransport()` directly. One helper,
+   `core.innerTransport(cl *client.Client) transport.Interface` (which is
+   `dialgate.Unwrap(cl.GetTransport())`), feeds `extractOAuthHandler` and
+   `SessionSnapshot`. The concrete `*transport.StreamableHTTP` assertion is
+   kept, but it now runs on the unwrapped value. Exposing the inner OAuth
+   handler does not bypass the gate. Its HTTP client is built on the
+   instance's gated `*http.Transport` (FR-024), and `ReinitializeSession`
+   sends through the wrapper's gated `SendRequest`. The write-site script
+   (T099) forbids `GetTransport()` in `internal/upstream/**` outside
+   `core/transport_unwrap.go`.
+
+Parity is enforced mechanically. `TestWrapTransportCapabilityParity` builds
+each production kind through the real constructors (the stdio branch and each
+`transport.CreateHTTPClient` branch: plain, headers, OAuth, SSE). For each of
+the six rows it asserts that the wrapper satisfies the row exactly when the
+inner value does, and that `Unwrap` returns the inner value.
+`TestMCPGoTransportMethodSetPinned` lists the exported methods of
+`*Stdio`, `*StreamableHTTP` and `*SSE` by reflection and compares them with a
+reviewed list, so an mcp-go upgrade that adds an optional interface fails CI
+until the wrapper is updated.
 
 The order inside `Retire`: `connsMu.Lock(); retired.Store(true); connsMu.Unlock()` → `cancel()` → close every
 tracked conn → kill every tracked process → `mu.Lock(); mu.Unlock()` → close every
@@ -617,5 +757,6 @@ The stdio, Docker and launcher `Start` calls run under `gate.Admit`.
                          |  --Update(oauth)@G2'-> present(g=G2',inc=G1,oauthEpoch=G2')  [OAuth state cleared; old-epoch credential writes dropped]
                          |  --Restart (same g)--> instance replaced (new InstanceID), old one retired
                          |  --Remove@G3-----> absent                 [purge set deleted, instance retired]
+                         |  --Remove+Create in one commit @G5--> present(g=G5,inc=G5,oauthEpoch=G5)  [Replaced: purge, old instance retired, new connect; even when the entry is equal]
 absent  --Create@G4--> present(g=G4,inc=G4)  with G4 > G3 > G2 > G1, empty purge set, every inc=G1 approval writer rejected
 ```

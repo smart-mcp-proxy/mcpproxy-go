@@ -669,3 +669,22 @@ Review rounds used on this design PR: 7 of the 10-round cap.
 Not taken into this spec: the name-resolved logout sequence
 (`runtime.go:3250-3271`), which all three chunks listed again as out of scope.
 It stays recorded on #1563.
+
+## 14. Design review round 8 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Transcripts: `docs/qa/0.70.0-ux-2026-10-10/remediation/reviews/s116-spec-r4A.txt`,
+`s116-spec-r4B.txt` and `s116-spec-r4C.txt` (spec review round 4, chunked
+A/B/C). Verdicts: A FINDINGS (1 high), B FINDINGS (1 high, 1 medium), C PASS.
+All three chunks confirmed that the round-7 fixes (R7.1-R7.3) are present.
+Each new finding was checked against `main` and mcp-go v1.0.0, and all three
+were accepted. Review rounds used on this design PR: 8 of the 10-round cap.
+
+| # | Sev | Finding | Verification | Resolution |
+|---|---|---|---|---|
+| R8.1 | high | The PR4 transport wrapper hides capabilities that consumers assert on. OAuth handler lookup, the GH #1271 forced login and Spec 113-e session re-init would silently stop working | Confirmed: `core/client.go:756-765` asserts `GetOAuthHandler()` on `GetTransport()` (used by `oauth_refresh.go:182`, `client.go:780`, `connection_oauth.go:2047`), and `core/session_reinit.go:33` asserts `*transport.StreamableHTTP`. The problem is wider than reported. mcp-go v1.0.0 itself asserts `BidirectionalInterface` (`client/client.go:201`), `HTTPConnection` (`:403`), `SetConnectionLostHandler` (`:226-229`) and `RequiresLegacyProtocol` (`client/protocol.go:44`) on the transport. mcp-go's `LoggingTransport` mirrors only two of these | Capability-preserving wrapper: three concrete wrapper types that forward exactly their inner kind's rows, plus `Unwrap()`. Core's assertions go through one `core.innerTransport` helper. A retired wrapper refuses server-to-client requests. `TestWrapTransportCapabilityParity` and `TestMCPGoTransportMethodSetPinned` enforce parity, and T099 bans `GetTransport()` outside the helper (FR-023b, data-model §5). T4.17 exercises the production wrapped transports |
+| R8.2 | high | `Prepare(cfg, source)` and `Changes map[string]ServerChange` cannot express a remove and re-create of one name in one commit. The re-created entry looks unchanged (equal) or updated (changed), and keeps the old incarnation and binding | Confirmed against the design text. The generation table had a "removed and re-created" row that `Prepare` could not evaluate from its inputs, and §1 promised `Removed(old)` + `Created(new)` under a single map key. The "ApplyConfig rename" example was also wrong: a rename involves two names | `CommitTx.replaced`, `Prepare(PrepareInput{Config, Source, Replaced})` with the replaced row checked first, a `Replaced` change kind carrying the old and new `ServerGen`, `ServerCommitBatch.Replaces` (purge before save in one tx), and `GenerationChange.Replaced` (always unregister and retire). `ReplaceConfig` cannot express a replacement, so a name kept in a file is an update, as on `main` (FR-010a, data-model §1-§4). T1.17, T2.17, T3.10 |
+| R8.3 | medium | Unexporting `BoltDB.DeleteOAuthToken` breaks the standalone CLI logout at `internal/upstream/cli/client.go:473`, which the design had declared out of scope while banning the name in `internal/upstream/**` | Confirmed: `cli/client.go:473` calls `c.storage.DeleteOAuthToken(serverKey)` on a `*storage.BoltDB`, and `cmd/mcpproxy/auth_cmd.go:16`/`:932-939` use it. Unexporting the method would break the build in both editions | `BoltDB.ClearOAuthTokenForStandaloneLogout(serverKey)` is an exported exact-key current-state clear with unchanged semantics. The caller is converted in PR2, and the write-site grep has a one-file exception with a planted-violation self-test. No binding is needed: the path runs only without a daemon, and bbolt's exclusive file lock rules out a concurrent instance (FR-014h, data-model §3). T2.18 and a two-edition build |
+
+Not taken into this spec: the name-resolved logout sequence
+(`runtime.go:3250-3271`), which all three chunks again listed as out of scope.
+It stays recorded on #1563.
