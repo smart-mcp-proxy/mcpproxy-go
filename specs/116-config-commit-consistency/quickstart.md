@@ -98,6 +98,8 @@ tokens.
 | T2.11 | completion event for old `acme` fetched, consumer parked | remove + re-add, release | no retry against the replacement; completion record purged (R3.5) |
 | T2.12 | worker parked before `RegisterServerIdentity`; call parked before history write | remove `acme`, release | no identity or history bucket for `acme` (R3.6) |
 | T2.13 | the old instance's `SaveToken` and DCR `SaveOAuthClient` parked after the network response, before persisting | change `acme`'s OAuth config (scopes or client id), keeping name and URL; the commit returns; release | no token and no DCR client for `acme` in storage; the new instance starts a fresh OAuth flow and does not load the old records; the old refresh schedule is dropped. Parent (incarnation-only check): the cleared records are restored (review R5.3) |
+| T2.14 | a commit that changes `acme`'s OAuth config (same name and URL) parked at `commitHooks.afterStorage` (row has the new epoch; step 7 has not run). An old-generation worker for `acme`, holding the previous `ServerGen`, released at `oauthHooks.beforeBindingCheck`. Variant: remove and re-add `acme` (same URL) parked at the same point | the worker returns `ErrStaleGeneration` and builds no instance and no OAuth config. No token, DCR client or completion is written under the new binding, and the records the commit cleared stay absent. After the commit is released, the new worker connects with the new config. Parent (binding read from the row): the old-config instance saves a token that passes `SaveOAuthTokenIfBound` (review R6.1) |
+| T2.15 | (a) the old instance's 5xx-recovery `ClearToken` and (b) its config-build DCR clear (`clearOAuthCredentials`, stale redirect URI case), each parked at `oauthHooks.beforeClear`, before its storage transaction. Then change `acme`'s OAuth config (same name and URL), let the replacement save a fresh token and DCR client, and release. Variant: `RestartServer(acme)` (same binding) instead of the config change | the replacement's token and DCR registration are byte-for-byte unchanged. The old clears return `false` with a debug log. In the restart variant the record compare rejects the clear. Parent (unconditional delete): both are erased (review R6.2) |
 | T2.7 | discovery pass for old `acme` parked at `beforeApprovalLock` | remove and re-add, then release: no records with the old incarnation are written |
 
 ## T3: Generation-bound workers (PR3)
@@ -197,6 +199,15 @@ because other sessions share the harness. Evidence goes to
 4. Stop the daemon and inspect `config.db` with the PR2 debug command
    `mcpproxy debug purge-report --data-dir $QA_DATA acme` (test-only build
    tag): zero keys in every purge bucket.
+5. OAuth binding (review R6.1, R6.2): with `acme-oauth` signed in, make the
+   fake OAuth server answer the next MCP `initialize` with 500 so the old
+   instance enters 5xx recovery, and in the same second change
+   `acme-oauth`'s `oauth.scopes` through REST PATCH. Complete the new login.
+   `mcpproxy auth status --server acme-oauth` shows the new token, and the
+   purge-report command shows one token record whose `oauth_epoch` equals the
+   row's. The main log has a debug `oauth clear skipped: binding mismatch`
+   line and no "OAuth token cleared" line after the new save. This is a
+   best-effort live race. The deterministic proof is T2.14/T2.15.
 
 ### L3 (PR3)
 

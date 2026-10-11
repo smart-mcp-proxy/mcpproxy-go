@@ -144,6 +144,12 @@ capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` aft
 4. Taking L0-L5 inside a `configsvc` hook or observer (L6).
 5. Taking any runtime lock from `upstream`, `managed`, `core`, `transport`, `oauth` or `supervisor`. These packages never call back into the runtime synchronously, except through the existing tool-discovery callback, which takes only L1(one).
 
+**Credential-binding checks add no edge (review R6.1, R6.2).** `CheckCommittedView`
+is one bbolt `View`, and `DeleteOAuthTokenIfBound`/`ClearOAuthClientIfBound`
+are one bbolt `Update`. Both are L2 leaves taken with no runtime lock held,
+from `oauth`/`core`/workers (rule 5). Neither waits on L0, L1 or L3, so a
+worker parked in one cannot block a commit beyond bbolt's own serialization.
+
 **`createMu`** is deleted in PR1, because `configCommitMu` subsumes it. **`asyncMgr`**
 storage operations (`EnableUpstreamServer`/`QuarantineUpstreamServer`) are no
 longer used by daemon paths, so the commit writes rows directly in its
@@ -170,6 +176,8 @@ production, following the `toolApprovalReadHook` and
 | `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4 |
 | `approvalHooks.afterBaselineBeforeUnquarantine(name, inc)` | scanner `approveServer`, after the L1 section exits | T2.5 (review R5.6) |
 | `oauthHooks.beforePersist(name, binding)` | token store and DCR client save | T2.9, T2.13 |
+| `oauthHooks.beforeBindingCheck(name, sg)` | worker, before `CheckCommittedView` | T2.14 |
+| `oauthHooks.beforeClear(name, binding, op)` | `DeleteOAuthTokenIfBound` / `ClearOAuthClientIfBound` callers, before the storage tx | T2.15 |
 | `restPatchAfterParse` | httpapi PATCH handler | T1.3 |
 | `dialgate.TestHooks.beforeAdmit` / `afterAdmitBeforeAct` / `beforeTrack` / `afterSweepBeforeBarrier` | dialgate | T4.x, T4.16 |
 | `transport` test RoundTripper that fails the first write on a reused connection | `transport` tests | T4.3 |
@@ -192,9 +200,9 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR2: Atomic removal, purge and incarnation-bound approvals (#1559 remainder, #1562; B2)
 
-- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes and reads (review R5.3), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
+- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
 - **Depends on**: PR1.
-- **Failing-first tests**: T2.1-T2.13.
+- **Failing-first tests**: T2.1-T2.15.
 - **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
 - **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
 

@@ -173,6 +173,8 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-014a**: scan jobs and reports MUST record the incarnation they were started for and MUST be persisted with an incarnation-conditional storage write (row exists and matches, in the same bbolt tx). `approveServer` MUST read only reports of the current incarnation. Removal MUST invalidate the scan-summary cache.
 - **FR-014c**: server-identity registration and per-server tool-call history writes MUST be incarnation-conditional (`code_execution` exempt). OAuth completion events MUST carry their incarnation, the consumer MUST drop stale ones, and the purge MUST match completion records by decoded `ServerName`.
 - **FR-014b**: OAuth token, DCR-client and completion writes MUST be conditional on the row's `CredentialBinding{Incarnation, OAuthEpoch}` in the same way. `OAuthEpoch` MUST be raised in the same bbolt transaction as every OAuth-state clear (an OAuth config change) and set on create. The token store and DCR lookups MUST be bound to the instance's binding and MUST ignore records written under another one. Refresh schedules MUST be keyed by `(name, incarnation, oauthEpoch)` and dropped on mismatch (review R5.3).
+- **FR-014d**: an instance's `CredentialBinding` MUST come from the same committed view (`CommitResult` or published `Snapshot` `ServerGen{Gen, Incarnation, OAuthEpoch}`) as its config and generation. It MUST NOT be read from the storage row and adopted. Before an instance or its OAuth config is constructed, the worker MUST check, in one storage read, that the row equals that `ServerGen` in all three fields, and MUST build nothing (`ErrStaleGeneration`) on a mismatch (review R6.1).
+- **FR-014e**: every instance-originated destructive OAuth operation (the 5xx `ClearToken`, the DCR clears in `createOAuthConfigInternal`, and the refresh and stale-client compare-and-clears) MUST check the instance's `CredentialBinding` against the row, and the record's epoch against the binding, in the same bbolt transaction as the delete, together with a compare on the record content it observed. On a mismatch it MUST delete nothing. The unconditional delete primitives MUST NOT be callable from `internal/upstream` or `internal/oauth`. Intentional current-state clears (the commit's OAuth-config clear and purge, and logout) stay separate and unconditional on the binding (review R6.2).
 - **FR-015**: scanner approval MUST unquarantine through `Commit` with `ExpectIncarnation(name, inc)`.
 - **FR-016**: prompt-approval writes MUST take the server's approval lock.
 - **FR-017**: REST approval endpoints MUST accept an optional `expected_incarnation`. The review payload and `GET /api/v1/servers/{id}` MUST expose `incarnation` and `generation`. The Web UI MUST send `incarnation` back.
@@ -206,7 +208,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 
 ### Key Entities
 
-See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapshot`, `ServerGen{Gen, Incarnation}`, `UpstreamRecord.Generation/Incarnation`, `PurgeSet`, `PurgeReport`, `Manager.desired`, `dialgate.Gate`, and the errors.
+See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapshot`, `ServerGen{Gen, Incarnation, OAuthEpoch}`, `UpstreamRecord.Generation/Incarnation/OAuthEpoch`, `CredentialBinding`, `PurgeSet`, `PurgeReport`, `Manager.desired`, `dialgate.Gate`, and the errors.
 
 ## Success Criteria
 
@@ -292,3 +294,5 @@ See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapsho
 | Review R5.4 same-generation replacement not retired | FR-020a, FR-022 | PR3, PR4 | T4.15 |
 | Review R5.5 compensation erases a pending restart change | FR-001 (step 6) | PR1 | T1.16 |
 | Review R5.6 T2.5 park point deadlocks on L1 | FR-014, FR-015 | PR2 | T2.5 (amended) |
+| Review R6.1 stale construction adopts the replacement's binding | FR-014d | PR2 | T2.14 |
+| Review R6.2 stale instance's OAuth clear deletes the replacement's credentials | FR-014e | PR2 | T2.15 |

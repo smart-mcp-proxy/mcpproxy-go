@@ -512,6 +512,14 @@ OAuth writes and reuse-reads therefore bind to
 `CredentialBinding{Incarnation, OAuthEpoch}`. The commit raises `OAuthEpoch`
 in the same transaction as the clear, by the same either-or argument.
 
+**Amended after review R6.1 and R6.2** (§12): the binding is part of the
+committed view (`ServerGen.OAuthEpoch`) and is never adopted from the row. A
+construction-time `CheckCommittedView` rejects a worker whose view the row no
+longer matches. The either-or argument also covers deletes. Every
+instance-originated OAuth delete is a binding- and content-conditional
+storage method, so a parked clear either ran before the replacement's save or
+finds a binding or record it does not own and deletes nothing.
+
 ### D13. Projection repair is not a config change
 
 A commit has two diffs:
@@ -617,3 +625,22 @@ rounds used on this design PR: 5 of the 10-round cap.
 | R5.4 | high | Only `AdvanceGenerations` retires. Same-generation replacements (`RestartServer`, `ForceReconnectAll`, Docker recovery: `manager.go:2612-2617`) never retire the old instance | Confirmed: `ForceReconnectAll` calls `RemoveServer` then `AddServer` with no config change | A single `unregisterLocked` that retires every instance leaving `m.clients`, enforced by the write-site script (FR-020a, FR-022). T4.15 |
 | R5.5 | medium | The compensating write on a storage failure writes `base` back. With a pending restart-required change, disk intentionally differs from the live snapshot, so the pending change is erased | Confirmed: `pendingAwareDiskConfig` (`lifecycle.go:1739-1745`) and `desiredCfg` (`runtime.go:1950-1954`) | Compensate with `pendingAwareDiskConfig(base)` captured before step 5, with self-write marker bookkeeping and `desiredCfg` untouched (plan step 6). T1.16 |
 | R5.6 | medium | T2.5 parks scanner approval after the baseline save, which T055 puts under L1. The recipe then removes the server, which needs the same lock, so it blocks | Confirmed: a test-recipe defect, not a design defect | T2.5 parks after the L1 section exits and before `Commit(ExpectIncarnation, SetQuarantined(false))` (new seam `afterBaselineBeforeUnquarantine`), and asserts remove and re-add return while parked |
+
+## 12. Design review round 6 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Transcripts: `docs/qa/0.70.0-ux-2026-10-10/remediation/reviews/s116-spec-r2A.txt`
+and `s116-spec-r2B.txt` (spec review round 2, chunked A/B). Verdict: FINDINGS.
+The two chunks reported the same two defects, at high and at high/medium. Both
+were checked against `main` and the design, and both were accepted. Review
+rounds used on this design PR: 6 of the 10-round cap.
+
+| # | Sev | Finding | Verification | Resolution |
+|---|---|---|---|---|
+| R6.1 | high | The instance's `CredentialBinding` was read from the storage row at construction. An OAuth-changing commit stamps the new epoch in step 6 and parks before step 7. An old-generation worker still passes the desired-generation check, builds with the old config, adopts the new binding and persists old-config credentials that pass `Save*IfBound`. The same applies across remove and re-add before PR3 | Confirmed against the design text (`data-model.md` §3, "captures its `CredentialBinding` from the row"). Steps 6 and 7 are separate (plan §Commit pipeline), and before PR3 step 7 is a no-op | `ServerGen` gains `OAuthEpoch`, computed in `Prepare`, so config, generation, incarnation and epoch come from one committed view. `CheckCommittedView(name, sg)` before any construction rejects a mismatched row with `ErrStaleGeneration`. The binding is never adopted from the row (FR-014d, data-model §2 and §3). Lands in PR2. T2.14 |
+| R6.2 | high | Binding covered saves and reuse-reads, not deletes. A parked old-instance clear deletes the replacement's fresh credentials under the same key | Confirmed on `main`: `core/connection_oauth.go:573-574` → `PersistentTokenStore.ClearToken` → `DeleteOAuthToken(serverKey)` (`persistent_token_store.go:331-335`), unconditional. `oauth/config.go:812-816` `clearOAuthCredentials` (four callers, `:1026-:1134`) → `ClearOAuthClientCredentials`, unconditional. The compare-and-clear variants (`bbolt.go:1148-1165`) compare only content, which does not distinguish a stale binding when the content is reused | `DeleteOAuthTokenIfBound` and `ClearOAuthClientIfBound` check the row binding, the record epoch and the observed content in one bbolt `Update`. The unconditional primitives are unexported and banned from `internal/upstream` and `internal/oauth` by the write-site grep. The commit's clears and logout stay intentional current-state clears (FR-014e, data-model §3). T2.15 |
+
+Not taken into this spec: the logout flow (`runtime.go:3250-3271`) sets a
+name-resolved logged-out flag, clears and disconnects in three steps, and can
+race a replacement. That is pre-existing behaviour and is unchanged here.
+Chunk A listed it as out of scope. It is recorded on #1563 (the same
+name-resolution hazard, PR3) rather than widened into PR2.

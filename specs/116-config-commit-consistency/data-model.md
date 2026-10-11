@@ -83,8 +83,10 @@ type Snapshot struct {
 type ServerGen struct {
     Gen         int64 // g(name): last create or change
     Incarnation int64 // inc(name): last create; kept through updates
+    OAuthEpoch  int64 // PR2: G of the create or of the last commit that cleared OAuth state (review R6.1)
 }
 func (s *Snapshot) ServerGeneration(name string) (ServerGen, bool)
+func (g ServerGen) Binding() storage.CredentialBinding // {Incarnation, OAuthEpoch}; PR2
 
 type PreparedSnapshot struct {
     base   int64            // Version this was prepared against
@@ -105,6 +107,13 @@ Generation rule, computed in `Prepare`:
 | present, not equal | `{Gen: G, Incarnation: base.Incarnation}` |
 | removed and re-created in one commit | `{Gen: G, Incarnation: G}` |
 | absent in next | key dropped |
+
+`OAuthEpoch` (PR2) follows the same table with one difference: on a changed
+entry it is `G` when `config.OAuthConfigChanged(base, next)` is true (the
+commit clears OAuth state, §3) and the base value otherwise. A created entry
+gets `G`. `Prepare` computes it, so the snapshot, the `CommitResult` and the
+row the commit writes in step 6 all carry the same
+`{Gen, Incarnation, OAuthEpoch}`: one committed view (review R6.1).
 
 `config.ServerEntryEqual` compares every serialized field, including the
 explicit-quarantine bit, `Shared` and `AuthBroker`, and ignores
@@ -187,6 +196,12 @@ type CredentialBinding struct{ Incarnation, OAuthEpoch int64 }
 func (m *Manager) SaveOAuthTokenIfBound(rec *OAuthTokenRecord, server string, b CredentialBinding) (bool, error)
 func (m *Manager) SaveOAuthClientIfBound(..., b CredentialBinding) (bool, error)
 func (m *Manager) SaveOAuthCompletionIfBound(..., b CredentialBinding) (bool, error)
+// Construction-time check (review R6.1): one bbolt View, row must equal sg exactly.
+func (m *Manager) CheckCommittedView(server string, sg configsvc.ServerGen) error // ErrStaleGeneration
+// Instance-originated destructive OAuth operations (review R6.2): binding check,
+// optional record compare, and the delete in one bbolt Update.
+func (m *Manager) DeleteOAuthTokenIfBound(serverKey, server string, b CredentialBinding, expectAccess string) (bool, error)
+func (m *Manager) ClearOAuthClientIfBound(serverKey, server string, b CredentialBinding, match func(*OAuthTokenRecord) bool) (bool, error)
 func (m *Manager) RegisterServerIdentityIfIncarnation(sc *config.ServerConfig, path string, inc int64) (*ServerIdentity, bool, error)
 func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (bool, error) // code_execution exempt
 ```
@@ -201,8 +216,37 @@ and URL keeps the incarnation, and `GenerateServerKey` returns the same key, so
 an incarnation check alone would let an old instance's parked token or DCR
 write restore credentials that the commit had just cleared (review R5.3). The
 retirement barrier cannot prevent this, because the write is local and its
-network response has already completed. Each instance captures its
-`CredentialBinding` from the row when the post-commit worker constructs it.
+network response has already completed.
+
+**The binding comes from the committed view, never from the row (review
+R6.1).** An instance's `CredentialBinding` is `sg.Binding()` of the
+`ServerGen` it was built for, taken from the **same** `CommitResult` or
+published `Snapshot` as its `cfg` and `Gen` (§2). A worker never reads the
+binding from the `upstreams` row and adopts it. Reading it from the row would
+let a stale worker pair an old config with a new binding. For example, a
+commit that changes OAuth config writes the new epoch in step 6 and pauses
+before step 7. An old-generation worker still passes the desired-generation
+check (the manager has not advanced), builds an instance with the old config,
+reads the new epoch and saves old-config credentials that pass
+`Save*IfBound`. Before the instance is built, and before any OAuth config is
+created for it (`createOAuthConfigInternal` can clear DCR state, see below),
+the worker calls `CheckCommittedView(name, sg)`. In one bbolt `View`, it
+requires the row to exist and to equal `sg` in `Generation`, `Incarnation`
+and `OAuthEpoch`. On any mismatch it returns `ErrStaleGeneration` and the
+worker builds nothing. That is a debug log, not an error. The rule covers
+every constructor: the post-commit workers, supervisor `ActionConnect`, and
+`postConfigReload`'s `ConnectAll` (each with the `ServerGen` of its
+snapshot), plus `RestartServer`/`ReplaceInstanceAt`, which reuse the binding
+of the instance they replace. A check that passes is not a lease. If a commit
+lands after the check, the instance holds the older binding, so its
+`…IfBound` writes and binding-conditional deletes are dropped, and PR3/PR4
+unregister and retire it. A generation-only mismatch with an equal binding is
+also rejected. It loses no connection: the newer commit's publish triggers a
+supervisor reconcile that connects the server from the newer snapshot, and
+after PR3 step 7 restamps an instance that is already installed. This check
+lands in **PR2**, because the remove-and-re-add form of the race (the row's
+incarnation moved) exists before PR3 does.
+
 The commit that clears OAuth state raises the epoch in the same bbolt
 transaction as the clear. A parked write therefore either committed first, and
 the clear deletes it, or sees the new epoch and is dropped. Reads that
@@ -212,6 +256,56 @@ written under the current binding, and refresh schedules are keyed by
 `(name, Incarnation, OAuthEpoch)`. The token, client and completion records
 gain `OAuthEpoch int64` (`omitempty`). A record without it is accepted only
 while the row's epoch is also 0.
+
+**Destructive OAuth operations are binding-conditional too (review R6.2).**
+Saves and reuse-reads are not the only local mutations a stale instance can
+make. On `main` an instance also deletes credentials unconditionally:
+
+| Site | Operation | Trigger |
+|---|---|---|
+| `core/connection_oauth.go:573-574` → `PersistentTokenStore.ClearToken` (`persistent_token_store.go:331-335`) | `DeleteOAuthToken(serverKey)` | 5xx during MCP initialize |
+| `oauth/config.go:812-816` `clearOAuthCredentials`, called at `:1026`, `:1043`, `:1057`, `:1134` | `ClearOAuthClientCredentials(serverKey)` | stale DCR record seen while building the OAuth config (legacy port, unpinned record, redirect mismatch, callback port change) |
+| `persistent_token_store.go:122`, `core/oauth_refresh.go:168` | `ClearOAuthClientCredentialsIf` (compare on client id and refresh token) | refresh rejected |
+| `core/oauth_stale_dcr_client.go:196`, `:322` | `ClearOAuthClientCredentialsIfClientID` | authorization rejected the persisted client |
+
+The interleaving: the old instance parks just before the delete, an OAuth
+config change (or a remove and re-add) commits, the replacement saves fresh
+credentials under the new binding, and then the old delete resumes and erases
+them. The key is the same, because `GenerateServerKey` uses only the name and
+URL. Retirement does not stop it, because the delete is a local storage
+mutation.
+
+Every instance-originated delete therefore goes through
+`DeleteOAuthTokenIfBound` or `ClearOAuthClientIfBound`, with the binding of
+the instance (or, for the transient preflight and login clients, the binding
+captured with their config). Each runs one bbolt `Update`. It reads
+`upstreams[server]` and requires `{Incarnation, OAuthEpoch}` to equal the
+binding. It reads the record and requires the record's own `OAuthEpoch` to
+equal the binding's epoch, under the same legacy-zero rule as reads. Then it
+applies a content compare. For the 5xx path, `expectAccess` is the access
+token the instance's store last served (`PersistentTokenStore` records it in
+`GetToken`). For the four config-build clears, `match` compares the client id
+the hygiene check read. The two existing `…If` predicates are kept as
+`match`. Only then does it delete. On any mismatch it deletes
+nothing and returns `false`, and the caller logs at debug level and goes on
+with a fresh flow. The record compare also covers a same-binding replacement
+(`RestartServer`, `ForceReconnectAll`): the replacement's freshly saved token
+has a different access token, so the old instance's clear does not match it.
+The unconditional `BoltDB.DeleteOAuthToken` and `ClearOAuthClientCredentials`
+become unexported storage primitives. The PR2 write-site grep (T055d) forbids
+calling them, or the old exported names, from `internal/upstream/**` and
+`internal/oauth/**`. `storage.Manager.ClearOAuthState` may be called only
+from the commit and from `upstream.Manager.ClearOAuthToken` (logout).
+
+**Intentional current-state clears stay separate.** These are deliberate
+operator or commit actions on whatever is current, not stale-instance
+cleanup: the commit's own OAuth-config clear and removal purge (in the
+commit transaction, which also raises the epoch), and `Manager.ClearOAuthToken`
+for logout (`upstream/manager.go:3425`). They keep the exact-key
+`ClearOAuthState` and are not binding-conditional. The CLI-only
+`cli/client.go:473` runs with no daemon and is out of scope. The logout flow's
+non-atomic flag, clear and disconnect sequence (`runtime.go:3250-3271`) is a
+pre-existing race, recorded on #1563 for PR3.
 
 Not in the set: `activity_records` (audit history), `agent_tokens` and
 client credentials (A5), `toolstats` (aggregate counters, not trust).
