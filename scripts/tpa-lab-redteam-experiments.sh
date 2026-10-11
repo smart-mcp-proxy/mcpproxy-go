@@ -15,6 +15,14 @@
 #   EXP-4 hole B    — TOCTOU: poisoned discovery, clean scan    → probe
 #   EXP-5 hole C    — annotation-only flip after approval       → probe (hash blindness)
 #   EXP-6 hole D    — trust_mode=scan + paraphrased stage-3 pull → probe (auto-approval chain)
+#
+# Exit status: 0 only when every experiment that ran HOLDS. A HOLE, a
+# PARTIAL-HOLE or an INCONCLUSIVE result (failed baseline approval, failed
+# scan) exits 1. The EXP-3 detector-evasion hole is the one allowed failure,
+# deferred to RT-04/RT-07 (scripts/lib/tpa-lab-verdicts.sh).
+#
+# IMAGE=<tag> builds that tag and runs it: every generated config's isolation
+# blocks are rewritten to the same image.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +33,8 @@ API_KEY="tpa-lab-key"
 API_URL="http://127.0.0.1:8081/api/v1"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
 RUN_ROOT="$PROJECT_DIR/test-data-tpa-lab-docker"
+# shellcheck source=lib/tpa-lab-verdicts.sh
+source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
 ONLY="${ONLY:-}"
 DAEMON_PID=""
 CURRENT_CONFIG=""
@@ -63,6 +73,9 @@ for s in cfg["mcpServers"]:
             s["quarantined"] = False
 json.dump(cfg, open(out, "w"), indent=2)
 PY
+  # Run the image this invocation built (IMAGE override), never a stale
+  # default tag; refuses a config whose upstreams are not Docker-isolated.
+  lab_config_use_image "$cfg" "$IMAGE" >&2 || { echo "refusing lab config $cfg" >&2; return 1; }
   echo "$cfg"
 }
 
@@ -168,9 +181,6 @@ all_approved() {
     [[ "$s" == "approved" ]] || { log "baseline not approved: $t=$s"; return 1; }
   done
 }
-
-# is_pulled <status> — the change gate held the tool (changed and/or blocked).
-is_pulled() { [[ "$1" == changed* || "$1" == *blocked* ]]; }
 
 tool_status() {  # tool_status <tool> → status column from `upstream inspect` table
   "$BINARY" upstream inspect tpa-lab-attacker --config "$CURRENT_CONFIG" 2>/dev/null \
@@ -285,18 +295,22 @@ if want_only EXP-2; then
   cfg="$(make_config exp2 facade 2 "$RUN_DIR/exp2-data")"; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp2-2.log" || { record "EXP-2: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
-  cal="$(tool_status calendar_get_events)"
-  log "2a) after restart (server re-quarantined by config): calendar=$cal"
-  if [[ "$cal" == "not-found" ]]; then
-    log "EXP-2a inconclusive: no approval record visible"
-    record "EXP-2a INCONCLUSIVE: no approval record after restart"
-  elif [[ "$cal" == "approved" ]]; then
-    hole "EXP-2a armed contract NOT re-ingested after restart (discovery skipped for quarantined server) — stale approved contract survives the whole quarantine window; gate only runs after unquarantine+sweep"
-    record "EXP-2a HOLE (window): re-quarantined restart → no re-discovery; stale stage-1 approved contract while armed server runs; caught only after unquarantine (~13s sweep)"
-  else
-    pass "EXP-2a change detected even while re-quarantined ($cal)"
-    record "EXP-2a HOLDS: calendar=$cal"
-  fi
+  # Both rug-pulled tools must be held (changed/blocked); a pending or
+  # missing record proves nothing (Sol r3 P2).
+  cal="$(wait_status_not calendar_get_events approved 30)"
+  stock="$(wait_status_not stock_quote approved 15)"
+  log "2a) after restart (server re-quarantined by config): calendar=$cal stock=$stock"
+  case "$(exp2a_verdict "$cal" "$stock")" in
+    HOLDS)
+      pass "EXP-2a change detected even while re-quarantined (calendar=$cal stock=$stock)"
+      record "EXP-2a HOLDS: calendar=$cal stock=$stock" ;;
+    HOLE)
+      hole "EXP-2a armed contract NOT re-ingested after restart (discovery skipped for quarantined server) — stale approved contract survives the whole quarantine window; gate only runs after unquarantine+sweep"
+      record "EXP-2a HOLE (window): re-quarantined restart → stale approved contract while armed server runs (calendar=$cal stock=$stock)" ;;
+    *)
+      log "EXP-2a inconclusive: neither held nor approved"
+      record "EXP-2a INCONCLUSIVE: calendar=$cal stock=$stock (not both held)" ;;
+  esac
 
   # Phase 2b: operator unquarantines (the normal flow for an already-vetted
   # server) → the sweep must re-list and the contract-hash gate must fire.
@@ -306,7 +320,7 @@ if want_only EXP-2; then
   stock="$(wait_status_not stock_quote approved 30)"
   notes="$(tool_status notes_export)"
   log "2b) after unquarantine re-discovery: calendar=$cal stock=$stock notes_export=$notes"
-  if [[ "$cal" == changed* || "$cal" == *blocked* ]] && [[ "$stock" == changed* || "$stock" == *blocked* ]]; then
+  if is_pulled "$cal" && is_pulled "$stock"; then
     pass "EXP-2b description+schema rug pulls detected (changed/blocked)"
     record "EXP-2b HOLDS: calendar=$cal stock=$stock"
   else
@@ -448,3 +462,9 @@ fi
 echo
 log "===== experiment summary ====="
 printf '%s\n' "${RESULTS[@]-}"
+if suite_exit_status "${RESULTS[@]-}"; then
+  log "suite result: PASS (every experiment holds; EXP-3 is the deferred RT-04/RT-07 hole)"
+  exit 0
+fi
+log "suite result: FAIL (a hole was confirmed or an experiment was inconclusive)"
+exit 1

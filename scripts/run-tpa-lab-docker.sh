@@ -32,6 +32,23 @@ LOG_DIR="$(mktemp -d)"
 
 log() { echo "[tpa-lab] $*"; }
 
+# shellcheck source=lib/tpa-lab-verdicts.sh
+source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
+
+# The checked-in config pins its isolation image; an IMAGE override would
+# build one tag and run another (a stale fixture). Refuse it rather than
+# verify the wrong image (Sol r3 P2) — use scripts/tpa-lab-redteam-experiments.sh,
+# which rewrites its generated configs, for a custom tag.
+while IFS= read -r cfg_image; do
+  if [[ "$cfg_image" != "$IMAGE" ]]; then
+    echo "ERROR: IMAGE=$IMAGE but $CONFIG runs isolation image '$cfg_image'; the override is not supported here." >&2
+    exit 1
+  fi
+done < <(lab_config_images "$CONFIG")
+# Test hook: stop after the preflight checks, before building or starting
+# anything (tests/tpa-attack-lab/scripts_test.go).
+[[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok"; exit 0; }
+
 mkdir -p "$DATA_DIR"
 export MCPPROXY_TRAY_ENDPOINT="unix://$DATA_DIR/mcpproxy.sock"
 
