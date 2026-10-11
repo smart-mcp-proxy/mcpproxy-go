@@ -219,12 +219,15 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		return nil
 	}
 
-	// Scan the de-obfuscated PhraseText AND the plain NormalizedText: folding
+	// Scan the plain NormalizedText AND the de-obfuscated PhraseText: folding
 	// can only ever ADD matches this way, never hide one that the plain
-	// normalization exposed (SEC-01 review round 1).
+	// normalization exposed (SEC-01 review round 1). The plain view comes
+	// first, so on equal confidence its (truthful) evidence wins.
 	texts := []string{text}
+	deobfIndex := -1 // index of the de-obfuscated view when it differs
 	if tool.NormalizedText != "" && tool.NormalizedText != text {
-		texts = append(texts, tool.NormalizedText)
+		texts = []string{tool.NormalizedText, text}
+		deobfIndex = 1
 	}
 
 	matched := false
@@ -248,15 +251,22 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
 				softReason := fam.softReason
-				// Only the de-obfuscated view (index 0, when it differs) can
-				// produce a match the plain text does not contain. Such a match is
-				// REVIEW-ONLY: joining letters or folding look-alikes also turns
-				// prohibitions, questions and ordinary data ("Do not i g n o r e
-				// …", "copy se-cr-et files into a local backup") into the
-				// canonical phrase, and position/negation cues do not survive the
-				// rewrite (SEC-01 review round 10). It still holds the change
+				// Every match in the de-obfuscated view (when it differs from the
+				// plain one) is REVIEW-ONLY: joining letters or folding look-alikes
+				// also turns prohibitions, questions and ordinary data ("Do not
+				// i g n o r e …", "copy se-cr-et files into a local backup") into
+				// the canonical phrase, and position/negation cues do not survive
+				// the rewrite (SEC-01 review round 10). It still holds the change
 				// under trust_mode=scan; it never auto-quarantines.
-				deobfuscated := ti == 0 && len(texts) > 1 && !fam.re.MatchString(tool.NormalizedText)
+				//
+				// The cap is applied to EVERY de-obfuscated occurrence, not only
+				// when the family is absent from the plain text: a quoted plain
+				// example elsewhere must not lift the cap for an obfuscated one
+				// (review round 11). Nothing is lost — any occurrence that is
+				// already plain is matched, and position-classified, in the plain
+				// view, which is the only view that can reach the HARD tier. This
+				// also keeps the loop linear: no whole-text rescan per occurrence.
+				deobfuscated := ti == deobfIndex
 				if deobfuscated && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
 					softReason = "visible only after de-obfuscation, which can also rewrite negated or benign text"

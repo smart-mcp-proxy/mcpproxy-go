@@ -139,13 +139,51 @@ func TestSEC01_VariantCorpus_ScanGateOutcomes(t *testing.T) {
 	t.Log(b.String())
 }
 
-// Pre-change (origin/main c9c1ad2d1) counts of real benign tools that the
-// trust_mode=scan gate already holds (verdict != clean) on the two vendored
-// real-world corpora. The detector change must not raise them.
-const (
-	sec01LiveMCPToolBaselineHeld = 17
-	sec01ReferenceBaselineHeld   = 0
-)
+// sec01RealWorldBaselinePath holds the pre-change (origin/main c9c1ad2d1)
+// gate outcome of EVERY tool in the two vendored real-world corpora (generated
+// on merge-base fffc0c04b, whose internal/security is identical), keyed by
+// position and server:tool. The detector change must not make any single tool
+// worse (clean → warnings/dangerous, warnings → dangerous) and must keep full
+// scan coverage; comparing per tool (not an aggregate count) means an
+// equal-count swap or a warnings→dangerous escalation still fails (SEC-01
+// review round 11). Regenerate only from the pre-change detector with
+// SEC01_WRITE_BASELINE=1.
+const sec01RealWorldBaselinePath = "testdata/sec01_realworld_baseline.json"
+
+type sec01BaselineCorpus struct {
+	Tools    int                 `json:"tools"`
+	Outcomes []sec01BaselineTool `json:"outcomes"`
+}
+
+type sec01BaselineTool struct {
+	Key     string `json:"key"`
+	Verdict string `json:"verdict"`
+}
+
+// sec01VerdictRank orders gate outcomes from most to least admissible.
+// "held" is a clean verdict with degraded coverage: the runtime gate
+// (scanChangeIsClean) holds it, so it ranks with the non-clean verdicts.
+func sec01VerdictRank(v string) int {
+	switch v {
+	case "clean":
+		return 0
+	case "warnings", "held":
+		return 1
+	case "dangerous":
+		return 2
+	default:
+		return 3
+	}
+}
+
+// sec01GateOutcome applies the full runtime admission predicate
+// (internal/runtime scanChangeIsClean: clean AND coverage OK).
+func sec01GateOutcome(verdict string, coverageOK bool) string {
+	if verdict == "clean" && !coverageOK {
+		return "held"
+	}
+	return verdict
+}
 
 // TestSEC01_RealWorldBenignCorpora_NoNewHolds measures the false-positive side
 // of SEC-01 on real tool definitions the repository already vendors: the
@@ -175,17 +213,39 @@ func TestSEC01_RealWorldBenignCorpora_NoNewHolds(t *testing.T) {
 		return doc.Tools
 	}
 	corpora := []struct {
-		name    string
-		path    string
-		maxHeld int
+		name string
+		path string
+		size int // expected cardinality: an empty or truncated dataset fails
 	}{
-		{"livemcptool_527", "../../../specs/083-discovery-profiler/datasets/livemcptool_snapshot/tools.json", sec01LiveMCPToolBaselineHeld},
-		{"reference_45", "../../../specs/065-evaluation-foundation/datasets/corpus_v1.tools.json", sec01ReferenceBaselineHeld},
+		{"livemcptool_527", "../../../specs/083-discovery-profiler/datasets/livemcptool_snapshot/tools.json", 527},
+		{"reference_45", "../../../specs/065-evaluation-foundation/datasets/corpus_v1.tools.json", 45},
 	}
+
+	writeBaseline := os.Getenv("SEC01_WRITE_BASELINE") == "1"
+	baseline := map[string]sec01BaselineCorpus{}
+	if !writeBaseline {
+		data, err := os.ReadFile(filepath.Clean(sec01RealWorldBaselinePath))
+		if err != nil {
+			t.Fatalf("read baseline: %v", err)
+		}
+		if err := json.Unmarshal(data, &baseline); err != nil {
+			t.Fatalf("parse baseline: %v", err)
+		}
+	}
+	out := map[string]sec01BaselineCorpus{}
+
 	for _, c := range corpora {
 		tools := load(c.path)
+		if len(tools) != c.size {
+			t.Fatalf("corpus %s: %d tools, want %d (missing or truncated dataset)", c.name, len(tools), c.size)
+		}
+		base := baseline[c.name]
+		if !writeBaseline && (base.Tools != c.size || len(base.Outcomes) != c.size) {
+			t.Fatalf("baseline for %s covers %d/%d tools, want %d", c.name, base.Tools, len(base.Outcomes), c.size)
+		}
+		cur := sec01BaselineCorpus{Tools: len(tools)}
 		held := 0
-		for _, tl := range tools {
+		for i, tl := range tools {
 			name := tl.Name
 			if name == "" {
 				name = tl.Tool
@@ -194,15 +254,40 @@ func TestSEC01_RealWorldBenignCorpora_NoNewHolds(t *testing.T) {
 			if len(schema) == 0 {
 				schema = tl.Schema
 			}
-			verdict, _, sigs := sec01Scan(tl.Server, name, tl.Description, string(schema))
-			if verdict != "clean" {
+			verdict, coverageOK, sigs := sec01Scan(tl.Server, name, tl.Description, string(schema))
+			key := fmt.Sprintf("%d:%s:%s", i, tl.Server, name)
+			outcome := sec01GateOutcome(verdict, coverageOK)
+			cur.Outcomes = append(cur.Outcomes, sec01BaselineTool{Key: key, Verdict: outcome})
+			if !coverageOK {
+				t.Errorf("corpus %s tool %s: scan coverage degraded (the runtime gate would hold it)", c.name, key)
+			}
+			if outcome != "clean" {
 				held++
-				t.Logf("SEC01-FP corpus=%s tool=%s:%s verdict=%s signals=%v", c.name, tl.Server, name, verdict, sigs)
+				t.Logf("SEC01-FP corpus=%s tool=%s:%s outcome=%s signals=%v", c.name, tl.Server, name, outcome, sigs)
+			}
+			if writeBaseline {
+				continue
+			}
+			want := base.Outcomes[i]
+			if want.Key != key {
+				t.Fatalf("corpus %s: baseline entry %d is %q, corpus has %q (dataset changed)", c.name, i, want.Key, key)
+			}
+			if sec01VerdictRank(outcome) > sec01VerdictRank(want.Verdict) {
+				t.Errorf("corpus %s tool %s: gate outcome worsened %s → %s (signals=%v)", c.name, key, want.Verdict, outcome, sigs)
 			}
 		}
-		t.Logf("SEC01-FP corpus=%s tools=%d held=%d baseline_max=%d", c.name, len(tools), held, c.maxHeld)
-		if c.maxHeld >= 0 && held > c.maxHeld {
-			t.Errorf("corpus %s: %d real benign tools are now held, more than the pre-change %d", c.name, held, c.maxHeld)
+		out[c.name] = cur
+		t.Logf("SEC01-FP corpus=%s tools=%d held=%d", c.name, len(tools), held)
+	}
+
+	if writeBaseline {
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			t.Fatal(err)
 		}
+		if err := os.WriteFile(sec01RealWorldBaselinePath, append(data, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", sec01RealWorldBaselinePath)
 	}
 }

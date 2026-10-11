@@ -1,0 +1,2300 @@
+{
+  "livemcptool_527": {
+    "tools": 527,
+    "outcomes": [
+      {
+        "key": "0:12306-mcp:get-current-date",
+        "verdict": "clean"
+      },
+      {
+        "key": "1:12306-mcp:get-interline-tickets",
+        "verdict": "clean"
+      },
+      {
+        "key": "2:12306-mcp:get-station-by-telecode",
+        "verdict": "clean"
+      },
+      {
+        "key": "3:12306-mcp:get-station-code-by-names",
+        "verdict": "clean"
+      },
+      {
+        "key": "4:12306-mcp:get-station-code-of-citys",
+        "verdict": "clean"
+      },
+      {
+        "key": "5:12306-mcp:get-stations-code-in-city",
+        "verdict": "clean"
+      },
+      {
+        "key": "6:12306-mcp:get-tickets",
+        "verdict": "clean"
+      },
+      {
+        "key": "7:12306-mcp:get-train-route-stations",
+        "verdict": "clean"
+      },
+      {
+        "key": "8:Ant Design Components:get-component-changelog",
+        "verdict": "clean"
+      },
+      {
+        "key": "9:Ant Design Components:get-component-docs",
+        "verdict": "clean"
+      },
+      {
+        "key": "10:Ant Design Components:list-component-examples",
+        "verdict": "clean"
+      },
+      {
+        "key": "11:Ant Design Components:list-components",
+        "verdict": "clean"
+      },
+      {
+        "key": "12:Asset_Price_MCP:get_asset_price",
+        "verdict": "warnings"
+      },
+      {
+        "key": "13:Bazi:buildBaziFromLunarDatetime",
+        "verdict": "clean"
+      },
+      {
+        "key": "14:Bazi:buildBaziFromSolarDatetime",
+        "verdict": "clean"
+      },
+      {
+        "key": "15:Bazi:getBaziDetail",
+        "verdict": "clean"
+      },
+      {
+        "key": "16:Bazi:getChineseCalendar",
+        "verdict": "clean"
+      },
+      {
+        "key": "17:Bazi:getSolarTimes",
+        "verdict": "clean"
+      },
+      {
+        "key": "18:Context7:get-library-docs",
+        "verdict": "clean"
+      },
+      {
+        "key": "19:Context7:resolve-library-id",
+        "verdict": "clean"
+      },
+      {
+        "key": "20:MetaTagGenie:writeImageMetadata",
+        "verdict": "clean"
+      },
+      {
+        "key": "21:airbnb:airbnb_listing_details",
+        "verdict": "clean"
+      },
+      {
+        "key": "22:airbnb:airbnb_search",
+        "verdict": "clean"
+      },
+      {
+        "key": "23:arxiv-mcp-server:download_paper",
+        "verdict": "clean"
+      },
+      {
+        "key": "24:arxiv-mcp-server:list_papers",
+        "verdict": "clean"
+      },
+      {
+        "key": "25:arxiv-mcp-server:read_paper",
+        "verdict": "clean"
+      },
+      {
+        "key": "26:arxiv-mcp-server:search_papers",
+        "verdict": "clean"
+      },
+      {
+        "key": "27:basic-memory:build_context",
+        "verdict": "clean"
+      },
+      {
+        "key": "28:basic-memory:canvas",
+        "verdict": "clean"
+      },
+      {
+        "key": "29:basic-memory:create_memory_project",
+        "verdict": "clean"
+      },
+      {
+        "key": "30:basic-memory:delete_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "31:basic-memory:delete_project",
+        "verdict": "clean"
+      },
+      {
+        "key": "32:basic-memory:edit_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "33:basic-memory:get_current_project",
+        "verdict": "clean"
+      },
+      {
+        "key": "34:basic-memory:list_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "35:basic-memory:list_memory_projects",
+        "verdict": "clean"
+      },
+      {
+        "key": "36:basic-memory:move_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "37:basic-memory:read_content",
+        "verdict": "clean"
+      },
+      {
+        "key": "38:basic-memory:read_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "39:basic-memory:recent_activity",
+        "verdict": "clean"
+      },
+      {
+        "key": "40:basic-memory:search_notes",
+        "verdict": "clean"
+      },
+      {
+        "key": "41:basic-memory:set_default_project",
+        "verdict": "clean"
+      },
+      {
+        "key": "42:basic-memory:switch_project",
+        "verdict": "clean"
+      },
+      {
+        "key": "43:basic-memory:sync_status",
+        "verdict": "clean"
+      },
+      {
+        "key": "44:basic-memory:view_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "45:basic-memory:write_note",
+        "verdict": "clean"
+      },
+      {
+        "key": "46:bing-cn-mcp:bing_search",
+        "verdict": "clean"
+      },
+      {
+        "key": "47:bing-cn-mcp:fetch_webpage",
+        "verdict": "clean"
+      },
+      {
+        "key": "48:biomcp:alphagenome_predictor",
+        "verdict": "clean"
+      },
+      {
+        "key": "49:biomcp:article_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "50:biomcp:article_searcher",
+        "verdict": "clean"
+      },
+      {
+        "key": "51:biomcp:fetch",
+        "verdict": "clean"
+      },
+      {
+        "key": "52:biomcp:search",
+        "verdict": "clean"
+      },
+      {
+        "key": "53:biomcp:think",
+        "verdict": "warnings"
+      },
+      {
+        "key": "54:biomcp:trial_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "55:biomcp:trial_locations_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "56:biomcp:trial_outcomes_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "57:biomcp:trial_protocol_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "58:biomcp:trial_references_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "59:biomcp:trial_searcher",
+        "verdict": "clean"
+      },
+      {
+        "key": "60:biomcp:variant_getter",
+        "verdict": "clean"
+      },
+      {
+        "key": "61:biomcp:variant_searcher",
+        "verdict": "clean"
+      },
+      {
+        "key": "62:calculator:calculate",
+        "verdict": "clean"
+      },
+      {
+        "key": "63:chess:find_position_in_pgn",
+        "verdict": "clean"
+      },
+      {
+        "key": "64:chess:get_board_visualization",
+        "verdict": "clean"
+      },
+      {
+        "key": "65:chess:get_turn",
+        "verdict": "clean"
+      },
+      {
+        "key": "66:chess:get_valid_moves",
+        "verdict": "clean"
+      },
+      {
+        "key": "67:chess:make_move",
+        "verdict": "clean"
+      },
+      {
+        "key": "68:chess:new_game",
+        "verdict": "clean"
+      },
+      {
+        "key": "69:coin-flip:get-contest-details",
+        "verdict": "clean"
+      },
+      {
+        "key": "70:coin-flip:get-daily-challenge",
+        "verdict": "clean"
+      },
+      {
+        "key": "71:coin-flip:get-problem",
+        "verdict": "clean"
+      },
+      {
+        "key": "72:coin-flip:get-user-contest-ranking",
+        "verdict": "clean"
+      },
+      {
+        "key": "73:coin-flip:get-user-profile",
+        "verdict": "clean"
+      },
+      {
+        "key": "74:coin-flip:get-user-submissions",
+        "verdict": "clean"
+      },
+      {
+        "key": "75:coin-flip:search-problems",
+        "verdict": "clean"
+      },
+      {
+        "key": "76:datagov:group_list",
+        "verdict": "clean"
+      },
+      {
+        "key": "77:datagov:package_search",
+        "verdict": "clean"
+      },
+      {
+        "key": "78:datagov:package_show",
+        "verdict": "clean"
+      },
+      {
+        "key": "79:datagov:tag_list",
+        "verdict": "clean"
+      },
+      {
+        "key": "80:desktop-commander:create_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "81:desktop-commander:edit_block",
+        "verdict": "clean"
+      },
+      {
+        "key": "82:desktop-commander:force_terminate",
+        "verdict": "clean"
+      },
+      {
+        "key": "83:desktop-commander:get_config",
+        "verdict": "clean"
+      },
+      {
+        "key": "84:desktop-commander:get_file_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "85:desktop-commander:get_usage_stats",
+        "verdict": "clean"
+      },
+      {
+        "key": "86:desktop-commander:give_feedback_to_desktop_commander",
+        "verdict": "clean"
+      },
+      {
+        "key": "87:desktop-commander:interact_with_process",
+        "verdict": "clean"
+      },
+      {
+        "key": "88:desktop-commander:kill_process",
+        "verdict": "clean"
+      },
+      {
+        "key": "89:desktop-commander:list_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "90:desktop-commander:list_processes",
+        "verdict": "clean"
+      },
+      {
+        "key": "91:desktop-commander:list_sessions",
+        "verdict": "clean"
+      },
+      {
+        "key": "92:desktop-commander:move_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "93:desktop-commander:read_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "94:desktop-commander:read_multiple_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "95:desktop-commander:read_process_output",
+        "verdict": "clean"
+      },
+      {
+        "key": "96:desktop-commander:search_code",
+        "verdict": "clean"
+      },
+      {
+        "key": "97:desktop-commander:search_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "98:desktop-commander:set_config_value",
+        "verdict": "clean"
+      },
+      {
+        "key": "99:desktop-commander:start_process",
+        "verdict": "clean"
+      },
+      {
+        "key": "100:desktop-commander:write_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "101:docker-mcp:create-container",
+        "verdict": "clean"
+      },
+      {
+        "key": "102:docker-mcp:deploy-compose",
+        "verdict": "clean"
+      },
+      {
+        "key": "103:docker-mcp:get-logs",
+        "verdict": "clean"
+      },
+      {
+        "key": "104:docker-mcp:list-containers",
+        "verdict": "clean"
+      },
+      {
+        "key": "105:duckduckgo-search:duckduckgo_web_search",
+        "verdict": "clean"
+      },
+      {
+        "key": "106:excel:excel_copy_sheet",
+        "verdict": "clean"
+      },
+      {
+        "key": "107:excel:excel_create_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "108:excel:excel_describe_sheets",
+        "verdict": "clean"
+      },
+      {
+        "key": "109:excel:excel_read_sheet",
+        "verdict": "clean"
+      },
+      {
+        "key": "110:excel:excel_write_to_sheet",
+        "verdict": "clean"
+      },
+      {
+        "key": "111:exchange-rate-mcp:exchange_rate",
+        "verdict": "clean"
+      },
+      {
+        "key": "112:fetch:fetch",
+        "verdict": "clean"
+      },
+      {
+        "key": "113:filesystem:create_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "114:filesystem:directory_tree",
+        "verdict": "clean"
+      },
+      {
+        "key": "115:filesystem:edit_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "116:filesystem:get_file_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "117:filesystem:list_allowed_directories",
+        "verdict": "clean"
+      },
+      {
+        "key": "118:filesystem:list_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "119:filesystem:list_directory_with_sizes",
+        "verdict": "clean"
+      },
+      {
+        "key": "120:filesystem:move_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "121:filesystem:read_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "122:filesystem:read_multiple_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "123:filesystem:search_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "124:filesystem:write_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "125:git:git_add",
+        "verdict": "clean"
+      },
+      {
+        "key": "126:git:git_branch",
+        "verdict": "clean"
+      },
+      {
+        "key": "127:git:git_checkout",
+        "verdict": "clean"
+      },
+      {
+        "key": "128:git:git_commit",
+        "verdict": "clean"
+      },
+      {
+        "key": "129:git:git_create_branch",
+        "verdict": "clean"
+      },
+      {
+        "key": "130:git:git_diff",
+        "verdict": "clean"
+      },
+      {
+        "key": "131:git:git_diff_staged",
+        "verdict": "clean"
+      },
+      {
+        "key": "132:git:git_diff_unstaged",
+        "verdict": "clean"
+      },
+      {
+        "key": "133:git:git_init",
+        "verdict": "clean"
+      },
+      {
+        "key": "134:git:git_log",
+        "verdict": "clean"
+      },
+      {
+        "key": "135:git:git_reset",
+        "verdict": "clean"
+      },
+      {
+        "key": "136:git:git_show",
+        "verdict": "clean"
+      },
+      {
+        "key": "137:git:git_status",
+        "verdict": "clean"
+      },
+      {
+        "key": "138:hackernews:getComment",
+        "verdict": "clean"
+      },
+      {
+        "key": "139:hackernews:getCommentTree",
+        "verdict": "clean"
+      },
+      {
+        "key": "140:hackernews:getComments",
+        "verdict": "clean"
+      },
+      {
+        "key": "141:hackernews:getStories",
+        "verdict": "clean"
+      },
+      {
+        "key": "142:hackernews:getStory",
+        "verdict": "clean"
+      },
+      {
+        "key": "143:hackernews:getStoryWithComments",
+        "verdict": "clean"
+      },
+      {
+        "key": "144:hackernews:getUser",
+        "verdict": "clean"
+      },
+      {
+        "key": "145:hackernews:getUserSubmissions",
+        "verdict": "clean"
+      },
+      {
+        "key": "146:hackernews:search",
+        "verdict": "clean"
+      },
+      {
+        "key": "147:howtocook-mcp:mcp_howtocook_getAllRecipes",
+        "verdict": "clean"
+      },
+      {
+        "key": "148:howtocook-mcp:mcp_howtocook_getRecipeById",
+        "verdict": "clean"
+      },
+      {
+        "key": "149:howtocook-mcp:mcp_howtocook_getRecipesByCategory",
+        "verdict": "clean"
+      },
+      {
+        "key": "150:howtocook-mcp:mcp_howtocook_recommendMeals",
+        "verdict": "clean"
+      },
+      {
+        "key": "151:howtocook-mcp:mcp_howtocook_whatToEat",
+        "verdict": "clean"
+      },
+      {
+        "key": "152:hugeicons:get_platform_usage",
+        "verdict": "clean"
+      },
+      {
+        "key": "153:hugeicons:list_icons",
+        "verdict": "clean"
+      },
+      {
+        "key": "154:hugeicons:search_icons",
+        "verdict": "clean"
+      },
+      {
+        "key": "155:image-extractor:extract_image_from_base64",
+        "verdict": "warnings"
+      },
+      {
+        "key": "156:image-extractor:extract_image_from_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "157:image-extractor:extract_image_from_url",
+        "verdict": "clean"
+      },
+      {
+        "key": "158:investor:get_cnn_fear_greed_index",
+        "verdict": "clean"
+      },
+      {
+        "key": "159:investor:get_crypto_fear_greed_index",
+        "verdict": "clean"
+      },
+      {
+        "key": "160:investor:get_earnings_history",
+        "verdict": "clean"
+      },
+      {
+        "key": "161:investor:get_financial_statements",
+        "verdict": "clean"
+      },
+      {
+        "key": "162:investor:get_insider_trades",
+        "verdict": "clean"
+      },
+      {
+        "key": "163:investor:get_institutional_holders",
+        "verdict": "clean"
+      },
+      {
+        "key": "164:investor:get_options",
+        "verdict": "clean"
+      },
+      {
+        "key": "165:investor:get_price_history",
+        "verdict": "clean"
+      },
+      {
+        "key": "166:investor:get_ticker_data",
+        "verdict": "clean"
+      },
+      {
+        "key": "167:kospi-kosdaq:get_stock_fundamental",
+        "verdict": "warnings"
+      },
+      {
+        "key": "168:kospi-kosdaq:get_stock_market_cap",
+        "verdict": "clean"
+      },
+      {
+        "key": "169:kospi-kosdaq:get_stock_ohlcv",
+        "verdict": "clean"
+      },
+      {
+        "key": "170:kospi-kosdaq:get_stock_trading_volume",
+        "verdict": "clean"
+      },
+      {
+        "key": "171:kospi-kosdaq:load_all_tickers",
+        "verdict": "clean"
+      },
+      {
+        "key": "172:magicuidesign_mcp:getAnimations",
+        "verdict": "clean"
+      },
+      {
+        "key": "173:magicuidesign_mcp:getBackgrounds",
+        "verdict": "warnings"
+      },
+      {
+        "key": "174:magicuidesign_mcp:getButtons",
+        "verdict": "clean"
+      },
+      {
+        "key": "175:magicuidesign_mcp:getComponents",
+        "verdict": "clean"
+      },
+      {
+        "key": "176:magicuidesign_mcp:getDeviceMocks",
+        "verdict": "clean"
+      },
+      {
+        "key": "177:magicuidesign_mcp:getSpecialEffects",
+        "verdict": "clean"
+      },
+      {
+        "key": "178:magicuidesign_mcp:getTextAnimations",
+        "verdict": "clean"
+      },
+      {
+        "key": "179:magicuidesign_mcp:getUIComponents",
+        "verdict": "clean"
+      },
+      {
+        "key": "180:maven-deps-server:check_maven_version_exists",
+        "verdict": "clean"
+      },
+      {
+        "key": "181:maven-deps-server:get_latest_release",
+        "verdict": "clean"
+      },
+      {
+        "key": "182:maven-deps-server:list_maven_versions",
+        "verdict": "clean"
+      },
+      {
+        "key": "183:mcp-crypto-price:get-crypto-price",
+        "verdict": "clean"
+      },
+      {
+        "key": "184:mcp-crypto-price:get-historical-analysis",
+        "verdict": "clean"
+      },
+      {
+        "key": "185:mcp-crypto-price:get-market-analysis",
+        "verdict": "clean"
+      },
+      {
+        "key": "186:mcp-deepwiki:deepwiki_fetch",
+        "verdict": "clean"
+      },
+      {
+        "key": "187:mcp-github-trending:get_github_trending_developers",
+        "verdict": "clean"
+      },
+      {
+        "key": "188:mcp-github-trending:get_github_trending_repositories",
+        "verdict": "clean"
+      },
+      {
+        "key": "189:mcp-server-chart:generate_area_chart",
+        "verdict": "warnings"
+      },
+      {
+        "key": "190:mcp-server-chart:generate_bar_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "191:mcp-server-chart:generate_boxplot_chart",
+        "verdict": "warnings"
+      },
+      {
+        "key": "192:mcp-server-chart:generate_column_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "193:mcp-server-chart:generate_district_map",
+        "verdict": "clean"
+      },
+      {
+        "key": "194:mcp-server-chart:generate_dual_axes_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "195:mcp-server-chart:generate_fishbone_diagram",
+        "verdict": "clean"
+      },
+      {
+        "key": "196:mcp-server-chart:generate_flow_diagram",
+        "verdict": "clean"
+      },
+      {
+        "key": "197:mcp-server-chart:generate_funnel_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "198:mcp-server-chart:generate_histogram_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "199:mcp-server-chart:generate_line_chart",
+        "verdict": "warnings"
+      },
+      {
+        "key": "200:mcp-server-chart:generate_liquid_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "201:mcp-server-chart:generate_mind_map",
+        "verdict": "warnings"
+      },
+      {
+        "key": "202:mcp-server-chart:generate_network_graph",
+        "verdict": "clean"
+      },
+      {
+        "key": "203:mcp-server-chart:generate_organization_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "204:mcp-server-chart:generate_path_map",
+        "verdict": "clean"
+      },
+      {
+        "key": "205:mcp-server-chart:generate_pie_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "206:mcp-server-chart:generate_pin_map",
+        "verdict": "clean"
+      },
+      {
+        "key": "207:mcp-server-chart:generate_radar_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "208:mcp-server-chart:generate_sankey_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "209:mcp-server-chart:generate_scatter_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "210:mcp-server-chart:generate_treemap_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "211:mcp-server-chart:generate_venn_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "212:mcp-server-chart:generate_violin_chart",
+        "verdict": "warnings"
+      },
+      {
+        "key": "213:mcp-server-chart:generate_word_cloud_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "214:mcp-simple-arxiv:get_paper_data",
+        "verdict": "clean"
+      },
+      {
+        "key": "215:mcp-simple-arxiv:list_categories",
+        "verdict": "clean"
+      },
+      {
+        "key": "216:mcp-simple-arxiv:search_papers",
+        "verdict": "clean"
+      },
+      {
+        "key": "217:mcp-simple-arxiv:update_categories",
+        "verdict": "clean"
+      },
+      {
+        "key": "218:memory:add_observations",
+        "verdict": "clean"
+      },
+      {
+        "key": "219:memory:create_entities",
+        "verdict": "clean"
+      },
+      {
+        "key": "220:memory:create_relations",
+        "verdict": "clean"
+      },
+      {
+        "key": "221:memory:delete_entities",
+        "verdict": "clean"
+      },
+      {
+        "key": "222:memory:delete_observations",
+        "verdict": "clean"
+      },
+      {
+        "key": "223:memory:delete_relations",
+        "verdict": "clean"
+      },
+      {
+        "key": "224:memory:open_nodes",
+        "verdict": "clean"
+      },
+      {
+        "key": "225:memory:read_graph",
+        "verdict": "clean"
+      },
+      {
+        "key": "226:memory:search_nodes",
+        "verdict": "clean"
+      },
+      {
+        "key": "227:mermaid-validator:validateMermaid",
+        "verdict": "clean"
+      },
+      {
+        "key": "228:met-museum:get-museum-object",
+        "verdict": "clean"
+      },
+      {
+        "key": "229:met-museum:list-departments",
+        "verdict": "clean"
+      },
+      {
+        "key": "230:met-museum:search-museum-objects",
+        "verdict": "clean"
+      },
+      {
+        "key": "231:mindmap:convert_markdown_to_mindmap",
+        "verdict": "clean"
+      },
+      {
+        "key": "232:music-analysis:beat_track",
+        "verdict": "clean"
+      },
+      {
+        "key": "233:music-analysis:chroma_cqt",
+        "verdict": "clean"
+      },
+      {
+        "key": "234:music-analysis:download_from_url",
+        "verdict": "clean"
+      },
+      {
+        "key": "235:music-analysis:download_from_youtube",
+        "verdict": "clean"
+      },
+      {
+        "key": "236:music-analysis:get_duration",
+        "verdict": "clean"
+      },
+      {
+        "key": "237:music-analysis:load",
+        "verdict": "clean"
+      },
+      {
+        "key": "238:music-analysis:mfcc",
+        "verdict": "clean"
+      },
+      {
+        "key": "239:music-analysis:tempo",
+        "verdict": "clean"
+      },
+      {
+        "key": "240:npm-sentinel-mcp:npmAlternatives",
+        "verdict": "clean"
+      },
+      {
+        "key": "241:npm-sentinel-mcp:npmChangelogAnalysis",
+        "verdict": "clean"
+      },
+      {
+        "key": "242:npm-sentinel-mcp:npmCompare",
+        "verdict": "clean"
+      },
+      {
+        "key": "243:npm-sentinel-mcp:npmDeprecated",
+        "verdict": "clean"
+      },
+      {
+        "key": "244:npm-sentinel-mcp:npmDeps",
+        "verdict": "clean"
+      },
+      {
+        "key": "245:npm-sentinel-mcp:npmLatest",
+        "verdict": "clean"
+      },
+      {
+        "key": "246:npm-sentinel-mcp:npmLicenseCompatibility",
+        "verdict": "clean"
+      },
+      {
+        "key": "247:npm-sentinel-mcp:npmMaintainers",
+        "verdict": "warnings"
+      },
+      {
+        "key": "248:npm-sentinel-mcp:npmMaintenance",
+        "verdict": "clean"
+      },
+      {
+        "key": "249:npm-sentinel-mcp:npmPackageReadme",
+        "verdict": "clean"
+      },
+      {
+        "key": "250:npm-sentinel-mcp:npmQuality",
+        "verdict": "clean"
+      },
+      {
+        "key": "251:npm-sentinel-mcp:npmRepoStats",
+        "verdict": "clean"
+      },
+      {
+        "key": "252:npm-sentinel-mcp:npmScore",
+        "verdict": "clean"
+      },
+      {
+        "key": "253:npm-sentinel-mcp:npmSearch",
+        "verdict": "clean"
+      },
+      {
+        "key": "254:npm-sentinel-mcp:npmSize",
+        "verdict": "warnings"
+      },
+      {
+        "key": "255:npm-sentinel-mcp:npmTrends",
+        "verdict": "clean"
+      },
+      {
+        "key": "256:npm-sentinel-mcp:npmTypes",
+        "verdict": "clean"
+      },
+      {
+        "key": "257:npm-sentinel-mcp:npmVersions",
+        "verdict": "clean"
+      },
+      {
+        "key": "258:npm-sentinel-mcp:npmVulnerabilities",
+        "verdict": "clean"
+      },
+      {
+        "key": "259:npx_fetch:fetch_html",
+        "verdict": "clean"
+      },
+      {
+        "key": "260:npx_fetch:fetch_json",
+        "verdict": "clean"
+      },
+      {
+        "key": "261:npx_fetch:fetch_markdown",
+        "verdict": "clean"
+      },
+      {
+        "key": "262:npx_fetch:fetch_txt",
+        "verdict": "clean"
+      },
+      {
+        "key": "263:okppt:add_slide_with_layout",
+        "verdict": "clean"
+      },
+      {
+        "key": "264:okppt:analyze_presentation_layouts",
+        "verdict": "clean"
+      },
+      {
+        "key": "265:okppt:clear_placeholders_from_slides",
+        "verdict": "clean"
+      },
+      {
+        "key": "266:okppt:convert_svg_to_png",
+        "verdict": "clean"
+      },
+      {
+        "key": "267:okppt:copy_svg_slide",
+        "verdict": "clean"
+      },
+      {
+        "key": "268:okppt:delete_slide",
+        "verdict": "clean"
+      },
+      {
+        "key": "269:okppt:get_file_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "270:okppt:get_pptx_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "271:okppt:insert_blank_slide",
+        "verdict": "clean"
+      },
+      {
+        "key": "272:okppt:insert_svg",
+        "verdict": "clean"
+      },
+      {
+        "key": "273:okppt:list_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "274:okppt:save_svg_code",
+        "verdict": "clean"
+      },
+      {
+        "key": "275:okppt:set_placeholder_value",
+        "verdict": "clean"
+      },
+      {
+        "key": "276:okppt:svg_prompt",
+        "verdict": "clean"
+      },
+      {
+        "key": "277:opgg-mcp:esports-lol-schedules",
+        "verdict": "clean"
+      },
+      {
+        "key": "278:opgg-mcp:esports-lol-team-standings",
+        "verdict": "clean"
+      },
+      {
+        "key": "279:opgg-mcp:lol-brawl-champion-tier-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "280:opgg-mcp:lol-champion-analysis",
+        "verdict": "clean"
+      },
+      {
+        "key": "281:opgg-mcp:lol-champion-leader-board",
+        "verdict": "clean"
+      },
+      {
+        "key": "282:opgg-mcp:lol-champion-meta-data",
+        "verdict": "clean"
+      },
+      {
+        "key": "283:opgg-mcp:lol-champion-positions-data",
+        "verdict": "clean"
+      },
+      {
+        "key": "284:opgg-mcp:lol-champion-skin-sale",
+        "verdict": "clean"
+      },
+      {
+        "key": "285:opgg-mcp:lol-summoner-game-history",
+        "verdict": "clean"
+      },
+      {
+        "key": "286:opgg-mcp:lol-summoner-renewal",
+        "verdict": "clean"
+      },
+      {
+        "key": "287:opgg-mcp:lol-summoner-search",
+        "verdict": "clean"
+      },
+      {
+        "key": "288:opgg-mcp:tft-champion-item-build",
+        "verdict": "clean"
+      },
+      {
+        "key": "289:opgg-mcp:tft-meta-item-combinations",
+        "verdict": "clean"
+      },
+      {
+        "key": "290:opgg-mcp:tft-meta-trend-deck-list",
+        "verdict": "clean"
+      },
+      {
+        "key": "291:opgg-mcp:tft-play-style-comment",
+        "verdict": "clean"
+      },
+      {
+        "key": "292:opgg-mcp:tft-recommend-champion-for-item",
+        "verdict": "clean"
+      },
+      {
+        "key": "293:opgg-mcp:valorant-agents-composition-with-map",
+        "verdict": "clean"
+      },
+      {
+        "key": "294:opgg-mcp:valorant-characters-statistics",
+        "verdict": "clean"
+      },
+      {
+        "key": "295:opgg-mcp:valorant-leaderboard",
+        "verdict": "clean"
+      },
+      {
+        "key": "296:opgg-mcp:valorant-meta-characters",
+        "verdict": "clean"
+      },
+      {
+        "key": "297:opgg-mcp:valorant-meta-maps",
+        "verdict": "clean"
+      },
+      {
+        "key": "298:opgg-mcp:valorant-player-match-history",
+        "verdict": "clean"
+      },
+      {
+        "key": "299:osm-mcp-server:analyze_commute",
+        "verdict": "clean"
+      },
+      {
+        "key": "300:osm-mcp-server:analyze_neighborhood",
+        "verdict": "clean"
+      },
+      {
+        "key": "301:osm-mcp-server:explore_area",
+        "verdict": "clean"
+      },
+      {
+        "key": "302:osm-mcp-server:find_ev_charging_stations",
+        "verdict": "clean"
+      },
+      {
+        "key": "303:osm-mcp-server:find_nearby_places",
+        "verdict": "clean"
+      },
+      {
+        "key": "304:osm-mcp-server:find_parking_facilities",
+        "verdict": "clean"
+      },
+      {
+        "key": "305:osm-mcp-server:find_schools_nearby",
+        "verdict": "clean"
+      },
+      {
+        "key": "306:osm-mcp-server:geocode_address",
+        "verdict": "clean"
+      },
+      {
+        "key": "307:osm-mcp-server:get_route_directions",
+        "verdict": "clean"
+      },
+      {
+        "key": "308:osm-mcp-server:reverse_geocode",
+        "verdict": "clean"
+      },
+      {
+        "key": "309:osm-mcp-server:search_category",
+        "verdict": "clean"
+      },
+      {
+        "key": "310:osm-mcp-server:suggest_meeting_point",
+        "verdict": "clean"
+      },
+      {
+        "key": "311:painter:drawing_fillRectangle",
+        "verdict": "clean"
+      },
+      {
+        "key": "312:painter:drawing_generateCanvas",
+        "verdict": "clean"
+      },
+      {
+        "key": "313:painter:drawing_getCanvasData",
+        "verdict": "clean"
+      },
+      {
+        "key": "314:painter:drawing_getCanvasPng",
+        "verdict": "clean"
+      },
+      {
+        "key": "315:pdf-reader-mcp:read_pdf",
+        "verdict": "clean"
+      },
+      {
+        "key": "316:playwright:clear_codegen_session",
+        "verdict": "clean"
+      },
+      {
+        "key": "317:playwright:end_codegen_session",
+        "verdict": "clean"
+      },
+      {
+        "key": "318:playwright:get_codegen_session",
+        "verdict": "clean"
+      },
+      {
+        "key": "319:playwright:playwright_assert_response",
+        "verdict": "clean"
+      },
+      {
+        "key": "320:playwright:playwright_click",
+        "verdict": "clean"
+      },
+      {
+        "key": "321:playwright:playwright_click_and_switch_tab",
+        "verdict": "clean"
+      },
+      {
+        "key": "322:playwright:playwright_close",
+        "verdict": "clean"
+      },
+      {
+        "key": "323:playwright:playwright_console_logs",
+        "verdict": "clean"
+      },
+      {
+        "key": "324:playwright:playwright_custom_user_agent",
+        "verdict": "clean"
+      },
+      {
+        "key": "325:playwright:playwright_delete",
+        "verdict": "clean"
+      },
+      {
+        "key": "326:playwright:playwright_drag",
+        "verdict": "clean"
+      },
+      {
+        "key": "327:playwright:playwright_evaluate",
+        "verdict": "clean"
+      },
+      {
+        "key": "328:playwright:playwright_expect_response",
+        "verdict": "clean"
+      },
+      {
+        "key": "329:playwright:playwright_fill",
+        "verdict": "clean"
+      },
+      {
+        "key": "330:playwright:playwright_get",
+        "verdict": "clean"
+      },
+      {
+        "key": "331:playwright:playwright_get_visible_html",
+        "verdict": "clean"
+      },
+      {
+        "key": "332:playwright:playwright_get_visible_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "333:playwright:playwright_go_back",
+        "verdict": "clean"
+      },
+      {
+        "key": "334:playwright:playwright_go_forward",
+        "verdict": "clean"
+      },
+      {
+        "key": "335:playwright:playwright_hover",
+        "verdict": "clean"
+      },
+      {
+        "key": "336:playwright:playwright_iframe_click",
+        "verdict": "clean"
+      },
+      {
+        "key": "337:playwright:playwright_iframe_fill",
+        "verdict": "clean"
+      },
+      {
+        "key": "338:playwright:playwright_navigate",
+        "verdict": "clean"
+      },
+      {
+        "key": "339:playwright:playwright_patch",
+        "verdict": "clean"
+      },
+      {
+        "key": "340:playwright:playwright_post",
+        "verdict": "clean"
+      },
+      {
+        "key": "341:playwright:playwright_press_key",
+        "verdict": "clean"
+      },
+      {
+        "key": "342:playwright:playwright_put",
+        "verdict": "clean"
+      },
+      {
+        "key": "343:playwright:playwright_save_as_pdf",
+        "verdict": "clean"
+      },
+      {
+        "key": "344:playwright:playwright_screenshot",
+        "verdict": "clean"
+      },
+      {
+        "key": "345:playwright:playwright_select",
+        "verdict": "clean"
+      },
+      {
+        "key": "346:playwright:playwright_upload_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "347:playwright:start_codegen_session",
+        "verdict": "clean"
+      },
+      {
+        "key": "348:ppt:add_bullet_points",
+        "verdict": "clean"
+      },
+      {
+        "key": "349:ppt:add_chart",
+        "verdict": "clean"
+      },
+      {
+        "key": "350:ppt:add_connector",
+        "verdict": "clean"
+      },
+      {
+        "key": "351:ppt:add_shape",
+        "verdict": "clean"
+      },
+      {
+        "key": "352:ppt:add_slide",
+        "verdict": "clean"
+      },
+      {
+        "key": "353:ppt:add_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "354:ppt:apply_picture_effects",
+        "verdict": "clean"
+      },
+      {
+        "key": "355:ppt:apply_professional_design",
+        "verdict": "clean"
+      },
+      {
+        "key": "356:ppt:apply_slide_template",
+        "verdict": "clean"
+      },
+      {
+        "key": "357:ppt:auto_generate_presentation",
+        "verdict": "clean"
+      },
+      {
+        "key": "358:ppt:create_presentation",
+        "verdict": "clean"
+      },
+      {
+        "key": "359:ppt:create_presentation_from_template",
+        "verdict": "clean"
+      },
+      {
+        "key": "360:ppt:create_presentation_from_templates",
+        "verdict": "clean"
+      },
+      {
+        "key": "361:ppt:create_slide_from_template",
+        "verdict": "clean"
+      },
+      {
+        "key": "362:ppt:format_table_cell",
+        "verdict": "clean"
+      },
+      {
+        "key": "363:ppt:get_presentation_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "364:ppt:get_server_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "365:ppt:get_slide_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "366:ppt:get_template_file_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "367:ppt:get_template_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "368:ppt:list_presentations",
+        "verdict": "clean"
+      },
+      {
+        "key": "369:ppt:list_slide_templates",
+        "verdict": "clean"
+      },
+      {
+        "key": "370:ppt:manage_fonts",
+        "verdict": "clean"
+      },
+      {
+        "key": "371:ppt:manage_hyperlinks",
+        "verdict": "clean"
+      },
+      {
+        "key": "372:ppt:manage_image",
+        "verdict": "clean"
+      },
+      {
+        "key": "373:ppt:manage_slide_masters",
+        "verdict": "clean"
+      },
+      {
+        "key": "374:ppt:manage_slide_transitions",
+        "verdict": "clean"
+      },
+      {
+        "key": "375:ppt:manage_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "376:ppt:open_presentation",
+        "verdict": "clean"
+      },
+      {
+        "key": "377:ppt:optimize_slide_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "378:ppt:populate_placeholder",
+        "verdict": "clean"
+      },
+      {
+        "key": "379:ppt:save_presentation",
+        "verdict": "clean"
+      },
+      {
+        "key": "380:ppt:set_core_properties",
+        "verdict": "clean"
+      },
+      {
+        "key": "381:ppt:switch_presentation",
+        "verdict": "clean"
+      },
+      {
+        "key": "382:ppt:update_chart_data",
+        "verdict": "clean"
+      },
+      {
+        "key": "383:puppeteer:puppeteer_click",
+        "verdict": "clean"
+      },
+      {
+        "key": "384:puppeteer:puppeteer_evaluate",
+        "verdict": "clean"
+      },
+      {
+        "key": "385:puppeteer:puppeteer_fill",
+        "verdict": "clean"
+      },
+      {
+        "key": "386:puppeteer:puppeteer_hover",
+        "verdict": "clean"
+      },
+      {
+        "key": "387:puppeteer:puppeteer_navigate",
+        "verdict": "clean"
+      },
+      {
+        "key": "388:puppeteer:puppeteer_screenshot",
+        "verdict": "clean"
+      },
+      {
+        "key": "389:puppeteer:puppeteer_select",
+        "verdict": "clean"
+      },
+      {
+        "key": "390:random-number:random_choices",
+        "verdict": "clean"
+      },
+      {
+        "key": "391:random-number:random_float",
+        "verdict": "clean"
+      },
+      {
+        "key": "392:random-number:random_int",
+        "verdict": "clean"
+      },
+      {
+        "key": "393:random-number:random_sample",
+        "verdict": "clean"
+      },
+      {
+        "key": "394:random-number:random_shuffle",
+        "verdict": "clean"
+      },
+      {
+        "key": "395:random-number:secure_random_int",
+        "verdict": "clean"
+      },
+      {
+        "key": "396:random-number:secure_token_hex",
+        "verdict": "clean"
+      },
+      {
+        "key": "397:searxng:document_reader",
+        "verdict": "clean"
+      },
+      {
+        "key": "398:searxng:docx_to_html",
+        "verdict": "clean"
+      },
+      {
+        "key": "399:searxng:docx_to_pdf",
+        "verdict": "clean"
+      },
+      {
+        "key": "400:searxng:excel_read",
+        "verdict": "clean"
+      },
+      {
+        "key": "401:searxng:format_convert",
+        "verdict": "clean"
+      },
+      {
+        "key": "402:searxng:html_cleaner",
+        "verdict": "clean"
+      },
+      {
+        "key": "403:searxng:html_extract_resources",
+        "verdict": "clean"
+      },
+      {
+        "key": "404:searxng:html_formatter",
+        "verdict": "clean"
+      },
+      {
+        "key": "405:searxng:html_to_markdown",
+        "verdict": "clean"
+      },
+      {
+        "key": "406:searxng:html_to_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "407:searxng:pdf_merger",
+        "verdict": "clean"
+      },
+      {
+        "key": "408:searxng:pdf_splitter",
+        "verdict": "clean"
+      },
+      {
+        "key": "409:searxng:text_diff",
+        "verdict": "clean"
+      },
+      {
+        "key": "410:searxng:text_encoding_converter",
+        "verdict": "clean"
+      },
+      {
+        "key": "411:searxng:text_formatter",
+        "verdict": "clean"
+      },
+      {
+        "key": "412:searxng:text_splitter",
+        "verdict": "clean"
+      },
+      {
+        "key": "413:sequential-thinking:sequentialthinking",
+        "verdict": "clean"
+      },
+      {
+        "key": "414:shadcn-ui-server:get_component_details",
+        "verdict": "clean"
+      },
+      {
+        "key": "415:shadcn-ui-server:get_component_examples",
+        "verdict": "clean"
+      },
+      {
+        "key": "416:shadcn-ui-server:list_shadcn_components",
+        "verdict": "clean"
+      },
+      {
+        "key": "417:shadcn-ui-server:search_components",
+        "verdict": "clean"
+      },
+      {
+        "key": "418:sitemap:get_sitemap_pages",
+        "verdict": "clean"
+      },
+      {
+        "key": "419:sitemap:get_sitemap_stats",
+        "verdict": "clean"
+      },
+      {
+        "key": "420:sitemap:get_sitemap_tree",
+        "verdict": "clean"
+      },
+      {
+        "key": "421:sitemap:parse_sitemap_content",
+        "verdict": "clean"
+      },
+      {
+        "key": "422:taskmanager:add_tasks_to_request",
+        "verdict": "clean"
+      },
+      {
+        "key": "423:taskmanager:approve_request_completion",
+        "verdict": "clean"
+      },
+      {
+        "key": "424:taskmanager:approve_task_completion",
+        "verdict": "clean"
+      },
+      {
+        "key": "425:taskmanager:delete_task",
+        "verdict": "clean"
+      },
+      {
+        "key": "426:taskmanager:get_next_task",
+        "verdict": "clean"
+      },
+      {
+        "key": "427:taskmanager:list_requests",
+        "verdict": "clean"
+      },
+      {
+        "key": "428:taskmanager:mark_task_done",
+        "verdict": "clean"
+      },
+      {
+        "key": "429:taskmanager:open_task_details",
+        "verdict": "clean"
+      },
+      {
+        "key": "430:taskmanager:request_planning",
+        "verdict": "clean"
+      },
+      {
+        "key": "431:taskmanager:update_task",
+        "verdict": "clean"
+      },
+      {
+        "key": "432:text-editor:edit_text_file_contents",
+        "verdict": "warnings"
+      },
+      {
+        "key": "433:text-editor:get_text_file_contents",
+        "verdict": "clean"
+      },
+      {
+        "key": "434:time:convert_time",
+        "verdict": "clean"
+      },
+      {
+        "key": "435:time:get_current_time",
+        "verdict": "clean"
+      },
+      {
+        "key": "436:trends-hub:get-36kr-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "437:trends-hub:get-9to5mac-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "438:trends-hub:get-bbc-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "439:trends-hub:get-bilibili-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "440:trends-hub:get-douban-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "441:trends-hub:get-douyin-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "442:trends-hub:get-gcores-new",
+        "verdict": "clean"
+      },
+      {
+        "key": "443:trends-hub:get-ifanr-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "444:trends-hub:get-infoq-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "445:trends-hub:get-juejin-article-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "446:trends-hub:get-netease-news-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "447:trends-hub:get-nytimes-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "448:trends-hub:get-smzdm-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "449:trends-hub:get-sspai-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "450:trends-hub:get-tencent-news-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "451:trends-hub:get-thepaper-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "452:trends-hub:get-theverge-news",
+        "verdict": "clean"
+      },
+      {
+        "key": "453:trends-hub:get-toutiao-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "454:trends-hub:get-weibo-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "455:trends-hub:get-weread-rank",
+        "verdict": "clean"
+      },
+      {
+        "key": "456:trends-hub:get-zhihu-trending",
+        "verdict": "clean"
+      },
+      {
+        "key": "457:weather:get_weather",
+        "verdict": "clean"
+      },
+      {
+        "key": "458:weather:get_weather_by_city",
+        "verdict": "clean"
+      },
+      {
+        "key": "459:web3-research-mcp:create-research-plan",
+        "verdict": "clean"
+      },
+      {
+        "key": "460:web3-research-mcp:fetch-content",
+        "verdict": "clean"
+      },
+      {
+        "key": "461:web3-research-mcp:list-resources",
+        "verdict": "clean"
+      },
+      {
+        "key": "462:web3-research-mcp:research-source",
+        "verdict": "clean"
+      },
+      {
+        "key": "463:web3-research-mcp:research-token",
+        "verdict": "clean"
+      },
+      {
+        "key": "464:web3-research-mcp:research-with-keywords",
+        "verdict": "clean"
+      },
+      {
+        "key": "465:web3-research-mcp:search",
+        "verdict": "clean"
+      },
+      {
+        "key": "466:web3-research-mcp:search-source",
+        "verdict": "clean"
+      },
+      {
+        "key": "467:web3-research-mcp:update-status",
+        "verdict": "clean"
+      },
+      {
+        "key": "468:whois:whois_as",
+        "verdict": "warnings"
+      },
+      {
+        "key": "469:whois:whois_domain",
+        "verdict": "warnings"
+      },
+      {
+        "key": "470:whois:whois_ip",
+        "verdict": "warnings"
+      },
+      {
+        "key": "471:whois:whois_tld",
+        "verdict": "warnings"
+      },
+      {
+        "key": "472:wikipedia:extract_key_facts",
+        "verdict": "clean"
+      },
+      {
+        "key": "473:wikipedia:get_article",
+        "verdict": "clean"
+      },
+      {
+        "key": "474:wikipedia:get_links",
+        "verdict": "clean"
+      },
+      {
+        "key": "475:wikipedia:get_related_topics",
+        "verdict": "clean"
+      },
+      {
+        "key": "476:wikipedia:get_sections",
+        "verdict": "clean"
+      },
+      {
+        "key": "477:wikipedia:get_summary",
+        "verdict": "clean"
+      },
+      {
+        "key": "478:wikipedia:search_wikipedia",
+        "verdict": "clean"
+      },
+      {
+        "key": "479:wikipedia:summarize_article_for_query",
+        "verdict": "clean"
+      },
+      {
+        "key": "480:wikipedia:summarize_article_section",
+        "verdict": "clean"
+      },
+      {
+        "key": "481:word-document-server:add_endnote_to_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "482:word-document-server:add_footnote_to_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "483:word-document-server:add_heading",
+        "verdict": "clean"
+      },
+      {
+        "key": "484:word-document-server:add_page_break",
+        "verdict": "clean"
+      },
+      {
+        "key": "485:word-document-server:add_paragraph",
+        "verdict": "clean"
+      },
+      {
+        "key": "486:word-document-server:add_picture",
+        "verdict": "clean"
+      },
+      {
+        "key": "487:word-document-server:add_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "488:word-document-server:convert_to_pdf",
+        "verdict": "clean"
+      },
+      {
+        "key": "489:word-document-server:copy_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "490:word-document-server:create_custom_style",
+        "verdict": "clean"
+      },
+      {
+        "key": "491:word-document-server:create_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "492:word-document-server:customize_footnote_style",
+        "verdict": "clean"
+      },
+      {
+        "key": "493:word-document-server:delete_paragraph",
+        "verdict": "clean"
+      },
+      {
+        "key": "494:word-document-server:find_text_in_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "495:word-document-server:format_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "496:word-document-server:format_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "497:word-document-server:get_document_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "498:word-document-server:get_document_outline",
+        "verdict": "clean"
+      },
+      {
+        "key": "499:word-document-server:get_document_text",
+        "verdict": "clean"
+      },
+      {
+        "key": "500:word-document-server:get_paragraph_text_from_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "501:word-document-server:list_available_documents",
+        "verdict": "clean"
+      },
+      {
+        "key": "502:word-document-server:protect_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "503:word-document-server:search_and_replace",
+        "verdict": "clean"
+      },
+      {
+        "key": "504:word-document-server:unprotect_document",
+        "verdict": "clean"
+      },
+      {
+        "key": "505:wuwa-mcp:get_artifact_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "506:wuwa-mcp:get_character_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "507:wuwa-mcp:get_character_profile",
+        "verdict": "clean"
+      },
+      {
+        "key": "508:yahoo-finance:get_cashflow",
+        "verdict": "clean"
+      },
+      {
+        "key": "509:yahoo-finance:get_current_stock_price",
+        "verdict": "clean"
+      },
+      {
+        "key": "510:yahoo-finance:get_dividends",
+        "verdict": "clean"
+      },
+      {
+        "key": "511:yahoo-finance:get_earning_dates",
+        "verdict": "clean"
+      },
+      {
+        "key": "512:yahoo-finance:get_historical_stock_prices",
+        "verdict": "clean"
+      },
+      {
+        "key": "513:yahoo-finance:get_income_statement",
+        "verdict": "clean"
+      },
+      {
+        "key": "514:yahoo-finance:get_news",
+        "verdict": "clean"
+      },
+      {
+        "key": "515:yahoo-finance:get_recommendations",
+        "verdict": "clean"
+      },
+      {
+        "key": "516:yahoo-finance:get_stock_price_by_date",
+        "verdict": "clean"
+      },
+      {
+        "key": "517:yahoo-finance:get_stock_price_date_range",
+        "verdict": "clean"
+      },
+      {
+        "key": "518:yfmcp:get_price_history",
+        "verdict": "clean"
+      },
+      {
+        "key": "519:yfmcp:get_ticker_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "520:yfmcp:get_ticker_news",
+        "verdict": "clean"
+      },
+      {
+        "key": "521:yfmcp:get_top",
+        "verdict": "clean"
+      },
+      {
+        "key": "522:yfmcp:search",
+        "verdict": "clean"
+      },
+      {
+        "key": "523:ygocdb:get_card_by_id",
+        "verdict": "clean"
+      },
+      {
+        "key": "524:ygocdb:get_card_image",
+        "verdict": "clean"
+      },
+      {
+        "key": "525:ygocdb:search_cards",
+        "verdict": "clean"
+      },
+      {
+        "key": "526:youtube-transcript:get_transcript",
+        "verdict": "clean"
+      }
+    ]
+  },
+  "reference_45": {
+    "tools": 45,
+    "outcomes": [
+      {
+        "key": "0:fetch:fetch",
+        "verdict": "clean"
+      },
+      {
+        "key": "1:filesystem:create_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "2:filesystem:directory_tree",
+        "verdict": "clean"
+      },
+      {
+        "key": "3:filesystem:edit_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "4:filesystem:get_file_info",
+        "verdict": "clean"
+      },
+      {
+        "key": "5:filesystem:list_allowed_directories",
+        "verdict": "clean"
+      },
+      {
+        "key": "6:filesystem:list_directory",
+        "verdict": "clean"
+      },
+      {
+        "key": "7:filesystem:list_directory_with_sizes",
+        "verdict": "clean"
+      },
+      {
+        "key": "8:filesystem:move_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "9:filesystem:read_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "10:filesystem:read_media_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "11:filesystem:read_multiple_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "12:filesystem:read_text_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "13:filesystem:search_files",
+        "verdict": "clean"
+      },
+      {
+        "key": "14:filesystem:write_file",
+        "verdict": "clean"
+      },
+      {
+        "key": "15:git:git_add",
+        "verdict": "clean"
+      },
+      {
+        "key": "16:git:git_branch",
+        "verdict": "clean"
+      },
+      {
+        "key": "17:git:git_checkout",
+        "verdict": "clean"
+      },
+      {
+        "key": "18:git:git_commit",
+        "verdict": "clean"
+      },
+      {
+        "key": "19:git:git_create_branch",
+        "verdict": "clean"
+      },
+      {
+        "key": "20:git:git_diff",
+        "verdict": "clean"
+      },
+      {
+        "key": "21:git:git_diff_staged",
+        "verdict": "clean"
+      },
+      {
+        "key": "22:git:git_diff_unstaged",
+        "verdict": "clean"
+      },
+      {
+        "key": "23:git:git_log",
+        "verdict": "clean"
+      },
+      {
+        "key": "24:git:git_reset",
+        "verdict": "clean"
+      },
+      {
+        "key": "25:git:git_show",
+        "verdict": "clean"
+      },
+      {
+        "key": "26:git:git_status",
+        "verdict": "clean"
+      },
+      {
+        "key": "27:memory:add_observations",
+        "verdict": "clean"
+      },
+      {
+        "key": "28:memory:create_entities",
+        "verdict": "clean"
+      },
+      {
+        "key": "29:memory:create_relations",
+        "verdict": "clean"
+      },
+      {
+        "key": "30:memory:delete_entities",
+        "verdict": "clean"
+      },
+      {
+        "key": "31:memory:delete_observations",
+        "verdict": "clean"
+      },
+      {
+        "key": "32:memory:delete_relations",
+        "verdict": "clean"
+      },
+      {
+        "key": "33:memory:open_nodes",
+        "verdict": "clean"
+      },
+      {
+        "key": "34:memory:read_graph",
+        "verdict": "clean"
+      },
+      {
+        "key": "35:memory:search_nodes",
+        "verdict": "clean"
+      },
+      {
+        "key": "36:sequential-thinking:sequentialthinking",
+        "verdict": "clean"
+      },
+      {
+        "key": "37:sqlite:append_insight",
+        "verdict": "clean"
+      },
+      {
+        "key": "38:sqlite:create_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "39:sqlite:describe_table",
+        "verdict": "clean"
+      },
+      {
+        "key": "40:sqlite:list_tables",
+        "verdict": "clean"
+      },
+      {
+        "key": "41:sqlite:read_query",
+        "verdict": "clean"
+      },
+      {
+        "key": "42:sqlite:write_query",
+        "verdict": "clean"
+      },
+      {
+        "key": "43:time:convert_time",
+        "verdict": "clean"
+      },
+      {
+        "key": "44:time:get_current_time",
+        "verdict": "clean"
+      }
+    ]
+  }
+}
