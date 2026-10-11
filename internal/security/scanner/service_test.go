@@ -1131,6 +1131,40 @@ func TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine(t *testing.T) 
 	}
 }
 
+// lockingUnquarantiner implements the optional ToolApprovalLocker capability
+// and records the order of lock/unlock/unquarantine around the storage write.
+type lockingUnquarantiner struct {
+	steps *[]string
+}
+
+func (u *lockingUnquarantiner) UnquarantineServer(string) error {
+	*u.steps = append(*u.steps, "unquarantine")
+	return nil
+}
+
+func (u *lockingUnquarantiner) WithToolApprovalLock(serverName string, fn func() error) error {
+	*u.steps = append(*u.steps, "lock:"+serverName)
+	err := fn()
+	*u.steps = append(*u.steps, "unlock:"+serverName)
+	return err
+}
+
+// UX-02: the atomic baseline+blocks commit writes approval records directly,
+// so it must run inside the runtime's per-server tool-approval lock — and the
+// unquarantine (which reloads config and starts discovery) must run after the
+// lock is released, or it would deadlock against the discovery pass.
+func TestServiceApproveServerWithBlocksWritesUnderToolApprovalLock(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	svc.SetServerUnquarantiner(&lockingUnquarantiner{steps: &steps})
+
+	if err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"}); err != nil {
+		t.Fatalf("approve with block failed: %v", err)
+	}
+	assert.Equal(t, []string{"lock:qs-server", "baseline_and_blocks", "unlock:qs-server", "unquarantine"}, steps)
+}
+
 func TestServiceApproveServerWithBlocksKeepsBlockWhenUnquarantineFails(t *testing.T) {
 	svc, store, _ := newTestService(t)
 	blockedStore := &blockRecordingStorage{Storage: store, blocks: make(map[string]map[string]ToolApprovalBlock)}

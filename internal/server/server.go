@@ -4445,7 +4445,17 @@ func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverN
 	a.server.runtime.RecordToolBlocksForSecurityApproval(serverName, toolNames, blockedBy)
 }
 
+// WithToolApprovalLock serializes the scanner's baseline+blocks commit with
+// the runtime's tool-approval writers for the server (UX-02).
+func (a *serverUnquarantinerAdapter) WithToolApprovalLock(serverName string, fn func() error) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fn()
+	}
+	return a.server.runtime.WithToolApprovalLock(serverName, fn)
+}
+
 var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
+var _ scanner.ToolApprovalLocker = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

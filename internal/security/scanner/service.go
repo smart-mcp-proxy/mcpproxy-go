@@ -131,6 +131,17 @@ type ToolBlockRecorder interface {
 	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
 }
 
+// ToolApprovalLocker is an OPTIONAL capability of the ServerUnquarantiner: run
+// fn while holding the runtime's per-server tool-approval lock (UX-02). The
+// atomic baseline+blocks commit writes approval records directly in storage;
+// serializing it with discovery passes keeps a pass holding a stale pending
+// copy of a record from overwriting the operator's block (approved+disabled)
+// back to pending+enabled, which the server-approval baseline would then
+// promote to approved+enabled. fn must not unquarantine the server.
+type ToolApprovalLocker interface {
+	WithToolApprovalLock(serverName string, fn func() error) error
+}
+
 // Service coordinates scanner management, scan execution, and approval workflow
 type Service struct {
 	storage        Storage
@@ -1780,7 +1791,12 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	if len(blocks) == 0 {
 		saveErr = s.storage.SaveIntegrityBaseline(baseline)
 	} else {
-		saveErr = s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+		save := func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
+		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok {
+			saveErr = locker.WithToolApprovalLock(serverName, save)
+		} else {
+			saveErr = save()
+		}
 	}
 	if saveErr != nil {
 		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
