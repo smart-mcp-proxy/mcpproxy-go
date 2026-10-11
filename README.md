@@ -249,7 +249,7 @@ The agent executes the tool through the variant matching its intent (`call_tool_
 }
 ```
 
-MCPProxy validates the intent against the tool's annotations (a "read" call can't reach a destructive tool) and checks quarantine and approval state before the call is forwarded. Sensitive-data detection flags potential secrets in arguments and responses in the activity log; it does not block the call by default. Optional [output sanitisation](https://docs.mcpproxy.app/features/output-sanitisation/) can redact detected secrets or block critical detections in supported text responses before they are forwarded. It does not cover tool arguments or non-text content.
+MCPProxy validates the intent against the tool's annotations (a "read" call can't reach a destructive tool) and checks quarantine and approval state before the call is forwarded. Sensitive-data detection flags potential secrets in arguments and responses in the activity log; it does not block the call by default. Optional [output sanitisation](https://docs.mcpproxy.app/features/output-sanitisation/) can redact detected secrets or block critical detections in supported text responses before they are forwarded. It does not cover tool arguments, non-text content, direct routing mode, or upstream error responses.
 
 ### 3. Audit — every call is on the record
 

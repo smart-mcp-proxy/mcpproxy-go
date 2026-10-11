@@ -22,7 +22,7 @@ MCPProxy is a Go-based application that acts as an intelligent proxy between AI 
 - **Security Quarantine** - Withholds new servers and tools from agents until you review and approve them, and holds changed tool definitions for review. This reduces exposure to Tool Poisoning Attacks (TPA); it is not a guarantee of safety (see [limits](/features/security-quarantine#what-quarantine-does-and-does-not-cover))
 - **Containerized MCP Servers** - Run upstream servers in Docker isolation for enhanced security
 - **Audit & Transparency** - Local activity records of tool calls for inspection and debugging, with configurable retention and a response size cap per record (not a compliance certification)
-- **Sensitive Data Detection** - Flags potential API keys, credentials and other sensitive data in tool arguments and responses in the activity log. Optional [output sanitisation](/features/output-sanitisation) can redact detected secrets or block critical detections in supported text responses
+- **Sensitive Data Detection** - Flags potential API keys, credentials and other sensitive data in tool arguments and responses in the activity log. Optional [output sanitisation](/features/output-sanitisation) can redact detected secrets or block critical detections in supported text responses (not in direct routing mode or upstream error results)
 
 ## Key Features
 

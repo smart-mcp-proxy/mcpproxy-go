@@ -25,7 +25,7 @@ MCPProxy scans tool call arguments and responses for sensitive data patterns and
 ### What detection does and does not do
 
 - **Detection is asynchronous and flags only.** Detection runs just after the call is recorded. Sensitive data in tool **arguments** is still forwarded to the upstream server, and a response is still returned to the agent unchanged. The finding is visible afterwards in the activity log.
-- **Inline protection is separate and opt-in.** [Output sanitisation](./output-sanitisation.md) can redact detected secrets (`response_action: redact`) or block a response containing a critical detection (`response_action: block`) before it is forwarded. It is off by default, applies to text content in tool responses only, and does not cover tool arguments or non-text content (images, audio, embedded resources).
+- **Inline protection is separate and opt-in.** [Output sanitisation](./output-sanitisation.md) can redact detected secrets (`response_action: redact`) or block a response containing a critical detection (`response_action: block`) before it is forwarded. It is off by default, applies to text content in successful tool responses only, and does not cover tool arguments, non-text content (images, audio, embedded resources), calls made in direct routing mode, or upstream error responses (`isError: true`).
 - **Pattern-based, so best effort.** A secret that matches no pattern is not flagged, and a redaction replaces only the matched span; check the redacted output rather than assuming the entire secret is gone.
 - **Retention is finite.** Activity records are subject to the configured age, count and size caps and to a per-record response size cap (see [Activity Log](./activity-log.md#configuration)).
 
