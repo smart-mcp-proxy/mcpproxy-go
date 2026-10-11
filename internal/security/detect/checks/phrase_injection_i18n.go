@@ -19,9 +19,12 @@ import (
 // "instrucciones"→"instrucci…" — hence the \p{L}* prefix stems). Go's \b is
 // ASCII-only, so word boundaries are spelled (?:^|[^\p{L}\p{N}]).
 //
-// The space-delimited families are HARD and skip a match negated by the word
-// before it ("не игнорируй"). The CJK families are SOFT (review only): without
-// word boundaries they cannot see negation or descriptive framing.
+// All non-English families are SOFT (review only): pattern matching cannot
+// see every language's negation ("Ignoriere die vorherigen Anweisungen nicht",
+// "以前の指示を無視しないで") or descriptive framing, and the position
+// classifier's cues are English. A match therefore HOLDS the change under
+// trust_mode=scan (verdict "warnings") but never auto-quarantines a server
+// (SEC-01 review rounds 1-2).
 //
 // Coverage is deliberately bounded to languages written here: de, fr, es, it,
 // pt, nl, pl, ru, uk, zh, ja, ko. Anything else (e.g. Turkish) is a documented
@@ -129,34 +132,32 @@ var cjkOverrideFamilies = []struct {
 	{"ko", regexp.MustCompile(`(?:이전|앞의|앞서|위의|위|기존|처음|원래|시스템)` + cjkGap + `{0,8}?(?:지시|지침|명령|규칙|프롬프트|안내)` + cjkGap + `{0,10}?(?:무시|잊어|잊으|따르지)`)},
 }
 
-// cjkOverrideBase keeps CJK override matches on the SOFT review tier.
-const cjkOverrideBase = 0.55
+// i18nOverrideBase keeps non-English override matches on the SOFT review tier
+// (below phraseHardMinConfidence, above phraseSoftFloor).
+const i18nOverrideBase = 0.55
 
-// multilingualOverrideFamilies returns the phrase families for the non-English
-// overrides: HARD for the space-delimited languages (imperative verb + prior
-// qualifier + directive noun, negation-guarded), SOFT for CJK.
+// i18nSoftReason is shown in the finding detail.
+const i18nSoftReason = "non-English matching cannot rule out negation or descriptive use"
+
+// multilingualOverrideFamilies returns the SOFT phrase families for the
+// non-English overrides.
 func multilingualOverrideFamilies() []phraseFamily {
 	out := make([]phraseFamily, 0, len(i18nOverrides)+len(cjkOverrideFamilies))
 	for _, o := range i18nOverrides {
 		out = append(out, phraseFamily{
 			re:              i18nSpacedFamily(o),
-			base:            0.88,
+			base:            i18nOverrideBase,
 			threat:          detect.ThreatPromptInjection,
 			what:            "non-English (" + o.lang + ") instruction-override directive",
 			leadingBoundary: true,
+			softReason:      i18nSoftReason,
 		})
 	}
 	for _, c := range cjkOverrideFamilies {
 		out = append(out, phraseFamily{
-			re: c.re,
-			// SOFT (below phraseHardMinConfidence): without word boundaries the
-			// CJK patterns cannot see negation ("以前の指示を無視しないで") or
-			// descriptive framing ("检查是否忽略之前的指令"), and the position
-			// classifier's cues are English. A match therefore HOLDS the change
-			// for review under trust_mode=scan but never auto-quarantines
-			// (SEC-01 review round 1).
-			base:       cjkOverrideBase,
-			softReason: "CJK matching cannot rule out negation or descriptive use",
+			re:         c.re,
+			base:       i18nOverrideBase,
+			softReason: i18nSoftReason,
 			threat:     detect.ThreatPromptInjection,
 			what:       "non-English (" + c.lang + ") instruction-override directive",
 		})

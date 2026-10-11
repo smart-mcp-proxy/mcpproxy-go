@@ -174,13 +174,6 @@ var phraseFamilies = []phraseFamily{
 		threat: detect.ThreatPromptInjection,
 		what:   "context-wipe directive",
 	},
-	{ // "Treat everything you were told before as void" (SEC-01): declaring the
-		// agent's prior directives void, then (by implication) replacing them.
-		re:     regexp.MustCompile(`\b(?:treat|consider|regard|deem) (?:(?:everyth\w*|anyth\w*|all(?: of)?(?: the| your)?) (?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct)\w*|(?:all(?: of)?(?: the| your)? |the |your )?(?:previous |prior |earlier |original |above )?(?:instruction|directiv|guidance|guidelin|system prompt)\w*(?: (?:that )?you (?:were|have been|has been|had been|was) (?:told|given|sent|provid)\w*)?)[^.!?]{0,30}?\bas (?:void|null|invalid|obsolete|cancel\w*|irrelevant|outdat\w*|moot|supersed\w*|non-?binding)\b`),
-		base:   0.88,
-		threat: detect.ThreatPromptInjection,
-		what:   "instruction-voiding directive",
-	},
 	{ // System-prompt / instruction exfiltration: "reveal your system prompt", "print these instructions".
 		re:     regexp.MustCompile(`\b(?:reveal|expos\w*|print|output|send|leak|disclos\w*|repeat|show|dump) (?:your |the |me |us |all )*(?:system prompt|hidden instruction|these instruction|your instruction|initial prompt|secret instruction)`),
 		base:   0.85,
@@ -231,9 +224,6 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				start := loc[0]
 				if fam.leadingBoundary {
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
-					if negatedOverride(t[:start]) {
-						continue
-					}
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
 				if !matched || conf > bestConf {
@@ -328,17 +318,3 @@ func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
 }
 
 func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
-
-// negatedOverride reports whether a non-English override is negated by the
-// word right before it ("не игнорируй …", "nie ignoruj …", "non ignorare …"),
-// which turns the directive into its opposite. prefix is the text before the
-// match's first letter.
-func negatedOverride(prefix string) bool {
-	p := strings.TrimRight(prefix, " ")
-	for _, neg := range []string{"не", "nie", "non", "no", "não", "nao", "ne", "niet", "nicht", "ні"} {
-		if strings.HasSuffix(p, " "+neg) || p == neg {
-			return true
-		}
-	}
-	return false
-}

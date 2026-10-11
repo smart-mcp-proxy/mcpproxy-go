@@ -185,33 +185,71 @@ func foldConfusables(s string) string {
 		i = j
 	}
 
-	changed := false
+	// Pass 1: decide each token's folding direction. Mixed tokens are resolved
+	// on their own evidence; whole-look-alike tokens need their neighbours.
+	const (
+		keep = iota
+		foldLatin
+		foldCyr
+		undecided // whole word of look-alikes: decided in pass 2
+	)
+	dir := make([]int, len(toks))
 	for ti, t := range toks {
 		nonLatin := t.counts.cyrillic + t.counts.other
 		mixed := t.counts.latin > 0 && nonLatin > 0
-		latinNeighbour := (ti > 0 && toks[ti-1].hasLatinLetter) || (ti+1 < len(toks) && toks[ti+1].hasLatinLetter)
-		toLat, toCyr := false, false
 		switch {
 		case mixed && t.canLatin && t.canCyr:
-			toLat = latinMajority
-			toCyr = !latinMajority
+			if latinMajority {
+				dir[ti] = foldLatin
+			} else {
+				dir[ti] = foldCyr
+			}
 		case mixed && t.canLatin:
-			toLat = true
+			dir[ti] = foldLatin
 		case mixed && t.canCyr:
-			toCyr = true
-		case t.counts.latin == 0 && nonLatin > 0 && t.canLatin && latinMajority && latinNeighbour:
-			// A whole word of look-alikes between Latin words: a disguised Latin word.
-			toLat = true
+			dir[ti] = foldCyr
+		case t.counts.latin == 0 && nonLatin > 0 && t.canLatin && latinMajority:
+			dir[ti] = undecided
 		}
+	}
+	// resolvedLatin reports whether token ti reads as a Latin word AFTER pass 1:
+	// a mixed word restored to Cyrillic ("Игнoрируй" → "игнорируй") is not a
+	// Latin neighbour, even though it contained a Latin letter.
+	resolvedLatin := func(ti int) bool {
+		if ti < 0 || ti >= len(toks) {
+			return false
+		}
+		switch dir[ti] {
+		case foldLatin:
+			return true
+		case foldCyr, undecided:
+			return false
+		}
+		return toks[ti].hasLatinLetter && toks[ti].counts.cyrillic+toks[ti].counts.other == 0
+	}
+	// Pass 2: a whole word of look-alikes folds to Latin only between Latin
+	// words; otherwise it is a genuine Cyrillic/Greek word and is kept.
+	for ti := range toks {
+		if dir[ti] == undecided {
+			if resolvedLatin(ti-1) || resolvedLatin(ti+1) {
+				dir[ti] = foldLatin
+			} else {
+				dir[ti] = keep
+			}
+		}
+	}
+
+	changed := false
+	for ti, t := range toks {
 		for k := t.start; k < t.end; k++ {
 			c := classifyLetter(runes[k])
-			if toLat && c != 0 {
+			if dir[ti] == foldLatin && c != 0 {
 				if l, ok := toLatin[runes[k]]; ok {
 					runes[k] = l
 					changed = true
 				}
 			}
-			if toCyr && c == 0 {
+			if dir[ti] == foldCyr && c == 0 {
 				if cy, ok := toCyrillic[runes[k]]; ok {
 					runes[k] = cy
 					changed = true
