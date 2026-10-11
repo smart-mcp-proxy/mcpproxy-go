@@ -104,6 +104,8 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
+	// createMu serializes create-only server adds (see createServer).
+	createMu sync.Mutex
 	// profileIndexes caches the slug → profile index of the current config
 	// snapshot for the /mcp/p/<slug> gate (Spec 105 FR-004, O(1) in the fleet).
 	profileIndexes profileIndexCache
@@ -1971,29 +1973,13 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 		zap.Bool("enabled", serverConfig.Enabled),
 		zap.Bool("quarantined", serverConfig.Quarantined))
 
-	// Check if server already exists
-	storageManager := s.runtime.StorageManager()
-	existing, err := storageManager.GetUpstreamServer(serverConfig.Name)
-	if err == nil && existing != nil {
-		return fmt.Errorf("server '%s' already exists", serverConfig.Name)
-	}
-
 	// Set creation timestamp
 	serverConfig.Created = time.Now()
 
-	// Save to storage
-	if err := storageManager.SaveUpstreamServer(serverConfig); err != nil {
-		return fmt.Errorf("failed to save server to storage: %w", err)
-	}
-
-	// Update runtime config.
-	// runtime.Config() returns the live immutable snapshot, which background
-	// goroutines (e.g. LoadConfiguredServers, DiscoverAndIndexTools) may be
-	// ranging over concurrently. Mutating its Servers slice in place is a data
-	// race, so copy-on-write: clone the config and its server list, append to
-	// the clone, then publish atomically via UpdateConfig.
-	if updatedConfig := configWithAppendedServer(s.runtime.Config(), serverConfig); updatedConfig != nil {
-		s.runtime.UpdateConfig(updatedConfig, "")
+	// Create-only: refuses an existing name (runtime config or storage) and
+	// publishes to the runtime config atomically. A failed add touches nothing.
+	if err := s.createServer(serverConfig); err != nil {
+		return err
 	}
 
 	// Save configuration to file
@@ -2164,7 +2150,9 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	s.runtime.UpstreamManager().RemoveServer(serverName)
 
 	// Remove from storage
-	if err := storageManager.RemoveUpstream(serverName); err != nil {
+	if err := s.removeServerStorage(serverName, func() error {
+		return storageManager.RemoveUpstream(serverName)
+	}); err != nil {
 		return fmt.Errorf("failed to remove server from storage: %w", err)
 	}
 
