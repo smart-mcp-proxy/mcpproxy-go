@@ -71,7 +71,7 @@ These are what the tests prove.
 - **I3 (atomic removal)**: once a removal commit returns, the name is absent from the live config, storage, disk, the manager, the search indexes and every purge-set bucket. No later commit or worker brings it back unless an explicit create commit does.
 - **I4 (clean re-add)**: a server created under a previously used name has a generation greater than every earlier generation for that name, and nothing from the purge set survives from them.
 - **I5 (stale workers are inert)**: a manager registration, removal or connect bound to `(name, g)` has no effect unless `g` equals the manager's desired generation for `name`. The check runs in the same critical section as the change.
-- **I6 (retirement barrier)**: when a commit removes a server, or changes its connection fields, `Enabled` or `Quarantined`, the old instance is unregistered and retired before the commit publishes. No process launch, TCP or TLS dial, HTTP/SSE request byte or OAuth request byte (metadata, DCR, token, refresh, or a `net/http` internal retry) for that instance starts after that point.
+- **I6 (retirement barrier)**: when a commit removes a server, or changes its connection fields, `Enabled` or `Quarantined`, the old instance is unregistered and retired before the commit publishes. No launch of the upstream (its command, its container `run`, its launcher, the OAuth browser, or a Docker diagnostic/recovery exec), no TCP or TLS dial (readiness probes included), and no HTTP/SSE request byte or OAuth request byte (metadata, DCR, token, refresh, or a `net/http` internal retry) for that instance starts after that point. Teardown commands that end the instance (`docker stop/kill/rm`, process-group kill) are exempt.
 - **I7 (incarnation-bound approvals)**: an approval writer that captured `inc(name)` writes nothing once a commit has removed the server, or removed and re-created it.
 - **I8 (no deadlock)**: the lock order in [plan.md](plan.md) §Lock order holds on every path. No code holding a lower lock calls `Commit`.
 
@@ -155,6 +155,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-008**: a newly quarantined server MUST be purged from the global and per-profile indexes inside the commit, whatever path set the flag (fixes B1 and r10-C #2).
 - **FR-008a**: every discovery pass MUST perform its final eligibility check (the row exists, `Generation` equals the generation it captured, and the server is not quarantined or disabled) and **all** of its index, StateView and last-good writes in one hold of the server's approval lock (D15).
 - **FR-008b**: every approval decision (discovery, operator approve/block/toggle, scanner, baseline promotion) MUST resolve its policy from storage under the server's approval lock: the row's trust mode, quarantine, skip and auto-approve fields, and `meta.quarantine_enabled` written in the commit transaction (D16). It MUST NOT read the published config.
+- **FR-008c**: a commit that changes a global approval-policy field (`quarantine_enabled`) MUST take every configured server's approval lock, in sorted order, in step 4 (D16 amended).
 - **FR-009**: `scripts/check-upstream-write-sites.sh` MUST fail when `upstreams` rows are written outside `internal/storage`, `internal/runtime/commit*.go` and tests. It MUST run in CI.
 - **FR-010a**: `CommitTx.UnderApprovalLock(name, fn)` MUST run `fn` in step 4 while holding `name`'s approval lock, in the same lock hold as step 6's row write. It is the integration point for Spec 117's review-bound server approval. The storage quarantine flip MUST only ever be the commit's row write.
 - **FR-010**: `configsvc` MUST compute `ServerGenerations` at prepare time. An unchanged entry keeps its generation, and a new or changed entry gets `G`. Generations MUST be monotonic across restarts.
@@ -177,6 +178,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-018**: `upstream.Manager` MUST keep `desired map[string]desiredGen` that only the commit sets (step 7), and MUST offer `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt` and `DisconnectServerAt` (every disconnect leg, including the first half of `ActionReconnect`). These return `ErrStaleGeneration` unless the generation matches, checked under `captureMu`+`mu` in the same section as the map change.
 - **FR-019**: the commit's step 7 MUST, for each server whose generation moved, either (a) unregister the instance under `captureMu` (for removal or for a change to connection fields, `Enabled` or `Quarantined`), or (b) restamp it and call `SetConfig` (for any other change).
 - **FR-020**: the connect/disconnect workers spawned after a commit, supervisor `executeAction`, `ActorPoolSimple`, `RestartServer` and `postConfigReload`'s `ConnectAll` MUST use the `*At` methods with the generation from the snapshot or commit result they act on. `ErrStaleGeneration` is logged at debug level and is not an error.
+- **FR-020a**: `Manager.ForceReconnectAll` and its Docker-recovery caller MUST use `ReplaceInstanceAt(name, gen, expected)`. Inside `manager.go`, no internal call may use the legacy mutators outside the `*At` implementations.
 - **FR-021**: the capture and discovery publish paths MUST carry the instance's generation and drop results whose generation is no longer desired.
 
 ### Functional Requirements: Retirement barrier (PR4)
@@ -273,6 +275,9 @@ See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapsho
 | Review R2.3/R2.4 gate nesting, stdio launch handoff | FR-025a | PR4 | T4.10, T4.11 |
 | Review R2.5 last-good snapshot after re-add | FR-012, FR-021b | PR2, PR3 | T2.10, T3.7 |
 | Review R3.1 D15 re-entry | FR-008a | PR1 | T1.13 |
+| Review R4.1 Docker recovery resurrection | FR-020a | PR3 | T3.8 |
+| Review R4.2 global policy change | FR-008c | PR1 | T1.15 |
+| Review R4.4 launcher probe, Docker helpers | I6, FR-023 | PR4 | T4.14 |
 | Review R3.2 policy from published config | FR-008b | PR1 | T1.14 |
 | Review R3.3/R3.4 Windows descendants, browser launch | FR-025b | PR4 | T4.12, T4.13 |
 | Review R3.5/R3.6 completion, identity, history | FR-014c | PR2 | T2.11, T2.12 |

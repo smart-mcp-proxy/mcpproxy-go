@@ -73,6 +73,7 @@ go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEn
 | T1.11 | exclusion: removal parked at `afterStorage` | B toggle, REST update and MCP patch of the removed server, started in goroutines | all three are blocked (`commitWaiters()==3`). After release: the toggle succeeds, both updates get 404, the server never reappears (formerly T2.3, regression coverage) |
 | T1.13 | n/a | a discovery pass whose upstream dropped a tool | completes without re-entering L1 (watchdog 5 s); the absent tool's record is removed (R3.1) |
 | T1.14 | approval writer parked after acquiring L1 is impossible on the PR, so: commit parked at `afterStorage` (L1 released, before publish) | `ApproveTools`/tool toggle on that server under the new `trust_mode: manual` | the decision uses manual (from storage), not the still-published auto (R3.2). Parent: fails |
+| T1.15 | discovery pass holding A's L1 with `quarantine_enabled=false` (parked inside, dual-mode) | global-only commit enabling quarantine | the commit is observed waiting on A's L1, or (parent) returns first. After release, a new tool is pending, not auto-approved (R4.2) |
 | T1.9 | n/a | restart | after a restart, `Snapshot.Version` is greater than or equal to the persisted `meta.config_commit_generation`, and generations of unchanged servers are kept |
 
 ## T2: Removal and purge (PR2)
@@ -107,6 +108,7 @@ tokens.
 | T3.4 | `RestartServer(s)` worker parked | remove s | no client for s |
 | T3.5 | (a) capture parked **before** `WithCurrentClientOnEpoch`; (b) capture parked inside it | (a) replace the endpoint, commit returns, release capture; (b) start the commit, assert `CaptureReplacementQueued()`, release capture, await commit | (a) the capture finds the instance unregistered and persists nothing; (b) the capture completed before the replacement (the old definitions are recorded under the old incarnation and then superseded). No `review.changed` for old definitions after the commit |
 | T3.7 | approval reindex with a cached snapshot stamped with an old `Gen` | the endpoint changes | reapply rejected; re-list instead (FR-021b) |
+| T3.8 | `ForceReconnectAll` parked after capturing clients | remove A; replace B | A not re-created, B's replacement not removed (R4.1) |
 | T3.6 | old `ActionDisconnect` at `beforeExecuteAction` | the newer commit installs and connects the replacement | release: `DisconnectServerAt` returns `ErrStaleGeneration`, the replacement stays connected (R1.5) |
 
 ## T4: Retirement barrier (PR4)
@@ -134,6 +136,7 @@ Fixtures (test-only):
 | T4.11 | stdio launch parked between `cmd.Start` and group/Job registration (inside the admitted section) | `Retire` (asserts `RetireWaiting()`), release | the child is killed before `Retire` returns; on Windows, a failed Job assignment kills the child and Start fails (R2.4) |
 | T4.12 | Windows-only: a child that spawns a grandchild immediately | `Retire` | the grandchild is in the Job and dead when `Retire` returns (R3.3) |
 | T4.13 | `openBrowser` parked before `Start` | `Retire` | no browser process; a code delivered to the callback afterwards is not exchanged and no token is stored (R3.4) |
+| T4.14 | launcher `WaitForURL` parked after its cancellation check; Docker diagnostic exec parked | `Retire` | no dial, no diagnostic exec; teardown `docker stop` still runs (R4.4) |
 | T4.7 | benchmark | — | `BenchmarkGatedConnWrite` shows < 5% overhead against an ungated conn on a 1 KiB write |
 
 ## Live checks (qa070 harness)

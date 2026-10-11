@@ -232,10 +232,12 @@ func (m *Manager) AddServerConfigAt(name string, cfg *config.ServerConfig, gen i
 func (m *Manager) RemoveServerAt(name string, gen int64) error                            // ErrStaleGeneration
 func (m *Manager) ConnectServerAt(ctx context.Context, name string, gen int64) error        // ErrStaleGeneration
 func (m *Manager) DisconnectServerAt(name string, gen int64) error                         // exact instance only
+func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Client) error // ForceReconnectAll / Docker recovery / RestartServer
 ```
 
-`managed.Client` gains `Generation() int64` (set when installed, restamped on
-generation-only changes). The legacy `AddServerConfig`/`AddServer`/`RemoveServer`
+`managed.Client` gains `Generation() int64`. It is set when installed and
+restamped on generation-only changes. **This lands in PR1** (review R4.3),
+because D15 needs it. PR3 adds the manager-side checks. The legacy `AddServerConfig`/`AddServer`/`RemoveServer`
 stay for tests and CLI-only code paths. In the daemon they are replaced by the
 `*At` forms, and a CI grep (`scripts/check-upstream-write-sites.sh`, extended)
 forbids the legacy forms in `internal/runtime/**`.

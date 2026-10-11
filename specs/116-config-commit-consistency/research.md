@@ -573,3 +573,15 @@ wrote under the same L1:
 reads the row and the meta key in one `View` while the caller holds L1. The
 published config may lag for the few microseconds between steps 6 and 8, and
 nothing that decides trust looks at it.
+
+## 10. Design review round 4 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Verdict: FINDINGS (4: two high, two medium). All were verified and accepted.
+Review rounds used on this design PR: 4 of the 10-round cap.
+
+| # | Sev | Finding | Resolution |
+|---|---|---|---|
+| R4.1 | high | `Manager.ForceReconnectAll` (`manager.go:2534-2617`), which is reached from Docker recovery (`:3299-3306`) and `Runtime.ForceReconnectAllServers` (`lifecycle.go:2471-2482`), captures clients and calls the legacy `RemoveServer`/`AddServer` internally. It can resurrect a removed server or remove its replacement | PR3 converts it to `ReplaceInstanceAt(name, gen, expected *managed.Client)`: replace only if `desired[name].gen == gen` and the registered instance is still `expected`. The write-site audit (T076) is extended **into `internal/upstream/manager.go`**, where internal calls to the legacy mutators are forbidden outside the `*At` implementations. T3.8 parks recovery after its capture and then removes or replaces the server |
+| R4.2 | high | A global-only policy change (`quarantine_enabled`) takes no server L1, so a discovery pass holding A's L1 with the old policy can approve under it after the commit returns | **D16 amended**: a commit that changes any global approval-policy field (`quarantine_enabled`; the list lives next to `resolveToolQuarantineGateHeld`) takes **every configured server's** L1 in sorted order in step 4. A pass then finishes entirely before the meta write or entirely after it. T1.15 is the global-only counterpart of T1.14 |
+| R4.3 | medium | D15 (PR1) compares a captured *config* generation, but instance generation stamping was assigned to PR3. Today discovery captures a supervisor connection generation, which is a different counter | Instance stamping moves to **PR1**: `managed.Client.Generation()` is set when a client is constructed from the `(cfg, gen)` the post-commit worker passes, and restamped on the `SetConfig` path. Discovery captures the instance's generation. D15 drops results from an instance whose stamp differs from the row (an instance not yet updated to the committed config). PR3 keeps only the execution-time manager checks and the supervisor actions (T024c) |
+| R4.4 | medium | The launcher readiness probe dials with its own `net.Dialer` (`launcher/wait.go:63-78`). Docker diagnostics run `cmd.Run()` (`core/monitoring.go:499-504`). Teardown runs Docker cleanup commands after retirement (`connection_lifecycle.go:323-354`) | `WaitForURL` takes the gate's dialer. Docker diagnostics and recovery execs are admitted sections. **I6 is refined**: it covers launches **of the upstream** (its command, its container `run`, its launcher, the OAuth browser) and every network byte. **Teardown commands** (`docker stop/kill/rm`, process-group kill) are explicitly exempt, because they act to end the instance (T4.14) |

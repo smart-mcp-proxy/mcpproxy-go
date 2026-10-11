@@ -53,6 +53,7 @@ Branch `116-pr1-config-commit` from `main`.
 - [ ] T024 [US1] `internal/runtime/commit_reconcile.go`: move `LoadConfiguredServers`' storage phase into step 6 (diff against the stored view; OAuth-config-change clear; newly-quarantined index purge, FR-008; orphan GC on the working copy, with the empty guard at boot only). Keep `LoadConfiguredServers(nil)` as a thin `Commit("reconcile", ReplaceConfig(live))` wrapper for the boot path. Delete the removal goroutines (removal is synchronous in step 6)
 - [ ] T024a [US1] D15: move a discovery pass's final eligibility/generation check and all its index, StateView and last-good writes into one hold of L1 (coordinate with Spec 117 PR-3 G8; skip if already landed) (makes T018c pass). `ReconcileLive()`; delete `LoadConfiguredServers(cfg)`'s captured-argument form (D14)
 - [ ] T024b [US1] `checkToolApprovalsHeld` / `deleteToolApprovalHeld` caller-held variants and the inventory of helpers inside the D15 hold; `resolveToolQuarantineGateHeld` reads the row + `meta.quarantine_enabled` (written by the commit tx) (D16) (makes T018d pass)
+- [ ] T024c [US1] `managed.Client.Generation()`: stamped from the `(cfg, gen)` passed by post-commit workers and restamped on `SetConfig`; discovery captures it for D15 (review R4.3). Global approval-policy change → all servers' L1 in step 4 (FR-008c, T1.15)
 - [ ] T025 [US1] after-unlock workers: spawn connect/disconnect workers for `Changes` (still the legacy manager calls; PR3 binds them), the events, the telemetry `NotifyConfigChanged`
 - [ ] T026 [US1] `ApplyConfig`/`applyConfigLocked`, `ReloadConfiguration`, `UpdateConfig`, `UpdateListenAddress`, `SaveConfiguration` (persist the live config, no storage read), `gateInitialConfig`, `SetServerShared` → `Commit` (makes T011 pass)
 - [ ] T027 [US1] `EnableServer`, `BulkEnableServers`, `QuarantineServer` (index purge in the commit; baseline approval after the commit, unchanged), `RestartServer`'s disk refresh → `Commit` (makes T013 pass)
@@ -126,13 +127,14 @@ independent of PR2.
 
 ### Implementation
 
-- [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu); `DisconnectServerAt`, `managed.Client.Generation()` (makes T064 and T061a pass)
+- [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu); `DisconnectServerAt`, `ReplaceInstanceAt` (makes T064 and T061a pass)
 - [ ] T071 [US3] `commit.go` step 7 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
 - [ ] T072 [US3] Post-commit workers use `*At` with `(name, g)` (makes T060 pass)
 - [ ] T073 [US3] Supervisor: actions carry `ServerGen.Gen` from their snapshot; `ActorPoolSimple` uses `*At`; `ErrStaleGeneration` → debug + no-op (makes T061 pass)
 - [ ] T074 [US3] `RestartServer` → `manager.ReplaceInstance(name, gen)` (retire + fresh instance at the same generation) (makes T062 pass)
 - [ ] T075 [US3] Capture and discovery carry the instance generation and drop on mismatch; `lastGoodTools` stamped `{Incarnation, Gen}` and reapply rejects a mismatch (makes T063 and T063a pass)
-- [ ] T076 [US3] Extend `check-upstream-write-sites.sh`: forbid `AddServerConfig(`, `AddServer(` and `RemoveServer(` on the manager inside `internal/runtime/**` and `internal/server/**` outside tests
+- [ ] T075a [US3] `ForceReconnectAll` + Docker recovery → `ReplaceInstanceAt` (T3.8, `internal/upstream/force_reconnect_generation_test.go` written first)
+- [ ] T076 [US3] Extend `check-upstream-write-sites.sh` (including manager-internal calls in `internal/upstream/manager.go`, review R4.1): forbid `AddServerConfig(`, `AddServer(` and `RemoveServer(` on the manager inside `internal/runtime/**` and `internal/server/**` outside tests
 - [ ] T077 [US3] `qa_hooks` build tag: `MCPPROXY_QA_PARK_WORKER`; live L3; evidence `s116-pr3`; the race/lint/e2e matrix; Sol review
 
 **Checkpoint**: stale workers and actions are inert. #1563 is closed.
@@ -165,6 +167,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
 - [ ] T093a [US4] Lock-free `dialgate.WrapTransport` around every core-built mcp-go transport; stdio `cmd.Start` + group/Job registration + `TrackProcess` in one admitted section, with a kill on a Job assignment failure; `Retire` kills before and after its barrier (makes T081a, T085a pass)
 - [ ] T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher); `openBrowser` under `gate.Admit` (makes T085b pass)
+- [ ] T093c [US4] `launcher.WaitForURL` takes the gate dialer; Docker diagnostic/recovery execs under `gate.Admit`; teardown exemption documented (T4.14, `internal/upstream/core/retire_launcher_probe_test.go` written first)
 - [ ] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
 - [ ] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
 - [ ] T095 [US4] `AdvanceGenerations` calls `Retire()` on every instance it unregisters, before returning (and so before publish) (makes T085 pass)
