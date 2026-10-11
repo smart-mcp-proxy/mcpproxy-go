@@ -65,7 +65,7 @@ var req struct {
 ## 4. `StaleToolReviewError` (PR-2)
 
 ```go
-// internal/storage/tool_review_errors.go
+// internal/toolreview/errors.go  (leaf package: stdlib imports only; see research D4)
 type StaleToolReviewError struct {
     Server        string
     Changed       []string // fingerprint differs from the reviewed one
@@ -79,6 +79,8 @@ All lists are sorted and deduplicated. HTTP mapping (both handlers): 409, `error
 
 ## 5. `ToolBaselineDecision` (stored, PR-1)
 
+The value type `toolreview.BaselineDecision{DecidedAt, Source, By}` lives in the leaf package `internal/toolreview`. The storage methods take and return it. The scanner never calls storage for it: it reaches the marker through the runtime adapter (research D7).
+
 Bucket `tool_baseline_decisions` (`internal/storage/models.go` constant `ToolBaselineDecisionsBucket`), created by `CreateBucketIfNotExists` on first write.
 
 | Key | Value (JSON) |
@@ -88,7 +90,7 @@ Bucket `tool_baseline_decisions` (`internal/storage/models.go` constant `ToolBas
 The value is decoded leniently: an unreadable value counts as "decided", which fails closed.
 
 ```go
-func (m *Manager) MarkToolBaselineDecided(server string, d ToolBaselineDecision) error // idempotent; keeps the first decided_at, updates source only from inferred → explicit
+func (m *Manager) MarkToolBaselineDecided(server string, d toolreview.BaselineDecision) error // idempotent; keeps the first decided_at, updates source only from inferred → explicit
 func (m *Manager) ToolBaselineDecided(server string) (bool, error)
 // DeleteServerToolApprovals / PruneToolApprovalsNotIn delete the marker in the same tx.
 ```
@@ -122,7 +124,7 @@ type toolApprovalServerLock struct {
 
 `lockToolApprovals` keeps its signature. A new `lockToolApprovalsForCapture(server, seq) (unlock func(), stale bool)` is added.
 
-`lastGoodTools` (`runtime.go`) becomes `map[string]lastGoodSnapshot{tools []*config.ToolMetadata; seq uint64}`. The `lastGoodToolsSnapshot` accessor returns both.
+`lastGoodTools` (`runtime.go`) becomes `map[string]lastGoodSnapshot{tools []*config.ToolMetadata; capture managed.InventoryCapture}`. It keeps the **complete** capture identity (seq, epoch, client), not only the sequence (design review r1 #4). Re-applying the snapshot validates that identity with `WithCaptureCurrent`. A snapshot whose client was replaced or retired, or whose epoch moved (reconnect), is not re-applied: the approval reindex re-lists instead (`RefreshServerTools`, the existing fallback at `tool_quarantine.go:1990-1995`), and the sweep fallback skips the server, since its connect discovery lists it. The `lastGoodToolsSnapshot` accessor returns both.
 
 ## 8. State transitions affected
 

@@ -78,7 +78,7 @@ An operator opens the review of a quarantined server, decides which tools to all
    - the server is still quarantined and the record is still pending;
    - no integrity baseline was written.
 2. **Given** the same review, **When** a new tool `drop_db` is captured before the approval and the request carries only `{"read_note": H1}`, **Then** the response is 409 naming `drop_db` as "not in the review". With `block: ["drop_db"]` instead, the approval succeeds and `drop_db` is approved+disabled.
-3. **Given** an empty captured review or a blind approval (nothing captured), and a client that sends `expected_hashes: {}`, **When** a tool is captured before the commit, **Then** the response is 409. **When** a tool is first captured after the commit, **Then** it is pending. That half needs PR-1's marker (FR-023).
+3. **Given** an empty captured review or a blind approval (nothing captured), and a client that sends `expected_hashes: {}`, **When** a tool is captured before the commit, **Then** the response is 409. **When** a tool is first captured after the commit, **Then** it is pending, through PR-1's marker (FR-023), which PR-2 requires.
 4. **Given** a trusted server with pending tool `t` at H1, **When** `POST tools/approve {"tools":["t"],"expected_hashes":{"t":H1}}` runs after `t` changed, **Then** the response is 409 and `t` stays held. With the fresh fingerprint, `t` is approved.
 5. **Given** a client that sends no `expected_hashes`, **When** it approves, **Then** today's behaviour applies, except that tools filed after the commit stay pending (FR-012).
 
@@ -156,7 +156,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 - **FR-010**: Unbound requests MUST keep working (compatibility), subject to FR-012.
 - **FR-011**: A bound server approval MUST perform these steps under one hold of the server's tool-approval lock:
   1. validation;
-  2. the baseline marker, when PR-1 is present;
+  2. the baseline marker (from PR-1, which PR-2 requires);
   3. the integrity baseline + blocks commit;
   4. promotion of the validated pending records;
   5. the storage quarantine flip.
@@ -204,13 +204,13 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 - **FR-034**: Before any index write, the apply MUST re-check under the lock that the server is enabled and not quarantined, in config OR storage, failing closed. A quarantined server's inventory is recorded for review only.
 - **FR-035**: `QuarantineServer(true)` MUST flip storage and purge the shared index entries in one critical section under the lock. The profile-index refresh may follow outside it.
 - **FR-036**: The upstream manager MUST retire a client it removes or replaces, under its capture writer lock. An inventory captured by a retired client, or under an epoch that is no longer current, MUST be discarded without writes.
-- **FR-037**: `lastGoodTools` MUST store the capture sequence with the snapshot and MUST NOT be replaced by an older capture. Re-applying the snapshot (approval reindex, sweep fallback) uses its stored sequence.
+- **FR-037**: `lastGoodTools` MUST store the complete capture identity (seq, epoch, client) with the snapshot and MUST NOT be replaced by an older capture. Re-applying the snapshot (approval reindex, sweep fallback) is allowed only while that capture is still current (client not replaced or retired, epoch unchanged). Otherwise the approval reindex re-lists the server and the sweep fallback skips it.
 - **FR-038**: The profile-index refresh, signature-cache reconcile, SSE events and activity records MUST run after the lock is released.
 
 ### Key Entities
 
 - **ReviewFingerprint**: derived, not stored. See data-model.md.
-- **StaleToolReviewError**: lists of changed, unreviewed and missing-block tools. Maps to HTTP 409.
+- **StaleToolReviewError**: lists of changed, unreviewed and missing-block tools, in the leaf package `internal/toolreview`. Maps to HTTP 409.
 - **ToolBaselineDecision**: stored in a new bucket. Server → `{decided_at, source, by}`.
 - **InventoryCapture**: in memory. `{seq uint64, epoch int64, client *managed.Client}`.
 - **ToolApprovalServerLock**: in memory. The existing per-server mutex plus the `applied` and `published` sequences.
@@ -245,7 +245,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 - **O1**: Blind approvals hold later tools (A6). The alternative is that a blind approval keeps auto-trust of the first inventory. Default: hold. It is safer and matches the tray's empty-snapshot binding. Updating the tray copy needs a follow-up on `native/`.
 - **O2**: Should the 409 body list the old and new fingerprints of each changed tool? Default: names only, since clients reload anyway.
 - **O3**: Bind the Tools page bulk approve and the MCP approval operations in a follow-up. This needs the fingerprint in `GET /servers/{id}/tools` and a golden update.
-- **O4**: PR order. Default: PR-1 (#1567) → PR-2 (#1566) → PR-3 (#1565). PR-2 can merge first; the post-commit half of US1 scenario 3 then lands with PR-1.
+- **O4**: PR order. PR-1 (#1567) must merge before PR-2 (#1566) is cut, because PR-2's post-commit guarantee needs the marker (design review r1 #3). PR-3 (#1565) is independent and can go at any point; the default is last, because it is the largest.
 
 ## Out of Scope
 

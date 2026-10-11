@@ -69,7 +69,7 @@ The tray's expectations, checked against `pr1572.diff`:
 **Decision**:
 - New `Runtime.ApproveToolsReviewed(server, names, expected, by)` and `Runtime.ApproveAllToolsReviewed(server, expected, by)`. A nil `expected` means unbound; these delegate to today's code.
 - The check `staleReviewedRecords(server, candidates, expected) *StaleToolReviewError` runs on records read inside the locked section.
-- `StaleToolReviewError` lives in `internal/storage`, next to the record type, so the scanner can return it without importing the runtime. httpapi maps it with `errors.As` to 409 `review_out_of_date`.
+- `StaleToolReviewError` lives in a new leaf package `internal/toolreview` (stdlib imports only). `internal/storage` already imports `internal/security/scanner` (`storage/manager.go:16`, `storage/scanner.go:7`), so the scanner can import neither storage nor the runtime. With a leaf package, scanner, storage, runtime and httpapi can all name the type without a cycle (design review r1 #1). httpapi maps it with `errors.As` to 409 `review_out_of_date`.
 
 **Alternatives**: validating in the HTTP handler before calling the runtime, rejected because of the TOCTOU between the check and the write. Validating in storage inside the bbolt tx, rejected because fingerprint computation is runtime policy, and the lock already gives atomicity with respect to every writer.
 
@@ -104,7 +104,7 @@ The scanner gets a new optional interface, `ReviewedServerApprover`, with these 
 **Decision**: add bucket `tool_baseline_decisions` with JSON values (data-model.md).
 - `serverHasBaseline = marker || anyApprovedOrChanged`.
 - Discovery sets the marker inside `checkToolApprovals`, under the lock, when the pass ends with at least one approved/changed record for the server (FR-022). The marker is written before the absent-record deletes that follow in `applyDifferentialToolUpdate`.
-- Every server approval sets it in `CommitServerApproval` (FR-023). In PR-1, before D5 exists, it is set inside the existing `WithToolApprovalLock` commit closure in `scanner.approveServer`. The plain `SaveIntegrityBaseline` branch is wrapped in that lock too.
+- Every server approval sets it in `CommitServerApproval` (FR-023). PR-1 introduces that runtime method in a minimal form: under the lock, mark and then run the scanner's commit closure. The scanner calls it through the optional `ServerApprovalCommitter` capability of its unquarantiner adapter, for both the plain `SaveIntegrityBaseline` branch and the `…WithBlocks` branch. The scanner never touches storage for the marker (import cycle, design review r1 #1). PR-2 grows the same method into the full D5 section.
 - Removal happens in the same tx as `DeleteServerToolApprovals` / `PruneToolApprovalsNotIn`.
 
 **Why not a field on each record**: the issue's failure is exactly that the records disappear.
@@ -149,7 +149,11 @@ The scanner gets a new optional interface, `ReviewedServerApprover`, with these 
 
 **Lock order**: `captureSnapMu` (global; already held by `commitDiscoveredTools`, `reindexFromLastGoodSnapshot` and `reapplyLastGoodSnapshot`) → per-server approval lock → manager `captureMu` (read) → client `epochMu` → storage manager lock / index lock / supervisor lock.
 
-Callers already follow the first two steps of this order. PR-3 adds a test asserting that no path takes `captureSnapMu` while holding the approval lock: `CommitServerApproval` and the operator approvals take only the approval lock. Supervisor publish must not call back into the runtime synchronously; it emits through the event channel (`supervisorEventForwarder`, `lifecycle.go:2596`). T305 verifies this with a test.
+**One existing path runs in the opposite order and must be inverted** (design review r1 #2). The quarantined capture calls `WithCurrentClientOnEpoch` first (`lifecycle.go:649-663`). That holds manager `captureMu` (R) and client `epochMu` across its callback (`manager.go:1228-1237`, `client.go:741-749`), and the callback then takes `captureSnapMu` and the approval lock (`lifecycle.go:730-739`, `tool_quarantine.go:446`). PR-3 removes that outer wrapper. Every inventory path, the quarantined capture included, goes through `applyInventory`, which takes `captureSnapMu` → approval lock. Only then, still inside the locked section, does it take `captureMu` (R) + `epochMu` through a new `Manager.WithCaptureCurrent(capture, fn)`. That call checks pointer, epoch and retirement and holds both locks across the record/index writes, so the protection the wrapper gave is kept for the whole write.
+
+Audit of the other `captureMu`/`epochMu` holders on main: `AddServerConfig`/`RemoveServer` (`manager.go:444,656`) and the connect/disconnect transitions (`client.go:591,686,1152,1337,1466`). None of them calls into the runtime while holding the lock. T305 pins this with a deadlock test (normal apply vs quarantined capture vs endpoint replacement, run concurrently) and with hook-based assertions that those sections never reach `checkToolApprovals`.
+
+Other paths already follow the order: `commitDiscoveredTools`, `reindexFromLastGoodSnapshot` and `reapplyLastGoodSnapshot` take `captureSnapMu` before the approval lock, and the operator approvals take only the approval lock. Supervisor publish only updates its snapshot and StateView (`supervisor.go:1214-1230`); events go out through `supervisorEventForwarder` (`lifecycle.go:2596`). That already holds on main, so T305 records it as a regression check, not a failing-first test.
 
 **Rationale**: G8 and G9 need the index writes inside the lock. G7 needs the order check in the same section. Branch X's `applyInventory` + `publishInventoryIfCurrent` (`edc13dd47`) is the reviewed precedent: r8 PASS on that part.
 
@@ -167,12 +171,12 @@ Callers already follow the first two steps of this order. PR-3 adds a test asser
 | PR | Issue | Contents | Depends on |
 |---|---|---|---|
 | PR-1 `fix: durable tool baseline` | #1567 | storage bucket + API; `serverHasBaseline` OR; discovery marks; scanner approval marks under the lock; removal; blind-copy text in Web/CLI | none |
-| PR-2 `fix: bind approvals to the reviewed definitions` | #1566 | fingerprint + review field; `expected_hashes` on both endpoints; `StaleToolReviewError` → 409; `CommitServerApproval`/`FinishServerApproval`; no post-unquarantine promote-all on the security path; Web + CLI binding; docs + swagger | none (calls `MarkToolBaselineDecided` if present; see T2xx note) |
+| PR-2 `fix: bind approvals to the reviewed definitions` | #1566 | fingerprint + review field; `expected_hashes` on both endpoints; `StaleToolReviewError` → 409; `CommitServerApproval`/`FinishServerApproval`; no post-unquarantine promote-all on the security path; Web + CLI binding; docs + swagger | **PR-1 merged** (extends PR-1's `CommitServerApproval`; the empty-review guarantee needs the marker) |
 | PR-3 `fix: apply tool inventories in capture order` | #1565 | capture sequence; `DiscoverToolsReportCaptured`; locked apply phase; gated publish; quarantine purge under the lock; retirement | none; composes with #1571 |
 
-Each PR is mergeable alone, and each keeps unbound clients working. PR-2's "empty review → later tools held" guarantee after unquarantine is complete only with PR-1 (O4).
+Each PR is a separate, self-contained change with its own tests, and each keeps unbound clients working. PR-1 and PR-3 depend on nothing. **PR-2 is cut after PR-1 merges** (design review r1 #3). Without the durable marker, an empty bound approval leaves no approved or changed record, and the first later capture is still a baseline pass (`tool_quarantine.go:481-491`, `:664-665`). Removing the post-unquarantine promote-all alone does not hold those tools. Making the dependency explicit is simpler and safer than duplicating a marker in PR-2.
 
-**PR-1/PR-2 coupling**: PR-1 marks inside the existing `WithToolApprovalLock` commit. When PR-2 lands, it moves that call into `CommitServerApproval`. Whichever PR lands second resolves the conflict, and tasks.md says so.
+**PR-1/PR-2 coupling**: PR-1 introduces `CommitServerApproval` (lock, mark, commit). PR-2 extends it with validation, promotion and the storage flip.
 
 ## Lessons taken from Branch X (and not repeated)
 
@@ -186,3 +190,12 @@ Each PR is mergeable alone, and each keeps unbound clients working. PR-2's "empt
 ## Open questions resolved by assumption
 
 See spec.md A1-A10 and O1-O4.
+
+## Design review round 1 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, import cycle** (`storage` imports `security/scanner`): the shared types move to the leaf package `internal/toolreview`. The scanner reaches the marker only through the runtime adapter's `ServerApprovalCommitter` (D4, D7).
+2. **High, lock-order inversion with the quarantined capture**: the outer `WithCurrentClientOnEpoch` wrapper is removed, and client validity is checked inside the locked section through `WithCaptureCurrent`. Audit of the other lock holders is in D10. A failing-first deadlock test was added (T305a).
+3. **High, PR-2 alone misses the empty-review guarantee**: PR-2 now explicitly requires PR-1 (D12, O4).
+4. **Medium, snapshot re-application cannot validate the client**: `lastGoodTools` keeps the full capture. A stale snapshot is re-listed or skipped, never re-applied (FR-037, data-model §7, T306(6b)).
+5. **Medium, T104 would not fail on main through `checkToolApprovals` alone**: it now drives the full apply path with the index, plus restart and dispatch refusal.
+6. **Medium, some PR-3 tests are already green on main**: T305(b)/(c) and T306(6) are reclassified as regression checks. The `CommitServerApproval` check is conditional on PR-2 (composition, not dependency).

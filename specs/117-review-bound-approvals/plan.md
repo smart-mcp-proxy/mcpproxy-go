@@ -5,7 +5,7 @@
 
 ## Summary
 
-Three independently mergeable PRs, one issue each:
+Three PRs, one issue each. PR-1 and PR-3 are independent. PR-2 builds on PR-1 (it needs the durable marker for its empty-review guarantee, design review r1 #3):
 
 1. **PR-1 (#1567) durable baseline.**
    - A `tool_baseline_decisions` bucket records that a server's tool baseline was decided. Trusted discovery and every server-approval commit write it.
@@ -78,13 +78,14 @@ specs/117-review-bound-approvals/
 ```text
 PR-1 (#1567)
 internal/storage/models.go                     # ToolBaselineDecisionsBucket const
+internal/toolreview/baseline.go                # NEW leaf pkg: BaselineDecision value type
 internal/storage/tool_baseline_decision.go     # NEW: Mark/Get + tx-scoped delete helper
 internal/storage/bbolt.go                      # DeleteServerToolApprovals, PruneToolApprovalsNotIn also drop markers
 internal/storage/manager.go                    # Manager wrappers
 internal/runtime/tool_quarantine.go            # serverHasBaseline OR marker; mark at end of pass (FR-022)
-internal/security/scanner/service.go           # mark inside the locked commit (both branches)
-internal/security/scanner/storage iface        # MarkToolBaselineDecided on the Storage interface (or via locker adapter)
-internal/server/server.go                      # adapter passthrough if needed
+internal/runtime/tool_approval_lock.go         # CommitServerApproval (PR-1 form: lock, mark, commit)
+internal/security/scanner/service.go           # ServerApprovalCommitter capability, both commit branches
+internal/server/server.go                      # adapter implements ServerApprovalCommitter
 frontend/src/components/ReviewScreen.vue       # blind dialog copy (FR-026)
 cmd/mcpproxy/review_cmd.go                     # blind prompt copy (FR-026)
 docs/features/security-quarantine.md
@@ -92,7 +93,7 @@ docs/features/security-quarantine.md
 PR-2 (#1566)
 internal/runtime/review_fingerprint.go         # NEW
 internal/runtime/review.go                     # ReviewTool.CurrentHash
-internal/storage/tool_review_errors.go         # NEW: StaleToolReviewError
+internal/toolreview/errors.go                  # NEW leaf pkg: StaleToolReviewError (no storage/scanner import cycle)
 internal/runtime/tool_quarantine.go            # ApproveToolsReviewed, ApproveAllToolsReviewed, staleReviewedRecords
 internal/runtime/tool_approval_lock.go         # CommitServerApproval, FinishServerApproval
 internal/runtime/lifecycle.go                  # QuarantineServer split: finishUnquarantine helper (no promote) reused by FinishServerApproval
@@ -132,7 +133,7 @@ Each PR:
 - includes docs and a CLAUDE.md "Recent Changes" line;
 - leaves unbound clients working.
 
-If PR-2 merges before PR-1, T204 (the marker call inside `CommitServerApproval`) is deferred to PR-1, and the conflict is resolved by whichever lands second.
+PR-2 is cut after PR-1 merges. PR-3 can be cut at any point; if it lands before PR-2, PR-2 must call its storage flip through the locked section that PR-3 also uses for the quarantine purge (T309), which is a mechanical rebase.
 
 ## Risks and mitigations
 

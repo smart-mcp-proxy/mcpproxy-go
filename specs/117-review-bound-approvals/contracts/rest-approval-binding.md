@@ -106,6 +106,6 @@ Guarantees on 409:
 
 | Client \ Core | main (no fingerprint) | PR-2 core |
 |---|---|---|
-| tray before #1572 / old scripts (unbound) | today | accepted; post-commit additions held |
+| tray before #1572 / old scripts (unbound) | today | accepted; post-commit additions held (PR-2 ships on top of PR-1's marker) |
 | tray #1572 | sends unbound (no hashes in review) | bound, validated |
 | Web/CLI with PR-2 | n/a (shipped together) | bound |

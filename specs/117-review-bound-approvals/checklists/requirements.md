@@ -48,4 +48,4 @@
 
 ## Review log
 
-- Cross-model review of this design (opencode Sol 6.1): pending.
+- Round 1 (opencode gpt-6.1-sol): FINDINGS, 3 high and 3 medium, all accepted and resolved (research.md "Design review round 1").

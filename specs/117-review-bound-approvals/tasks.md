@@ -29,13 +29,13 @@
 
 ### Runtime
 - [ ] T104 [P] [PR-1] test: `internal/runtime/tool_baseline_durable_test.go` (US2 scenarios 1, 2, 4, 5), on a trusted manual-trust server with quarantine enabled.
-  - (a) Baseline `[A]` → apply `[B]` → apply `[B]` ×2 → new Runtime on the same DB → apply `[B]`: B is pending throughout, and `ToolApprovalResult.BlockedTools` contains B.
-  - (b) The same with an authoritative empty pass between them.
+  - (a) Drive the **full** apply path (`commitDiscoveredTools` → `applyDifferentialToolUpdate`, with the index manager), because absent records are deleted there, not in `checkToolApprovals` (`lifecycle.go:1149-1185`; design review r1 #5). Steps: baseline `[A]` (A indexed) → apply `[B]` (A's record and index entry deleted) → apply `[B]` ×2 → new Runtime on the same DB → apply `[B]`. Expect B pending throughout, B absent from the index, and dispatch of B refused via the `internal/server` call gate.
+  - (b) The same with an authoritative empty apply (`[]` through the authoritative path) between A and B.
   - (c) A pre-seeded approved record without a marker → one pass → marker present with `source: inferred`.
   - (d) Delete the server records → first inventory auto-baselined.
   - (e) First inventory `[]` → no marker; then `[A]` → auto-baselined (FR-025).
 
-  Fails on main at (a): B becomes approved by `auto-baseline` on the second pass, as the live repro showed.
+  (a) and (b) fail on main: B becomes approved by `auto-baseline` on the second apply, as the live repro showed. (c) and (e) are marker-inference tests and are kept separate from the failing-first pair.
 - [ ] T105 [PR-1] impl: `tool_quarantine.go`.
   - `serverHasBaseline` ORs `ToolBaselineDecided` (read error → true).
   - After the per-tool loop, still under the lock: if any record of the server is approved or changed after the pass (track it in the loop, plus `priorByName`), mark with `discovery`, or `inferred` when only prior records qualified.
@@ -45,10 +45,13 @@
   - After the unquarantine, a pass with `[T]` leaves T pending.
 
   Fails on main: no marker, T auto-approved.
-- [ ] T107 [PR-1] impl: `scanner/service.go`.
-  - Both branches (`SaveIntegrityBaseline` and `…WithBlocks`) run inside `WithToolApprovalLock` when available and call `MarkToolBaselineDecided` first.
-  - Add the method to the scanner `Storage` interface; the `storage.Manager` already implements it after T103.
-  - Update test fakes.
+- [ ] T107 [PR-1] impl:
+  - new leaf package `internal/toolreview` (`BaselineDecision`);
+  - `Runtime.CommitServerApproval` in its PR-1 form: lock, mark, `commit()`;
+  - scanner `ServerApprovalCommitter` capability, used by both branches (`SaveIntegrityBaseline` and `…WithBlocks`) when present, with a fallback to today's path for fakes;
+  - the adapter in `internal/server/server.go`.
+
+  The scanner must not import `internal/storage` or `internal/runtime` (storage imports scanner).
 
 ### Copy and docs
 - [ ] T108 [P] [PR-1] test: vitest `frontend/tests/unit/review-screen-blind-copy.spec.ts` (the dialog text mentions that later tools wait for review) + `cmd/mcpproxy/review_cmd_test.go` (the blind prompt text).
@@ -60,7 +63,7 @@
 
 ---
 
-## PR-2: Review-bound approvals (#1566), branch `117-pr2-review-binding`
+## PR-2: Review-bound approvals (#1566), branch `117-pr2-review-binding` (requires PR-1 merged)
 
 **Declared scope**:
 - runtime: fingerprint, review field, reviewed approvals, `CommitServerApproval` / `FinishServerApproval`, the `QuarantineServer` split;
@@ -95,15 +98,16 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - `expected == nil` → identical to `ApproveTools` (table shared with the existing tests).
   - `ApproveAllToolsReviewed` validates pending+changed.
   - The check and write are atomic: `toolApprovalReadHook` mutates the record (simulated capture) after the handler read but before the lock → still stale, because validation re-reads under the lock.
-- [ ] T206 [PR-2] impl: `internal/storage/tool_review_errors.go`; `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
+- [ ] T206 [PR-2] impl: `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
 - [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
-  - Bound mismatch → error, and: `commit` was not called, no marker (when PR-1 is present), storage still quarantined, records unchanged.
+  - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
+  - Bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending (marker from PR-1; fails without PR-1's mark because the pass is a baseline pass).
   - Bound match → promoted == the validated pending set, blocks applied by `commit`, storage unquarantined **before** unlock (assert from inside a recording `commit` that runs last and from a hook after the flip).
   - An approved+enabled tool with a hint change → Changed (the activation set).
   - Unbound → promotes the pending records present at commit only. A record filed by a pass after `CommitServerApproval` returns but before `FinishServerApproval` stays pending. On main, `approveBaselineToolsForServer` promotes it; that is the failing assertion.
   - `FinishServerApproval` does not call `approveBaselineToolsForServer` (spy).
   - A missing block target under a bound request → `MissingBlocks`, nothing written.
-- [ ] T208 [PR-2] impl: `CommitServerApproval`, `FinishServerApproval` in `tool_approval_lock.go`. Split `QuarantineServer` into flip + `finishQuarantineChange(server, quarantined, promote bool)` in `lifecycle.go` (the non-review path keeps `promote=true`). If PR-1 is merged, call `MarkToolBaselineDecided` inside the section; otherwise leave a `// PR-1` hook that PR-1 fills.
+- [ ] T208 [PR-2] impl: `CommitServerApproval`, `FinishServerApproval` in `tool_approval_lock.go`. Split `QuarantineServer` into flip + `finishQuarantineChange(server, quarantined, promote bool)` in `lifecycle.go` (the non-review path keeps `promote=true`). This extends PR-1's `CommitServerApproval` (the mark stays the first write after validation).
 - [ ] T209 [P] [PR-2] test: `internal/security/scanner/service_test.go`.
   - `ApproveServerReviewed` uses `ReviewedServerApprover` when present and passes `expected` through.
   - The dangerous gate still runs first (its message contains "dangerous").
@@ -163,19 +167,26 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 
 ### Ordered apply
 - [ ] T305 [P] [PR-3] test: `internal/runtime/inventory_lock_order_test.go`.
-  - (a) Supervisor `RefreshServerToolsFromDiscovery` called under a held approval lock completes without re-entering the runtime (a spy runtime method that takes the lock is never called synchronously; run with a timeout).
-  - (b) Static: no function reachable from `CommitServerApproval`, `approveToolsAndNotify` or `applyInventory`'s locked phase takes `captureSnapMu`. Check this through a call-graph test helper or reviewed hooks. If (a) fails, switch to the fallback in research D10 before T307.
+  - (a) **Failing-first** deadlock test (design review r1 #2): run concurrently, with hooks forcing the overlap:
+    - a normal apply holding `captureSnapMu` + the approval lock and waiting for `captureMu`;
+    - a quarantined capture;
+    - an endpoint replacement (`AddServerConfig`).
+
+    On main's lock order, the quarantined capture holds `captureMu`/`epochMu` and waits for `captureSnapMu`, so the test times out once the new apply phase exists. It must pass after T307 removes the outer wrapper. Write it against T307's stubbed `applyInventory`, so the failure is the deadlock and not a compile error.
+  - (b) **Regression check** (already true on main; not failing-first): supervisor `RefreshServerToolsFromDiscovery` called under a held approval lock completes without re-entering the runtime (`supervisor.go:1214-1230`).
+  - (c) **Regression check**: no function reachable from `approveToolsAndNotify` or `applyInventory`'s locked phase takes `captureSnapMu`. If PR-2 is already merged, also check `CommitServerApproval`. This is a composition check, not a PR-3 dependency.
 - [ ] T306 [P] [PR-3] test: `internal/runtime/inventory_capture_order_test.go`, with paused passes via the new hooks `inventoryBeforeApplyLock` / `inventoryAfterDecisions` (US3 scenarios 1-4):
   - (1) C1 paused, C2 applied, C1 resumes → no record write (`SaveToolApproval` spy count), no index op (index spy), `lastGoodTools.seq == C2`, StateView still has C2's hints (dispatch tier destructive).
   - (2) A pass computes `t` blocked → the operator approves `t` and the reindex completes → the pass resumes → `t` is still in the index. Because the decision and the eviction are now one section, the operator approval waits; assert the order with the hook.
   - (3) Older-with-x vs newer-without-x → no delete or resurrect of x.
   - (4) A pass paused after eligibility → `QuarantineServer(true)` → resume → shared and profile indexes have no entry for the server, including previously approved tools.
   - (5) seq 0 is applied only while `applied == 0`.
-  - (6) Re-applying the last-good snapshot after an approval (`seq == applied`) works.
+  - (6) **Regression check** (already true on main): re-applying the last-good snapshot after an approval (`seq == applied`, capture current) works.
+  - (6b) **Failing-first**: after a reconnect (epoch moved) or endpoint replacement, the approval reindex does **not** re-apply the old snapshot; it re-lists. On main the old snapshot is re-applied (`tool_quarantine.go:2006-2027`).
   - (7) A retired client's capture → discarded.
 
-  Each must fail on main for the stated reason. For (1), C1's write-back restores read-only hints.
-- [ ] T307 [PR-3] impl: `toolApprovalServerLock{mu, applied, published}`, `lockToolApprovalsForCapture`. Extract `checkToolApprovalsLocked`. Split `applyDifferentialToolUpdate` into `applyInventoryLocked` + tail. Change `commitDiscoveredTools`, `discoverAndIndexToolsForServerOnce`, `captureQuarantinedToolDefinitions*` and `reindexFromLastGoodSnapshot` / `reapplyLastGoodSnapshot` to go through `applyInventory` with their capture. Add `lastGoodTools` seq. Make the sweep use `DiscoverToolsReportCaptured` and publish per server through the gate (keep `markZeroToolServersDiscovered`).
+  (1)-(5), (6b) and (7) must fail on main for the stated reason; (6) is a regression check. For (1), C1's write-back restores read-only hints.
+- [ ] T307 [PR-3] impl: `toolApprovalServerLock{mu, applied, published}`, `lockToolApprovalsForCapture`. Extract `checkToolApprovalsLocked`. Split `applyDifferentialToolUpdate` into `applyInventoryLocked` + tail. Remove the quarantined capture's outer `WithCurrentClientOnEpoch` wrapper (`lifecycle.go:649`) and add `Manager.WithCaptureCurrent`, used inside the locked section. Store the full capture in `lastGoodTools`. Change `commitDiscoveredTools`, `discoverAndIndexToolsForServerOnce`, `captureQuarantinedToolDefinitions*` and `reindexFromLastGoodSnapshot` / `reapplyLastGoodSnapshot` to go through `applyInventory` with their capture. Add `lastGoodTools` seq. Make the sweep use `DiscoverToolsReportCaptured` and publish per server through the gate (keep `markZeroToolServersDiscovered`).
 - [ ] T308 [P] [PR-3] test: `internal/runtime/quarantine_purge_lock_test.go`. `QuarantineServer(true)` purges under the lock: a pass blocked on the lock observes `serverQuarantined` and writes no index entries. Fails on main: the purge runs after unlock.
 - [ ] T309 [PR-3] impl: move the storage flip + `purgeQuarantinedServerFromIndex` (shared index part) into one locked section. The profile-index refresh stays after unlock.
 - [ ] T310 [P] [PR-3] test: stress `internal/runtime/inventory_stress_test.go`. Concurrent refresh, approvals, block, quarantine toggles, sweep and reindex for 2 s under `-race`. A goroutine dump on a 30 s timeout. Final invariant: every indexed tool has an approved, enabled record, and no pending/changed record is indexed. Run the existing UX-02 concurrency suite unchanged (SC-004).
@@ -189,6 +200,6 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 
 ## Dependencies
 
-- PR-1, PR-2 and PR-3 have no hard dependency. Preferred order: PR-1 → PR-2 → PR-3 (O4).
+- PR-2 is cut from `origin/main` after PR-1 merges (hard dependency; design review r1 #3). PR-1 and PR-3 have no dependency. Default order: PR-1 → PR-2 → PR-3 (O4).
 - Within a PR: each `test` comes before its `impl`. T102→T103→T104→T105. T201→T202→T203→T204→T205→T206→T207→T208. T305 gates T307.
 - Parallel: T102/T104/T106/T108 (different files); T201/T203/T205/T209/T211/T213/T215; T301/T303/T305/T306/T308.
