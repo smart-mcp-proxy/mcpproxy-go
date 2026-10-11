@@ -4736,6 +4736,44 @@ func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[str
 	return toolMap
 }
 
+// GetIngestedToolContracts implements scanner's optional
+// ingestedToolContractsProvider (RT-06): the tool contracts discovery actually
+// ingested for serverName, read from its tool-approval records — each record's
+// current contract and, for a changed (rug-pull) record, the approved contract
+// it changed from. The scan unions these with its live export so a server that
+// answers the scan's tools/list differently from discovery's cannot launder a
+// poisoned contract through a clean export.
+func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) ([]map[string]interface{}, error) {
+	if p.server == nil || p.server.runtime == nil {
+		return nil, nil
+	}
+	sm := p.server.runtime.StorageManager()
+	if sm == nil {
+		return nil, nil
+	}
+	records, err := sm.ListToolApprovals(serverName)
+	if err != nil {
+		return nil, err
+	}
+	contracts := make([]map[string]interface{}, 0, len(records))
+	for _, rec := range records {
+		if rec == nil || rec.ToolName == "" {
+			continue
+		}
+		if rec.CurrentDescription != "" || rec.CurrentSchema != "" {
+			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+				Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema, Annotations: rec.CurrentAnnotations,
+			}))
+		}
+		if rec.Status == storage.ToolApprovalStatusChanged && (rec.PreviousDescription != "" || rec.PreviousSchema != "") {
+			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+				Name: rec.ToolName, Description: rec.PreviousDescription, ParamsJSON: rec.PreviousSchema, Annotations: rec.PreviousAnnotations,
+			}))
+		}
+	}
+	return contracts, nil
+}
+
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it
 // returns every configured server's current tool definitions, keyed by server
 // name, so a scan can build a cross-server snapshot for the shadowing check.

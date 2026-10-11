@@ -104,6 +104,18 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// ingestedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// may also implement (RT-06, red-team 2026-10-11): return the tool contracts
+// discovery actually ingested for a server — the definitions recorded on its
+// tool-approval records (current, plus the approved one of a changed record) —
+// in the same tools/list shape as GetServerTools. The scan export is a fresh
+// tools/list that a malicious server can answer differently from the list
+// discovery ingested (TOCTOU); scanning the ingested contracts too makes the
+// verdict reflect what the proxy actually trusted.
+type ingestedToolContractsProvider interface {
+	GetIngestedToolContracts(serverName string) ([]map[string]interface{}, error)
+}
+
 // allServerToolsProvider is an OPTIONAL capability a ServerInfoProvider may also
 // implement: enumerate every known server's current tool definitions, keyed by
 // server name. The Service uses it to build the cross-server snapshot that lets
@@ -2412,9 +2424,14 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		return toolExport{}
 	}
 
+	// Names/hashes describe the LIVE export (what the scan coverage is matched
+	// against); diverging ingested contracts are scanned in addition.
+	names, hashes := toolDefinitionNames(tools), toolDefinitionHashes(tools)
+	scanned := s.withDivergentIngestedContracts(serverName, tools)
+
 	// Format as MCP tools/list output
 	toolsData := map[string]interface{}{
-		"tools": tools,
+		"tools": scanned,
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
@@ -2431,7 +2448,65 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		zap.Int("tools", len(tools)),
 		zap.String("path", toolsPath),
 	)
-	return toolExport{Count: len(tools), Names: toolDefinitionNames(tools), Hashes: toolDefinitionHashes(tools)}
+	return toolExport{Count: len(tools), Names: names, Hashes: hashes}
+}
+
+// withDivergentIngestedContracts returns the live export plus every contract
+// discovery ingested for the server that the live export does not reproduce
+// (same name, description and normalized input schema) — RT-06. Divergence
+// means the server answered the scan's tools/list differently from the list
+// the proxy approved or recorded, so the ingested contract is scanned too and
+// the divergence is logged. Providers without the capability, or a lookup
+// error, leave the export unchanged.
+func (s *Service) withDivergentIngestedContracts(serverName string, live []map[string]interface{}) []map[string]interface{} {
+	provider, ok := s.serverInfo.(ingestedToolContractsProvider)
+	if !ok {
+		return live
+	}
+	ingested, err := provider.GetIngestedToolContracts(serverName)
+	if err != nil || len(ingested) == 0 {
+		return live
+	}
+	seen := make(map[string]struct{}, len(live)+len(ingested))
+	for _, tool := range live {
+		seen[scanContractKey(tool)] = struct{}{}
+	}
+	out := live
+	var divergent []string
+	for _, tool := range ingested {
+		key := scanContractKey(tool)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(out) == len(live) {
+			out = append(make([]map[string]interface{}, 0, len(live)+len(ingested)), live...)
+		}
+		out = append(out, tool)
+		name, _ := tool["name"].(string)
+		divergent = append(divergent, name)
+	}
+	if len(divergent) > 0 {
+		sort.Strings(divergent)
+		s.logger.Warn("Scan export diverges from the tool contracts discovery ingested; scanning the ingested contracts too",
+			zap.String("server", serverName),
+			zap.Strings("tools", divergent))
+	}
+	return out
+}
+
+// scanContractKey identifies a tool contract by name, description and
+// normalized input schema.
+func scanContractKey(tool map[string]interface{}) string {
+	name, _ := tool["name"].(string)
+	description, _ := tool["description"].(string)
+	schemaJSON := ""
+	if schema := tool["inputSchema"]; schema != nil {
+		if raw, err := json.Marshal(schema); err == nil {
+			schemaJSON = hash.NormalizeJSON(string(raw))
+		}
+	}
+	return name + "\x00" + hash.ToolDefinitionDigest(description, schemaJSON)
 }
 
 // toolDefinitionHashes maps each exported tool name to the digest of its
