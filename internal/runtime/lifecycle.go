@@ -1060,7 +1060,7 @@ func (r *Runtime) discoveryEligibleHeld(serverName string, instanceGen int64) bo
 	if r.storageManager == nil {
 		return true
 	}
-	if _, committed, err := r.storageManager.ConfigCommitState(); err != nil || !committed {
+	if committed, err := r.storageManager.ConfigCommitted(); err != nil || !committed {
 		return err == nil
 	}
 	row, err := r.storageManager.GetStoredServer(serverName)

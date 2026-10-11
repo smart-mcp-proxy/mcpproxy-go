@@ -432,7 +432,7 @@ func (r *Runtime) resolveToolQuarantineGate(serverName string) toolQuarantineGat
 		}
 	}
 	if r.storageManager != nil {
-		if _, committed, err := r.storageManager.ConfigCommitState(); err == nil && committed {
+		if committed, err := r.storageManager.ConfigCommitted(); err == nil && committed {
 			if enabled, ok, qerr := r.storageManager.StoredQuarantineEnabled(); qerr == nil && ok {
 				globalEnabled = enabled
 			}

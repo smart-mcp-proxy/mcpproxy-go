@@ -230,6 +230,22 @@ func (m *Manager) ConfigCommitState() (seed int64, committed bool, err error) {
 	return seed, committed, err
 }
 
+// ConfigCommitted reports whether a Spec 116 config commit has written this
+// database (meta.config_commit_generation is present). One key read; callers
+// on hot paths use it instead of ConfigCommitState.
+func (m *Manager) ConfigCommitted() (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	committed := false
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		if meta := tx.Bucket([]byte(MetaBucket)); meta != nil {
+			committed = meta.Get([]byte(ConfigCommitGenerationKey)) != nil
+		}
+		return nil
+	})
+	return committed, err
+}
+
 // StoredQuarantineEnabled returns meta.quarantine_enabled. ok is false when no
 // commit has recorded it.
 func (m *Manager) StoredQuarantineEnabled() (enabled, ok bool, err error) {
