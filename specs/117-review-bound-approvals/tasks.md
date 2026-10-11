@@ -109,10 +109,11 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 - [ ] T205b [P] [PR-2] test: `internal/runtime/tool_quarantine_changed_tracking_test.go` (FR-017).
   - Approved H0 → capture H1 (changed) → capture H2 → the record's current fields describe H2, `Previous*` and `ApprovedHash` are still H0, and the review fingerprint is H2's.
   - `ApproveToolsReviewed(fp(H1))` → 409.
+  - Hint-only variant (design review r5 #1): approved H0 → changed H1 (read-only hints) → the same H1 definition with destructive hints → the record's annotations are destructive, and `ApproveToolsReviewed(fp(H1 read-only))` → 409.
   - A revert to H0 still restores approved.
 
   Fails on main: the record still shows H1.
-- [ ] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash differs from the stored current one, keep `Previous*`); `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
+- [ ] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash **or the hints** differ from the stored current ones, i.e. whenever the review fingerprint would change; keep `Previous*`); `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
 - [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
   - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
   - **Composition regression** (already green on top of PR-1): bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending.
@@ -197,10 +198,14 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - (1) C1 paused, C2 applied, C1 resumes → no record write (`SaveToolApproval` spy count), no index op (index spy), `lastGoodTools.seq == C2`, StateView still has C2's hints (dispatch tier destructive).
   - (2) A pass is paused inside the locked phase, after computing `t` blocked. Start the operator approval of `t` **asynchronously**, and assert it is still blocked after 200 ms because the pass holds the lock. Release the pass, then await the approval and its reindex, and assert that `t` is indexed and approved at the end (design review r3 #3).
   - (2m) **Main-compatible failing-first** for the old decision-to-index window (design review r4 #2). A full discovery pass holds `captureSnapMu`, so its reindex cannot finish while the pass is paused. The test therefore does **not** await the reindex:
-    1. Pause the pass after `checkToolApprovals` returns and before its index writes.
-    2. Complete `ApproveTools(t)` (it takes only the approval lock, so it finishes).
-    3. Resume the pass and wait for it to finish.
-    4. Assert the state **before** any reindex runs (hold the reindex with the `localReindexAfterSnapshot` hook): `t` is approved in storage. On main `t` has been evicted from the index (decision/index inconsistency); after T307 it is still indexed, or not yet evicted, because the eviction decision was made after the approval.
+    1. Pause the pass at the hook placed between its approval decisions and its index writes.
+    2. Start `ApproveTools(t)` **asynchronously** (design review r5 #2).
+       - On main the approval lock is free at that point, so the approval completes while the pass is paused.
+       - After T307 the hook sits inside the locked section, so the approval waits. Assert it has not completed after 200 ms.
+    3. Resume the pass, then await the approval. Hold the reindex with the `localReindexAfterSnapshot` hook.
+    4. Assert that `t` is approved in storage, and check the index:
+       - on main, `t` was evicted by the older decision (the failing assertion);
+       - after T307, the pass finished first and the approval followed. Release the reindex, await it, and assert `t` is indexed.
   - (3) Older-with-x vs newer-without-x → no delete or resurrect of x.
   - (4) A pass paused after eligibility → `QuarantineServer(true)` → resume → shared and profile indexes have no entry for the server, including previously approved tools.
   - (5) seq 0 is applied only while `applied == 0`.

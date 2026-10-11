@@ -225,3 +225,8 @@ See spec.md A1-A10 and O1-O4.
 1. **High, a `changed` record is frozen at its first changed definition**: a bound approval of the stale H1 would pass while H2 is live. FR-017 makes changed records track the live definition (keeping the approved contract in `Previous*`/`ApprovedHash`). T205b fails first.
 2. **Medium, T306(2m) would block on `captureSnapMu`**: rewritten to complete only the approval (which takes the approval lock only), hold the reindex, and assert the decision/index inconsistency.
 3. **Medium, a marker-write failure falls into today's fail-open error path**: FR-027 aborts the destructive half of the apply on marker errors, in PR-1. T104f is a fault-injection test on an older store.
+
+## Design review round 5 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, a hint-only change to a changed record stays stale**: FR-017 now refreshes on a hash **or** hint difference, i.e. whenever the review fingerprint would change. A hint-only test variant was added to T205b.
+2. **Medium, T306(2m) required a synchronous approval inside the widened lock**: the approval now runs asynchronously, with different expected orderings on main (it completes during the pause; stale eviction) and after T307 (it waits; final invariant holds).
