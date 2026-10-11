@@ -102,11 +102,17 @@ changed.
 | 2 | **Gate**: admission gate on `next` against the stored view. Force `Quarantined=true` where storage keeps a quarantine without an explicit decision. Validate (`ValidateDetailed`, trust modes, forward headers) | validation error → abort |
 | 3 | **Prepare**: `configSvc.Prepare(next)` runs the pre-publish hook and computes `G`, generations and incarnations. Compute `Changes` | — |
 | 4 | **Lock and hooks**: approval locks for changed names (sorted; a name with a hook counts as changed), then `tx.UnderApprovalLock` hooks (Spec 117 review-bound server approval: validate, decide, baseline and blocks, promote) | hook error (for example a stale review) → release locks, abort, nothing written |
-| 5 | **Disk** (when a path exists): pending-aware write plus the self-write marker | abort. Hook writes from step 4 stay, which is fail-safe: a promoted tool on a still-quarantined server is unreachable |
-| 6 | **Storage**: `ApplyServerCommit` (one bbolt tx: saves, deletes and purges, stamps, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk write of `base`, abort |
+| 5 | **Disk** (when a path exists): before writing, capture `prevDisk := r.pendingAwareDiskConfig(base)`, the persistable config that is on disk now (the live snapshot with every pending restart-gated value overlaid, the same value `desiredCfg` holds). Then the pending-aware write of `next` plus its self-write marker | abort. Hook writes from step 4 stay, which is fail-safe: a promoted tool on a still-quarantined server is unreachable |
+| 6 | **Storage**: `ApplyServerCommit` (one bbolt tx: saves, deletes and purges, stamps, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk write of `prevDisk` (**not** `base`, review R5.5), forget this commit's self-write marker and record one for the compensation, leave `desiredCfg` and the pending-restart report untouched, abort |
 | 7 | **Advance manager** (PR3/PR4): `AdvanceGenerations(changes)` unregisters, retires (PR4) and restamps | cannot fail (in-memory) |
 | 8 | **Publish**: `configSvc.Publish(prepared)` and the legacy `r.cfg`/`desiredCfg` swap | `ErrConcurrentPublish` is an invariant bug: logged as an error, the commit returns an error, and the state is still consistent because nothing else can publish |
 | — | **After unlock**: spawn workers bound to `(name, g)` for created and reconnecting servers, asynchronous `Disconnect` of retired instances, events, telemetry, activity | logged |
+
+Compensation restores what was on disk, not what is live. When a
+restart-required change is pending, disk intentionally differs from the live
+snapshot (`pendingAwareDiskConfig`, `lifecycle.go:1739-1745`; `desiredCfg`,
+`runtime.go:1950-1954`). Writing `base` back would silently erase the pending
+change after an unrelated failed edit (review R5.5, T1.16).
 
 Steps 7 and 8 always run in that order, so publication never comes before
 retirement. Before PR3 lands, step 7 is a no-op and the after-unlock workers
@@ -123,11 +129,12 @@ L2 storage.Manager.mu → bbolt tx                    (leaf)
 L1' index (bleve) writes                            (taken under L1 in step 6; leaf w.r.t. L0-L2)
 L3 upstream.Manager.captureMu (W in commit, R in capture) → L4 Manager.mu
 L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
+L5' dialgate.Gate.connsMu (leaf: track/sweep; taken under L5 R in a dial section, and without L5 in Retire)
 L6 configsvc.updateMu (leaf observers only; the pre-publish hook is removed, review R1.7)
 L7 Runtime.mu                                        (leaf: field swaps only)
 ```
 
-**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5; L0→L6; L0→L7;
+**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5→L5'; dial section L5(R)→L5'; L0→L6; L0→L7;
 capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` after Spec 117 PR-3 (either is compatible, because the commit never holds L1 and L3 together); L1(one)→L2 / L1' / L4(R) (discovery, approvals). Spec 117's global `captureSnapMu` sits above L1, and `Commit` never takes it.
 
 **Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):
@@ -159,10 +166,12 @@ production, following the `toolApprovalReadHook` and
 |---|---|---|
 | `commitHooks.afterBuild`, `.afterPrepare`, `.afterDisk`, `.afterStorage`, `.afterAdvance` | `runtime/commit.go` | T1.x, T2.x |
 | `beforeWorkerAct(name, gen)` | runtime worker closure | T3.1, T3.2 |
-| `supervisor.beforeExecuteAction(name, action)` | supervisor | T3.3 |
-| `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4, T2.5 |
+| `supervisor.beforeExecuteAction(name, action)` | supervisor | T3.3, T3.6, T3.9 |
+| `approvalHooks.afterCapture(name, inc)` | approval writers | T2.4 |
+| `approvalHooks.afterBaselineBeforeUnquarantine(name, inc)` | scanner `approveServer`, after the L1 section exits | T2.5 (review R5.6) |
+| `oauthHooks.beforePersist(name, binding)` | token store and DCR client save | T2.9, T2.13 |
 | `restPatchAfterParse` | httpapi PATCH handler | T1.3 |
-| `dialgate.TestHooks.beforeAdmit` / `afterAdmitBeforeAct` | dialgate | T4.x |
+| `dialgate.TestHooks.beforeAdmit` / `afterAdmitBeforeAct` / `beforeTrack` / `afterSweepBeforeBarrier` | dialgate | T4.x, T4.16 |
 | `transport` test RoundTripper that fails the first write on a reused connection | `transport` tests | T4.3 |
 
 ## PR split
@@ -183,25 +192,25 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR2: Atomic removal, purge and incarnation-bound approvals (#1559 remainder, #1562; B2)
 
-- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
+- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes and reads (review R5.3), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
 - **Depends on**: PR1.
-- **Failing-first tests**: T2.1-T2.7.
+- **Failing-first tests**: T2.1-T2.13.
 - **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
 - **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
 
 ### PR3: Generation-bound workers and supervisor (#1563)
 
-- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`/`DisconnectServerAt`/`ReplaceInstanceAt` (including `ForceReconnectAll` and Docker recovery), `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
+- **Scope**: `Manager.desired`, `managed.Client.InstanceID()`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`/`DisconnectServerAt(name, gen, inst)`/`ReplaceInstanceAt` (including `ForceReconnectAll` and Docker recovery), the single `unregisterLocked` path for every removal from `m.clients` (review R5.4; its `Retire` call is a no-op until PR4), instance-targeted supervisor actions bound to `(gen, InstanceID)` (review R5.2), `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
 - **Depends on**: PR1 (generations). Independent of PR2.
-- **Failing-first tests**: T3.1-T3.5.
+- **Failing-first tests**: T3.1-T3.9.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
 - **Size estimate**: about 500 LOC production code and 700 LOC tests.
 
 ### PR4: Retirement barrier, OAuth included (#1564)
 
-- **Scope**: the `dialgate` package, the per-instance gate and transport, stdio/Docker/launcher admission, the HTTP/SSE gated transport, the OAuth `WithBaseTransport`, `Retire` called in `AdvanceGenerations` before publish, refresh and manual OAuth refusing retired instances, tool calls and probes on retired instances mapped to unavailable, and the benchmark.
+- **Scope**: the `dialgate` package (with retirement-aware connection registration, review R5.1), the per-instance gate and transport, stdio/Docker/launcher admission, the HTTP/SSE gated transport, the OAuth `WithBaseTransport`, `Retire` called from `unregisterLocked`, so that every unregistration retires: `AdvanceGenerations` before publish, and `ReplaceInstanceAt`/`RemoveServerAt` at the same generation (restart, `ForceReconnectAll`, Docker recovery; review R5.4), refresh and manual OAuth refusing retired instances, tool calls and probes on retired instances mapped to unavailable, and the benchmark.
 - **Depends on**: PR3 (`AdvanceGenerations` is the retirement point).
-- **Failing-first tests**: T4.1-T4.7.
+- **Failing-first tests**: T4.1-T4.16.
 - **Live verification**: L4 (marker-file stdio launcher, an HTTP fixture counting requests and `Authorization` headers, a fake OAuth token endpoint).
 - **Size estimate**: about 600 LOC production code and 800 LOC tests.
 

@@ -104,6 +104,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 4. **Given** `ApproveTools(acme, …)` parked after it captured the generation, **When** `acme` is removed and re-added and the approval is released, **Then** the approval writes nothing and returns `server_replaced` (409). An unrelated edit to `acme` (for example `disabled_tools`) in the same window does **not** reject the approval.
 5. **Given** scanner approval parked before unquarantine, **When** `acme` is removed and re-added, **Then** the replacement stays quarantined.
 6. **Given** servers `foo` and `foo_bar` that both have OAuth tokens, **When** `foo` is removed, **Then** `foo_bar`'s tokens remain (B2).
+7. **Given** the old instance of `acme` parked mid-persistence of an OAuth token and a DCR client, **When** `acme`'s OAuth config changes while its name and URL stay the same, the commit returns, and the write is released, **Then** the cleared token and client registration stay absent, and the new instance does not reuse them (review R5.3).
 
 ### User Story 3: Stale workers and supervisor actions are inert (Priority: P1), PR3
 
@@ -114,6 +115,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 2. **Given** a disabled server's disconnect worker parked before `RemoveServer`, **When** the server is re-enabled and the worker is released, **Then** the new client stays registered and connected.
 3. **Given** a supervisor `ActionConnect` or `ActionReconnect` parked before its `AddServer`, **When** a newer commit removes, replaces or quarantines the server, **Then** the action has no effect.
 4. **Given** `RestartServer(name)` racing a removal, **Then** the restart does not re-create the removed server.
+5. **Given** a supervisor disconnect captured for the current instance and parked, **When** the server is restarted without a config change (a new instance at the same generation) and the disconnect is released, **Then** the replacement stays connected and the action is rejected as stale (review R5.2).
 
 ### User Story 4: Retired servers send nothing (Priority: P1), PR4
 
@@ -125,6 +127,8 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 3. **Given** a reused connection whose write fails and triggers a `net/http` internal retry that is parked, **When** retirement completes and the retry resumes, **Then** no retry reaches the old endpoint and `Retire` does not hang.
 4. **Given** an OAuth token or refresh request parked before sending, **When** the server is retired, **Then** the token endpoint receives no client secret and no refresh token.
 5. **Given** a quarantined server's inspection capture parked before persisting, **When** a commit replaces its endpoint, **Then** no definitions from the old endpoint are stored and no `review.changed` is sent for them.
+6. **Given** an old instance parked before its stdio launch, or before its HTTP or OAuth send, **When** `RestartServer`, `ForceReconnectAll` or Docker recovery replaces it at the same config generation and the old instance is released, **Then** the old instance launches nothing and sends nothing, and the replacement is unaffected (review R5.4).
+7. **Given** an admitted dial parked after it connected but before it registered the connection, **When** `Retire` runs its first sweep, the connection is then registered, and a blocking write is attempted, **Then** the connection is closed, the write returns `ErrRetired`, and `Retire` returns within its bound (review R5.1).
 
 ### Edge Cases
 
@@ -132,7 +136,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **Removing the last server**: the purge runs. The orphan prune's "empty set" guard (`lifecycle.go:1456`) now applies only to the boot GC.
 - **Restart-required `ApplyConfig`**: if no hot field changed, nothing is published and no generation is assigned. Disk is still written, as today.
 - **Disk write fails**: nothing is published and storage is untouched (A2).
-- **Storage transaction fails after the disk write**: the previous config is written back to disk, nothing is published, and an error is returned (A2).
+- **Storage transaction fails after the disk write**: the previous **disk** content is written back, nothing is published, and an error is returned (A2). That is the pending-aware persistable config, not the live snapshot, so a pending restart-required change survives (review R5.5).
 - **Config file path absent** (tests, stdin config): the disk step is skipped. Everything else is unchanged.
 - **The same commit re-adds a name it just removed** (an ApplyConfig rename): this is a remove plus a create with a new generation. The purge runs for the old entry.
 - **A generation-only change** (for example `disabled_tools`): the instance is kept and restamped with the new generation, with no reconnect. Discovery passes captured at the old generation drop their writes, and the next pass rewrites them.
@@ -168,30 +172,31 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-014**: approval writers (`ApproveTools`, baseline approval on unquarantine, block/unblock, prompt approve/block, scanner baseline+blocks, discovery's `checkToolApprovals` and quarantined capture) MUST capture the incarnation and re-check it against the storage row under the server's approval lock. On a mismatch they MUST write nothing and return `ErrServerReplaced`.
 - **FR-014a**: scan jobs and reports MUST record the incarnation they were started for and MUST be persisted with an incarnation-conditional storage write (row exists and matches, in the same bbolt tx). `approveServer` MUST read only reports of the current incarnation. Removal MUST invalidate the scan-summary cache.
 - **FR-014c**: server-identity registration and per-server tool-call history writes MUST be incarnation-conditional (`code_execution` exempt). OAuth completion events MUST carry their incarnation, the consumer MUST drop stale ones, and the purge MUST match completion records by decoded `ServerName`.
-- **FR-014b**: OAuth token, DCR-client and completion writes MUST be incarnation-conditional in the same way. The token store MUST be bound to the instance's incarnation. Refresh schedules MUST be keyed by `(name, incarnation)` and dropped on mismatch.
+- **FR-014b**: OAuth token, DCR-client and completion writes MUST be conditional on the row's `CredentialBinding{Incarnation, OAuthEpoch}` in the same way. `OAuthEpoch` MUST be raised in the same bbolt transaction as every OAuth-state clear (an OAuth config change) and set on create. The token store and DCR lookups MUST be bound to the instance's binding and MUST ignore records written under another one. Refresh schedules MUST be keyed by `(name, incarnation, oauthEpoch)` and dropped on mismatch (review R5.3).
 - **FR-015**: scanner approval MUST unquarantine through `Commit` with `ExpectIncarnation(name, inc)`.
 - **FR-016**: prompt-approval writes MUST take the server's approval lock.
 - **FR-017**: REST approval endpoints MUST accept an optional `expected_incarnation`. The review payload and `GET /api/v1/servers/{id}` MUST expose `incarnation` and `generation`. The Web UI MUST send `incarnation` back.
 
 ### Functional Requirements: Generation-bound workers (PR3)
 
-- **FR-018**: `upstream.Manager` MUST keep `desired map[string]desiredGen` that only the commit sets (step 7), and MUST offer `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt` and `DisconnectServerAt` (every disconnect leg, including the first half of `ActionReconnect`). These return `ErrStaleGeneration` unless the generation matches, checked under `captureMu`+`mu` in the same section as the map change.
+- **FR-018**: `upstream.Manager` MUST keep `desired map[string]desiredGen` that only the commit sets (step 7), and MUST offer `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt` and `DisconnectServerAt` (every disconnect leg, including the first half of `ActionReconnect`). These return `ErrStaleGeneration` unless the generation matches, checked under `captureMu`+`mu` in the same section as the map change. Actions that target an existing instance (`DisconnectServerAt`, the disconnect leg of `ActionReconnect`, `ReplaceInstanceAt`) MUST also match the captured `managed.Client.InstanceID()` (or `expected` pointer), because a replacement can share the generation (review R5.2).
 - **FR-019**: the commit's step 7 MUST, for each server whose generation moved, either (a) unregister the instance under `captureMu` (for removal or for a change to connection fields, `Enabled` or `Quarantined`), or (b) restamp it and call `SetConfig` (for any other change).
 - **FR-020**: the connect/disconnect workers spawned after a commit, supervisor `executeAction`, `ActorPoolSimple`, `RestartServer` and `postConfigReload`'s `ConnectAll` MUST use the `*At` methods with the generation from the snapshot or commit result they act on. `ErrStaleGeneration` is logged at debug level and is not an error.
-- **FR-020a**: `Manager.ForceReconnectAll` and its Docker-recovery caller MUST use `ReplaceInstanceAt(name, gen, expected)`. Inside `manager.go`, no internal call may use the legacy mutators outside the `*At` implementations.
+- **FR-020a**: `Manager.ForceReconnectAll` and its Docker-recovery caller MUST use `ReplaceInstanceAt(name, gen, expected)`. Inside `manager.go`, no internal call may use the legacy mutators outside the `*At` implementations. Every removal or overwrite of an entry in `Manager.clients` MUST go through one `unregisterLocked` helper (review R5.4).
 - **FR-021**: the capture and discovery publish paths MUST carry the instance's generation and drop results whose generation is no longer desired.
 
 ### Functional Requirements: Retirement barrier (PR4)
 
 - **FR-021b**: cached tool snapshots (`lastGoodTools`) MUST carry `{Incarnation, Gen}`. A reapply (sweep fallback or approval reindex) MUST reject a snapshot whose stamp differs from the current row.
-- **FR-022**: each `managed.Client` instance MUST own a `dialgate.Gate`. Step 7 MUST call `Retire()` on every instance it unregisters, before publishing (step 8).
+- **FR-022**: each `managed.Client` instance MUST own a `dialgate.Gate`. **Every** instance that leaves `Manager.clients` MUST be retired before the call that removed it returns: `unregisterLocked` calls `Retire()`. This covers step 7 (`AdvanceGenerations`, before publishing in step 8) and the same-generation replacements (`ReplaceInstanceAt` from `RestartServer`, `ForceReconnectAll` and Docker recovery, which retire the old instance before installing the new one) (review R5.4).
 - **FR-023**: `exec.Cmd.Start` for stdio, the Docker isolation launch and the launcher spawn MUST run under `Gate.Admit`.
 - **FR-023a**: every mcp-go `transport.Interface` that core builds (stdio, streamable HTTP, SSE) MUST be wrapped by `dialgate.WrapTransport`, which gates `Start`, `SendRequest` and `SendNotification`. For stdio, `Retire` MUST also kill the process group (Windows: terminate the Job Object) synchronously.
 - **FR-024a**: every OAuth preflight, resource auto-detect, metadata discovery and cache fetch MUST use the instance transport through `oauth.Env`. CI MUST reject `http.Get/Head/Post(`, `http.DefaultClient`, `http.DefaultTransport` and transport-less `&http.Client{` in `internal/oauth/**`, `internal/upstream/core/**` and `internal/transport/**` outside an allowlist.
 - **FR-024**: HTTP and SSE MCP traffic MUST use a per-instance `*http.Transport` whose `DialContext` is gated and whose connections gate every `Write`. The OAuth `HTTPClient` (metadata, DCR, authorization-code exchange, refresh) MUST use the same instance transport. `Manager.RefreshOAuthToken` and manual OAuth MUST refuse to run against an unregistered or retired instance.
 - **FR-025a**: the gate's read lock MUST be held only around one leaf operation (a dial syscall, one conn `Write`, or `cmd.Start` + process registration) and never nested. `WrapTransport` MUST NOT take the lock. Stdio process-group/Job registration and `TrackProcess` MUST happen inside the admitted launch section. A failed Job assignment MUST kill the child inside the section. `Retire` MUST kill tracked processes before **and** after its barrier.
 - **FR-025b**: on Windows, stdio, Docker and launcher processes MUST be created suspended, assigned to their Job and resumed inside the admitted section. The OAuth browser launch MUST be an admitted section, and the code exchange and token write it leads to are gated by FR-024 and FR-014b.
-- **FR-025**: `Retire()` MUST be bounded. It sets the latch, cancels the gate context, closes tracked connections, then runs a write-lock barrier. It MUST log a warning when it takes more than 1 s.
+- **FR-025**: `Retire()` MUST be bounded. It sets the latch (under `connsMu`), cancels the gate context, closes tracked connections, then runs a write-lock barrier, then closes any connection tracked during the drain. It MUST log a warning when it takes more than 1 s.
+- **FR-025c**: a gated connection MUST be registered inside the admitted dial section, before it is returned to its caller. Registration MUST check the latch under `connsMu` and close the connection with `ErrRetired` when the gate is already retired (review R5.1).
 - **FR-026**: tool calls, `tools/list`, health probes and ambiguous-call probes on a retired instance MUST fail with `ErrRetired` and MUST NOT mark the current instance unhealthy.
 
 ### Functional Requirements: Errors and surfaces
@@ -281,3 +286,9 @@ See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapsho
 | Review R3.2 policy from published config | FR-008b | PR1 | T1.14 |
 | Review R3.3/R3.4 Windows descendants, browser launch | FR-025b | PR4 | T4.12, T4.13 |
 | Review R3.5/R3.6 completion, identity, history | FR-014c | PR2 | T2.11, T2.12 |
+| Review R5.1 conn registered after the sweep | FR-025, FR-025c | PR4 | T4.16 |
+| Review R5.2 stale disconnect hits a same-generation replacement | FR-018 | PR3 | T3.9 |
+| Review R5.3 OAuth write survives an OAuth-config clear | FR-014b | PR2 | T2.13 |
+| Review R5.4 same-generation replacement not retired | FR-020a, FR-022 | PR3, PR4 | T4.15 |
+| Review R5.5 compensation erases a pending restart change | FR-001 (step 6) | PR1 | T1.16 |
+| Review R5.6 T2.5 park point deadlocks on L1 | FR-014, FR-015 | PR2 | T2.5 (amended) |

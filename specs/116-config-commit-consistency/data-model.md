@@ -128,8 +128,15 @@ type UpstreamRecord struct {
     // … existing fields unchanged …
     Generation  int64 `json:"generation,omitempty"`  // g(name) of the commit that last wrote this row
     Incarnation int64 `json:"incarnation,omitempty"` // inc(name); approval writers check this
+    OAuthEpoch  int64 `json:"oauth_epoch,omitempty"` // PR2: G of the commit that created the row or last cleared its OAuth state (review R5.3)
 }
 ```
+
+`OAuthEpoch` is set to `G` on create and by every commit that clears the
+server's OAuth state because `config.OAuthConfigChanged` is true. That clear
+(`lifecycle.go:1488-1489`, `:1543-1551` on `main`) moves into the commit
+transaction in PR1, and PR2 stamps the epoch in the same transaction. Any
+other update keeps the epoch. A row without the field reads as 0.
 
 ### Meta key (**persisted**)
 
@@ -175,9 +182,11 @@ Deleted in the same transaction as the row:
 ```go
 func (m *Manager) SaveScanJobIfIncarnation(job *ScanJob, inc int64) (written bool, err error)
 func (m *Manager) SaveScanReportIfIncarnation(r *ScanReport, inc int64) (bool, error)
-func (m *Manager) SaveOAuthTokenIfIncarnation(rec *OAuthTokenRecord, server string, inc int64) (bool, error)
-func (m *Manager) SaveOAuthClientIfIncarnation(...)  (bool, error)
-func (m *Manager) SaveOAuthCompletionIfIncarnation(...) (bool, error)
+// OAuth writes bind to the credential binding, not to the incarnation alone (review R5.3).
+type CredentialBinding struct{ Incarnation, OAuthEpoch int64 }
+func (m *Manager) SaveOAuthTokenIfBound(rec *OAuthTokenRecord, server string, b CredentialBinding) (bool, error)
+func (m *Manager) SaveOAuthClientIfBound(..., b CredentialBinding) (bool, error)
+func (m *Manager) SaveOAuthCompletionIfBound(..., b CredentialBinding) (bool, error)
 func (m *Manager) RegisterServerIdentityIfIncarnation(sc *config.ServerConfig, path string, inc int64) (*ServerIdentity, bool, error)
 func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (bool, error) // code_execution exempt
 ```
@@ -185,6 +194,24 @@ func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (b
 Each one runs a single bbolt `Update` that reads `upstreams[server]`, compares
 its `Incarnation`, and writes only on a match. `ScanJob` and `ScanReport` gain
 `Incarnation int64` (`omitempty`).
+
+The three OAuth writers compare **both** `Incarnation` and `OAuthEpoch` with
+the row, in the same transaction. An OAuth config change that keeps the name
+and URL keeps the incarnation, and `GenerateServerKey` returns the same key, so
+an incarnation check alone would let an old instance's parked token or DCR
+write restore credentials that the commit had just cleared (review R5.3). The
+retirement barrier cannot prevent this, because the write is local and its
+network response has already completed. Each instance captures its
+`CredentialBinding` from the row when the post-commit worker constructs it.
+The commit that clears OAuth state raises the epoch in the same bbolt
+transaction as the clear. A parked write therefore either committed first, and
+the clear deletes it, or sees the new epoch and is dropped. Reads that
+**reuse** state apply the same binding: the token store `Load`, the DCR client
+lookup and `RefreshManager` scheduling. A record is ignored unless it was
+written under the current binding, and refresh schedules are keyed by
+`(name, Incarnation, OAuthEpoch)`. The token, client and completion records
+gain `OAuthEpoch int64` (`omitempty`). A record without it is accepted only
+while the row's epoch is also 0.
 
 Not in the set: `activity_records` (audit history), `agent_tokens` and
 client credentials (A5), `toolstats` (aggregate counters, not trust).
@@ -231,9 +258,40 @@ func (m *Manager) AdvanceGenerations(changes []GenerationChange) []*managed.Clie
 func (m *Manager) AddServerConfigAt(name string, cfg *config.ServerConfig, gen int64) error // ErrStaleGeneration
 func (m *Manager) RemoveServerAt(name string, gen int64) error                            // ErrStaleGeneration
 func (m *Manager) ConnectServerAt(ctx context.Context, name string, gen int64) error        // ErrStaleGeneration
-func (m *Manager) DisconnectServerAt(name string, gen int64) error                         // exact instance only
-func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Client) error // ForceReconnectAll / Docker recovery / RestartServer
+func (m *Manager) DisconnectServerAt(name string, gen int64, inst managed.InstanceID) error // exact instance only (review R5.2)
+func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Client) error  // ForceReconnectAll / Docker recovery / RestartServer; retires `expected` (review R5.4)
+
+// unregisterLocked is the ONLY code that deletes from m.clients or overwrites
+// an entry. It runs under captureMu W + mu, calls old.Retire() (PR4; a no-op
+// before PR4) before returning, and returns old for asynchronous Disconnect.
+func (m *Manager) unregisterLocked(name string) (old *managed.Client)
 ```
+
+**Instance identity (review R5.2).** `managed.Client` gains
+`InstanceID() managed.InstanceID`, a process-wide monotonic counter assigned
+when the instance is constructed and never reused. A generation identifies a
+*config*. `ReplaceInstanceAt` installs a new instance at the **same**
+generation (restart, `ForceReconnectAll`, Docker recovery), so the generation
+alone cannot tell the old instance from its replacement. Every action that
+targets an existing instance rather than the desired config binds to
+`(gen, InstanceID)`: `DisconnectServerAt`, the disconnect leg of
+`ActionReconnect`, and `ReplaceInstanceAt` (through `expected`). The manager
+checks, under `captureMu` + `mu`, that `desired[name].gen == gen` **and** that
+the registered instance's `InstanceID()` equals the captured one. Otherwise it
+returns `ErrStaleGeneration` and does nothing. Actions that target the desired
+config (`ConnectServerAt`, `AddServerConfigAt`) stay keyed by generation,
+because connecting the current replacement is the intended effect.
+`ActorPoolSimple.DisconnectServer` (`actor_pool.go:146-154`) has the same
+name-resolution hazard today and is converted in the same task.
+
+**Every unregistration retires (review R5.4).** `AdvanceGenerations`,
+`RemoveServerAt` and `ReplaceInstanceAt` all go through `unregisterLocked`.
+An instance can therefore never leave `m.clients` without being retired,
+whether or not the config generation moved. `ReplaceInstanceAt` retires the
+old instance before it installs the replacement. The CI write-site script
+(T076) forbids `delete(m.clients` and `m.clients[...] =` in
+`internal/upstream/manager.go` outside `unregisterLocked` and the install
+helper.
 
 `managed.Client` gains `Generation() int64`. It is set when installed and
 restamped on generation-only changes. **This lands in PR1** (review R4.3),
@@ -249,8 +307,11 @@ because `present=true` overwrites them.
 ### Supervisor
 
 `DiscoveryCapture` and the planned action carry `gen` taken from
-`configSnapshot.ServerGeneration(name)`. `executeAction` calls the `*At`
-methods. `ErrStaleGeneration` produces a debug log and `ActionNone`.
+`configSnapshot.ServerGeneration(name)`. An action that targets an existing
+instance (`ActionDisconnect`, the first leg of `ActionReconnect`) also carries
+the `InstanceID` of the instance it observed when it was planned. `executeAction`
+calls the `*At` methods. `ErrStaleGeneration` produces a debug log and
+`ActionNone`.
 
 ## 5. Dial gate (PR4), `internal/upstream/dialgate`
 
@@ -277,15 +338,34 @@ func (g *Gate) RetireWaiting() bool // test probe: Retire is blocked on an admit
 
 type gatedConn struct{ net.Conn; g *Gate }
 func (c *gatedConn) Write(b []byte) (int, error) // RLock; if retired → ErrRetired; Conn.Write; RUnlock
+
+// track registers c. It runs INSIDE the admitted dial section, before the
+// read lock is released and before the conn is returned to the caller.
+// Under connsMu: if retired → close c and return ErrRetired; else add to conns.
+func (g *Gate) track(c *gatedConn) error
 ```
+
+**Connection registration is retirement-aware (review R5.1).** The gated
+`DialContext` dials **and** registers the connection in one admitted section,
+so a conn is never handed to `net/http` (and so never written) before it is
+tracked. `retired` is set while holding `connsMu`, and `track` checks it under
+the same mutex. A conn registered after the sweep is therefore closed by
+`track` itself, and one registered before the latch is closed by the sweep.
+`Retire` also sweeps `conns` a second time after its barrier, so the design
+does not rely on a single ordering argument. A `Write` that begins after the
+latch returns `ErrRetired` without touching the socket. A `Write` that began
+before the latch is on a conn that was already tracked, and the first sweep
+closes it, which unblocks it. Without these rules a conn registered after the
+sweep could be left open, and a blocked write on it would hold the read lock
+against the barrier indefinitely.
 
 The read lock is held only around **one leaf operation** (a dial syscall, one
 `Write`, or `cmd.Start` + process registration + `TrackProcess`) and is never
 nested. `WrapTransport` takes no lock (review R2.3).
 
-The order inside `Retire`: `retired.Store(true)` → `cancel()` → close every
-tracked conn → kill every tracked process → `mu.Lock(); mu.Unlock()` → kill
-anything tracked during the drain → poll ≤1 s for exit (review R2.4). Any section admitted before
+The order inside `Retire`: `connsMu.Lock(); retired.Store(true); connsMu.Unlock()` → `cancel()` → close every
+tracked conn → kill every tracked process → `mu.Lock(); mu.Unlock()` → close every
+conn and kill every process tracked during the drain → poll ≤1 s for exit (reviews R2.4, R5.1). Any section admitted before
 `retired` was set has finished by the time the barrier returns, because its
 conn is closed or its `cmd.Start` has returned. Any later `RLock` observes
 `retired`.
@@ -321,6 +401,8 @@ The stdio, Docker and launcher `Start` calls run under `gate.Admit`.
 ```
 (absent) --Create@G1--> present(g=G1,inc=G1) --Update(eq)--> present(g=G1,inc=G1)
                          |  --Update(ne)@G2--> present(g=G2,inc=G1)  [instance restamped or retired+replaced; approvals unaffected]
+                         |  --Update(oauth)@G2'-> present(g=G2',inc=G1,oauthEpoch=G2')  [OAuth state cleared; old-epoch credential writes dropped]
+                         |  --Restart (same g)--> instance replaced (new InstanceID), old one retired
                          |  --Remove@G3-----> absent                 [purge set deleted, instance retired]
 absent  --Create@G4--> present(g=G4,inc=G4)  with G4 > G3 > G2 > G1, empty purge set, every inc=G1 approval writer rejected
 ```

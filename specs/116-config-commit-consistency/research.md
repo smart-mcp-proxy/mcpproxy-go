@@ -278,8 +278,11 @@ Inside `configCommitMu`:
    purge, the generation and incarnation stamps, and the meta key
    `config_commit_generation = G`. Purge the index for removed or newly
    quarantined servers, then do the in-memory purge. Release the approval
-   locks. On failure, rewrite the previous config to disk (compensating
-   write), return the error and publish nothing.
+   locks. On failure, rewrite the previous **disk** content (compensating
+   write), return the error and publish nothing. The previous disk content is
+   `pendingAwareDiskConfig(base)`, captured before step 5, not `base`: with a
+   restart-required change pending, disk intentionally differs from the live
+   snapshot (review R5.5).
 7. **Advance manager** (PR3/PR4): unregister and retire instances whose
    generation moved with a connection-relevant change. Restamp instances with a
    generation-only change.
@@ -376,6 +379,12 @@ Spec 117 PR-3's inverted order (approval lock → `captureMu`(R) → `epochMu`,
 `dialgate.WrapTransport` (stdio stdin writes included). `Retire` kills a stdio
 process group synchronously. Every OAuth preflight, discovery and cache fetch
 takes the instance transport through `oauth.Env`.
+
+**Amended after review R5.1** (§11): the gated dialer registers the
+connection inside the same admitted section as the dial, before returning it.
+Registration checks the latch under `connsMu`, and `Retire` sets the latch
+under `connsMu`, so a late-registered conn is closed at registration. `Retire`
+sweeps the connections a second time after its barrier.
 
 **Invariant.** An instance admitted before `Retire` returns may already have
 launched or written. The asynchronous `Disconnect` terminates it. Nothing new
@@ -497,6 +506,12 @@ row delete (D4), so either the write committed first (and is purged) or it
 sees the row missing or re-incarnated (and is dropped). No lock is needed
 beyond bbolt's own serialization, so this adds no lock-order edge.
 
+**Amended after review R5.3** (§11): OAuth state is also cleared **without**
+a new incarnation, when the OAuth config changes but the name and URL do not.
+OAuth writes and reuse-reads therefore bind to
+`CredentialBinding{Incarnation, OAuthEpoch}`. The commit raises `OAuthEpoch`
+in the same transaction as the clear, by the same either-or argument.
+
 ### D13. Projection repair is not a config change
 
 A commit has two diffs:
@@ -585,3 +600,20 @@ Review rounds used on this design PR: 4 of the 10-round cap.
 | R4.2 | high | A global-only policy change (`quarantine_enabled`) takes no server L1, so a discovery pass holding A's L1 with the old policy can approve under it after the commit returns | **D16 amended**: a commit that changes any global approval-policy field (`quarantine_enabled`; the list lives next to `resolveToolQuarantineGateHeld`) takes **every configured server's** L1 in sorted order in step 4. A pass then finishes entirely before the meta write or entirely after it. T1.15 is the global-only counterpart of T1.14 |
 | R4.3 | medium | D15 (PR1) compares a captured *config* generation, but instance generation stamping was assigned to PR3. Today discovery captures a supervisor connection generation, which is a different counter | Instance stamping moves to **PR1**: `managed.Client.Generation()` is set when a client is constructed from the `(cfg, gen)` the post-commit worker passes, and restamped on the `SetConfig` path. Discovery captures the instance's generation. D15 drops results from an instance whose stamp differs from the row (an instance not yet updated to the committed config). PR3 keeps only the execution-time manager checks and the supervisor actions (T024c) |
 | R4.4 | medium | The launcher readiness probe dials with its own `net.Dialer` (`launcher/wait.go:63-78`). Docker diagnostics run `cmd.Run()` (`core/monitoring.go:499-504`). Teardown runs Docker cleanup commands after retirement (`connection_lifecycle.go:323-354`) | `WaitForURL` takes the gate's dialer. Docker diagnostics and recovery execs are admitted sections. **I6 is refined**: it covers launches **of the upstream** (its command, its container `run`, its launcher, the OAuth browser) and every network byte. **Teardown commands** (`docker stop/kill/rm`, process-group kill) are explicitly exempt, because they act to end the instance (T4.14) |
+
+## 11. Design review round 5 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Transcripts: `docs/qa/0.70.0-ux-2026-10-10/remediation/reviews/s116-spec-r1A.txt`
+and `s116-spec-r1B.txt` (spec review, chunked A/B). Verdict: FINDINGS (6: two
+high, four medium). Each was checked against `main` (`ee7834e71`) and the
+design. All six were accepted, one with a narrower rationale (R5.1). Review
+rounds used on this design PR: 5 of the 10-round cap.
+
+| # | Sev | Finding | Verification | Resolution |
+|---|---|---|---|---|
+| R5.1 | high | `Retire` closes tracked conns before its barrier. A conn registered after that sweep could be left open, and a blocked `Write` on it would hold the read lock against the barrier | The hang needs a `Write` that started before the latch on an untracked conn. Under the design's `gatedConn.Write` latch check that is reachable only if registration happens after the conn is handed to the caller, which the design did not forbid. A conn registered after the sweep was also never closed (a leak) | **Hardened** (D8 amended, FR-025c): dial and `track` in one admitted section, the latch checked and set under `connsMu` (close on late registration), and a second sweep after the barrier. T4.16 |
+| R5.2 | medium | `DisconnectServerAt(name, gen)` carries no instance identity. `ReplaceInstanceAt` at the same generation (restart) lets a stale disconnect hit the replacement. `actor_pool.go:146-154` resolves by name today | Confirmed: `ActorPoolSimple.DisconnectServer` calls `GetClient(name)` then `Disconnect()`. T074 replaces at the same generation | `managed.Client.InstanceID()`. Instance-targeted actions bind to `(gen, InstanceID)` (FR-018, data-model §4). T3.9, live L3 step 3 |
+| R5.3 | medium | An OAuth config change keeps the incarnation while the commit clears OAuth state, so an old instance's parked token or DCR write restores obsolete credentials, which the new instance reuses (same `GenerateServerKey`) | Confirmed: the clear is keyed on `config.OAuthConfigChanged` (`lifecycle.go:1488-1489`, `:1543-1551`), and the generation rule keeps the incarnation on update | `UpstreamRecord.OAuthEpoch` and `CredentialBinding` for OAuth writes, reuse-reads and refresh schedules (D12 amended, FR-014b). T2.13 |
+| R5.4 | high | Only `AdvanceGenerations` retires. Same-generation replacements (`RestartServer`, `ForceReconnectAll`, Docker recovery: `manager.go:2612-2617`) never retire the old instance | Confirmed: `ForceReconnectAll` calls `RemoveServer` then `AddServer` with no config change | A single `unregisterLocked` that retires every instance leaving `m.clients`, enforced by the write-site script (FR-020a, FR-022). T4.15 |
+| R5.5 | medium | The compensating write on a storage failure writes `base` back. With a pending restart-required change, disk intentionally differs from the live snapshot, so the pending change is erased | Confirmed: `pendingAwareDiskConfig` (`lifecycle.go:1739-1745`) and `desiredCfg` (`runtime.go:1950-1954`) | Compensate with `pendingAwareDiskConfig(base)` captured before step 5, with self-write marker bookkeeping and `desiredCfg` untouched (plan step 6). T1.16 |
+| R5.6 | medium | T2.5 parks scanner approval after the baseline save, which T055 puts under L1. The recipe then removes the server, which needs the same lock, so it blocks | Confirmed: a test-recipe defect, not a design defect | T2.5 parks after the L1 section exits and before `Commit(ExpectIncarnation, SetQuarantined(false))` (new seam `afterBaselineBeforeUnquarantine`), and asserts remove and re-add return while parked |

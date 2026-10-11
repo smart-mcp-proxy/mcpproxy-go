@@ -74,6 +74,7 @@ go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEn
 | T1.13 | n/a | a discovery pass whose upstream dropped a tool | completes without re-entering L1 (watchdog 5 s); the absent tool's record is removed (R3.1) |
 | T1.14 | approval writer parked after acquiring L1 is impossible on the PR, so: commit parked at `afterStorage` (L1 released, before publish) | `ApproveTools`/tool toggle on that server under the new `trust_mode: manual` | the decision uses manual (from storage), not the still-published auto (R3.2). Parent: fails |
 | T1.15 | discovery pass holding A's L1 with `quarantine_enabled=false` (parked inside, dual-mode) | global-only commit enabling quarantine | the commit is observed waiting on A's L1, or (parent) returns first. After release, a new tool is pending, not auto-approved (R4.2) |
+| T1.16 | storage failure injected (`commitHooks.afterDisk` returns an error into `ApplyServerCommit`) during an unrelated server edit, after a pending restart-required `routing_mode` change was persisted | the unrelated edit | the edit fails. The file on disk is byte-identical to before the edit (the pending `routing_mode` is still there), `desiredCfg` and the pending-restart report are unchanged, and the watcher does not reload the compensation write as an external edit. Parent: compensating with `base` drops the pending value (review R5.5) |
 | T1.9 | n/a | restart | after a restart, `Snapshot.Version` is greater than or equal to the persisted `meta.config_commit_generation`, and generations of unchanged servers are kept |
 
 ## T2: Removal and purge (PR2)
@@ -89,13 +90,14 @@ tokens.
 | T2.1 | remove through REST, through MCP, through `ApplyConfig` that drops it, through a file reload, and through `ApplyConfig` leaving an **empty** server set | for each path, every purge-set bucket has zero keys for `acme` when the call returns. `acme_x` untouched. Index has no `acme` docs. Refresh schedule is gone |
 | T2.2 | re-add a different `acme` (manual trust) exposing identical tools and prompts | all tools and prompts pending and withheld. Unforced scanner approve fails "no scan results". Connect needs OAuth (no token used) |
 | T2.4 | `ApproveTools(acme)` parked at `approvalHooks.afterCapture` | remove and re-add `acme`, then release: 409 `server_replaced`, no records written. A variant with an unrelated `disabled_tools` edit instead of the re-add: the approval succeeds |
-| T2.5 | scanner `ApproveServerWithBlocks(acme)` parked after baseline save | remove and re-add `acme`, then release: the replacement stays quarantined, its baseline and blocks are absent |
+| T2.5 | scanner `ApproveServerWithBlocks(acme)` parked **after its approval-lock (L1) section that saved the baseline and blocks has exited**, and before `Commit(ExpectIncarnation, SetQuarantined(false))` (`approvalHooks.afterBaselineBeforeUnquarantine`). Parking inside the L1 section would deadlock the recipe, because removal needs the same lock (review R5.6) | remove and re-add `acme` while the approval is parked: both **return** (assert `approvalLockWaiters("acme") == 0` and that they complete under a 5 s watchdog). Then release: the approval fails with `server_replaced`, the replacement stays quarantined, and it inherits no baseline or blocks (the removal purge deleted them, and the replacement's rows are empty) |
 | T2.6 | `foo` and `foo_bar` both with tokens; remove `foo` | `foo_bar`'s token readable (B2) |
 | T2.8 | scanner job for old `acme` parked before its report callback | remove and re-add `acme`, then release: no job or report for the new incarnation; unforced approve refused (R1.1) |
 | T2.9 | `SaveToken` parked after its context check (code exchange) | remove and re-add `acme` (same URL), then release: no token stored; the old schedule dropped (R1.2) |
 | T2.10 | none | remove `acme` and re-add it immediately; make its first discovery fail | the sweep fallback does not reapply the old `lastGoodTools` (R2.5) |
 | T2.11 | completion event for old `acme` fetched, consumer parked | remove + re-add, release | no retry against the replacement; completion record purged (R3.5) |
 | T2.12 | worker parked before `RegisterServerIdentity`; call parked before history write | remove `acme`, release | no identity or history bucket for `acme` (R3.6) |
+| T2.13 | the old instance's `SaveToken` and DCR `SaveOAuthClient` parked after the network response, before persisting | change `acme`'s OAuth config (scopes or client id), keeping name and URL; the commit returns; release | no token and no DCR client for `acme` in storage; the new instance starts a fresh OAuth flow and does not load the old records; the old refresh schedule is dropped. Parent (incarnation-only check): the cleared records are restored (review R5.3) |
 | T2.7 | discovery pass for old `acme` parked at `beforeApprovalLock` | remove and re-add, then release: no records with the old incarnation are written |
 
 ## T3: Generation-bound workers (PR3)
@@ -109,6 +111,7 @@ tokens.
 | T3.5 | (a) capture parked **before** `WithCurrentClientOnEpoch`; (b) capture parked inside it | (a) replace the endpoint, commit returns, release capture; (b) start the commit, assert `CaptureReplacementQueued()`, release capture, await commit | (a) the capture finds the instance unregistered and persists nothing; (b) the capture completed before the replacement (the old definitions are recorded under the old incarnation and then superseded). No `review.changed` for old definitions after the commit |
 | T3.7 | approval reindex with a cached snapshot stamped with an old `Gen` | the endpoint changes | reapply rejected; re-list instead (FR-021b) |
 | T3.8 | `ForceReconnectAll` parked after capturing clients | remove A; replace B | A not re-created, B's replacement not removed (R4.1) |
+| T3.9 | a real `ActionDisconnect` (and the disconnect leg of `ActionReconnect`) captured for instance I1 at `beforeExecuteAction` | `RestartServer(s)` without a config change installs I2 at the **same** generation; I2 connects | release: `DisconnectServerAt` returns `ErrStaleGeneration` (InstanceID mismatch), I2 stays connected. Parent (generation-only check): I2 is disconnected (review R5.2) |
 | T3.6 | old `ActionDisconnect` at `beforeExecuteAction` | the newer commit installs and connects the replacement | release: `DisconnectServerAt` returns `ErrStaleGeneration`, the replacement stays connected (R1.5) |
 
 ## T4: Retirement barrier (PR4)
@@ -137,6 +140,8 @@ Fixtures (test-only):
 | T4.12 | Windows-only: a child that spawns a grandchild immediately | `Retire` | the grandchild is in the Job and dead when `Retire` returns (R3.3) |
 | T4.13 | `openBrowser` parked before `Start` | `Retire` | no browser process; a code delivered to the callback afterwards is not exchanged and no token is stored (R3.4) |
 | T4.14 | launcher `WaitForURL` parked after its cancellation check; Docker diagnostic exec parked | `Retire` | no dial, no diagnostic exec; teardown `docker stop` still runs (R4.4) |
+| T4.15 | the old instance parked (a) at `dialgate.beforeAdmit` before its stdio launch (marker launcher) and (b) before its HTTP send and before its OAuth token send (counting fixture) | `RestartServer`, `ForceReconnectAll` and Docker recovery each replace it at the **same** config generation | release: no marker from the old instance, zero requests and zero `Authorization` headers from it; the replacement connects and its counters are unaffected (review R5.4) |
+| T4.16 | an admitted dial parked after the TCP connect but before `track` | `Retire` runs its first sweep (`afterSweepBeforeBarrier` seam), then release the dial and start a blocking `Write` against a peer that never reads | `track` closes the conn and the dial returns `ErrRetired`. In the variant that bypasses `track`'s latch check (to prove the second sweep), the post-barrier sweep closes the conn and the blocked `Write` returns. Either way `Retire` returns within 1 s and no byte reaches the peer after the latch (review R5.1) |
 | T4.7 | benchmark | — | `BenchmarkGatedConnWrite` shows < 5% overhead against an ungated conn on a 1 KiB write |
 
 ## Live checks (qa070 harness)
@@ -203,6 +208,12 @@ so the named server's post-commit worker blocks until
    args is running (`pgrep -f`).
 2. Park, re-add with another tool count (fixture arg), release. `tool_count`
    matches the **new** arg.
+3. **Same-generation restart**: note the fixture PID of `trusted-library`,
+   run `$CLI upstream restart trusted-library`, and check that the old PID is
+   gone and that exactly one fixture process with its args remains. Then, with
+   `MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=trusted-library`, park a supervisor
+   disconnect, restart again, release: `upstream list` shows it connected
+   (review R5.2).
 
 ### L4 (PR4)
 
