@@ -129,6 +129,8 @@ Set `anonymous_profile` to confine every caller that presents no credential (or 
 
 ### The binding guard
 
+On MCP, the `profiles` tool's `classify` operation takes `tier` of `read`, `write`, `destructive` or `none`; `none` removes the classification (the schema advertises no empty-string enum member because Google Gemini rejects one; a legacy `""` is still accepted).
+
 While `require_mcp_auth` is **off**, a client bound to a named profile could escape it by simply omitting its credential. MCPProxy refuses any change that would leave such a binding bypassable: connecting, rebinding, bulk moves, and also profile edits, classification changes, deletes and `reassign_to` that narrow what a binding reaches or widen what anonymous callers reach. The refusal is `409` with code `binding_bypassable_without_auth`:
 
 ```
