@@ -165,7 +165,8 @@ Other paths already follow the order: `commitDiscoveredTools`, `reindexFromLastG
 **Decision**:
 - Add `managed.Client.Retire()`: sets `retired` under `epochMu`.
 - `WithConnectionEpoch` and a new `CaptureIsCurrent(capture)` report false for retired clients.
-- `Manager.AddServerConfig` (endpoint change branch) and `RemoveServer` call `Retire()` on the old client inside the `captureMu` writer section, before the map entry is replaced.
+- `Manager.AddServerConfig` (endpoint change branch) and `RemoveServer` call `Retire()` on the old client while holding the `captureMu` writer lock but **after releasing `manager.mu`** (design review r8 #1). Today `AddServerConfig` holds both (`manager.go:444-445,469-482`), and `Supervisor.DiscoveryGeneration` → `GetServerState` → `Manager.GetClient` takes `manager.mu` (R) (`supervisor.go:1157-1160`, `actor_pool.go:165-166`, `manager.go:1214-1218`). If retirement ran under `manager.mu`, it would order `manager.mu → epochMu` against the callback's `epochMu → manager.mu`.
+- **No manager or supervisor lookups inside the epoch-held callback.** The supervisor-generation check that the quarantined capture performs inside its callback today (`lifecycle.go:649-661`) moves to just before `WithCaptureCurrent`, still under the approval lock. Inside the callback, pointer + epoch + `retired` are checked from the client alone; a reconnect after the generation check moves the epoch and is caught there. `captureMu` (W) still excludes every `WithCaptureCurrent` reader during replacement, so the protection is unchanged.
 
 **Rationale**: the #1565 last bullet. Pointer checks exist only in the quarantined capture today. Retirement makes "this capture's client is still the server's client" a single cheap check for every path.
 
@@ -241,3 +242,9 @@ See spec.md A1-A10 and O1-O4.
 1. **Medium, more disable writers** (PATCH, config reload, restart persist): FR-034 enumerates every disable writer regardless of quarantine. The CI guard also covers `EnableUpstreamServer`. T306(9c) covers each writer.
 2. **Medium, lenient empty captures bypass the fence**: FR-033a. An empty lenient result is an observation that advances `applied` without writing, and the discovery marker is published inside the gated section. Test T306(5e).
 3. **Medium, a marker failure still leaves the snapshot published**: `commitDiscoveredTools` restores `lastGoodTools` and `lastCaptureAt` on `errBaselineMarker`. T104f asserts both. PR-1's declared scope was updated.
+
+## Design review round 8 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, a manager.mu/epochMu inversion through retirement and the generation check**: retirement now runs after `manager.mu` is released, still under `captureMu` (W). The epoch-held callback must not look up the manager or supervisor; the generation check moves before `WithCaptureCurrent`. A deadlock test was added (T303).
+2. **High, a failed record write leaves the old binding valid**: FR-018 makes such a capture uncommitted (nothing published) and marks the server review-dirty. Bound approvals return 409 and unbound ones 503 until a full capture succeeds. The restart limitation is stated. Fault-injection test T205c.
+3. **Medium, the observation fence blocks operator reindex**: a `definitions` sequence lets the retained snapshot be reconciled without moving the fences. Test T306(5r).

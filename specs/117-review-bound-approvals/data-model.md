@@ -120,6 +120,8 @@ type toolApprovalServerLock struct {
     mu        sync.Mutex
     applied   uint64 // highest capture seq applied to records+index (guarded by mu)
     published uint64 // highest capture seq published to the StateView (guarded by mu)
+    definitions uint64 // seq of the newest applied NON-EMPTY capture (== retained snapshot); FR-033a
+    reviewDirty bool   // PR-2 FR-018: a capture's record writes failed; bound approvals 409 until a full capture
 }
 ```
 

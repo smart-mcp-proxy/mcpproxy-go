@@ -68,6 +68,7 @@ captureSnapMu (runtime, global RW)
 The quarantined capture's current outer `WithCurrentClientOnEpoch` wrapper (`lifecycle.go:649`) violates this order (it takes `captureMu`/`epochMu` **before** `captureSnapMu` and the approval lock). PR-3 removes it: client validity is checked by `Manager.WithCaptureCurrent(capture, fn)` **inside** the approval-locked section, holding `captureMu` (R) and `epochMu` across the writes.
 
 Rules:
+- Inside a `WithCaptureCurrent` callback (`epochMu` held), no code may call `Manager.GetClient`, `Supervisor.DiscoveryGeneration`/`GetServerState` or anything else that takes `manager.mu`. Retirement takes `epochMu` with `captureMu` (W) held but `manager.mu` released (design review r8 #1).
 - No code holding a per-server approval lock may take `captureSnapMu`.
 - No code holding a per-server approval lock may call `SaveConfiguration`, `LoadConfiguredServers`, `HandleUpstreamServerChange`, `reindexAffectedProfiles` or anything that can synchronously reach `checkToolApprovals` (`tool_approval_lock.go:25-38`, unchanged).
 - `CommitServerApproval` and the operator approvals take only the approval lock (no `captureSnapMu`).
@@ -77,6 +78,7 @@ Rules:
 
 | Situation | Rule |
 |---|---|
+| operator reconciliation (approval/block reindex) with `snapshot.seq == definitions < applied` (after a lenient-empty observation) | allowed: re-apply the retained snapshot without moving `applied`/`published` (FR-033a, design review r8 #3) |
 | `capture.seq < applied` | stale: no writes of any kind; caller logs at Debug and, for single-server discovery, does not re-list (a newer capture already applied) |
 | `capture.seq >= applied` | apply; `applied = seq` |
 | `capture.seq == 0` | apply only while `applied == 0` |

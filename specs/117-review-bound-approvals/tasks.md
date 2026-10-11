@@ -117,7 +117,15 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - A revert to H0 still restores approved.
 
   Fails on main: the record still shows H1.
-- [ ] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash **or the hints** differ from the stored current ones, i.e. whenever the review fingerprint would change; keep `Previous*`); `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
+- [ ] T205c [P] [PR-2] test: `internal/runtime/tool_capture_persist_fault_test.go` (FR-018, design review r8 #2). Fault injection is a storage wrapper failing `SaveToolApproval` for one tool:
+  - Review H1 (pending) → capture H2 with the write failing → snapshot and stamp unchanged.
+  - Bound approval with fp(H1) → 409 (review-dirty). Unbound → 503.
+  - Storage recovers but no new capture has run → still 409.
+  - A successful capture of H2 → the dirty flag clears, fp(H1) gets 409 (definition changed), and fp(H2) succeeds.
+  - The same for an approved → changed record and for a changed → changed-again record (FR-017).
+
+  Fails on main: approval of H1 succeeds after the failed write.
+- [ ] T206 [PR-2] impl: FR-018 (`errCaptureIncomplete`, review-dirty flag in the per-server lock state, the check in `ApproveToolsReviewed`/`ApproveAllToolsReviewed`/`CommitServerApproval`, unpublished snapshot on the error); FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash **or the hints** differ from the stored current ones, i.e. whenever the review fingerprint would change; keep `Previous*`); `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
 - [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
   - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
   - **Composition regression** (already green on top of PR-1): bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending.
@@ -186,8 +194,9 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - `Retire` makes `WithConnectionEpoch` and `CaptureIsCurrent` false.
   - `AddServerConfig` with a changed command retires the old client before the map entry is replaced.
   - `RemoveServer` retires.
+  - **Deadlock test** (design review r8 #1): retirement during `AddServerConfig`, run concurrently with a `WithCaptureCurrent` callback, completes under a timeout. The callback performs no manager or supervisor lookup; a static hook asserts that `GetClient`/`DiscoveryGeneration` are never called while the client's `epochMu` is held.
   - `DiscoverToolsReportCaptured` returns one capture per listed server, each from that server's own list.
-- [ ] T304 [PR-3] impl: `Retire`, `CaptureIsCurrent`, manager changes, `DiscoverToolsReportCaptured`.
+- [ ] T304 [PR-3] impl: `Retire`, `CaptureIsCurrent`, manager changes (retire after releasing `manager.mu`, still under `captureMu` W), `DiscoverToolsReportCaptured`.
 
 ### Ordered apply
 - [ ] T305 [P] [PR-3] test: `internal/runtime/inventory_lock_order_test.go`.
@@ -214,6 +223,7 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - (3) Older-with-x vs newer-without-x → no delete or resurrect of x.
   - (4) A pass paused after eligibility → `QuarantineServer(true)` → resume → shared and profile indexes have no entry for the server, including previously approved tools.
   - (5) seq 0 is applied only while `applied == 0`.
+  - (5r) **Failing-first** (design review r8 #3): non-empty C1 applied → lenient-empty C2 (observation) → the operator approves held tool `t` → `t` is indexed. Then the operator blocks approved tool `u` → `u` is evicted. Both go through the snapshot reconciliation (`snapshot.seq == definitions`) without moving `applied`. Against an implementation of (5e) only, they fail (stale rejection).
   - (5e) **Failing-first** (FR-033a, design review r7 #2): non-empty C1 is paused; a newer C2 lists zero tools on the lenient path (reactive, and sweep) and finishes; then C1 resumes → C1 writes nothing. On main C1 writes records, index entries and StateView.
   - (6) **Regression check** (already true on main): re-applying the last-good snapshot after an approval (`seq == applied`, capture current) works.
   - (6b) **Failing-first**: after a reconnect (epoch moved) or endpoint replacement, the approval reindex does **not** re-apply the old snapshot; it re-lists. On main the old snapshot is re-applied (`tool_quarantine.go:2006-2027`).
