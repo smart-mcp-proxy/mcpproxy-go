@@ -278,14 +278,16 @@ Inside `configCommitMu`:
    purge, the generation and incarnation stamps, and the meta key
    `config_commit_generation = G`. Purge the index for removed or newly
    quarantined servers, then do the in-memory purge. Release the approval
-   locks. On failure, rewrite the previous **disk** content (compensating
+   locks. On failure, restore the previous **disk** content (compensating
    write), return the error and publish nothing. The previous disk content is
-   `pendingAwareDiskConfig(base)`, captured before step 5, not `base`: with a
-   restart-required change pending, disk intentionally differs from the live
-   snapshot (review R5.5).
-7. **Advance manager** (PR3/PR4): unregister and retire instances whose
+   the raw file state (`{exists, bytes, mode}`) read inside the lock before
+   step 5. It is not `base`, because with a restart-required change pending
+   disk intentionally differs from the live snapshot (review R5.5). It is not
+   `pendingAwareDiskConfig(base)` either, because that is rebuilt from memory
+   and erases an operator edit that a reload is applying (review R9.2).
+7. **Advance manager**: unregister and retire (PR3/PR4) instances whose
    generation moved with a connection-relevant change. Restamp instances with a
-   generation-only change.
+   generation-only change, in PR1 already (`RestampRetained`, review R9.1).
 8. **Publish**: `configsvc.Publish(pending)` and the legacy `r.cfg` and
    `desiredCfg` swap.
 
@@ -295,7 +297,10 @@ disconnect retired instances in the background.
 
 **Assumption A2.** When the compensating disk write fails after a storage
 failure, the error is logged at error level and the disk stays ahead of the
-live config until the next commit rewrites it. Today a failed save already
+live config until the next commit rewrites it. When it succeeds after a failed
+reload, the disk again holds the operator's edit that the reload could not
+apply: disk is ahead of live exactly as it was before the reload, and the next
+reload or commit applies it (review R9.2). Today a failed save already
 leaves "in-memory stores agree, disk stale" (`lifecycle.go:1751-1760`). This
 keeps that guarantee.
 
@@ -534,7 +539,9 @@ A commit has two diffs:
 
 The commit skips work only when both are empty and nothing is forced. Boot
 (`Bootstrap`) and an explicit `SaveConfiguration` (`ForceDisk`) are the two
-forced cases. Generations survive restarts through the row stamps: at boot a
+forced cases. The boot call is `ReconcileLive()` plus `Bootstrap()`. A boot
+without `Bootstrap()` would skip scheduling on a restart whose rows already
+match the file, and leave the manager empty (review R9.6). Generations survive restarts through the row stamps: at boot a
 row whose content equals the file entry keeps its stored `{Gen, Incarnation}`,
 and everything else gets the boot `G`.
 
@@ -556,8 +563,12 @@ were not disputed, except where R2.3, R2.4 and R2.6 refine them.
 
 | Op | Input | Used by |
 |---|---|---|
-| `ReplaceConfig(cfg)` | a config the caller submitted **in this call**, or the file read inside the lock | `ApplyConfig` (PUT/apply), `ReloadConfiguration`, boot |
-| `ReconcileLive()` | none (base read under the lock) | projection repair: periodic/explicit reconcile, after-restart repair |
+| `ReplaceConfig(cfg)` | a config the caller submitted **in this call**, or the file read inside the lock | `ApplyConfig` (PUT/apply), `ReloadConfiguration` |
+| `ReconcileLive()` | none (base read under the lock) | projection repair: periodic/explicit reconcile, after-restart repair; boot, always together with `Bootstrap()` (review R9.6) |
+
+Boot was listed under `ReplaceConfig` until round 9. The live config at boot
+is the file read at startup **before** the lock, so it is not an authoritative
+input, and `ReplaceConfig(live)` alone does not force scheduling.
 
 No API accepts a previously captured snapshot as a replacement.
 
@@ -629,7 +640,7 @@ rounds used on this design PR: 5 of the 10-round cap.
 | R5.2 | medium | `DisconnectServerAt(name, gen)` carries no instance identity. `ReplaceInstanceAt` at the same generation (restart) lets a stale disconnect hit the replacement. `actor_pool.go:146-154` resolves by name today | Confirmed: `ActorPoolSimple.DisconnectServer` calls `GetClient(name)` then `Disconnect()`. T074 replaces at the same generation | `managed.Client.InstanceID()`. Instance-targeted actions bind to `(gen, InstanceID)` (FR-018, data-model §4). T3.9, live L3 step 3 |
 | R5.3 | medium | An OAuth config change keeps the incarnation while the commit clears OAuth state, so an old instance's parked token or DCR write restores obsolete credentials, which the new instance reuses (same `GenerateServerKey`) | Confirmed: the clear is keyed on `config.OAuthConfigChanged` (`lifecycle.go:1488-1489`, `:1543-1551`), and the generation rule keeps the incarnation on update | `UpstreamRecord.OAuthEpoch` and `CredentialBinding` for OAuth writes, reuse-reads and refresh schedules (D12 amended, FR-014b). T2.13 |
 | R5.4 | high | Only `AdvanceGenerations` retires. Same-generation replacements (`RestartServer`, `ForceReconnectAll`, Docker recovery: `manager.go:2612-2617`) never retire the old instance | Confirmed: `ForceReconnectAll` calls `RemoveServer` then `AddServer` with no config change | A single `unregisterLocked` that retires every instance leaving `m.clients`, enforced by the write-site script (FR-020a, FR-022). T4.15 |
-| R5.5 | medium | The compensating write on a storage failure writes `base` back. With a pending restart-required change, disk intentionally differs from the live snapshot, so the pending change is erased | Confirmed: `pendingAwareDiskConfig` (`lifecycle.go:1739-1745`) and `desiredCfg` (`runtime.go:1950-1954`) | Compensate with `pendingAwareDiskConfig(base)` captured before step 5, with self-write marker bookkeeping and `desiredCfg` untouched (plan step 6). T1.16 |
+| R5.5 | medium | The compensating write on a storage failure writes `base` back. With a pending restart-required change, disk intentionally differs from the live snapshot, so the pending change is erased | Confirmed: `pendingAwareDiskConfig` (`lifecycle.go:1739-1745`) and `desiredCfg` (`runtime.go:1950-1954`) | Compensate with `pendingAwareDiskConfig(base)` captured before step 5, with self-write marker bookkeeping and `desiredCfg` untouched (plan step 6). T1.16. **Superseded by R9.2**: the compensation restores the raw pre-write file bytes |
 | R5.6 | medium | T2.5 parks scanner approval after the baseline save, which T055 puts under L1. The recipe then removes the server, which needs the same lock, so it blocks | Confirmed: a test-recipe defect, not a design defect | T2.5 parks after the L1 section exits and before `Commit(ExpectIncarnation, SetQuarantined(false))` (new seam `afterBaselineBeforeUnquarantine`), and asserts remove and re-add return while parked |
 
 ## 12. Design review round 6 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
@@ -688,3 +699,22 @@ were accepted. Review rounds used on this design PR: 8 of the 10-round cap.
 Not taken into this spec: the name-resolved logout sequence
 (`runtime.go:3250-3271`), which all three chunks again listed as out of scope.
 It stays recorded on #1563.
+
+## 15. Design review round 9 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Transcripts: `docs/qa/0.70.0-ux-2026-10-10/remediation/reviews/s116-spec-r5A.txt`,
+`s116-spec-r5B.txt` and `s116-spec-r5C.txt` (spec review round 5, chunked
+A/B/C). Verdict: FINDINGS in every chunk (6: three high, three medium). Each
+was checked against `main` and the design, and all six were accepted. None
+was a false positive, and none is a pre-existing defect outside this design:
+each one is a gap that the design itself would have introduced or left open.
+Review rounds used on this design PR: 9 of the 10-round cap.
+
+| # | Sev | Finding | Verification | Resolution |
+|---|---|---|---|---|
+| R9.1 | high | PR1 has no update path for a retained instance on a non-connection edit. Step 7 is a no-op until PR3, and the after-unlock workers cover only created and reconnecting servers. A revoked `forward_headers` entry keeps being forwarded, and the instance's stale generation makes every later discovery pass fail D15 | Confirmed: `main`'s reconcile calls `AddServer` for every enabled server (`lifecycle.go:1570-1592`), and `AddServerConfig` calls `SetConfig` on a connection-equal client (`upstream/manager.go:484-496`). That is the only delivery path. The supervisor ignores such edits (`supervisor.go:564`), and `forwardPolicy` reads the instance config on each call (`managed/client.go:794-806`) | Step 7 in PR1 runs `upstream.Manager.RestampRetained` for every `Updated`, non-reconnect change: `mc.SetConfigAt(cfg, g)` stores `{cfg, g}` as one atomic pair, only forward (a larger `g`). The after-unlock phase requests one discovery pass for each restamped connected server. PR3 folds the restamp into `AdvanceGenerations` (plan §Commit pipeline, data-model §1 and §4, FR-019a). T1.19 |
+| R9.2 | medium | Compensation rebuilt the "pre-write file" from memory with `pendingAwareDiskConfig(base)`, which returns `nil` when nothing is pending and never reads disk. A reload that fails in storage would erase the operator's edit it was applying | Confirmed: `runtime.go:698-716` builds from `desiredCfg` and the running config. `ReloadConfiguration` reads the edited file inside the commit, so the file holds content that memory has not seen yet | Compensation restores the raw file state captured inside L0 before step 5: bytes and mode, or removal when the file was absent. Self-write marker for the restored bytes (plan steps 5-6, FR-001c). T1.18, with a pending-change variant, a no-pending variant and an absent-file variant. T1.16 still holds |
+| R9.3 | high | `ServerCommitBatch.Saves` held `*config.ServerConfig`, which has no stamp fields, and the batch carried only `G`. Projection repair of a missing row for an unchanged server would be stamped with `G`, and `CheckCommittedView` would then reject the published snapshot and block reconnects | Confirmed: `config.go:680` has no generation, incarnation or epoch field. The repaired row has no prior stamps to keep | `Saves []ServerSave{Config, Stamp commitview.ServerGen}`. The commit copies each stamp from the prepared snapshot and asserts the equality before calling storage. Storage writes the stamp verbatim and rejects a zero stamp or one above `G` (data-model §3, FR-007a). T1.20 |
+| R9.4 | medium | The shared contract said `ClearOAuthClientIfBound` deletes the record. On `main` every DCR clear keeps the access token, refresh token and expiry and blanks only the registration fields | Confirmed: `bbolt.go:1064-1091` (`ClearOAuthClientCredentials`) and `:1171-1196` (`clearOAuthClientCredentialsWhere`) rewrite the record with four fields emptied | `ClearOAuthClientIfBound` is a conditional field-clearing rewrite that keeps every token field and the record epoch and bumps `Revision`. `DeleteOAuthTokenIfBound` alone deletes (data-model §3, FR-014e). T2.20 |
+| R9.5 | high | The unquarantine baseline promotion runs after the commit and captured the incarnation itself. A remove and re-add between the commit and the promotion would let the operator's approval of I1 promote the replacement I2's pending tools, and the helper's own re-check would pass | Confirmed: `QuarantineServer` calls `approveBaselineToolsForServer(serverName)` after `SaveConfiguration` and `LoadConfiguredServers` have returned (`lifecycle.go:2209-2233`). The helper takes the lock by name (`tool_quarantine.go:2479-2492`) | The follow-up is `approveBaselineToolsForServerAt(name, inc)`, with `inc` taken from the `CommitResult` of the unquarantine commit (equal to `ExpectIncarnation` when the request carried one). Under L1 it requires the row to exist with that incarnation and to be unquarantined. Otherwise it promotes nothing and logs `ErrServerReplaced` at debug level. No approval follow-up may recapture an incarnation by name (FR-014i). T2.19 |
+| R9.6 | medium | The boot wrapper was `Commit("reconcile", ReplaceConfig(live))` without `Bootstrap()`. On a restart whose rows already match the file both diffs are empty, the skip rule applies, and nothing connects the empty manager | Confirmed against the design text (tasks T024, D14 table). On `main` the boot call (`lifecycle.go:206`) always spawns a worker per enabled server, so this would have been a regression | Boot is `Commit("boot", ReconcileLive + Bootstrap)`. `Bootstrap()` anywhere else is an invariant error. Every other reconcile is `ReconcileLive()` alone (D13, D14, data-model §1, FR-001a). T1.21 |

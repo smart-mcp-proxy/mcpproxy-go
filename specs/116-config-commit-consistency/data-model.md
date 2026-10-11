@@ -36,7 +36,7 @@ func (tx *CommitTx) ReplaceConfig(cfg *config.Config)                    // auth
 func (tx *CommitTx) ReconcileLive()                                      // projection repair of the base; no argument
 func (tx *CommitTx) ExpectGeneration(name string, gen int64) error       // ErrServerReplaced at commit time
 func (tx *CommitTx) ExpectIncarnation(name string, inc int64) error      // ErrServerReplaced at commit time
-func (tx *CommitTx) Bootstrap()   // boot only: seed generations from matching stored rows; schedule all enabled servers (D13)
+func (tx *CommitTx) Bootstrap()   // boot only, always with ReconcileLive(): seed generations from matching stored rows; schedule all enabled servers (D13, review R9.6)
 func (tx *CommitTx) ForceDisk()   // SaveConfiguration: always write the file (D13)
 func (tx *CommitTx) MutateGlobal(fn func(cfg *config.Config) error) error // listen, registries, …
 // UnderApprovalLock registers fn to run in pipeline step 4 while the commit
@@ -92,6 +92,22 @@ Rules:
   `CommitTx` API cannot express a replacement that the model then collapses
   into "unchanged" or "updated", which would keep the old incarnation and
   binding.
+- **Boot is `ReconcileLive()` plus `Bootstrap()` (review R9.6).** The boot
+  reconcile is `Commit("boot", func(tx) { tx.ReconcileLive(); tx.Bootstrap();
+  return nil })`. It is not `ReplaceConfig(live)`: the live config at boot is
+  the file read at startup, before the lock, so it is not an authoritative
+  input under D14. `Bootstrap()` is what forces the after-unlock scheduling.
+  Without it, a restart whose stored rows already match the file has an empty
+  config diff and an empty projection diff, so the skip rule (FR-001a) skips
+  steps 4-8 and nothing connects the empty manager. With it, every enabled
+  server gets a connect worker bound to its seeded `ServerGen`, and rows that
+  match keep their stored stamps. `Bootstrap()` outside the boot call is an
+  invariant error. Every other reconcile uses `ReconcileLive()` alone.
+- **Retained instances (review R9.1).** For each `Updated` change with
+  `Reconnect == false`, step 7 updates the registered instance in place:
+  PR1 calls `upstream.Manager.RestampRetained`, and from PR3
+  `AdvanceGenerations` does it (§4). The after-unlock phase then requests one
+  discovery pass for each restamped connected server.
 - `CommitTx` replaces `createMu`. `createServer` becomes
   `Commit("create", tx.CreateServer)`, and storage's
   `CreateUpstreamServer` stays the atomic existence check for the row.
@@ -226,12 +242,37 @@ generation))`.
 
 ```go
 type ServerCommitBatch struct {
-    Generation int64
-    Saves      []*config.ServerConfig // each carries its new generation
-    Removes    []string               // PR1: row + call history; PR2: full PurgeSet
-    Replaces   []string               // review R8.2: delete (PR2: purge) the old row, then save the new one, in this tx
+    Generation int64        // G: written to meta.config_commit_generation only
+    Saves      []ServerSave // review R9.3: each row with its prepared stamps
+    Removes    []string     // PR1: row + call history; PR2: full PurgeSet
+    Replaces   []string     // review R8.2: delete (PR2: purge) the old row, then save the new one, in this tx
+}
+
+// ServerSave is one row write. Stamp is the ServerGen that Prepare computed
+// for this name, copied from PreparedSnapshot.ServerGenerations. Storage
+// writes Stamp.Gen, Stamp.Incarnation and (PR2) Stamp.OAuthEpoch into the
+// row verbatim. It never derives a stamp from Generation or from the row it
+// replaces.
+type ServerSave struct {
+    Config *config.ServerConfig
+    Stamp  commitview.ServerGen
 }
 ```
+
+**Per-save stamps (review R9.3).** `config.ServerConfig` has no generation,
+incarnation or epoch fields (`config.go:680`), and the batch-wide `Generation`
+is right only for rows the commit created or changed. A row written by
+projection repair belongs to an unchanged server, whose snapshot keeps its
+earlier `ServerGen`. If storage stamped that row with `G`,
+`CheckCommittedView(name, sg)` would reject the published snapshot and block
+every reconnect of that server. If storage tried to keep the old stamps, it
+could not when the row is missing, which is exactly when repair runs. So the
+commit builds every `ServerSave.Stamp` from the prepared snapshot, and before
+it calls storage it asserts that each stamp equals
+`prepared.ServerGenerations[name]` (an invariant error aborts the commit).
+`ApplyServerCommit` rejects a zero stamp or a stamp with `Gen > Generation`
+as an invariant error. A `Replaces` entry's stamp is `{G, G, G}`, and a
+created entry's is `{G, G, G}` (PR1: `{G, G}`).
 
 `ApplyServerCommit` processes `Removes` and `Replaces` deletions before
 `Saves`. A name may appear in both the delete side and `Saves` only when it is
@@ -281,8 +322,8 @@ func (m *Manager) SaveOAuthCompletionIfBound(..., b CredentialBinding) (bool, er
 func (m *Manager) CheckCommittedView(server string, sg commitview.ServerGen) error // commitview.ErrStaleGeneration (review R7.2: storage never imports configsvc)
 // Instance-originated destructive OAuth operations (review R6.2, R7.3): binding
 // check, observed-revision check, and the delete in one bbolt Update.
-func (m *Manager) DeleteOAuthTokenIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error)
-func (m *Manager) ClearOAuthClientIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error)
+func (m *Manager) DeleteOAuthTokenIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error) // deletes the record
+func (m *Manager) ClearOAuthClientIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error) // clears only the DCR fields, keeps tokens, bumps Revision (review R9.4)
 func (m *Manager) RegisterServerIdentityIfIncarnation(sc *config.ServerConfig, path string, inc int64) (*ServerIdentity, bool, error)
 func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (bool, error) // code_execution exempt
 ```
@@ -421,9 +462,26 @@ captured with their config). Each runs one bbolt `Update`. It reads
 binding. It reads the record and requires the record's own `OAuthEpoch` to
 equal the binding's epoch, under the same legacy-zero rule as reads. Then it
 requires the record's `Revision` to equal `observedRev`, the revision of the
-exact record the caller based its decision on. Only then does it delete. On
-any mismatch it deletes nothing and returns `false`, and the caller logs at
+exact record the caller based its decision on. Only then does it act. On
+any mismatch it changes nothing and returns `false`, and the caller logs at
 debug level and goes on with a fresh flow.
+
+**The two operations act differently (review R9.4).** The checks are shared
+and the effects are not:
+
+| Operation | Effect after the checks pass | Replaces on `main` |
+|---|---|---|
+| `DeleteOAuthTokenIfBound` | deletes the whole record at `serverKey` (one key; no revision needed afterwards) | `DeleteOAuthToken` via `PersistentTokenStore.ClearToken` (5xx) |
+| `ClearOAuthClientIfBound` | **rewrites** the record: `ClientID`, `ClientSecret`, `CallbackPort` and `RedirectURI` become empty; `AccessToken`, `RefreshToken`, `ExpiresAt`, `TokenType`, `Scopes`, the record's `OAuthEpoch` and every other field are kept; `Updated = now`; `Revision = bucket.NextSequence()` | `ClearOAuthClientCredentials` (`bbolt.go:1064-1091`) and `clearOAuthClientCredentialsWhere` (`bbolt.go:1171-1196`), which on `main` also clear only the DCR fields |
+
+A DCR clear exists to force a fresh registration on the next login (stale
+callback port, legacy port, redirect mismatch, an authorization server that
+rejected the client). It does not sign the server out. Deleting the whole
+record would destroy a token that is still valid and force an unneeded
+sign-in. The rewrite bumps `Revision`, like every other write to the bucket,
+so a second parked clear that observed the pre-clear revision fails its check
+and is dropped. A record that does not exist makes `ClearOAuthClientIfBound`
+return `false` with nothing written.
 
 **Record revision, not a content compare (review R7.3).** A field compare
 cannot stand in for a revision. A same-binding replacement (`RestartServer`,
@@ -438,7 +496,7 @@ transaction. On `main` that is the six `Put` sites in `bbolt.go`
 (`SaveOAuthToken`, `UpdateOAuthClientCredentials`, `saveOAuthClientCredentialsIf`,
 `ClearOAuthClientCredentials`, `UpdateOAuthToken` and
 `clearOAuthClientCredentialsWhere`), plus the PR2
-`…IfBound` savers. Deletes (`DeleteOAuthToken`, `manager.go:2475`
+`…IfBound` savers and the `ClearOAuthClientIfBound` rewrite (review R9.4). Deletes (`DeleteOAuthToken`, `manager.go:2475`
 `ClearOAuthState`) remove the key and need no revision. A unit test enumerates
 the bucket's write paths and fails if one leaves `Revision` unchanged. The
 bucket sequence is persisted and never reused, so a deleted and re-created
@@ -548,6 +606,8 @@ type GenerationChange struct {
 // Called only from Commit step 7. Unregisters instances that must not survive,
 // restamps the rest, records desired. Returns the unregistered instances for
 // asynchronous Disconnect. PR4 also retires them before returning.
+// It replaces PR1's RestampRetained and restamps an instance only when
+// desired[name].gen moves (review R9.1).
 func (m *Manager) AdvanceGenerations(changes []GenerationChange) []*managed.Client
 
 func (m *Manager) AddServerConfigAt(name string, cfg *config.ServerConfig, gen int64) error // ErrStaleGeneration
@@ -590,7 +650,45 @@ helper.
 
 `managed.Client` gains `Generation() int64`. It is set when installed and
 restamped on generation-only changes. **This lands in PR1** (review R4.3),
-because D15 needs it. PR3 adds the manager-side checks. The legacy `AddServerConfig`/`AddServer`/`RemoveServer`
+because D15 needs it.
+
+**The PR1 restamp path (review R9.1).** PR1 has no `desired` map and no
+`AdvanceGenerations`, but it must still deliver non-connection edits to a
+live instance, as `main`'s reconcile does through `AddServerConfig` →
+`SetConfig` (`manager.go:484-496`). PR1 therefore adds:
+
+```go
+// managed.Client: cfg and gen are one atomic pair (atomic.Pointer[instanceView]);
+// GetConfig and Generation read the same pair.
+func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) (applied bool) // applies only if gen > Generation()
+
+// upstream.Manager, PR1 only. Called from Commit step 7 under captureMu W + mu.
+// For each Updated, non-reconnect change whose instance is registered:
+// SetConfigAt(cfg, gen). applyServerConcurrency runs after mu is released.
+func (m *Manager) RestampRetained(changes []RetainedChange) (restamped []string)
+type RetainedChange struct {
+    Name   string
+    Gen    int64
+    Config *config.ServerConfig
+}
+```
+
+`SetConfigAt` keeps `SetConfig`'s side effects (`SetExposePrompts`, the
+forward-header warning). PR1's post-commit workers pass their `(cfg, g)`
+(T024c), so a late worker's `SetConfigAt` is refused once the instance holds a
+newer generation. Callers that carry no generation in PR1 (the supervisor's
+`ActionConnect`, through `AddServer`) keep today's unconditional `SetConfig`.
+That remaining stale-overwrite window is #1563 and closes in PR3, which
+deletes `RestampRetained`, does the same restamp inside `AdvanceGenerations`
+and moves those callers to the `*At` methods.
+
+A restamp never changes the credential binding. An OAuth-config change is a
+connection change (`ConnectionEquivalent` compares `OAuth`,
+`connection_equivalent.go:38`), so it is a `Reconnect` change and never
+reaches `RestampRetained`. A restamped change keeps `Incarnation` and
+`OAuthEpoch` by the generation table (§2), so the instance's
+`CredentialBinding` (PR2) stays equal to `sg.Binding()` of its new
+`ServerGen`, and `CheckCommittedView` still passes for it. PR3 adds the manager-side checks. The legacy `AddServerConfig`/`AddServer`/`RemoveServer`
 stay for tests and CLI-only code paths. In the daemon they are replaced by the
 `*At` forms, and a CI grep (`scripts/check-upstream-write-sites.sh`, extended)
 forbids the legacy forms in `internal/runtime/**`.
