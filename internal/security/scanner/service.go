@@ -2427,7 +2427,16 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 	// Names/hashes describe the LIVE export (what the scan coverage is matched
 	// against); diverging ingested contracts are scanned in addition.
 	names, hashes := toolDefinitionNames(tools), toolDefinitionHashes(tools)
-	scanned := s.withDivergentIngestedContracts(serverName, tools)
+	scanned, err := s.withDivergentIngestedContracts(serverName, tools)
+	if err != nil {
+		// Fail closed (Sol r1 P2): without the ingested contracts the scan
+		// would see only what the server chose to answer this time — the
+		// RT-06 bypass. Export nothing so the scan errors out instead of
+		// producing a verdict that could support admission.
+		s.logger.Warn("Could not read the tool contracts discovery ingested; refusing to export a live-only tool list for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{}
+	}
 
 	// Format as MCP tools/list output
 	toolsData := map[string]interface{}{
@@ -2456,16 +2465,19 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 // (same name, description and normalized input schema) — RT-06. Divergence
 // means the server answered the scan's tools/list differently from the list
 // the proxy approved or recorded, so the ingested contract is scanned too and
-// the divergence is logged. Providers without the capability, or a lookup
-// error, leave the export unchanged.
-func (s *Service) withDivergentIngestedContracts(serverName string, live []map[string]interface{}) []map[string]interface{} {
+// the divergence is logged. A provider without the capability leaves the
+// export unchanged; a lookup error is returned so the caller fails closed.
+func (s *Service) withDivergentIngestedContracts(serverName string, live []map[string]interface{}) ([]map[string]interface{}, error) {
 	provider, ok := s.serverInfo.(ingestedToolContractsProvider)
 	if !ok {
-		return live
+		return live, nil
 	}
 	ingested, err := provider.GetIngestedToolContracts(serverName)
-	if err != nil || len(ingested) == 0 {
-		return live
+	if err != nil {
+		return nil, fmt.Errorf("read ingested tool contracts for %s: %w", serverName, err)
+	}
+	if len(ingested) == 0 {
+		return live, nil
 	}
 	seen := make(map[string]struct{}, len(live)+len(ingested))
 	for _, tool := range live {
@@ -2492,21 +2504,32 @@ func (s *Service) withDivergentIngestedContracts(serverName string, live []map[s
 			zap.String("server", serverName),
 			zap.Strings("tools", divergent))
 	}
-	return out
+	return out, nil
 }
 
 // scanContractKey identifies a tool contract by name, description and
-// normalized input schema.
+// normalized input and output schemas — an output-schema-only divergence is
+// a divergence too (Sol r1 P1), since the detector scans output schemas.
 func scanContractKey(tool map[string]interface{}) string {
 	name, _ := tool["name"].(string)
 	description, _ := tool["description"].(string)
-	schemaJSON := ""
-	if schema := tool["inputSchema"]; schema != nil {
-		if raw, err := json.Marshal(schema); err == nil {
-			schemaJSON = hash.NormalizeJSON(string(raw))
-		}
+	return name + "\x00" + hash.ToolDefinitionDigest(description, normalizedScanJSON(tool["inputSchema"])) +
+		"\x00" + normalizedScanJSON(tool["outputSchema"])
+}
+
+// normalizedScanJSON renders an exported schema value as normalized JSON ("" when absent).
+func normalizedScanJSON(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return hash.NormalizeJSON(v)
 	}
-	return name + "\x00" + hash.ToolDefinitionDigest(description, schemaJSON)
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return hash.NormalizeJSON(string(raw))
 }
 
 // toolDefinitionHashes maps each exported tool name to the digest of its

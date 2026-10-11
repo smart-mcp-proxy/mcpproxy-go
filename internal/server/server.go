@@ -3699,6 +3699,14 @@ func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
 
 // GetServerTools returns tools for a specific server
 func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	return s.serverToolMaps(serverName, false)
+}
+
+// serverToolMaps is GetServerTools with an opt-in "outputSchema" member. Only
+// the scanner-facing provider asks for it (RT-06, Sol r1): the TPA scan
+// covers output schemas (Spec 076 FR-001), while the REST/CLI tool listings
+// keep their existing shape.
+func (s *Server) serverToolMaps(serverName string, includeOutputSchema bool) ([]map[string]interface{}, error) {
 	s.logger.Debug("GetServerTools called (Phase 7.1: using StateView)", zap.String("server", serverName))
 
 	// Phase 7.1: Use StateView for lock-free cached tool reads
@@ -3725,6 +3733,9 @@ func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, er
 			"description": tool.Description,
 			"inputSchema": tool.InputSchema,
 			"server_name": serverName,
+		}
+		if includeOutputSchema {
+			addScanOutputSchema(toolMap, tool.OutputSchemaJSON)
 		}
 
 		// Include annotations if present
@@ -4611,7 +4622,7 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 		cachedErr error
 	)
 	if p.server != nil {
-		cached, cachedErr = p.server.GetServerTools(serverName)
+		cached, cachedErr = p.server.serverToolMaps(serverName, true)
 		if cachedErr == nil && len(cached) > 0 {
 			return cached, nil
 		}
@@ -4712,6 +4723,7 @@ func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[str
 		"inputSchema": inputSchema,
 		"server_name": serverName,
 	}
+	addScanOutputSchema(toolMap, tool.OutputSchemaJSON)
 	if tool.Annotations != nil {
 		annotations := map[string]interface{}{}
 		if tool.Annotations.Title != "" {
@@ -4734,6 +4746,21 @@ func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[str
 		}
 	}
 	return toolMap
+}
+
+// addScanOutputSchema sets toolMap["outputSchema"] from a tool's raw output
+// schema JSON, when it declares one. A schema that does not parse as JSON is
+// kept as its raw string so the scanner still sees its text.
+func addScanOutputSchema(toolMap map[string]interface{}, outputSchemaJSON string) {
+	if strings.TrimSpace(outputSchemaJSON) == "" {
+		return
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(outputSchemaJSON), &parsed); err == nil {
+		toolMap["outputSchema"] = parsed
+		return
+	}
+	toolMap["outputSchema"] = outputSchemaJSON
 }
 
 // GetIngestedToolContracts implements scanner's optional
@@ -4760,14 +4787,16 @@ func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) (
 		if rec == nil || rec.ToolName == "" {
 			continue
 		}
-		if rec.CurrentDescription != "" || rec.CurrentSchema != "" {
+		if rec.CurrentDescription != "" || rec.CurrentSchema != "" || rec.CurrentOutputSchema != "" {
 			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
-				Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema, Annotations: rec.CurrentAnnotations,
+				Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema,
+				OutputSchemaJSON: rec.CurrentOutputSchema, Annotations: rec.CurrentAnnotations,
 			}))
 		}
-		if rec.Status == storage.ToolApprovalStatusChanged && (rec.PreviousDescription != "" || rec.PreviousSchema != "") {
+		if rec.Status == storage.ToolApprovalStatusChanged && (rec.PreviousDescription != "" || rec.PreviousSchema != "" || rec.PreviousOutputSchema != "") {
 			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
-				Name: rec.ToolName, Description: rec.PreviousDescription, ParamsJSON: rec.PreviousSchema, Annotations: rec.PreviousAnnotations,
+				Name: rec.ToolName, Description: rec.PreviousDescription, ParamsJSON: rec.PreviousSchema,
+				OutputSchemaJSON: rec.PreviousOutputSchema, Annotations: rec.PreviousAnnotations,
 			}))
 		}
 	}
