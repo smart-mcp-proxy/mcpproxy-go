@@ -553,3 +553,46 @@ func waitOrDump(t *testing.T, wg *sync.WaitGroup, d time.Duration) {
 		t.Fatalf("deadlock: goroutines did not finish within %v\n%s", d, buf[:n])
 	}
 }
+
+// The config funnel (PATCH /api/v1/config, profile writes) is a read-modify-
+// write of the whole desired config. Its read runs inside the commit, so a
+// removal that lands while the mutation is being built is not reverted by the
+// funnel's apply (live L1 found the resurrection: #1558/#1559 class).
+func TestCommit_FunnelMutationCannotResurrectRemoval(t *testing.T) {
+	rt, _ := newSpec116Runtime(t, nil, disabledStdio("keep"), disabledStdio("gone"))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	funnelDone := make(chan error, 1)
+	go func() {
+		_, _, err := rt.MutateConfig(context.Background(), Actor{}, func(desired *config.Config) (ChangeHint, error) {
+			close(entered)
+			<-release
+			desired.Profiles = append(desired.Profiles, config.ProfileConfig{Name: "ops", Servers: []string{"keep"}})
+			return ChangeHint{}, nil
+		}, TokenRewrite{})
+		funnelDone <- err
+	}()
+	spec116Await(t, entered, "the funnel mutation to park")
+
+	removeDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Commit("remove", func(tx *CommitTx) error { return tx.RemoveServer("gone") })
+		removeDone <- err
+	}()
+	returned, rerr := spec116AwaitReturnOrBlocked(t, removeDone, func() bool { return rt.commitWaiters() > 0 })
+	if returned {
+		require.NoError(t, rerr)
+	}
+	close(release)
+	require.NoError(t, spec116AwaitErr(t, funnelDone, "funnel"))
+	if !returned {
+		require.NoError(t, spec116AwaitErr(t, removeDone, "removal"))
+	}
+	assert.Nil(t, spec116Live(rt, "gone"), "the removed server must stay removed")
+	assert.Nil(t, spec116Stored(t, rt, "gone"))
+	found := false
+	for _, p := range rt.Config().Profiles {
+		found = found || p.Name == "ops"
+	}
+	assert.True(t, found, "the funnel's own change lands")
+}

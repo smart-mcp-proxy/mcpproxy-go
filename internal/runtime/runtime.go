@@ -1850,6 +1850,48 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	return result, nil
 }
 
+// applyConfigWith is ApplyConfig for a read-modify-write of the DESIRED
+// configuration: build receives a private copy of the desired config read
+// INSIDE the commit lock and returns the config to apply (Spec 116 D14). A
+// funnel that read the desired config before the lock and applied a copy of
+// it would revert every commit that landed in between — a removed server would
+// come back, a quarantine would be lowered (#1558, #1559).
+func (r *Runtime) applyConfigWith(cfgPath string, build func(desired *config.Config) (*config.Config, error)) (*ConfigApplyResult, error) {
+	var result *ConfigApplyResult
+	var fnErr error
+	_, err := r.Commit("api_apply_config", func(tx *CommitTx) error {
+		desired, derr := r.GetDesiredConfig()
+		if derr != nil {
+			fnErr = derr
+			return derr
+		}
+		newCfg, berr := build(desired)
+		if berr != nil {
+			fnErr = berr
+			return berr
+		}
+		for _, n := range config.NormalizeTrustModes(newCfg) {
+			r.logger.Warn("Unrecognized trust_mode in applied config; treating it as manual",
+				zap.String("server", n.Server),
+				zap.String("trust_mode", n.Original))
+		}
+		if errs := newCfg.ValidateDetailed(); len(errs) > 0 {
+			result = &ConfigApplyResult{Success: false, ValidationErrors: errs}
+			fnErr = fmt.Errorf("configuration validation failed: %v", errs[0].Error())
+			return fnErr
+		}
+		result, fnErr = r.applyConfigInTx(tx, newCfg, cfgPath)
+		return fnErr
+	})
+	if err != nil {
+		if fnErr == nil {
+			result = &ConfigApplyResult{Success: false}
+		}
+		return result, err
+	}
+	return result, nil
+}
+
 // applyConfigInTx is ApplyConfig's commit body. It runs with configCommitMu
 // held and only stages the change on tx; the commit pipeline writes the disk,
 // storage and the snapshot.

@@ -71,55 +71,73 @@ func (r *Runtime) MutateConfig(
 	unlock := r.LockBindingWrites()
 	defer unlock()
 
-	before, err := r.GetDesiredConfig()
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrConfigUnavailable, err)
+	// Spec 116: steps 1-5 run inside one config commit. The desired config is
+	// read under the commit lock, so the mutation lands on top of every commit
+	// before it and no concurrent server write is reverted by a stale copy.
+	var (
+		before, desired *config.Config
+		hint            ChangeHint
+		moved           []auth.AgentToken
+		mutateErr       error
+	)
+	fail := func(err error) (*config.Config, error) {
+		mutateErr = err
+		return nil, err
 	}
-	desired, err := r.GetDesiredConfig()
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrConfigUnavailable, err)
-	}
-	hint, err := mutate(desired)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := refuseUnknownAnonymousProfile(before, desired); err != nil {
-		return nil, nil, err
-	}
-
-	current, err := r.guardedBindingSnapshot()
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot inspect client bindings: %w", err)
-	}
-	candidateTokens := current
-	if tokens.active() {
-		candidateTokens = rewriteClientPins(current, tokens.From, tokens.To)
-	}
-	if err := CheckBindingGuard(r.BindingGuard(),
-		GuardState{Config: r.Config(), Tokens: current},
-		GuardState{Config: desired, Tokens: candidateTokens}); err != nil {
-		return nil, nil, err
-	}
-
-	var moved []auth.AgentToken
-	if tokens.active() {
-		// A pin rewrite is only worth doing for a config that will apply:
-		// validate first so a bad edit never moves a token.
-		if errs := desired.ValidateDetailed(); len(errs) > 0 {
-			return &ConfigApplyResult{Success: false, ValidationErrors: errs},
-				nil, fmt.Errorf("configuration validation failed: %v", errs[0].Error())
-		}
-		store := r.pinStore()
-		if store == nil {
-			return nil, nil, fmt.Errorf("token store unavailable")
-		}
-		moved, err = store.RepinProfile(tokens.From, tokens.To)
+	result, applyErr := r.applyConfigWith(r.funnelConfigPath(), func(base *config.Config) (*config.Config, error) {
+		var err error
+		before, err = r.GetDesiredConfig()
 		if err != nil {
-			return nil, nil, fmt.Errorf("cannot move token pins: %w", err)
+			return fail(fmt.Errorf("%w: %v", ErrConfigUnavailable, err))
 		}
-	}
+		desired = base
+		hint, err = mutate(desired)
+		if err != nil {
+			return fail(err)
+		}
+		if err := refuseUnknownAnonymousProfile(before, desired); err != nil {
+			return fail(err)
+		}
 
-	result, applyErr := r.ApplyConfig(desired, r.funnelConfigPath())
+		current, err := r.guardedBindingSnapshot()
+		if err != nil {
+			return fail(fmt.Errorf("cannot inspect client bindings: %w", err))
+		}
+		candidateTokens := current
+		if tokens.active() {
+			candidateTokens = rewriteClientPins(current, tokens.From, tokens.To)
+		}
+		if err := CheckBindingGuard(r.BindingGuard(),
+			GuardState{Config: r.Config(), Tokens: current},
+			GuardState{Config: desired, Tokens: candidateTokens}); err != nil {
+			return fail(err)
+		}
+
+		if tokens.active() {
+			// A pin rewrite is only worth doing for a config that will apply:
+			// validate first so a bad edit never moves a token.
+			if errs := desired.ValidateDetailed(); len(errs) > 0 {
+				return fail(&configValidationFailure{errs: errs})
+			}
+			store := r.pinStore()
+			if store == nil {
+				return fail(fmt.Errorf("token store unavailable"))
+			}
+			moved, err = store.RepinProfile(tokens.From, tokens.To)
+			if err != nil {
+				return fail(fmt.Errorf("cannot move token pins: %w", err))
+			}
+		}
+		return desired, nil
+	})
+	if mutateErr != nil {
+		var vf *configValidationFailure
+		if errors.As(mutateErr, &vf) {
+			return &ConfigApplyResult{Success: false, ValidationErrors: vf.errs},
+				nil, fmt.Errorf("configuration validation failed: %v", vf.errs[0].Error())
+		}
+		return nil, nil, mutateErr
+	}
 	if applyErr != nil {
 		if len(moved) > 0 {
 			if restoreErr := r.pinStore().RestorePins(moved); restoreErr != nil {
@@ -140,6 +158,12 @@ func (r *Runtime) MutateConfig(
 	// are reconciled by the apply itself (applyConfigLocked, #1458).
 	return result, diff, nil
 }
+
+// configValidationFailure carries a funnel candidate's validation errors out of
+// the commit body.
+type configValidationFailure struct{ errs []config.ValidationError }
+
+func (e *configValidationFailure) Error() string { return e.errs[0].Error() }
 
 // funnelConfigPath is the file a funnel write saves to: the runtime's config
 // path, else the data dir's default (the path Server.GetConfigPath reports).
