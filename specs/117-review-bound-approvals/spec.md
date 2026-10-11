@@ -178,7 +178,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - trusted path: the selected tools, or every held tool for the default `approve_all`.
 
   The CLI MUST bind to what the operator actually reviewed (design review r2 #1):
-  - **`--from-review <file>`** (new): the file is the JSON output of `mcpproxy review show <server> -o json`. The selection and the binding come from that file, so a definition that changed after `review show` fails as out of date. This is the scripted and headless path.
+  - **`--from-review <file>`** (new): the file is the JSON output of `mcpproxy review show <server> -o json`. It MUST be a structurally valid success envelope whose `data.server.name` equals the positional server; otherwise the CLI exits 1 **before sending any request** (design review r6 #2; the tray does the same check, `review.server.name == server`). The fingerprint also covers the server name, so a cross-server binding can never match. The selection and the binding come from that file, so a definition that changed after `review show` fails as out of date. This is the scripted and headless path.
   - **Interactive, without `--from-review`**: before the confirmation, the prompt lists every tool it will make reachable, with tier, status and the first line of the description, plus a diff marker for changed tools. The binding is to that displayed fetch, which is then the review the operator saw.
   - **`--yes` without `--from-review`**: binds to the review fetched at that moment. This is documented as "approve what the server serves now", and it is still protected against changes during the call.
 
@@ -208,7 +208,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - added/modified/annotation index writes;
   - the last-good snapshot update.
 - **FR-033**: The StateView publish of an inventory MUST run under the same lock, and only while `seq >= applied` and `seq >= published`. It then sets `published = seq`. The sweep MUST publish per server through this gate.
-- **FR-034**: Before any index write, the apply MUST re-check under the lock that the server is enabled and not quarantined, in config OR storage, failing closed. A quarantined server's inventory is recorded for review only.
+- **FR-034**: Before any index write, the apply MUST re-check under the lock that the server is enabled and not quarantined, in config OR storage, failing closed. A quarantined server's inventory is recorded for review only. Every writer that makes a server **ineligible** (quarantine per FR-035, and disable: `EnableServer(false)`, `lifecycle.go:2086` with its async purge at `:2107-2123`, and `BulkEnableServers`, `:2288`) MUST store the change and purge the shared index entries in one critical section under that server's approval lock, so the check cannot be passed by a stale view (design review r6 #1). The operation is `persistServerIneligibleLocked`, which generalises `persistServerQuarantinedLocked`. The profile refresh follows after unlock.
 - **FR-035**: Every writer that can store a server record as quarantined MUST do so through one runtime operation, `persistServerQuarantinedLocked`. That operation saves storage and purges the shared index entries in one critical section under the server's approval lock. The writers are (design review r2 #3, r3 #1):
   - `QuarantineServer(true)`;
   - the config-load path (`LoadConfiguredServers`, `lifecycle.go:1539-1557`);

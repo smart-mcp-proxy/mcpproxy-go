@@ -53,3 +53,4 @@
 - Round 3 (opencode gpt-6.1-sol): FINDINGS, 1 high, 2 medium and 2 low, all accepted and resolved (research.md "Design review round 3").
 - Round 4 (opencode gpt-6.1-sol): FINDINGS, 1 high and 2 medium, all accepted and resolved (research.md "Design review round 4").
 - Round 5 (opencode gpt-6.1-sol): FINDINGS, 1 high and 1 medium, both accepted and resolved (research.md "Design review round 5").
+- Round 6 (opencode gpt-6.1-sol): FINDINGS, 2 medium, both accepted and resolved (research.md "Design review round 6"). Sol confirmed rounds 1-5 resolved and found no wire mismatch with #1572.

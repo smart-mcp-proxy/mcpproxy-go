@@ -15,7 +15,7 @@ func reviewFingerprint(rec *storage.ToolApprovalRecord) string {
         base = "nohash:" + hex.EncodeToString(sum[:])
     }
     h := sha256.New()
-    write(h, reviewFingerprintVersion, rec.ToolName, base, hintString(rec.CurrentAnnotations)) // \x00-separated
+    write(h, reviewFingerprintVersion, rec.ServerName, rec.ToolName, base, hintString(rec.CurrentAnnotations)) // \x00-separated
     return reviewFingerprintVersion + "-" + hex.EncodeToString(h.Sum(nil))
 }
 
@@ -24,6 +24,7 @@ func reviewFingerprint(rec *storage.ToolApprovalRecord) string {
 
 | Input | In the fingerprint | Why |
 |---|---|---|
+| server name | yes | a binding for server A never matches server B, even with identical definitions (design review r6 #2) |
 | tool name (raw, Spec 105) | yes | identity |
 | `CurrentHash` (description, input schema, output schema) | yes | the approval-hashed contract |
 | `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` | yes | they set the tier and the default selection (G3) |

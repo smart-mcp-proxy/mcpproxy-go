@@ -30,7 +30,7 @@ All code references are to `origin/main` at `ee7834e71`. "Branch X" means `origi
 
 ### D1. The fingerprint is a separate value; the rug-pull hash is unchanged
 
-**Decision**: `reviewFingerprint(record) = "rv1-" + hex(sha256("rv1\x00" + name + "\x00" + base + "\x00" + hints))`.
+**Decision**: `reviewFingerprint(record) = "rv1-" + hex(sha256("rv1\x00" + server + "\x00" + name + "\x00" + base + "\x00" + hints))`.
 - `base` is `record.CurrentHash`. When `CurrentHash` is empty, `base` is `"nohash:" + sha256(description \x00 schema \x00 outputSchema)`.
 - `hints` is `ro=<-|0|1>;de=…;id=…;ow=…`.
 
@@ -230,3 +230,8 @@ See spec.md A1-A10 and O1-O4.
 
 1. **High, a hint-only change to a changed record stays stale**: FR-017 now refreshes on a hash **or** hint difference, i.e. whenever the review fingerprint would change. A hint-only test variant was added to T205b.
 2. **Medium, T306(2m) required a synchronous approval inside the widened lock**: the approval now runs asynchronously, with different expected orderings on main (it completes during the pause; stale eviction) and after T307 (it waits; final invariant holds).
+
+## Design review round 6 (OpenCode gpt-6.1-sol) resolutions
+
+1. **Medium, the disable writers bypass the apply lock**: FR-034 now requires every ineligibility writer (quarantine and disable, including bulk) to store and purge under the server's approval lock (`persistServerIneligibleLocked`). Test T306(9c). The bulk path takes per-server locks in sorted order, so two bulk calls cannot deadlock.
+2. **Medium, a saved review is not tied to its server**: `--from-review` must match `data.server.name` before any request is sent, and the fingerprint now covers the server name. CLI test with identical definitions on A and B.
