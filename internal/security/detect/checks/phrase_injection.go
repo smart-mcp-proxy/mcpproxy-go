@@ -342,12 +342,14 @@ var englishNegators = []string{"do not", "does not", "did not", "must not", "sho
 // the change under trust_mode=scan — so an attacker gains nothing by adding a
 // negator except losing the hard block.
 func negatedEnglish(prefix string) bool {
-	// Commas and colons do NOT end the scope: "Do not, under any
+	// Only sentence punctuation ends the scope: "Do not, under any
 	// circumstances, set aside …" is still negated.
 	if i := strings.LastIndexAny(prefix, ".!?;"); i >= 0 {
 		prefix = prefix[i+1:]
 	}
-	clause := " " + strings.Join(strings.Fields(strings.NewReplacer(",", " ", ":", " ").Replace(prefix)), " ") + " "
+	// Words are runs of letters, so a negator wrapped in ANY punctuation —
+	// "(not)", "[not]", "not/never", "not—", "never-ever" — is still a word.
+	clause := " " + strings.Join(strings.FieldsFunc(prefix, func(r rune) bool { return !unicode.IsLetter(r) }), " ") + " "
 	for _, n := range englishNegators {
 		if strings.Contains(clause, " "+n+" ") {
 			return true
