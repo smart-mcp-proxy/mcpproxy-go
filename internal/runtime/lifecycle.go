@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -440,12 +441,30 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// differential update atomically with respect to review reads. A
 	// quarantined or disabled server is never (re)indexed by the sweep
 	// (issue #873).
+	//
+	// Each server's StateView publish runs inside that commit, in the same
+	// approval-lock hold as its D15 check (FR-008a). A server whose connection
+	// changed while the sweep was listing had its result dropped and is
+	// collected in stale.
 	processedServers := make(map[string]struct{}, len(toolsByServer))
+	var stale []string
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		if _, err := r.commitDiscoveredTools(ctx, serverName, serverTools, instanceGens[serverName]); err != nil {
+		// No generation captured before the list: the result cannot be bound
+		// to a connection, so it is indexed but not published into the
+		// StateView, and the server is re-listed (as before).
+		var capture *supervisor.DiscoveryCapture
+		c, captured := gens[serverName]
+		if r.supervisor != nil && captured {
+			capture = &c
+		}
+		eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, serverTools, instanceGens[serverName], capture)
+		if err != nil {
 			r.logger.Error("Failed to apply differential update for server during sweep",
 				zap.String("server", serverName), zap.Error(err))
+		}
+		if eligible && r.supervisor != nil && (!captured || !published) {
+			stale = append(stale, serverName)
 		}
 	}
 
@@ -478,27 +497,18 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools
-	if r.supervisor != nil {
-		stale, err := r.supervisor.RefreshToolsFromDiscovery(tools, gens)
-		if err != nil {
-			r.logger.Warn("Failed to refresh tools in StateView", zap.Error(err))
-			// Don't fail the entire operation if StateView update fails
-		} else {
-			r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", len(tools)))
-		}
-		// A server whose connection changed while the sweep was listing had
-		// its result dropped: re-list it under its current connection so it
-		// does not linger in the connect→discovery window until the next
-		// sweep tick (the reactive connect discovery may have been skipped by
-		// the in-progress dedup).
-		for _, serverName := range stale {
-			r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
-				zap.String("server", serverName))
-			if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
-				r.logger.Warn("Failed to re-list server after a stale sweep result",
-					zap.String("server", serverName), zap.Error(err))
-			}
+	// A server whose connection changed while the sweep was listing had its
+	// result dropped: re-list it under its current connection so it does not
+	// linger in the connect→discovery window until the next sweep tick (the
+	// reactive connect discovery may have been skipped by the in-progress
+	// dedup).
+	sort.Strings(stale)
+	for _, serverName := range stale {
+		r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
+			zap.String("server", serverName))
+		if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
+			r.logger.Warn("Failed to re-list server after a stale sweep result",
+				zap.String("server", serverName), zap.Error(err))
 		}
 	}
 
@@ -770,11 +780,24 @@ func (r *Runtime) noteCaptureLocked(serverName string) {
 // commitDiscoveredTools publishes a discovery result and updates the stored
 // approval records under captureSnapMu, so GetServerReview never observes the
 // new capture stamp with the previous generation's records (or vice versa).
-// For an eligible server it publishes the snapshot and stamp, then applies the
-// differential index update (which writes the approval records). For a server
-// that is quarantined or disabled it records the definitions for review
+// For an eligible server the last-good snapshot and capture stamp are written,
+// together with the differential index update, in ONE hold of the server's
+// approval lock and only after its final eligibility and generation check
+// (Spec 116 D15, FR-008a): a pass the check rejects writes nothing. For a
+// server that is quarantined or disabled it records the definitions for review
 // without indexing. eligible reports whether the index update was attempted.
 func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64) (eligible bool, err error) {
+	eligible, _, err = r.commitDiscoveredToolsAt(ctx, serverName, tools, instanceGen, nil)
+	return eligible, err
+}
+
+// commitDiscoveredToolsAt is commitDiscoveredTools that also publishes the
+// result into the supervisor snapshot and StateView inside the same approval
+// lock hold when capture (the DiscoveryGeneration taken before the list) is
+// non-nil. published is false only when that publish was dropped because the
+// server's connection changed while the tools were listed (the caller
+// re-lists); a pass rejected by the D15 check returns eligible=false.
+func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture) (eligible, published bool, err error) {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 	if !r.serverEligibleForIndexing(serverName) {
@@ -782,24 +805,41 @@ func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, 
 			r.logger.Warn("Failed to capture review definitions for ineligible server",
 				zap.String("server", serverName), zap.Error(perr))
 		}
-		return false, nil
+		return false, false, nil
 	}
-	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.noteCaptureLocked(serverName)
-	r.lastGoodToolsMu.Unlock()
-	if hook := r.discoveryAfterPublish; hook != nil {
-		hook()
-	}
-	if err := r.applyDifferentialToolUpdateAt(ctx, serverName, tools, instanceGen); err != nil {
-		if errors.Is(err, errDiscoveryIneligible) {
-			return false, nil
+	published = true
+	held := func() {
+		r.lastGoodToolsMu.Lock()
+		snapshot := make([]*config.ToolMetadata, len(tools))
+		copy(snapshot, tools)
+		r.lastGoodTools[serverName] = snapshot
+		r.noteCaptureLocked(serverName)
+		r.lastGoodToolsMu.Unlock()
+		if capture != nil && r.supervisor != nil {
+			// The per-server variant stamps the server's discovery as
+			// completed even when the result is EMPTY, so a tool-less
+			// server is not left in the connect→discovery window (Spec 105
+			// FR-009, research D4). The supervisor never calls back into
+			// the runtime (plan.md lock rule 5), so this adds no edge.
+			ok, rerr := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, *capture)
+			if rerr != nil {
+				r.logger.Warn("Failed to refresh tools in StateView for server",
+					zap.String("server", serverName), zap.Error(rerr))
+			} else {
+				published = ok
+			}
 		}
-		return true, err
+		if hook := r.discoveryAfterPublish; hook != nil {
+			hook()
+		}
 	}
-	return true, nil
+	if err := r.applyDifferentialToolUpdateHeld(ctx, serverName, tools, instanceGen, held); err != nil {
+		if errors.Is(err, errDiscoveryIneligible) {
+			return false, false, nil
+		}
+		return true, published, err
+	}
+	return true, published, nil
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -942,7 +982,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// quarantined in that window has its records captured for review (no index
 	// write); a microsecond window remains before the index mutation, which is
 	// deliberately not closed with a lock across the index write.
-	eligible, err := r.commitDiscoveredTools(ctx, serverName, tools, instanceGen)
+	eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, tools, instanceGen, &gen)
 	if !eligible {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
@@ -955,27 +995,13 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools. The per-server variant stamps
-	// the server's discovery as completed even when the result is EMPTY, so
-	// a tool-less server is not left in the connect→discovery window (Spec
-	// 105 FR-009, research D4). The publish is bound to the generation
-	// captured before the list; a dropped (stale) result is reported to the
-	// caller, which re-lists.
-	published = true
-	if r.supervisor != nil {
-		ok, err := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, gen)
-		if err != nil {
-			r.logger.Warn("Failed to refresh tools in StateView for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-		} else {
-			published = ok
-			r.logger.Debug("Refreshed tools in StateView for server",
-				zap.String("server", serverName),
-				zap.Int("tool_count", len(tools)),
-				zap.Bool("published", ok))
-		}
-	}
+	// The StateView publish ran inside the commit above, bound to the
+	// generation captured before the list; a dropped (stale) result is
+	// reported to the caller, which re-lists.
+	r.logger.Debug("Refreshed tools in StateView for server",
+		zap.String("server", serverName),
+		zap.Int("tool_count", len(tools)),
+		zap.Bool("published", published))
 
 	r.logger.Info("Successfully indexed tools for server",
 		zap.String("server", serverName),
@@ -1083,6 +1109,14 @@ func (r *Runtime) discoveryEligibleHeld(serverName string, instanceGen int64) bo
 // (Spec 116 D15, FR-008a); the per-profile rebuild and the events run after
 // the lock is released.
 func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64) error {
+	return r.applyDifferentialToolUpdateHeld(ctx, serverName, newTools, instanceGen, nil)
+}
+
+// applyDifferentialToolUpdateHeld is applyDifferentialToolUpdateAt with held,
+// which runs inside the same approval-lock hold right after the final
+// eligibility check passed and before any index write (the discovery pass's
+// last-good and StateView publish, D15). It never runs for a rejected pass.
+func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func()) error {
 	unlock := r.lockToolApprovals(serverName)
 	locked := true
 	release := func() {
@@ -1097,6 +1131,9 @@ func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName 
 		r.logger.Info("Discovery result dropped: the server is no longer eligible at the captured generation",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return errDiscoveryIneligible
+	}
+	if held != nil {
+		held()
 	}
 
 	// Check tool-level quarantine approvals before indexing
@@ -1852,9 +1889,16 @@ func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[str
 // (issue #467) and the edit reaches the live config, storage and the manager
 // together. The disk entry is admission-gated (#937): a server whose file
 // entry never stated `quarantined` keeps its recorded quarantine. When the file
-// is unreadable or does not list the server, the live entry stands.
+// is unreadable or does not list the server, the live entry stands. The file
+// itself is not rewritten.
 func (r *Runtime) refreshServerFromDiskForRestart(serverName string) (*config.ServerConfig, error) {
 	_, err := r.Commit("restart_refresh", func(tx *CommitTx) error {
+		// The file is the source here and is never written back (as on
+		// main): rewriting it from the live config would overwrite an
+		// unreloaded external edit of another server or of a global field,
+		// and its self-write marker would stop the watcher from applying it
+		// (review round 1).
+		tx.noDisk()
 		path := r.configSvc.Current().Path
 		var disk *config.ServerConfig
 		var diskCfg *config.Config

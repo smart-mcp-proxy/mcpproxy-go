@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sync"
 	"testing"
 	"time"
@@ -127,9 +128,12 @@ func TestCommit_T1_18_ReloadStorageFailureRestoresRawFile(t *testing.T) {
 	after, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
 	assert.True(t, bytes.Equal(before, after), "the file must be byte-identical to the edited input")
-	info, err := os.Stat(cfgPath)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	if goruntime.GOOS != "windows" {
+		// Windows has no Unix permission bits (Chmod only toggles read-only).
+		info, err := os.Stat(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	}
 	assert.Nil(t, spec116Live(rt, "b"), "live config must still hold only a")
 	assert.Nil(t, spec116Stored(t, rt, "b"), "storage must still hold only a")
 }

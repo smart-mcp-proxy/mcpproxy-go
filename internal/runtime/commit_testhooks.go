@@ -32,6 +32,9 @@ type commitTestHooks struct {
 	// into the storage transaction of step 6.
 	diskWriteFault func(reason string) error
 	storageFault   func(reason string) error
+	// storedReadFault injects a failure into the commit's read of the stored
+	// view (ListStoredServers) for a commit with the given reason.
+	storedReadFault func(reason string) error
 	// skipAdvance stubs commit step 7 out, so a regression test can show it
 	// detects the loss of the retained-instance update (T1.19).
 	skipAdvance bool

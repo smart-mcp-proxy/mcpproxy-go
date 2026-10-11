@@ -142,3 +142,41 @@ func TestServerRowMatches(t *testing.T) {
 	b.Args = []string{"y"}
 	assert.False(t, ServerRowMatches(a, b))
 }
+
+// T018 (review round 1): a failure INSIDE the bbolt transaction, after the
+// delete of a removed row and the writes of earlier rows, rolls all of them
+// back. The cases above are refused by the preflight before the transaction
+// starts; this one passes the preflight and fails on the third save.
+func TestApplyServerCommit_InTransactionFailureRollsBack(t *testing.T) {
+	m := newCommitTestManager(t)
+	q := commitEntry("q")
+	q.Quarantined = true
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 1, Saves: []ServerSave{
+		{Config: commitEntry("keep"), Stamp: stamp(1, 1)},
+		{Config: commitEntry("victim"), Stamp: stamp(1, 1)},
+		{Config: q, Stamp: stamp(1, 1)},
+	}}))
+
+	err := m.ApplyServerCommit(&ServerCommitBatch{
+		Generation: 2,
+		Removes:    []string{"victim"},
+		Saves: []ServerSave{
+			{Config: commitEntry("keep", "x"), Stamp: stamp(2, 1)},
+			{Config: commitEntry("fresh"), Stamp: stamp(2, 2)},
+			{Config: commitEntry("q"), Stamp: stamp(2, 1)}, // lowers a recorded quarantine: refused in the tx
+		},
+	})
+	require.ErrorIs(t, err, ErrInvariant)
+
+	stored, err := m.ListStoredServers()
+	require.NoError(t, err)
+	assert.Len(t, stored, 3)
+	assert.Contains(t, stored, "victim", "the delete ran first in the transaction and must be rolled back")
+	assert.NotContains(t, stored, "fresh", "a row written earlier in the transaction must be rolled back")
+	assert.Nil(t, stored["keep"].Config.Args, "the first save must be rolled back")
+	assert.Equal(t, stamp(1, 1), stored["keep"].Stamp)
+	assert.True(t, stored["q"].Config.Quarantined)
+	seed, _, err := m.ConfigCommitState()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seed, "meta untouched")
+}

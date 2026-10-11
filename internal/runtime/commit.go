@@ -183,6 +183,12 @@ func (tx *CommitTx) loadStored() (map[string]*storage.StoredServer, error) {
 	if !tx.storedLoaded {
 		tx.storedLoaded = true
 		if tx.r.storageManager != nil {
+			if f := tx.r.testHooks.storedReadFault; f != nil {
+				if err := f(tx.reason); err != nil {
+					tx.stored, tx.storedErr = nil, err
+					return tx.stored, tx.storedErr
+				}
+			}
 			tx.stored, tx.storedErr = tx.r.storageManager.ListStoredServers()
 		}
 	}
@@ -510,6 +516,15 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	storageOK := r.storageManager != nil && storedErr == nil
 	if r.storageManager != nil && storedErr != nil {
 		r.logger.Error("Config commit: failed to read stored servers", zap.String("reason", reason), zap.Error(storedErr))
+		// Without the stored view the projection diff cannot be computed, so
+		// the storage step would be skipped while disk and the live config
+		// move: the commit aborts with nothing written (review round 1).
+		// Only the boot commit continues, as main's boot sync did: it writes
+		// nothing to storage or disk, publishes the file it was started with
+		// and schedules the connects, and the admission gate abstains (#937).
+		if reason != commitReasonBoot {
+			return nil, nil, fmt.Errorf("failed to read stored servers: %w", storedErr)
+		}
 	}
 	storedCfg := make(map[string]*config.ServerConfig, len(stored))
 	for name, s := range stored {
@@ -586,7 +601,12 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			}
 		}
 	}
-	storageNeeded := batch != nil && (len(batch.Saves) > 0 || len(batch.Removes) > 0 || len(batch.Replaces) > 0 || batch.QuarantineEnabled != nil)
+	// Every published generation is recorded in meta.config_commit_generation,
+	// including a global-only commit with no row to write (review round 1):
+	// the seed after a restart is that value, so skipping it would let the
+	// next process publish a generation below this one's.
+	storageNeeded := batch != nil && (len(batch.Saves) > 0 || len(batch.Removes) > 0 || len(batch.Replaces) > 0 ||
+		batch.QuarantineEnabled != nil || configChanged || tx.bootstrap)
 
 	path := r.configSvc.Current().Path
 	if tx.disk != nil && tx.disk.path != "" {
@@ -600,6 +620,15 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			if h := hooks.reconcileExit; h != nil {
 				h()
 			}
+		}
+		// A reload that changes only a restart-gated value, or cancels a
+		// pending one, publishes nothing but still moves the desired config
+		// (review round 1): the next write must not re-persist what the file
+		// no longer says.
+		if tx.desired != nil {
+			r.mu.Lock()
+			r.desiredCfg = tx.desired
+			r.mu.Unlock()
 		}
 		return &CommitResult{Changes: changes}, nil, nil
 	}

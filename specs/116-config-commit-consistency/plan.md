@@ -99,11 +99,11 @@ changed.
 | # | Step | Failure behaviour |
 |---|---|---|
 | 1 | **Build**: `base := configSvc.Current()`, `next := deep clone`, run `fn(tx)` | `fn` error → abort, nothing written |
-| 2 | **Gate**: admission gate on `next` against the stored view. Force `Quarantined=true` where storage keeps a quarantine without an explicit decision. Validate (`ValidateDetailed`, trust modes, forward headers) | validation error → abort |
+| 2 | **Gate**: admission gate on `next` against the stored view. Force `Quarantined=true` where storage keeps a quarantine without an explicit decision. Validate (`ValidateDetailed`, trust modes, forward headers) | validation error → abort. The stored view cannot be read → abort with nothing written (the projection diff needs it); only the boot commit continues, writing nothing to storage or disk, with the gate abstaining (#937), as `main`'s boot sync did (implementation review R1) |
 | 3 | **Prepare**: `configSvc.Prepare(next)` runs the pre-publish hook and computes `G`, generations and incarnations. Compute `Changes` | — |
 | 4 | **Lock and hooks**: approval locks for changed names (sorted; a name with a hook counts as changed), then `tx.UnderApprovalLock` hooks (Spec 117 review-bound server approval: validate, decide, baseline and blocks, promote) | hook error (for example a stale review) → release locks, abort, nothing written |
 | 5 | **Disk** (when a path exists): before writing, capture `prevDisk := readDiskState(path)`, the **actual file state** read from disk inside L0: `{exists, bytes, mode}` (review R9.2). Then the pending-aware write of `next` plus its self-write marker | abort. Hook writes from step 4 stay, which is fail-safe: a promoted tool on a still-quarantined server is unreachable |
-| 6 | **Storage**: `ApplyServerCommit` (one bbolt tx: saves carrying their prepared per-server stamps (review R9.3), deletes and purges, meta `G`), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk restore of `prevDisk`: write `prevDisk.bytes` back byte-for-byte with its mode (temp file + rename, as the normal save does), or remove the file when `prevDisk.exists` was false. Forget this commit's self-write marker and record one for the restored bytes. Leave `desiredCfg` and the pending-restart report untouched. Abort (reviews R5.5, R9.2) |
+| 6 | **Storage**: `ApplyServerCommit` (one bbolt tx: saves carrying their prepared per-server stamps (review R9.3), deletes and purges, meta `G`; it runs for every commit that publishes, a global-only one included, so `meta.config_commit_generation` never lags the published generation, implementation review R1), then the index purge for removed and newly quarantined servers, then the in-memory purge. Release the approval locks | tx error → compensating disk restore of `prevDisk`: write `prevDisk.bytes` back byte-for-byte with its mode (temp file + rename, as the normal save does), or remove the file when `prevDisk.exists` was false. Forget this commit's self-write marker and record one for the restored bytes. Leave `desiredCfg` and the pending-restart report untouched. Abort (reviews R5.5, R9.2) |
 | 7 | **Advance manager**. PR1: `RestampRetained(changes)` gives every retained instance its new config and generation (review R9.1). PR3/PR4: `AdvanceGenerations(changes)` unregisters, retires (PR4) and restamps, and replaces `RestampRetained` | cannot fail (in-memory) |
 | 8 | **Publish**: `configsvc.Publish(prepared)` and the legacy `r.cfg`/`desiredCfg` swap | `ErrConcurrentPublish` is an invariant bug: logged as an error, the commit returns an error, and the state is still consistent because nothing else can publish |
 | — | **After unlock**: spawn workers bound to `(name, g)` for created, replaced and reconnecting servers; request one discovery pass (`DiscoverAndIndexToolsForServer`) for each restamped connected server; asynchronous `Disconnect` of retired instances; events, telemetry, activity | logged |
@@ -153,6 +153,30 @@ restamps only when `desired` moved (§PR3).
 Steps 7 and 8 always run in that order, so publication never comes before
 retirement. Before PR3 lands, step 7 only restamps retained instances, and the
 after-unlock workers use today's manager methods.
+
+### Implementation review round 1 amendments
+
+- **Skip rule and the desired config**: a commit that publishes nothing (both
+  diffs empty) still records `tx.desired` when the caller set one. A reload
+  that only cancels or changes a restart-gated value therefore resets the
+  desired config, and the next write does not re-persist the cancelled value.
+- **Restart refresh** (`RestartServer`'s disk import, FR-003) is a commit with
+  no disk step: the file is its source and is never rewritten from the live
+  config, so an unreloaded edit of another server or a global field stays on
+  disk for the watcher.
+- **Reconnect predicate**: `upstream.Manager.AddServerConfigAt` replaces an
+  instance exactly when `config.ConnectionEquivalent` is false, the predicate
+  that marks a change `Reconnect`. A narrower manager comparison kept the old
+  isolation, OAuth, `working_dir` or init timeout on a retained instance.
+- **Registry edit with a probe**: the commit applies the request to the live
+  entry and copies only the probe-derived fields (`servers_url`, `protocol`).
+- **D15 hold**: `applyDifferentialToolUpdateHeld` runs the discovery pass's
+  last-good write and its StateView publish inside the approval-lock hold,
+  after the final eligibility/generation check. The sweep publishes each
+  server's StateView in its own hold instead of one batch afterwards.
+- **Compensation mode**: the restore sets the captured mode on the temp file
+  before the rename (`Chmod`, not filtered by the umask). `0000` is restored
+  as `0000`.
 
 ## Lock order
 

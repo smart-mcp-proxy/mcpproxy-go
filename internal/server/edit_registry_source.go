@@ -94,6 +94,12 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 	// configuration inside the commit lock (the probe above ran outside it), so
 	// a concurrent change to another source or to the servers is never
 	// reverted by the copy read before the probe.
+	//
+	// Only the probe-derived fields (ServersURL, Protocol) are carried over
+	// from the probe; everything else comes from the request applied to the
+	// live entry, so a concurrent edit of another field of the same source
+	// (its name, say) committed while this one was probing is kept (review
+	// round 1).
 	probed := updated
 	res, err := s.runtime.Commit("registry_source_edit", func(tx *runtime.CommitTx) error {
 		edited, live, err := editRegistrySourceInConfig(tx.Config(), req)
@@ -101,15 +107,16 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 			return err
 		}
 		if reprobed {
+			edited.ServersURL = probed.ServersURL
+			edited.Protocol = probed.Protocol
 			for i := range live {
 				if strings.EqualFold(live[i].ID, edited.ID) {
-					live[i] = probed
+					live[i] = edited
 					break
 				}
 			}
-		} else {
-			updated = edited
 		}
+		updated = edited
 		return tx.MutateGlobal(func(cfg *config.Config) error {
 			cfg.Registries = live
 			return nil

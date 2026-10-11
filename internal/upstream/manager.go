@@ -458,15 +458,14 @@ func (m *Manager) AddServerConfigAt(id string, serverConfig *config.ServerConfig
 	if existingClient, exists := m.clients[id]; exists {
 		existingConfig := existingClient.GetConfig()
 
-		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
-			existingConfig.Protocol != serverConfig.Protocol ||
-			existingConfig.Command != serverConfig.Command ||
-			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
-			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
-			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
+		// Compare configurations to determine if reconnection is needed. The
+		// predicate is the one the config commit uses to mark a change as
+		// Reconnect (config.ConnectionEquivalent): a narrower set here would
+		// keep a running instance on its old isolation, OAuth, working_dir or
+		// init timeout after a commit that asked for a reconnect (Spec 116
+		// review round 1; the MCP update/patch handlers used to cover this
+		// with an unconditional RemoveServer).
+		configChanged := !config.ConnectionEquivalent(existingConfig, serverConfig)
 
 		if configChanged {
 			m.logger.Info("Server configuration changed, disconnecting existing client",
@@ -579,31 +578,6 @@ func (m *Manager) AddServerConfigAt(id string, serverConfig *config.ServerConfig
 	}
 
 	return nil
-}
-
-// Helper functions for comparing slices and maps
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalStringMaps(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // AddServer adds a new upstream server and connects to it (legacy method)

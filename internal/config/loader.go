@@ -429,6 +429,13 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 // approach is still much safer than truncate+write (reduces race window from
 // ~50ms to <1ms).
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileMode(path, data, perm, false)
+}
+
+// atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
+// chmod-ed to perm before the rename, so the result carries perm itself and
+// not perm filtered by the process umask (which OpenFile applies).
+func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
 	if _, err := rand.Read(randBytes); err != nil {
@@ -457,6 +464,12 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	// Write data
 	if _, err := tmpFile.Write(data); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if exactMode {
+		if err := tmpFile.Chmod(perm); err != nil {
+			return fmt.Errorf("failed to set temp file mode: %w", err)
+		}
 	}
 
 	// Fsync to ensure data is on disk
@@ -520,16 +533,14 @@ var saveConfigMu sync.Mutex
 var saveConfigTestHook func()
 
 // RestoreConfigFileBytes writes raw bytes back to the config file atomically
-// with the given permission bits, under the same lock as every in-process save
-// (Spec 116 commit compensation: the pre-commit file is restored byte for
-// byte, never rebuilt from memory).
+// with exactly the given permission bits (the process umask does not apply,
+// and 0000 is a mode like any other), under the same lock as every in-process
+// save (Spec 116 commit compensation: the pre-commit file is restored byte for
+// byte and mode, never rebuilt from memory).
 func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
-	if perm == 0 {
-		perm = 0600
-	}
-	if err := atomicWriteFile(path, data, perm); err != nil {
+	if err := atomicWriteFileMode(path, data, perm.Perm(), true); err != nil {
 		return fmt.Errorf("failed to restore config file: %w", err)
 	}
 	return nil

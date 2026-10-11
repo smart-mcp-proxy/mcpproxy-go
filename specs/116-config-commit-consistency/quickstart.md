@@ -201,14 +201,23 @@ because other sessions share the harness. Evidence goes to
    `header_echo_fixture.py` next to `fixture.py`), with `forward_headers:
    ["X-Tenant"]`, and call one of its tools through the MCP client with
    `X-Tenant: t1`: the fixture log shows `X-Tenant`. PATCH only
-   `forward_headers: []`, call again at once: the log shows no `X-Tenant`, and
-   `GET /api/v1/servers/hdr-echo` reports the new `generation` with no
-   reconnect in `upstream logs hdr-echo`.
-5. **Restart with matching rows (review R9.6)**: note every server's
-   `generation` from `GET /api/v1/servers`, stop the daemon with
-   `stop.sh s116-pr1`, start it again on the same run directory, and wait for
-   Ready. Every enabled server is connected, and every `generation` is the
-   value noted before the restart.
+   `forward_headers: []`, call again at once: the log shows no `X-Tenant`,
+   and `upstream logs hdr-echo` shows no reconnect. The REST `generation`
+   field is PR2 (FR-017, [contracts/surfaces.md](contracts/surfaces.md)), so
+   PR1 reads generations from storage: the `servers.changed` SSE event of the
+   PATCH carries the commit's `generation`, and after `stop.sh s116-pr1` the
+   `hdr-echo` row in `config.db` (read-only bbolt dump of the `upstreams`
+   bucket) carries that value as its `generation`. A recipe that reads
+   `generation` from `GET /api/v1/servers` in PR1 compares two missing values
+   and must be treated as a failed check, not a pass. Unit coverage:
+   `TestCommit_R1_ConnectedRetainedInstanceGetsNewConfig`.
+5. **Restart with matching rows (review R9.6)**: stop the daemon with
+   `stop.sh s116-pr1` and dump every row's `generation` and `incarnation`
+   from `config.db` (read-only). Start it again on the same run directory,
+   wait for Ready, check every enabled server is connected, stop it again and
+   dump the rows: every stamp equals the value before the restart, and
+   `meta.config_commit_generation` did not decrease. (From PR2 the same check
+   can read `generation` from `GET /api/v1/servers` while the daemon runs.)
 
 ### L2 (PR2)
 
