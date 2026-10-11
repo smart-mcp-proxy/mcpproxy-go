@@ -22,7 +22,7 @@ func descTool(server, desc string) *config.ToolMetadata {
 func TestGetServerReview_WaitsForNormalDiscoveryBetweenPublishAndRecords(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true}})
 	ctx := context.Background()
-	_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")})
+	_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")}, 0)
 	require.NoError(t, err)
 	before := reviewOf(t, rt, "srv")
 	require.Equal(t, "v1", before.Tools[0].Description)
@@ -35,7 +35,7 @@ func TestGetServerReview_WaitsForNormalDiscoveryBetweenPublishAndRecords(t *test
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v2")})
+		_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v2")}, 0)
 		done <- err
 	}()
 	<-paused
@@ -69,7 +69,7 @@ func TestGetServerReview_WaitsForNormalDiscoveryBetweenPublishAndRecords(t *test
 func TestCommitDiscoveredTools_QuarantinedDuringListCapturesConsistentlyWithoutIndexing(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true, Quarantined: true}})
 	ctx := context.Background()
-	eligible, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")})
+	eligible, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")}, 0)
 	require.NoError(t, err)
 	require.False(t, eligible)
 	indexed, err := rt.indexManager.GetToolsByServer("srv")

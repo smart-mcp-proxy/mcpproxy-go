@@ -2672,69 +2672,29 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePatchServer godoc
-// @Summary Partially update an upstream server
-// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
-// @Tags servers
-// @Accept json
-// @Produce json
-// @Security ApiKeyAuth
-// @Security ApiKeyQuery
-// @Param id path string true "Server ID or name"
-// @Param server body AddServerRequest true "Fields to update (all optional)"
-// @Success 200 {object} contracts.SuccessResponse "Server updated successfully"
-// @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
-// @Failure 404 {object} contracts.ErrorResponse "Server not found"
-// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
-// @Router /api/v1/servers/{id} [patch]
-func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
-	serverName := chi.URLParam(r, "id")
-	if serverName == "" {
-		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
-		return
-	}
+// patchError is a PATCH /api/v1/servers/{id} refusal produced while the
+// update is resolved against the live entry (inside the config commit).
+type patchError struct {
+	status int
+	msg    string
+}
 
-	var req AddServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
-		return
-	}
+func (e *patchError) Error() string { return e.msg }
 
-	// GH #938: reject an unrecognized trust_mode before anything is persisted.
-	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
-	// unchanged); only a present-but-bogus value is refused.
-	if !config.IsValidTrustMode(req.TrustMode) {
-		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
-		return
-	}
+// ServerPatcher is implemented by controllers that resolve a partial server
+// update inside their config commit (Spec 116 FR-006). resolve receives a copy
+// of the LIVE entry read under the commit lock and returns the update to
+// apply; an error from it aborts the commit with nothing written.
+type ServerPatcher interface {
+	PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error
+}
 
-	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
-	// isolation mode BEFORE anything is persisted.
-	if err := req.Isolation.validate(); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Pre-fetch existing server so we can preserve bool fields the request
-	// did not explicitly set. `config.ServerConfig` uses non-pointer bools
-	// whose zero value cannot be distinguished from "not set" by the time
-	// the update reaches the controller — without this, a PATCH body like
-	// `{"args": [...]}` silently disables a previously-enabled server.
-	var existingSrv *config.ServerConfig
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
-		for _, sc := range cfg.Servers {
-			if sc != nil && sc.Name == serverName {
-				existingSrv = sc
-				break
-			}
-		}
-	}
-
-	if h := s.patchAfterParse; h != nil {
-		h(serverName)
-	}
-
+// resolveServerPatch turns a PATCH body into the partial update to apply to
+// existingSrv (the live entry; nil when unknown). Omitted fields, map merges,
+// isolation and forward-header validation are all resolved against it, so
+// running it inside the commit means a PATCH can never revert a newer write
+// with values it read earlier (#1560).
+func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
@@ -2760,8 +2720,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		}
 		unmaskedURL, err := oauth.UnmaskLiveURL(req.URL, storedURL)
 		if err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
+			return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		updates.URL = unmaskedURL
 		hasUpdates = true
@@ -2781,8 +2740,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			storedArgs = existingSrv.Args
 		}
 		if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
+			return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		updates.Args = req.Args
 		hasUpdates = true
@@ -2905,16 +2863,14 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case req.ForwardHeaders != nil:
 			if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
-				s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-				return
+				return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
 			}
 			updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
 			hasUpdates = true
 		case existingSrv != nil:
 			if req.Headers != nil {
 				if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
-					s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-					return
+					return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
 				}
 			}
 			updates.ForwardHeaders = existingSrv.ForwardHeaders
@@ -2973,8 +2929,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !hasUpdates {
-		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
-		return
+		return nil, &patchError{status: http.StatusBadRequest, msg: "No fields to update"}
 	}
 
 	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
@@ -2986,13 +2941,93 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// round-tripping its own mask into the config. See
 	// oauth.ServerFieldMaskDecisions.
 	if err := oauth.CheckServerWriteMasks("server.", updates); err != nil {
+		return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
+	}
+
+	return updates, nil
+}
+
+// handlePatchServer godoc
+// @Summary Partially update an upstream server
+// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Param server body AddServerRequest true "Fields to update (all optional)"
+// @Success 200 {object} contracts.SuccessResponse "Server updated successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
+// @Router /api/v1/servers/{id} [patch]
+func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
+	serverName := chi.URLParam(r, "id")
+	if serverName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req AddServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// GH #938: reject an unrecognized trust_mode before anything is persisted.
+	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
+	// unchanged); only a present-but-bogus value is refused.
+	if !config.IsValidTrustMode(req.TrustMode) {
+		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
+		return
+	}
+
+	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
+	// isolation mode BEFORE anything is persisted.
+	if err := req.Isolation.validate(); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	logger := s.getRequestLogger(r)
+	if h := s.patchAfterParse; h != nil {
+		h(serverName)
+	}
 
-	if err := s.controller.UpdateServer(r.Context(), serverName, updates); err != nil {
+	resolve := func(existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
+		return resolveServerPatch(serverName, &req, existingSrv)
+	}
+
+	var err error
+	if patcher, ok := s.controller.(ServerPatcher); ok {
+		// Spec 116: resolved inside the config commit, on the live entry.
+		err = patcher.PatchServer(r.Context(), serverName, resolve)
+	} else {
+		// A controller without a config commit resolves against its current
+		// configuration (test doubles).
+		var existingSrv *config.ServerConfig
+		if cfg, cerr := s.controller.GetConfig(); cerr == nil && cfg != nil {
+			for _, sc := range cfg.Servers {
+				if sc != nil && sc.Name == serverName {
+					existingSrv = sc
+					break
+				}
+			}
+		}
+		var updates *config.ServerConfig
+		if updates, err = resolve(existingSrv); err == nil {
+			err = s.controller.UpdateServer(r.Context(), serverName, updates)
+		}
+	}
+
+	logger := s.getRequestLogger(r)
+	var perr *patchError
+	if errors.As(err, &perr) {
+		s.writeError(w, r, perr.status, perr.msg)
+		return
+	}
+	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return
@@ -3128,29 +3163,42 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 
 	// Apply the swap as a deep-merge PATCH so we don't touch any other
 	// keys on the server. Build the updates map with just the one field
-	// we care about.
-	updates := &config.ServerConfig{Name: serverName}
-	if req.Scope == "header" {
-		merged := map[string]string{}
-		for k, v := range sc.Headers {
-			merged[k] = v
+	// we care about, from the entry the update is applied to.
+	buildUpdates := func(cur *config.ServerConfig) *config.ServerConfig {
+		updates := &config.ServerConfig{Name: serverName}
+		if req.Scope == "header" {
+			merged := map[string]string{}
+			for k, v := range cur.Headers {
+				merged[k] = v
+			}
+			merged[req.Key] = referenceStr
+			updates.Headers = merged
+		} else {
+			merged := map[string]string{}
+			for k, v := range cur.Env {
+				merged[k] = v
+			}
+			merged[req.Key] = referenceStr
+			updates.Env = merged
 		}
-		merged[req.Key] = referenceStr
-		updates.Headers = merged
-	} else {
-		merged := map[string]string{}
-		for k, v := range sc.Env {
-			merged[k] = v
-		}
-		merged[req.Key] = referenceStr
-		updates.Env = merged
+		// Preserve existing bool fields so the partial config doesn't reset them.
+		updates.Enabled = cur.Enabled
+		updates.Quarantined = cur.Quarantined
+		updates.ReconnectOnUse = cur.ReconnectOnUse
+		return updates
 	}
-	// Preserve existing bool fields so the partial config doesn't reset them.
-	updates.Enabled = sc.Enabled
-	updates.Quarantined = sc.Quarantined
-	updates.ReconnectOnUse = sc.ReconnectOnUse
 
-	if err := s.controller.UpdateServer(ctx, serverName, updates); err != nil {
+	var updateErr error
+	if patcher, ok := s.controller.(ServerPatcher); ok {
+		// Spec 116: merged inside the config commit, on the live entry, so a
+		// concurrent edit of another header or env key is not reverted.
+		updateErr = patcher.PatchServer(ctx, serverName, func(cur *config.ServerConfig) (*config.ServerConfig, error) {
+			return buildUpdates(cur), nil
+		})
+	} else {
+		updateErr = s.controller.UpdateServer(ctx, serverName, buildUpdates(sc))
+	}
+	if err := updateErr; err != nil {
 		s.logger.Errorw("config-to-secret: keyring write succeeded but config update failed; secret is stored but not referenced",
 			"server", serverName, "scope", req.Scope, "key", req.Key, "secret_name", req.SecretName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("secret stored as %q but config update failed: %v", req.SecretName, err))

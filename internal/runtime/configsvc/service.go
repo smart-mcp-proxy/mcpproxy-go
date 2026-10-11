@@ -2,6 +2,7 @@ package configsvc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -49,17 +50,15 @@ type Service struct {
 	subscribers []chan Update
 	subMu       sync.RWMutex
 
-	// prePublish runs on an incoming config while it is still exclusively owned
-	// by the updater — before the snapshot is stored and therefore before any
-	// subscriber can observe it. It returns the config to publish. Used by the
-	// #937 admission gate so a poisoned server can never be reconciled and
-	// indexed in the window between "config parsed" and "config gated".
-	prePublish atomic.Value // func(*config.Config) *config.Config
-
-	// prePublishObservers run after prePublish, on the exact *Config that is
-	// about to be stored — while nothing else can observe it. Read-only: they
-	// build state keyed on that pointer (Spec 105's profile index) so it is
-	// ready before the first reader can capture the snapshot.
+	// prePublishObservers run on the exact *Config that is about to be
+	// stored — while nothing else can observe it. Read-only: they build state
+	// keyed on that pointer (Spec 105's profile index) so it is ready before
+	// the first reader can capture the snapshot.
+	//
+	// Spec 116 removed the single pre-publish hook the #937 admission gate
+	// used to own: admission now runs in step 2 of Runtime.Commit, on the
+	// config before it is prepared, so every published config is already
+	// gated and nothing under updateMu reads storage (review R1.7).
 	observersMu         sync.RWMutex
 	prePublishObservers []func(*config.Config)
 }
@@ -99,34 +98,17 @@ func (s *Service) Current() *Snapshot {
 	return s.snapshot.Load().(*Snapshot)
 }
 
-// SetPrePublishHook installs a function invoked on every configuration on its
-// way into the snapshot, before subscribers are notified. The hook receives a
-// config nothing else can observe yet and returns the config to publish
-// (itself, or a modified copy — it must not mutate the one it is given, which
-// may still be the currently published snapshot).
-//
-// Passing nil removes the hook. Safe to call at any time.
-func (s *Service) SetPrePublishHook(hook func(*config.Config) *config.Config) {
-	if hook == nil {
-		s.prePublish.Store((func(*config.Config) *config.Config)(nil))
-		return
-	}
-	s.prePublish.Store(hook)
-}
-
 // AddPrePublishObserver registers a read-only observer of every configuration
 // on its way into the snapshot. Observers run inside the update, after the
 // pre-publish hook has produced the final config and before the snapshot is
 // stored or any subscriber is notified — so they see the exact *Config that
 // will be published, at a moment nothing else can. They must not mutate it,
 // and because they run under the update mutex they must be cheap (an index
-// build of one insertion per entry, not I/O). Distinct from the single
-// SetPrePublishHook slot, which the #937 admission gate owns.
+// build of one insertion per entry, not I/O).
 //
 // Observers run with the update mutex held and MUST NOT publish: a call to
-// Update, UpdateIfCurrent or ReloadFromFile from inside an observer is a
-// re-entrant publish and deadlocks by design, exactly like the pre-publish
-// hook. Registering a further observer from inside one is allowed — the
+// Update, UpdateIfCurrent or Publish from inside an observer is a re-entrant
+// publish and deadlocks by design. Registering a further observer from inside one is allowed — the
 // list is not locked while observers run — and that observer first runs on
 // the next publication.
 //
@@ -154,79 +136,133 @@ func (s *Service) runPrePublishObservers(cfg *config.Config) {
 	}
 }
 
-// runPrePublishHook applies the installed hook, if any.
-func (s *Service) runPrePublishHook(cfg *config.Config) *config.Config {
-	v := s.prePublish.Load()
-	if v == nil {
-		return cfg
-	}
-	hook, _ := v.(func(*config.Config) *config.Config)
-	if hook == nil {
-		return cfg
-	}
-	if gated := hook(cfg); gated != nil {
-		return gated
-	}
-	return cfg
-}
-
 // Update atomically updates the configuration and notifies all subscribers.
-// This operation is serialized to ensure consistency.
+// It is Prepare+Publish without replacement metadata; after Spec 116 only the
+// runtime's commit (and tests) call it.
 func (s *Service) Update(newConfig *config.Config, updateType UpdateType, source string) error {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	s.updateLocked(newConfig, updateType, source)
+	p, err := s.prepareLocked(PrepareInput{Config: newConfig, Source: source, Type: updateType})
+	if err != nil {
+		return err
+	}
+	s.publishLocked(p)
 	return nil
 }
 
 // UpdateIfCurrent atomically publishes newConfig only when expected is still
 // the active configuration pointer. It closes the check-then-update race for
-// derived snapshots such as admission/quarantine stamps: a newer config must
-// never be overwritten by a stale copy prepared before it was committed.
+// derived snapshots: a newer config must never be overwritten by a stale copy
+// prepared before it was committed.
 func (s *Service) UpdateIfCurrent(expected, newConfig *config.Config, updateType UpdateType, source string) (bool, error) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 	if s.Current().Config != expected {
 		return false, nil
 	}
-	s.updateLocked(newConfig, updateType, source)
+	p, err := s.prepareLocked(PrepareInput{Config: newConfig, Source: source, Type: updateType})
+	if err != nil {
+		return false, err
+	}
+	s.publishLocked(p)
 	return true, nil
 }
 
-func (s *Service) updateLocked(newConfig *config.Config, updateType UpdateType, source string) {
+// ErrConcurrentPublish reports that a prepared snapshot was published after
+// another publication moved the version it was prepared against. Under the
+// runtime's commit lock this is an invariant violation.
+var ErrConcurrentPublish = errors.New("configsvc: concurrent publish")
 
-	newConfig = s.runPrePublishHook(newConfig)
-	s.runPrePublishObservers(newConfig)
+// Prepare computes the next snapshot for in.Config against the current one
+// without making it visible (Spec 116 two-phase publish). It assigns the
+// commit generation G = version+1, the per-server generations and the change
+// set. Publish makes it current. The runtime's commit lock serializes
+// Prepare/Publish pairs; Publish refuses a snapshot whose base version moved.
+func (s *Service) Prepare(in PrepareInput) (*PreparedSnapshot, error) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	return s.prepareLocked(in)
+}
+
+// Publish makes a prepared snapshot current: it runs the pre-publish
+// observers, stores the snapshot and notifies subscribers.
+func (s *Service) Publish(p *PreparedSnapshot) (*Snapshot, error) {
+	if p == nil || p.snap == nil {
+		return nil, fmt.Errorf("configsvc: nil prepared snapshot")
+	}
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	if s.version != p.base {
+		return nil, fmt.Errorf("%w: prepared against version %d, current %d", ErrConcurrentPublish, p.base, s.version)
+	}
+	s.publishLocked(p)
+	return p.snap, nil
+}
+
+// SeedVersion raises the version counter to v so the next commit generation
+// is greater than every generation persisted by an earlier process (Spec 116
+// D6). It never lowers the counter.
+func (s *Service) SeedVersion(v int64) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	if v > s.version {
+		s.version = v
+	}
+}
+
+func (s *Service) prepareLocked(in PrepareInput) (*PreparedSnapshot, error) {
+	if in.Config == nil {
+		return nil, fmt.Errorf("configsvc: nil config")
+	}
+	current := s.Current()
+	g := s.version + 1
+	gens, changes, err := computeGenerations(current, in, g)
+	if err != nil {
+		return nil, err
+	}
+	updateType := in.Type
+	if updateType == "" {
+		updateType = UpdateTypeModify
+	}
+	return &PreparedSnapshot{
+		base:       s.version,
+		generation: g,
+		updateType: updateType,
+		source:     in.Source,
+		Changes:    changes,
+		snap: &Snapshot{
+			Config:            in.Config,
+			Path:              current.Path,
+			Version:           g,
+			Timestamp:         time.Now(),
+			ServerGenerations: gens,
+		},
+	}, nil
+}
+
+func (s *Service) publishLocked(p *PreparedSnapshot) {
+	s.runPrePublishObservers(p.snap.Config)
 
 	current := s.Current()
-	s.version++
-
-	newSnapshot := &Snapshot{
-		Config:    newConfig,
-		Path:      current.Path,
-		Version:   s.version,
-		Timestamp: time.Now(),
-	}
-
-	// Store the new snapshot atomically
-	s.snapshot.Store(newSnapshot)
+	s.version = p.generation
+	snap := p.snap
+	snap.Path = current.Path
+	snap.Timestamp = time.Now()
+	s.snapshot.Store(snap)
 
 	s.logger.Info("Configuration updated",
-		zap.String("type", string(updateType)),
-		zap.String("source", source),
+		zap.String("type", string(p.updateType)),
+		zap.String("source", p.source),
 		zap.Int64("old_version", current.Version),
-		zap.Int64("new_version", newSnapshot.Version),
-		zap.Int("server_count", newSnapshot.ServerCount()))
+		zap.Int64("new_version", snap.Version),
+		zap.Int("server_count", snap.ServerCount()))
 
-	// Notify subscribers
-	update := Update{
-		Snapshot:  newSnapshot,
-		Type:      updateType,
-		ChangedAt: newSnapshot.Timestamp,
-		Source:    source,
-	}
-
-	s.notifySubscribers(update)
+	s.notifySubscribers(Update{
+		Snapshot:  snap,
+		Type:      p.updateType,
+		ChangedAt: snap.Timestamp,
+		Source:    p.source,
+	})
 }
 
 // UpdatePath updates the configuration file path.
@@ -236,10 +272,11 @@ func (s *Service) UpdatePath(newPath string) {
 
 	current := s.Current()
 	newSnapshot := &Snapshot{
-		Config:    current.Config,
-		Path:      newPath,
-		Version:   current.Version,
-		Timestamp: current.Timestamp,
+		Config:            current.Config,
+		Path:              newPath,
+		Version:           current.Version,
+		Timestamp:         current.Timestamp,
+		ServerGenerations: current.ServerGenerations,
 	}
 
 	s.snapshot.Store(newSnapshot)
@@ -247,31 +284,6 @@ func (s *Service) UpdatePath(newPath string) {
 	s.logger.Debug("Configuration path updated",
 		zap.String("old_path", current.Path),
 		zap.String("new_path", newPath))
-}
-
-// ReloadFromFile loads configuration from disk and updates the snapshot.
-// Returns the new snapshot and any error encountered.
-func (s *Service) ReloadFromFile() (*Snapshot, error) {
-	current := s.Current()
-	if current.Path == "" {
-		return nil, fmt.Errorf("no configuration file path set")
-	}
-
-	s.logger.Info("Reloading configuration from disk",
-		zap.String("path", current.Path))
-
-	// Load config from file (this may block on disk I/O)
-	newConfig, err := config.LoadFromFile(current.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load config from %s: %w", current.Path, err)
-	}
-
-	// Update atomically
-	if err := s.Update(newConfig, UpdateTypeReload, "file_reload"); err != nil {
-		return nil, err
-	}
-
-	return s.Current(), nil
 }
 
 // SaveToFile persists the current configuration to disk.

@@ -149,12 +149,9 @@ func TestServerAddServer_DeleteThenReaddSucceeds(t *testing.T) {
 	var exists *ServerExistsError
 	require.ErrorAs(t, add(), &exists, "live duplicate stays refused")
 
-	// The storage-removal door shared by Server.RemoveServer and the MCP remove
-	// operation. (Server.RemoveServer itself is avoided here: a concurrent
-	// config reconcile may prune the not-yet-synced record first and make it
-	// report "not found", which is unrelated to this test.)
-	st := srv.runtime.StorageManager()
-	require.NoError(t, srv.removeServerStorage("cycle", func() error { return st.RemoveUpstream("cycle") }))
+	// The removal door shared by Server.RemoveServer and the MCP remove
+	// operation (Spec 116: one config commit).
+	require.NoError(t, srv.removeServerFromConfig("cycle"))
 	for _, s := range srv.runtime.Config().Servers {
 		require.NotEqual(t, "cycle", s.Name, "removal must drop the runtime config entry synchronously")
 	}

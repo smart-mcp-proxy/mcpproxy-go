@@ -519,6 +519,22 @@ var saveConfigMu sync.Mutex
 // (under saveConfigMu). Tests only.
 var saveConfigTestHook func()
 
+// RestoreConfigFileBytes writes raw bytes back to the config file atomically
+// with the given permission bits, under the same lock as every in-process save
+// (Spec 116 commit compensation: the pre-commit file is restored byte for
+// byte, never rebuilt from memory).
+func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	if perm == 0 {
+		perm = 0600
+	}
+	if err := atomicWriteFile(path, data, perm); err != nil {
+		return fmt.Errorf("failed to restore config file: %w", err)
+	}
+	return nil
+}
+
 // writeConfigFile marshals cfg exactly as given and writes it atomically.
 func writeConfigFile(cfg *Config, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")

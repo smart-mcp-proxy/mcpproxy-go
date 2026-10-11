@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // MCP-1072: `registry edit` updates a user-added custom registry source (name,
@@ -72,7 +73,7 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 		return nil, errors.New("configuration unavailable")
 	}
 
-	updated, remaining, err := editRegistrySourceInConfig(currentConfig, req)
+	updated, _, err := editRegistrySourceInConfig(currentConfig, req)
 	if err != nil {
 		return nil, err
 	}
@@ -81,30 +82,46 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 	// (GH #783), so re-probe it — unless the caller pinned the servers URL
 	// explicitly, in which case that is the answer. This is what lets a user REPAIR
 	// a registry that was added while the URL was being mangled.
+	reprobed := false
 	if strings.TrimSpace(req.URL) != "" && strings.TrimSpace(req.ServersURL) == "" {
 		if err := s.resolveRegistrySourceShape(&updated); err != nil {
 			return nil, err
 		}
-		for i := range remaining {
-			if strings.EqualFold(remaining[i].ID, updated.ID) {
-				remaining[i] = updated
-				break
-			}
-		}
+		reprobed = true
 	}
 
-	// Copy-on-write: clone the config and publish a fresh registries slice so
-	// background readers ranging over the shared snapshot are never disturbed.
-	updatedConfig := *currentConfig
-	updatedConfig.Registries = remaining
-	s.runtime.UpdateConfig(&updatedConfig, "")
+	// One config commit (Spec 116): the edit is re-applied to the LIVE
+	// configuration inside the commit lock (the probe above ran outside it), so
+	// a concurrent change to another source or to the servers is never
+	// reverted by the copy read before the probe.
+	probed := updated
+	res, err := s.runtime.Commit("registry_source_edit", func(tx *runtime.CommitTx) error {
+		edited, live, err := editRegistrySourceInConfig(tx.Config(), req)
+		if err != nil {
+			return err
+		}
+		if reprobed {
+			for i := range live {
+				if strings.EqualFold(live[i].ID, edited.ID) {
+					live[i] = probed
+					break
+				}
+			}
+		} else {
+			updated = edited
+		}
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			cfg.Registries = live
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Rebuild the effective catalog so the edit takes effect immediately.
-	registries.SetRegistriesFromConfig(&updatedConfig)
-
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after editing registry source",
-			zap.String("registry_id", updated.ID), zap.Error(err))
+	if res != nil && res.Snapshot != nil {
+		registries.SetRegistriesFromConfig(res.Snapshot.Config)
 	}
 
 	s.logger.Info("Edited custom registry source",

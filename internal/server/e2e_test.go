@@ -431,7 +431,7 @@ func TestE2E_ToolDiscovery(t *testing.T) {
 	// Update runtime config with the unquarantined server
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for supervisor to reconcile and client to connect
@@ -540,7 +540,7 @@ func TestE2E_ToolCalling(t *testing.T) {
 	// Update runtime config with the unquarantined server
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for supervisor to reconcile and client to connect
@@ -1618,7 +1618,7 @@ func TestE2E_IntentDeclarationToolVariants(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for supervisor to reconcile and client to connect
@@ -2828,7 +2828,7 @@ func TestE2E_DisableServerRemovesToolsFromSearch(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for connection and discovery
@@ -3013,7 +3013,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for connection and discovery
@@ -3138,7 +3138,7 @@ func TestE2E_ServerDeleteReaddDifferentTools(t *testing.T) {
 	require.NoError(t, err)
 	cfgB := env.proxyServer.runtime.Config()
 	cfgB.Servers = serversB
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfgB)
+	err = env.proxyServer.runtime.CommitConfig(cfgB)
 	require.NoError(t, err)
 
 	// Wait for connection and discovery
@@ -3319,7 +3319,7 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for connection and trigger tool discovery
@@ -3468,7 +3468,7 @@ func TestE2E_SelfHealingInvalidParams(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
 	// Wait for connect + index (poll: connection and discovery are async, so
 	// re-trigger discovery until the tool is searchable).
@@ -3618,7 +3618,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
 	// retrieveEntries runs one retrieve_tools call and returns the decoded
 	// response body (tools + optional hint).
@@ -3903,7 +3903,7 @@ func startDirectFixtureUpstream(t *testing.T, env *TestEnvironment, serverName s
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
 	// Connect and discovery are async and the direct listing is a projection of
 	// discovery, so re-trigger indexing until both fixture tools are on the

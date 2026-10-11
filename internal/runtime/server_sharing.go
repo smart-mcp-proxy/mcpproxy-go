@@ -12,28 +12,33 @@ import (
 // SetServerShared commits sharing against the current configuration and
 // publishes it before returning. A successful unshare must not leave a file
 // watcher delay in which existing credentials can still reach the server.
+// It is one config commit (Spec 116); the default disk write keeps any change
+// still pending a restart.
 func (r *Runtime) SetServerShared(name string, shared bool) (*config.ServerConfig, error) {
-	r.lockConfigCommit()
-	defer r.configCommitMu.Unlock()
-	snapshot := r.ConfigSnapshot()
-	next := snapshot.Clone()
-	if next == nil {
-		return nil, fmt.Errorf("configuration unavailable")
-	}
-	// Preserve unrelated changes already saved pending a restart.
-	if desired := r.pendingAwareDiskConfig(next); desired != nil {
-		next = desired
-	}
-	for _, server := range next.Servers {
-		if server == nil || !strings.EqualFold(server.Name, name) {
-			continue
+	var updated *config.ServerConfig
+	_, err := r.Commit("set_server_shared", func(tx *CommitTx) error {
+		target := ""
+		for _, sc := range tx.Config().Servers {
+			if sc != nil && strings.EqualFold(sc.Name, name) {
+				target = sc.Name
+				break
+			}
 		}
-		server.Shared = shared
-		server.Updated = time.Now().UTC()
-		if _, err := r.applyConfigLocked(next, snapshot.Path); err != nil {
-			return nil, err
+		if target == "" {
+			return fmt.Errorf("server not found: %w", os.ErrNotExist)
 		}
-		return server, nil
+		if err := tx.UpdateServer(target, func(cur *config.ServerConfig) error {
+			cur.Shared = shared
+			cur.Updated = time.Now().UTC()
+			return nil
+		}); err != nil {
+			return err
+		}
+		updated, _ = tx.Server(target)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("server not found: %w", os.ErrNotExist)
+	return updated, nil
 }

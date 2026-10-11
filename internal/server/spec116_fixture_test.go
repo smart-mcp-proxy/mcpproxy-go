@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // Spec 116 PR1 test fixtures (quickstart.md §T1). The servers point at
@@ -42,11 +43,15 @@ func newSpec116Server(t *testing.T, servers ...*config.ServerConfig) (*Server, s
 	return srv, cfgPath
 }
 
-// bootSpec116 projects the configured servers into storage, as the daemon's
-// boot reconcile does.
+// bootSpec116 waits for the server's own boot reconcile (started by the
+// constructor) and then reconciles once more, so the storage projection holds
+// every configured server and no boot work races the test's seams.
 func bootSpec116(t *testing.T, srv *Server) {
 	t.Helper()
-	require.NoError(t, srv.runtime.LoadConfiguredServers(nil))
+	require.Eventually(t, func() bool {
+		return srv.runtime.CurrentPhase() == runtime.PhaseReady
+	}, 20*time.Second, 5*time.Millisecond, "the runtime never finished its boot")
+	require.NoError(t, srv.runtime.ReconcileServers())
 }
 
 func liveServer(srv *Server, name string) *config.ServerConfig {

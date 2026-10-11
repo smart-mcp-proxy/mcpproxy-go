@@ -104,9 +104,6 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 type Server struct {
 	logger  *zap.Logger
 	runtime *runtime.Runtime
-	// createMu serializes create-only server adds (see createServer).
-	createMu sync.Mutex
-
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -1971,6 +1968,9 @@ func (s *Server) UnquarantineServer(serverName string) error {
 
 // AddServer adds a new upstream server to the configuration.
 // New servers are quarantined by default for security.
+//
+// Spec 116: the add is one config commit — the live config, storage and the
+// file all hold the server when this returns.
 func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfig) error {
 	s.logger.Info("Adding upstream server",
 		zap.String("name", serverConfig.Name),
@@ -1982,15 +1982,9 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	serverConfig.Created = time.Now()
 
 	// Create-only: refuses an existing name (runtime config or storage) and
-	// publishes to the runtime config atomically. A failed add touches nothing.
+	// commits it atomically. A failed add touches nothing.
 	if err := s.createServer(serverConfig); err != nil {
 		return err
-	}
-
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after adding server",
-			zap.Error(err))
 	}
 
 	// Notify about upstream server change
@@ -2017,17 +2011,11 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	return nil
 }
 
-// UpdateServer applies partial updates to an existing upstream server configuration.
-func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error {
-	s.logger.Info("Updating upstream server", zap.String("name", serverName))
-
-	storageManager := s.runtime.StorageManager()
-	existing, err := storageManager.GetUpstreamServer(serverName)
-	if err != nil || existing == nil {
-		return fmt.Errorf("server '%s' not found", serverName)
-	}
-
-	// Apply non-zero/non-nil fields from updates
+// applyServerUpdates applies a partial update to existing in place: the
+// non-zero/non-nil fields of updates, plus the always-applied Enabled and
+// ReconnectOnUse (the REST handler resolves them against the existing server
+// first). It is the field logic UpdateServer and PatchServer share.
+func applyServerUpdates(existing, updates *config.ServerConfig) {
 	if updates.URL != "" {
 		existing.URL = updates.URL
 	}
@@ -2055,7 +2043,7 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	existing.ReconnectOnUse = updates.ReconnectOnUse
 	// Quarantine is applied only when the caller stated it (the REST PATCH
 	// handler marks the explicit bit when the body carries `quarantined`).
-	// Otherwise the stored value stands: `updates.Quarantined` can be a stale
+	// Otherwise the live value stands: `updates.Quarantined` can be a stale
 	// false copied from a config snapshot, which must never un-quarantine.
 	if updates.QuarantineExplicitlySet() {
 		existing.Quarantined = updates.Quarantined
@@ -2095,6 +2083,21 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.InitTimeout = updates.InitTimeout
 	}
 
+	// F9 / Spec 093: tri-state pointers the PATCH handler resolves against the
+	// existing server; nil means "leave unchanged".
+	if updates.ExposePrompts != nil {
+		existing.ExposePrompts = updates.ExposePrompts
+	}
+	if updates.MaxConcurrentRequests != nil {
+		existing.MaxConcurrentRequests = updates.MaxConcurrentRequests
+	}
+	if updates.QueueSize != nil {
+		existing.QueueSize = updates.QueueSize
+	}
+	if updates.QueueTimeout != nil {
+		existing.QueueTimeout = updates.QueueTimeout
+	}
+
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a present
 	// struct REPLACES the override set wholesale.
 	//
@@ -2102,33 +2105,51 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	// an empty image or a nil `enabled` was indistinguishable from "not
 	// supplied" — which is half of why an inheriting server could never be
 	// restored once something wrote an explicit opt-out (GH #1142). The REST
-	// handler now resolves the patch against the persisted overrides
+	// handler resolves the patch against the live overrides
 	// (IsolationRequest.resolve) and hands over a complete struct, so replacing
 	// is both correct and the only way clears can work.
 	if updates.Isolation != nil {
 		existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
 	}
+}
 
-	// Save to storage
-	if err := storageManager.SaveUpstreamServer(existing); err != nil {
-		return fmt.Errorf("failed to save server: %w", err)
-	}
+// UpdateServer applies partial updates to an existing upstream server
+// configuration. Spec 116: one config commit, applied to the LIVE entry read
+// inside the commit lock (so config-only fields such as Shared and AuthBroker
+// survive, and a server removed concurrently is "not found").
+func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error {
+	return s.PatchServer(ctx, serverName, func(*config.ServerConfig) (*config.ServerConfig, error) {
+		return updates, nil
+	})
+}
 
-	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
-		for i, sc := range currentConfig.Servers {
-			if sc.Name == serverName {
-				currentConfig.Servers[i] = existing
-				break
+// PatchServer is UpdateServer whose partial update is resolved inside the
+// commit, against a copy of the live entry (Spec 116 FR-006): resolve sees the
+// current server and returns the update to apply. The REST PATCH handler
+// resolves omitted fields, map merges, isolation and forward-header validation
+// this way, so a PATCH parked before the commit cannot revert a newer write.
+// An error from resolve aborts the commit with nothing written.
+func (s *Server) PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error {
+	s.logger.Info("Updating upstream server", zap.String("name", serverName))
+
+	_, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
+		return tx.UpdateServer(serverName, func(cur *config.ServerConfig) error {
+			updates, err := resolve(config.CopyServerConfig(cur))
+			if err != nil {
+				return err
 			}
+			if updates == nil {
+				return nil
+			}
+			applyServerUpdates(cur, updates)
+			return nil
+		})
+	})
+	if err != nil {
+		if errors.Is(err, runtime.ErrServerNotFound) {
+			return fmt.Errorf("server '%s' not found", serverName)
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
-	}
-
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))
+		return err
 	}
 
 	// Notify about change
@@ -2141,28 +2162,25 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 
 // RemoveServer removes an upstream server from the configuration.
 // This stops the server if running and removes it from storage.
+//
+// Spec 116: the removal is one config commit — the live config, the storage
+// row and call history, the file and the search index lose the server
+// together, and the manager instance is unregistered before this returns.
 func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	s.logger.Info("Removing upstream server", zap.String("name", serverName))
 
-	// Check if server exists
-	storageManager := s.runtime.StorageManager()
-	existing, err := storageManager.GetUpstreamServer(serverName)
-	if err != nil || existing == nil {
-		return fmt.Errorf("server '%s' not found", serverName)
-	}
-
-	// Remove from upstream manager (stops the server)
-	s.runtime.UpstreamManager().RemoveServer(serverName)
-
-	// Remove from storage
-	if err := s.removeServerStorage(serverName, func() error {
-		return storageManager.RemoveUpstream(serverName)
-	}); err != nil {
+	if err := s.removeServerFromConfig(serverName); err != nil {
+		if errors.Is(err, runtime.ErrServerNotFound) {
+			return fmt.Errorf("server '%s' not found", serverName)
+		}
 		return fmt.Errorf("failed to remove server from storage: %w", err)
 	}
 
+	storageManager := s.runtime.StorageManager()
+
 	// Clear OAuth state (tokens, client registration) for the removed server
-	// This prevents orphaned tokens from accumulating in the database
+	// This prevents orphaned tokens from accumulating in the database.
+	// (Spec 116 PR2 moves this into the removal commit's purge.)
 	if err := storageManager.ClearOAuthState(serverName); err != nil {
 		s.logger.Warn("Failed to clear OAuth state for removed server",
 			zap.String("server", serverName),
@@ -2175,24 +2193,11 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 		refreshManager.OnTokenCleared(serverName)
 	}
 
-	// Remove from search index
-	if err := s.runtime.IndexManager().DeleteServerTools(serverName); err != nil {
-		s.logger.Warn("Failed to remove server tools from index",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
 	// Clean up tool approval records for the removed server
 	// This prevents orphaned approval records from accumulating
 	if err := storageManager.DeleteServerToolApprovals(serverName); err != nil {
 		s.logger.Warn("Failed to clear tool approvals for removed server",
 			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after removing server",
 			zap.Error(err))
 	}
 
@@ -2203,6 +2208,7 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 		zap.String("name", serverName))
 
 	return nil
+
 }
 
 // EnableServer enables/disables a server and ensures all state is synchronized.

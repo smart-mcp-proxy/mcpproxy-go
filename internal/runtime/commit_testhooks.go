@@ -20,6 +20,21 @@ type commitTestHooks struct {
 	// discoveryBeforeIndex runs in a discovery pass after its approval check
 	// and before its index write.
 	discoveryBeforeIndex func(serverName string)
+
+	// Commit pipeline seams (plan.md §Test seams). Each runs inside
+	// configCommitMu with the reason of the commit.
+	afterBuild   func(reason string)
+	afterPrepare func(reason string)
+	afterDisk    func(reason string)
+	afterStorage func(reason string)
+	afterAdvance func(reason string)
+	// diskWriteFault / storageFault inject a failure into commit step 5 or
+	// into the storage transaction of step 6.
+	diskWriteFault func(reason string) error
+	storageFault   func(reason string) error
+	// skipAdvance stubs commit step 7 out, so a regression test can show it
+	// detects the loss of the retained-instance update (T1.19).
+	skipAdvance bool
 }
 
 // commitWaitState carries the commit-lock and approval-lock waiter probes and

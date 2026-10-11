@@ -410,21 +410,44 @@ func (g toolQuarantineGate) active() bool {
 	return g.enforceNewTools && !g.autoApproveChanges
 }
 
-// resolveToolQuarantineGate resolves the gate for a server from the current
-// config (trust mode: manual → every change/addition held; auto → all
-// auto-approved; scan → green-scan-gated).
+// resolveToolQuarantineGate resolves the gate for a server (trust mode:
+// manual → every change/addition held; auto → all auto-approved; scan →
+// green-scan-gated).
+//
+// Spec 116 D16: the policy is read from STORAGE — the server's row and
+// meta.quarantine_enabled, which the config commit writes in its storage step
+// under the server's approval lock — not from the published config. The commit
+// releases the approval lock before it publishes, so a decision made in that
+// window from the published config would use the old trust mode (review
+// R3.2). Callers hold the server's approval lock. A database no commit has
+// written yet (some unit-test fixtures) falls back to the published config.
 func (r *Runtime) resolveToolQuarantineGate(serverName string) toolQuarantineGate {
 	cfg := r.Config()
-	gate := toolQuarantineGate{globalEnabled: cfg.IsQuarantineEnabled()}
+	globalEnabled := cfg.IsQuarantineEnabled()
+	var entry *config.ServerConfig
 	for _, sc := range cfg.Servers {
 		if sc.Name == serverName {
-			mode := sc.EffectiveTrustMode()
-			gate.serverSkipped = sc.IsQuarantineSkipped()
-			gate.serverQuarantined = sc.Quarantined
-			gate.autoApproveChanges = mode == config.TrustModeAuto
-			gate.scanMode = mode == config.TrustModeScan
+			entry = sc
 			break
 		}
+	}
+	if r.storageManager != nil {
+		if _, committed, err := r.storageManager.ConfigCommitState(); err == nil && committed {
+			if enabled, ok, qerr := r.storageManager.StoredQuarantineEnabled(); qerr == nil && ok {
+				globalEnabled = enabled
+			}
+			if row, rerr := r.storageManager.GetStoredServer(serverName); rerr == nil {
+				entry = row.Config
+			}
+		}
+	}
+	gate := toolQuarantineGate{globalEnabled: globalEnabled}
+	if entry != nil {
+		mode := entry.EffectiveTrustMode()
+		gate.serverSkipped = entry.IsQuarantineSkipped()
+		gate.serverQuarantined = entry.Quarantined
+		gate.autoApproveChanges = mode == config.TrustModeAuto
+		gate.scanMode = mode == config.TrustModeScan
 	}
 	gate.enforceNewTools = gate.globalEnabled && !gate.serverSkipped
 	gate.enforceQuarantine = gate.enforceNewTools && gate.serverQuarantined
@@ -446,6 +469,16 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	// tool-approval lock, so overlapping discovery passes and operator
 	// approvals apply one after another instead of overwriting each other.
 	defer r.lockToolApprovals(serverName)()
+	return r.checkToolApprovalsHeld(serverName, tools)
+}
+
+// checkToolApprovalsHeld is checkToolApprovals for a caller that already holds
+// serverName's approval lock (Spec 116 D15: the discovery pass makes its final
+// eligibility check, the approval decisions and its index writes in one hold).
+func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
+	if r.storageManager == nil {
+		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
+	}
 
 	// Determine if quarantine is enforced for this server. Storage is
 	// consulted too (fail closed): QuarantineServer flips it under this lock
@@ -2469,6 +2502,18 @@ func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 func (r *Runtime) approveBaselineToolsForServer(serverName string) error {
 	_, err := r.approveBaselineToolsForServerCount(serverName)
 	return err
+}
+
+// approveBaselineToolsForServerAt is the unquarantine baseline promotion bound
+// to the incarnation of the commit that unquarantined the server (Spec 116
+// FR-014i): the caller passes the incarnation from that commit's result and
+// never recaptures it by name. PR1 records the binding; Spec 116 PR2 adds the
+// under-lock check that the row still has that incarnation and is still
+// unquarantined, and writes nothing otherwise.
+func (r *Runtime) approveBaselineToolsForServerAt(serverName string, incarnation int64) error {
+	r.logger.Debug("Baseline promotion after unquarantine",
+		zap.String("server", serverName), zap.Int64("incarnation", incarnation))
+	return r.approveBaselineToolsForServer(serverName)
 }
 
 // approveBaselineToolsForServerCount is approveBaselineToolsForServer

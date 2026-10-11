@@ -1,17 +1,34 @@
 package configsvc
 
 import (
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Snapshot is an immutable point-in-time view of the configuration.
 // It allows lock-free reads without blocking on disk I/O or mutations.
 type Snapshot struct {
-	Config    *config.Config
-	Path      string
-	Version   int64 // Monotonically increasing version number
+	Config *config.Config
+	Path   string
+	// Version is monotonically increasing. Since Spec 116 it is the commit
+	// generation G of the commit that published this snapshot, and it is
+	// seeded from storage at startup, so it also increases across restarts.
+	Version   int64
 	Timestamp time.Time
+	// ServerGenerations holds each configured server's committed generation
+	// (Spec 116 data-model §2). Immutable once published. Nil on the snapshot
+	// NewService was constructed with, which predates any commit.
+	ServerGenerations map[string]ServerGen
+}
+
+// ServerGeneration returns the committed generation of one server.
+func (s *Snapshot) ServerGeneration(name string) (ServerGen, bool) {
+	if s == nil || s.ServerGenerations == nil {
+		return ServerGen{}, false
+	}
+	g, ok := s.ServerGenerations[name]
+	return g, ok
 }
 
 // Clone creates a deep copy of the configuration to ensure immutability.

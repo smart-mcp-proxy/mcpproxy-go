@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -165,3 +166,5 @@ func spec116AwaitErr(t *testing.T, ch <-chan error, what string) error {
 		return nil
 	}
 }
+
+func runtimeStack(buf []byte) int { return goruntime.Stack(buf, true) }

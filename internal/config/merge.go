@@ -634,6 +634,7 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		ReconnectOnUse:           src.ReconnectOnUse,
 		SourceRegistryID:         src.SourceRegistryID,
 		SourceRegistryProvenance: src.SourceRegistryProvenance,
+		ToonOutput:               src.ToonOutput,
 	}
 
 	// Copy slices
