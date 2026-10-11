@@ -211,3 +211,11 @@ See spec.md A1-A10 and O1-O4.
 4. **Medium, coalesced waiters read a shared last-result slot**: an immutable per-flight result (research D9, T302) and a failing-first interleaving test (T301).
 5. **Medium, failing-first labels**: T305(a) and the T207 empty-review check are reclassified as composition regressions. T208's failing pair is the post-commit promotion window.
 6. **Low, the health check does not list**: removed from capture producers.
+
+## Design review round 3 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, more quarantine writers** (PATCH `quarantined:true` via `UpdateServer`; the restart persist): every quarantined-record writer goes through `persistServerQuarantinedLocked`. A quarantined apply self-heals the index. A CI guard script pins the writer list (FR-035, T309, T306(9b)).
+2. **Medium, T104 cannot import `internal/server`**: the dispatch refusal moves to T104s in `internal/server`.
+3. **Medium, T306(2) would deadlock as written**: the approval runs asynchronously and is asserted blocked, then released. A separate main-compatible window test was added (2m).
+4. **Low, stale "in storage" scope line**: fixed to `internal/toolreview`.
+5. **Low, duplicate names are not deduplicated on main**: documented. The bound path deduplicates and is tested.

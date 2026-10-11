@@ -127,7 +127,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 - An `expected_hashes` value is an empty string: the tool counts as "not in the review".
 - A tool in the reachable set has a record with no storage `CurrentHash` (a toggle-synthesized record): its fingerprint is still non-empty, derived from the stored definition, so a review that contains it stays bound.
 - A dangerous scan verdict and a stale review at the same time: the scan gate answers first, with the unchanged message containing "dangerous". The force retry re-sends the original binding and then gets 409 out of date. The out-of-date message never contains "dangerous", because the tray keys its force dialog on that word.
-- Duplicate names in `tools`: counted once (unchanged).
+- Duplicate names in `tools`: on main each occurrence is written and counted (`tool_quarantine.go:2064-2099`, `httpapi/server.go:6922-6924`). The bound path validates the set once and deduplicates; the unbound path keeps today's behaviour (design review r3 #5). T205 covers the bound dedupe.
 - `approve_all` with `expected_hashes`: the reachable set is every `pending` and `changed` record.
 - Capture sequence 0 (a caller with no managed client, such as tests or fixtures): treated as "unordered". It is applied only while the server has no applied capture yet, never after one.
 - Re-applying the same capture (the approval reindex from the last-good snapshot) is allowed, because `seq == applied`.
@@ -207,7 +207,15 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - the last-good snapshot update.
 - **FR-033**: The StateView publish of an inventory MUST run under the same lock, and only while `seq >= applied` and `seq >= published`. It then sets `published = seq`. The sweep MUST publish per server through this gate.
 - **FR-034**: Before any index write, the apply MUST re-check under the lock that the server is enabled and not quarantined, in config OR storage, failing closed. A quarantined server's inventory is recorded for review only.
-- **FR-035**: Every quarantine writer MUST flip storage and purge the shared index entries in one critical section under the server's approval lock: `QuarantineServer(true)` and the config-load path (`LoadConfiguredServers`, `lifecycle.go:1539-1557`: `newlyQuarantined` → purge, then `SaveUpstreamServer`). The config path saves the quarantined storage record **before** purging, inside that section, so an apply that takes the lock afterwards sees the quarantine. The profile-index refresh may follow outside the section.
+- **FR-035**: Every writer that can store a server record as quarantined MUST do so through one runtime operation, `persistServerQuarantinedLocked`. That operation saves storage and purges the shared index entries in one critical section under the server's approval lock. The writers are (design review r2 #3, r3 #1):
+  - `QuarantineServer(true)`;
+  - the config-load path (`LoadConfiguredServers`, `lifecycle.go:1539-1557`);
+  - REST `PATCH /servers/{id}` with `quarantined: true` (`httpapi/server.go:2848-2853,2982` → `Server.UpdateServer`, `server/server.go:2055-2057,2107-2121`; the later reload no longer sees a transition, so it never purges);
+  - the disk-first restart persist (`lifecycle.go:2347-2355`).
+
+  As defence in depth, an apply that finds the server quarantined under the lock also purges the server's shared index entries before returning. An index left populated by a writer this list missed then heals on the next pass.
+
+  For the config path (`newlyQuarantined` → purge, then `SaveUpstreamServer`): The config path saves the quarantined storage record **before** purging, inside that section, so an apply that takes the lock afterwards sees the quarantine. The profile-index refresh may follow outside the section.
 - **FR-036**: The upstream manager MUST retire a client it removes or replaces, under its capture writer lock. An inventory captured by a retired client, or under an epoch that is no longer current, MUST be discarded without writes.
 - **FR-037**: `lastGoodTools` MUST store the complete capture identity (seq, epoch, client) with the snapshot and MUST NOT be replaced by an older capture. Re-applying the snapshot (approval reindex, sweep fallback) is allowed only while that capture is still current (client not replaced or retired, epoch unchanged). Otherwise the approval reindex re-lists the server and the sweep fallback skips it.
 - **FR-038**: The profile-index refresh, signature-cache reconcile, SSE events and activity records MUST run after the lock is released.
