@@ -113,20 +113,11 @@ func (m *Manager) GetBoltDB() *BoltDB {
 
 // Upstream operations
 
-// SaveUpstreamServer saves an upstream server configuration.
-//
-// Invariant: it never lowers a recorded Quarantined=true. Only
-// QuarantineUpstreamServer (the review/approve door) or a config that carries an
-// explicit operator decision (QuarantineExplicitlySet) may clear it. A Go-built
-// or file-decoded ServerConfig that merely says Quarantined=false is
-// indistinguishable from "never stated", so it must not erase a quarantine the
-// admission gate recorded. The guard changes only the persisted record, never
-// the caller's struct.
-func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	record := &UpstreamRecord{
+// upstreamRecordFromConfig builds the persisted record for a server config.
+// Shared by the upsert (SaveUpstreamServer) and create-only
+// (CreateUpstreamServer) doors so no field is dropped by one of them.
+func upstreamRecordFromConfig(serverConfig *config.ServerConfig) *UpstreamRecord {
+	return &UpstreamRecord{
 		ID:                     serverConfig.Name, // Use name as ID for simplicity
 		Name:                   serverConfig.Name,
 		URL:                    serverConfig.URL,
@@ -161,6 +152,32 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
 	}
+}
+
+// CreateUpstreamServer persists a NEW server and fails with ErrUpstreamExists
+// when a record with that name is already stored. The existence check and the
+// write share one bbolt transaction, so concurrent creates of the same name
+// yield exactly one success. Unlike SaveUpstreamServer it never overwrites.
+func (m *Manager) CreateUpstreamServer(serverConfig *config.ServerConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.db.CreateUpstream(upstreamRecordFromConfig(serverConfig))
+}
+
+// SaveUpstreamServer saves an upstream server configuration.
+//
+// Invariant: it never lowers a recorded Quarantined=true. Only
+// QuarantineUpstreamServer (the review/approve door) or a config that carries an
+// explicit operator decision (QuarantineExplicitlySet) may clear it. A Go-built
+// or file-decoded ServerConfig that merely says Quarantined=false is
+// indistinguishable from "never stated", so it must not erase a quarantine the
+// admission gate recorded. The guard changes only the persisted record, never
+// the caller's struct.
+func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	record := upstreamRecordFromConfig(serverConfig)
 
 	kept, err := m.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
 	if kept {
