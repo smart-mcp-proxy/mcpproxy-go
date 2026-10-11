@@ -204,10 +204,16 @@ because other sessions share the harness. Evidence goes to
    `forward_headers: []`, call again at once: the log shows no `X-Tenant`,
    and `upstream logs hdr-echo` shows no reconnect. The REST `generation`
    field is PR2 (FR-017, [contracts/surfaces.md](contracts/surfaces.md)), so
-   PR1 reads generations from storage: the `servers.changed` SSE event of the
-   PATCH carries the commit's `generation`, and after `stop.sh s116-pr1` the
-   `hdr-echo` row in `config.db` (read-only bbolt dump of the `upstreams`
-   bucket) carries that value as its `generation`. A recipe that reads
+   PR1 reads generations from `config.db` only (read-only bbolt dump, daemon
+   stopped). Before the PATCH, `stop.sh s116-pr1`, dump the `hdr-echo` row's
+   `generation` (G0), and start again on the same run directory (step 5 shows
+   a restart keeps every stamp). After the PATCH, stop again and dump: the
+   `hdr-echo` row's `generation` equals `meta.config_commit_generation` and is
+   greater than G0. Do not compare against the `generation` field of a
+   `servers.changed` SSE event: the coalescer keeps only the latest pending
+   marker (`internal/runtime/event_bus.go`), so a later `tools_changed` or
+   `tools_indexed` marker without that field can replace the commit's before
+   the flush (review R2.6). A recipe that reads
    `generation` from `GET /api/v1/servers` in PR1 compares two missing values
    and must be treated as a failed check, not a pass. Unit coverage:
    `TestCommit_R1_ConnectedRetainedInstanceGetsNewConfig`.

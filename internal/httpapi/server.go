@@ -3027,6 +3027,11 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, perr.status, perr.msg)
 		return
 	}
+	var verr *config.InvalidServerUpdateError
+	if errors.As(err, &verr) {
+		s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(verr.Errors))
+		return
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, err.Error())

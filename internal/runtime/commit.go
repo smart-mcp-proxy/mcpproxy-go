@@ -120,6 +120,7 @@ type CommitTx struct {
 	desired         *config.Config
 	onPublish       []func(oldCfg, newCfg *config.Config)
 	after           []func(*CommitResult)
+	eventExtra      map[string]any
 
 	storedLoaded bool
 	stored       map[string]*storage.StoredServer
@@ -371,6 +372,19 @@ func (tx *CommitTx) publishHook(fn func(oldCfg, newCfg *config.Config)) {
 
 // afterCommit runs after the commit lock is released, only on success.
 func (tx *CommitTx) afterCommit(fn func(*CommitResult)) { tx.after = append(tx.after, fn) }
+
+// EventExtra adds caller fields (for example {"server", "quarantined"}) to the
+// commit's one servers.changed event, so a caller never sends a second,
+// same-reason copy of it (FR-028: at most once per commit and reason). The
+// commit's own "servers" and "generation" fields win on a clash.
+func (tx *CommitTx) EventExtra(extra map[string]any) {
+	if tx.eventExtra == nil {
+		tx.eventExtra = make(map[string]any, len(extra))
+	}
+	for k, v := range extra {
+		tx.eventExtra[k] = v
+	}
+}
 
 const (
 	commitReasonBoot       = "boot"
@@ -1006,7 +1020,12 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 					names = append(names, n)
 				}
 				sort.Strings(names)
-				r.emitServersChanged(tx.reason, map[string]any{"servers": names, "generation": res.Generation})
+				extra := make(map[string]any, len(tx.eventExtra)+2)
+				for k, v := range tx.eventExtra {
+					extra[k] = v
+				}
+				extra["servers"], extra["generation"] = names, res.Generation
+				r.emitServersChanged(tx.reason, extra)
 			}
 			for name, ch := range res.Changes {
 				prev, next := baseEntry(tx.base.Config, name), tx.entry(name)

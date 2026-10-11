@@ -46,6 +46,11 @@ type commitWaitState struct {
 	commitWaiting       atomic.Int32
 	approvalLockWaiting sync.Map // server name -> *atomic.Int32
 	testHooks           commitTestHooks
+	// serversChangedHook observes every servers.changed submission (reason
+	// and extra) before the coalescer merges them (review R2.5). Test seam,
+	// nil in production; atomic because background emitters may run while a
+	// test sets it, and outside commitTestHooks because that struct is copied.
+	serversChangedHook atomic.Pointer[func(reason string, extra map[string]any)]
 }
 
 // lockConfigCommit takes configCommitMu and counts the goroutines waiting for

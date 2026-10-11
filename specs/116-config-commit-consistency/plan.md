@@ -215,7 +215,13 @@ the network call or a storage write, as on `main`. `Forget` takes only that
 `mu`, so calling it from the commit's in-memory purge adds an L1/L2 → coordinator
 edge and no reverse edge.
 
-**`createMu`** is deleted in PR1, because `configCommitMu` subsumes it. **`asyncMgr`**
+**`createMu`** is deleted in PR1, because `configCommitMu` subsumes it. Only
+the mutex goes: the #1570 *behaviour* (create-only refusal with
+`ServerExistsError` against the live config and storage, delete-then-re-add
+succeeding at once) is kept by `CommitTx.CreateServer` under `configCommitMu`,
+and the #1570 test assertions are unchanged (review R2.8: "keep createMu
+behaviour until the plan says to delete it" refers to that behaviour; this plan
+deletes the mutex in PR1). **`asyncMgr`**
 storage operations (`EnableUpstreamServer`/`QuarantineUpstreamServer`) are no
 longer used by daemon paths, so the commit writes rows directly in its
 transaction.

@@ -3,7 +3,8 @@
 # check-upstream-write-sites.sh (Spec 116 T002, quickstart T1.8).
 #
 # Builds temp trees: a planted direct SaveUpstreamServer in internal/server
-# (must exit 1), the same call in a test file, in internal/storage and in
+# (must exit 1), each AsyncManager queue writer (SaveServerAsync,
+# DeleteServerAsync, EnableServerAsync, QuarantineServerAsync; must exit 1), the same call in a test file, in internal/storage and in
 # internal/runtime/commit.go (must exit 0), and a whole-line comment (must
 # exit 0). Then runs the real script on the repository (must exit 0).
 set -uo pipefail
@@ -43,6 +44,13 @@ expect "planted QuarantineUpstreamServer outside commit.go" 1 "$quarantine"
 cmdplant="$(mkroot planted-cmd)"
 echo '	_ = db.UpdateUpstream(name, sc)' > "$cmdplant/cmd/mcpproxy/x.go"
 expect "planted UpdateUpstream in cmd" 1 "$cmdplant"
+
+# The AsyncManager queue writes upstream rows too (internal/storage/async_ops.go).
+for m in 'SaveServerAsync(sc)' 'DeleteServerAsync(name)' 'EnableServerAsync(name, true)' 'QuarantineServerAsync(name, true)'; do
+  r="$(mkroot "planted-async-${m%%(*}")"
+  echo "	am.$m" > "$r/internal/server/a.go"
+  expect "planted ${m%%(*} in internal/server" 1 "$r"
+done
 
 allowed="$(mkroot allowed)"
 echo '	_ = m.SaveUpstreamServer(sc)' > "$allowed/internal/storage/manager.go"

@@ -2142,6 +2142,12 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 				return nil
 			}
 			applyServerUpdates(cur, updates)
+			// Spec 116 review R2.1: the concurrency overrides are validated
+			// against the LIVE global defaults before anything is persisted,
+			// so the commit can never write an entry the next start refuses.
+			if errs := tx.Config().ValidateServerConcurrency(cur); len(errs) > 0 {
+				return &config.InvalidServerUpdateError{Server: serverName, Errors: errs}
+			}
 			return nil
 		})
 	})

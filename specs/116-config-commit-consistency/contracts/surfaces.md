@@ -11,7 +11,7 @@ and one error code. Everything else stays byte-compatible.
 | Endpoint | Before | After | PR |
 |---|---|---|---|
 | `POST /api/v1/servers` | 201. 409 "already exists". Storage and runtime published; disk saved best-effort | Same codes. Live, storage and disk are committed together before the 201 | PR1 |
-| `PATCH /api/v1/servers/{id}` | resolved against a snapshot read before the write | resolved inside the commit against the live entry. 404 if the server was removed concurrently | PR1 |
+| `PATCH /api/v1/servers/{id}` | resolved against a snapshot read before the write; `max_concurrent_requests`, `queue_size`, `queue_timeout` were accepted but not applied | resolved inside the commit against the live entry. 404 if the server was removed concurrently. The concurrency overrides are now applied, and validated inside the commit against the live global defaults: a value the next start would refuse (negative, or a positive queue on a disabled limit) is **400** with the live config, storage and file unchanged (review R2.1) | PR1 |
 | `PUT /api/v1/servers/{id}` (UpdateServer) | storage first, then in-place snapshot mutation | one commit | PR1 |
 | `POST .../enable`, `.../disable`, `.../quarantine`, `.../unquarantine` | storage flag, then save, then async reconcile | one commit. Quarantine has purged the index by the time the call returns | PR1 |
 | `PUT /api/v1/config`, `POST /api/v1/config/apply` | publishes, then async reconcile | publishes the reconciled state. `ConfigApplyResult` unchanged | PR1 |
@@ -44,7 +44,13 @@ new flags.
 
 `servers.changed`, `review.changed`, `config.saved` and `config.reloaded` are
 sent after the commit lock is released, at most once per commit and reason.
-The payloads are unchanged. There are no new event types.
+The commit sends them itself; a caller adds its own payload fields to that
+one event (`CommitTx.EventExtra`) instead of sending a second copy, so
+`enable_toggle`, `quarantine_toggle` and `bulk_enable_toggle` keep their fields
+(`server`, `enabled`, `quarantined`, `count`) and gain the commit's `servers`
+and `generation` (additive, review R2.5). The coalescer may replace a pending
+`servers.changed` marker with a later one, so a client must not rely on
+`generation` arriving in SSE. There are no new event types.
 
 ## Activity log
 

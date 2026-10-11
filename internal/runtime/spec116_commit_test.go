@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -239,11 +240,25 @@ func TestCommit_T1_19_RetainedInstanceGetsNewConfig(t *testing.T) {
 func TestCommit_T1_21_BootSchedulesAndKeepsGenerations(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "mcp_config.json")
-	fileCfg := config.DefaultConfig()
-	fileCfg.Listen = "127.0.0.1:0"
-	fileCfg.DataDir = dir
-	fileCfg.Servers = []*config.ServerConfig{unreachableHTTP("up1"), unreachableHTTP("up2"), disabledStdio("off")}
-	require.NoError(t, config.SaveConfig(fileCfg, cfgPath))
+	// A minimal operator file in noncanonical formatting (compact JSON, a
+	// trailing blank line, no defaults spelled out): any boot-time rewrite
+	// through the canonical writer changes these bytes (review R2.7). It
+	// carries an api_key (a generated one is persisted by New()) and no
+	// deprecated key (New() auto-cleans those, with a .bak), so the check is
+	// about the boot commits only.
+	compact, err := json.Marshal(map[string]any{
+		"listen": "127.0.0.1:0", "data_dir": dir, "api_key": "spec116-boot-key",
+		"mcpServers": []*config.ServerConfig{unreachableHTTP("up1"), unreachableHTTP("up2"), disabledStdio("off")},
+	})
+	require.NoError(t, err)
+	operatorBytes := append(compact, '\n', '\n')
+	require.NoError(t, os.WriteFile(cfgPath, operatorBytes, 0o600))
+	assertFileUntouched := func(when string) {
+		t.Helper()
+		now, err := os.ReadFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, string(operatorBytes), string(now), "the boot never rewrites the operator's file (%s)", when)
+	}
 
 	boot := func() *Runtime {
 		cfg, err := config.LoadFromFile(cfgPath)
@@ -265,6 +280,7 @@ func TestCommit_T1_21_BootSchedulesAndKeepsGenerations(t *testing.T) {
 	}
 
 	rt := boot()
+	assertFileUntouched("right after the first boot")
 	scheduled(rt)
 	gens := map[string]configsvc.ServerGen{}
 	for _, name := range []string{"up1", "up2", "off"} {
@@ -273,21 +289,18 @@ func TestCommit_T1_21_BootSchedulesAndKeepsGenerations(t *testing.T) {
 		gens[name] = g
 		assert.Equal(t, g, storedStamp(t, rt, name).Stamp)
 	}
-	_, err := rt.Commit("not_boot", func(tx *CommitTx) error {
+	_, err = rt.Commit("not_boot", func(tx *CommitTx) error {
 		tx.ReconcileLive()
 		tx.Bootstrap()
 		return nil
 	})
 	require.ErrorIs(t, err, ErrCommitInvariant, "Bootstrap() outside the boot commit is an invariant error")
-	diskBefore, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
 	require.NoError(t, rt.Close())
-	diskAfterBoot, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	assert.Equal(t, diskBefore, diskAfterBoot, "the boot never rewrites the operator's file")
+	assertFileUntouched("after the first boot")
 
 	rt2 := boot()
 	t.Cleanup(func() { _ = rt2.Close() })
+	assertFileUntouched("right after the restart's boot")
 	scheduled(rt2)
 	for name, want := range gens {
 		got, ok := rt2.ConfigSnapshot().ServerGeneration(name)
