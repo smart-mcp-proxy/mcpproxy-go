@@ -192,7 +192,7 @@ func toolDefinitionsGate(s *ScannerPlugin, req ScanRequest) error {
 // (RT-06, Sol r5). Nothing is mounted for scanners independent of tool
 // metadata or when nothing was exported. The returned cleanup removes the
 // snapshot.
-func (e *Engine) toolDefinitionsSnapshotMounts(s *ScannerPlugin, req ScanRequest, jobID string) ([]string, func(), error) {
+func (e *Engine) toolDefinitionsSnapshotMounts(s *ScannerPlugin, req ScanRequest) ([]string, func(), error) {
 	noop := func() {}
 	if toolMetadataIndependentScanners[s.ID] || len(req.ToolDefinitions) == 0 {
 		return nil, noop, nil
@@ -201,7 +201,11 @@ func (e *Engine) toolDefinitionsSnapshotMounts(s *ScannerPlugin, req ScanRequest
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
 	}
-	dir, err := os.MkdirTemp(root, jobID+"-"+s.ID+"-")
+	// A constant pattern (Sol r6 P2): os.MkdirTemp rejects a pattern with a
+	// path separator, and jobID carries the raw server name, which holds '/'
+	// for official-registry servers (MCP-2123). The random suffix already
+	// makes the dir unique.
+	dir, err := os.MkdirTemp(root, "tools-snapshot-")
 	if err != nil {
 		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
 	}
@@ -767,7 +771,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
-	snapshotMounts, cleanupSnapshot, err := e.toolDefinitionsSnapshotMounts(s, req, jobID)
+	snapshotMounts, cleanupSnapshot, err := e.toolDefinitionsSnapshotMounts(s, req)
 	if err != nil {
 		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}

@@ -105,3 +105,35 @@ func TestRT06_MetadataIndependentScanner_IgnoresToolsJSONTamper(t *testing.T) {
 		})
 	}
 }
+
+// TestRT06_DockerScanner_SlashNamedServer_MountsSnapshot (Sol r6 P2):
+// official-registry server names contain '/' ("com.pulsemcp/google-flights").
+// The snapshot dir must not interpolate the server name into an os.MkdirTemp
+// pattern (which rejects path separators), or every metadata-dependent Docker
+// scanner fails before it runs for such a server (MCP-2123 regression).
+func TestRT06_DockerScanner_SlashNamedServer_MountsSnapshot(t *testing.T) {
+	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+	snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, err)
+
+	logger := zap.NewNop()
+	engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), t.TempDir(), logger)
+	ran := false
+	engine.runScannerContainer = func(_ context.Context, cfg ScannerRunConfig) (string, string, int, error) {
+		ran = true
+		hostPath := snapshotMountHostPath(cfg)
+		require.NotEmpty(t, hostPath, "the exported snapshot is mounted over tools.json")
+		seen, err := os.ReadFile(hostPath)
+		require.NoError(t, err)
+		assert.Equal(t, string(snapshot), string(seen))
+		require.NoError(t, os.WriteFile(filepath.Join(cfg.ReportDir, "results.json"), []byte(genericCleanReport), 0o644))
+		return "", "", 0, nil
+	}
+
+	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}}
+	report, _, err := engine.runSingleScanner(context.Background(), plugin,
+		ScanRequest{ServerName: "com.pulsemcp/google-flights", SourceDir: source, ToolDefinitions: snapshot})
+	require.NoError(t, err, "a slash-named server's scanner must run")
+	require.NotNil(t, report)
+	assert.True(t, ran, "the container ran")
+}
