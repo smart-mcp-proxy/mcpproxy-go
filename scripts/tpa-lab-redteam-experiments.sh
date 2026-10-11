@@ -24,12 +24,20 @@ BINARY="$PROJECT_DIR/mcpproxy"
 API_KEY="tpa-lab-key"
 API_URL="http://127.0.0.1:8081/api/v1"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
-RUN_DIR="$PROJECT_DIR/test-data-tpa-lab-docker/experiments"
+RUN_ROOT="$PROJECT_DIR/test-data-tpa-lab-docker"
 ONLY="${ONLY:-}"
 DAEMON_PID=""
 CURRENT_CONFIG=""
 
+# One fresh run dir per suite invocation, shared by every stage restart of
+# that invocation: approvals or a scan report left by an earlier run can
+# never satisfy this one. The name stays short — each experiment's data dir
+# holds the daemon's unix socket (macOS sun_path limit is 104 bytes).
+# RUN_DIR may be set to reuse a directory explicitly.
+mkdir -p "$RUN_ROOT"
+RUN_DIR="${RUN_DIR:-$(mktemp -d "$RUN_ROOT/xXXXX")}"
 mkdir -p "$RUN_DIR"
+ln -sfn "$RUN_DIR" "$RUN_ROOT/experiments-latest"
 
 log()  { echo "[exp]  $*"; }
 pass() { echo "[exp]  ✔ HOLDS: $*"; }
@@ -94,16 +102,28 @@ stop_daemon() {
 }
 
 # scan_and_verdict <cfg> <outfile> — runs the blocking scan, echoes the verdict
+# of THAT scan job: "scan-failed" when the scan did not complete, and
+# "stale-report" when the stored report belongs to another job.
 scan_and_verdict() {
-  local cfg="$1" out="$2"
+  local cfg="$1" out="$2" rc job
   "$BINARY" security scan tpa-lab-attacker --config "$cfg" >"$out" 2>&1
+  rc=$?
+  job="$(sed -nE 's/.*[(, ]job (scan-[^) ]+)\).*/\1/p' "$out" | head -1)"
+  if [[ $rc -ne 0 || -z "$job" ]]; then
+    echo "scan-failed"; return
+  fi
   "$BINARY" security report tpa-lab-attacker -o json --config "$cfg" 2>/dev/null >"$out.json"
-  python3 - "$out.json" <<'PY'
+  python3 - "$out.json" "$job" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     print("unknown"); raise SystemExit
+data = d.get("data") if isinstance(d, dict) else None
+if not isinstance(data, dict) or data.get("job_id") != sys.argv[2]:
+    print("stale-report"); raise SystemExit
+if data.get("verdict") in ("dangerous", "warnings", "clean"):
+    print(data["verdict"]); raise SystemExit
 found = set()
 def walk(o):
     if isinstance(o, dict):
@@ -125,6 +145,7 @@ PY
 approve_all() {
   # Mirror the reference QA flow (tests/test-quarantine.sh): tool approval
   # applies to UNquarantined servers — unquarantine first, then approve.
+  # Returns non-zero unless the approve call reported success.
   curl -s -X POST -H "X-API-Key: $API_KEY" \
     "$API_URL/servers/tpa-lab-attacker/unquarantine" >/dev/null
   sleep 2  # re-discovery with tool-level quarantine
@@ -133,7 +154,23 @@ approve_all() {
     -d '{"approve_all":true}' "$API_URL/servers/tpa-lab-attacker/tools/approve")"
   log "approve_all response: ${resp:0:200}"
   sleep 2
+  python3 -c 'import json,sys
+d=json.loads(sys.argv[1]); d=d if isinstance(d,dict) else {}
+sys.exit(0 if d.get("success") is True and not (d.get("data") or {}).get("still_pending") and not (d.get("data") or {}).get("still_changed") else 1)' "$resp" 2>/dev/null
 }
+
+# all_approved <tool>... — every named tool's record is approved (the
+# approved baseline a rug-pull experiment needs before it can mean anything).
+all_approved() {
+  local t s
+  for t in "$@"; do
+    s="$(wait_status "$t")"
+    [[ "$s" == "approved" ]] || { log "baseline not approved: $t=$s"; return 1; }
+  done
+}
+
+# is_pulled <status> — the change gate held the tool (changed and/or blocked).
+is_pulled() { [[ "$1" == changed* || "$1" == *blocked* ]]; }
 
 tool_status() {  # tool_status <tool> → status column from `upstream inspect` table
   "$BINARY" upstream inspect tpa-lab-attacker --config "$CURRENT_CONFIG" 2>/dev/null \
@@ -202,7 +239,7 @@ record() { RESULTS+=("$1"); echo "----------------------------------------"; }
 # Preflight: a leftover daemon on our port would silently receive our API
 # calls while CLI reads a different DB — refuse to run until it is gone.
 if lsof -ti :8081 >/dev/null 2>&1; then
-  pkill -f "mcpproxy serve.*experiments" 2>/dev/null && sleep 2
+  pkill -f "mcpproxy serve.*test-data-tpa-lab-docker" 2>/dev/null && sleep 2
   if lsof -ti :8081 >/dev/null 2>&1; then
     echo "ERROR: port 8081 is still in use by a non-lab process — free it first." >&2
     exit 1
@@ -217,7 +254,8 @@ if want_only EXP-1; then
   if [[ ${skip:-0} != 1 ]]; then
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp1-scan.txt")"
   log "scan verdict: $v (full output: $RUN_DIR/exp1-scan.txt)"
-  if [[ "$v" == "dangerous" ]]; then pass "EXP-1 baseline detection works (dangerous)"; record "EXP-1 HOLDS: baseline scan → dangerous"
+  if [[ "$v" == "scan-failed" || "$v" == "stale-report" ]]; then record "EXP-1 INCONCLUSIVE: scan=$v"
+  elif [[ "$v" == "dangerous" ]]; then pass "EXP-1 baseline detection works (dangerous)"; record "EXP-1 HOLDS: baseline scan → dangerous"
   else hole "EXP-1 baseline catalog NOT flagged (verdict=$v)"; record "EXP-1 HOLE?: baseline verdict=$v"; fi
   stop_daemon; fi
 fi
@@ -230,11 +268,17 @@ if want_only EXP-2; then
   unquarantine
   cal1="$(wait_status calendar_get_events)"
   log "after unquarantine re-discovery: calendar_get_events status=$cal1"
-  approve_all
+  approve_ok=0; approve_all && approve_ok=1
   cal1="$(wait_status calendar_get_events)"
-  log "after approve: calendar_get_events status=$cal1"
+  log "after approve: calendar_get_events status=$cal1 (approve ok=$approve_ok)"
+  baseline_ok=0
+  [[ $approve_ok == 1 ]] && all_approved calendar_get_events stock_quote && baseline_ok=1
   stop_daemon
 
+  if [[ $baseline_ok != 1 ]]; then
+    record "EXP-2a INCONCLUSIVE: stage-1 baseline was not approved"
+    record "EXP-2b INCONCLUSIVE: stage-1 baseline was not approved"
+  else
   # Phase 2a: restart with the armed contract while config re-quarantines the
   # server (config templates keep quarantined:true). Discovery is skipped for
   # quarantined servers, so the change gate may never see the new contract.
@@ -270,6 +314,7 @@ if want_only EXP-2; then
     record "EXP-2b HOLE: calendar=$cal stock=$stock"
   fi
   stop_daemon
+  fi
 fi
 
 # ==================================================================== EXP-3
@@ -279,7 +324,8 @@ if want_only EXP-3; then
   start_daemon "$cfg" "$RUN_DIR/exp3.log" || { record "EXP-3: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp3-scan.txt")"
   log "scan verdict: $v (full output: $RUN_DIR/exp3-scan.txt)"
-  if [[ "$v" == "dangerous" ]]; then pass "EXP-3 mutants flagged dangerous (detector improved!)"; record "EXP-3 HOLDS: mutants → dangerous"
+  if [[ "$v" == "scan-failed" || "$v" == "stale-report" ]]; then record "EXP-3 INCONCLUSIVE: scan=$v"
+  elif [[ "$v" == "dangerous" ]]; then pass "EXP-3 mutants flagged dangerous (detector improved!)"; record "EXP-3 HOLDS: mutants → dangerous"
   else hole "EXP-3 mutant tools scan '$v' — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v"; fi
   stop_daemon
 fi
@@ -296,7 +342,9 @@ if want_only EXP-4; then
   baseline_lines="$(grep -c 'auto-baseline' "$RUN_DIR/exp4.log" || true)"
   flap_lines="$(grep -c 'changed since approval' "$RUN_DIR/exp4.log" || true)"
   log "stored tool status: $stored (auto-baseline approvals: $baseline_lines, rug-pull flags: $flap_lines)"
-  if [[ "$v" != "dangerous" && "$stored" == "changed" ]]; then
+  if [[ "$v" == "scan-failed" || "$v" == "stale-report" || "$v" == "unknown" ]]; then
+    record "EXP-4 INCONCLUSIVE: scan=$v, stored=$stored"
+  elif [[ "$v" != "dangerous" && "$stored" == "changed" ]]; then
     hole "EXP-4 PARTIAL: scan export is attacker-controllable (verdict=$v on a poisoned server; poisoned contract WAS auto-baselined) — the flap itself was caught here, but a session-fingerprinting variant would scan clean without flapping"
     record "EXP-4 PARTIAL-HOLE: scan=$v on poisoned server; poisoned list auto-baselined; flap caught (changed)"
   elif [[ "$stored" == "changed" ]]; then
@@ -316,11 +364,14 @@ if want_only EXP-5; then
   unquarantine
   n1="$(wait_status notes_export)"
   log "after unquarantine re-discovery: notes_export status=$n1 (stage-1 honest annotations: destructive)"
-  approve_all
+  approve_ok=0; approve_all && approve_ok=1
   n1="$(wait_status notes_export)"
-  log "after approve: notes_export status=$n1"
+  log "after approve: notes_export status=$n1 (approve ok=$approve_ok)"
   stop_daemon
 
+  if [[ $approve_ok != 1 || "$n1" != "approved" ]]; then
+    record "EXP-5 INCONCLUSIVE: stage-1 baseline not approved (approve ok=$approve_ok, notes_export=$n1)"
+  else
   cfg="$(make_config exp5 facade 2 "$RUN_DIR/exp5-data")"; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp5-2.log" || { record "EXP-5: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
@@ -330,14 +381,17 @@ if want_only EXP-5; then
   # flip is genuinely invisible to the gate.
   n2="$(wait_status_not notes_export approved 90)"
   log "after annotation flip: notes_export status=$n2"
-  if [[ "$n2" == *approved* ]]; then
+  if is_pulled "$n2"; then
+    pass "EXP-5 annotation flip surfaced ($n2)"
+    record "EXP-5 HOLDS: notes_export=$n2"
+  elif [[ "$n2" == "approved" ]]; then
     hole "EXP-5 destructive→readOnly-lying flip INVISIBLE to the change gate (still $n2)"
     record "EXP-5 HOLE: annotation flip unseen (notes_export=$n2)"
   else
-    pass "EXP-5 annotation flip surfaced ($n2)"
-    record "EXP-5 HOLDS: notes_export=$n2"
+    record "EXP-5 INCONCLUSIVE: notes_export=$n2 (neither held nor approved)"
   fi
   stop_daemon
+  fi
 fi
 
 # ==================================================================== EXP-6
@@ -349,13 +403,19 @@ if want_only EXP-6; then
   unquarantine
   pre="$(wait_status calendar_get_events)"
   log "initial status under trust_mode=scan: calendar_get_events=$pre"
+  approve_ok=1
   if [[ "$pre" != "approved" ]]; then
     log "not auto-approved initially — approving manually (stage-1 facade is benign anyway)"
-    approve_all
+    approve_ok=0; approve_all && approve_ok=1
     pre="$(wait_status calendar_get_events)"
   fi
+  baseline_ok=0
+  [[ $approve_ok == 1 ]] && all_approved calendar_get_events stock_quote && baseline_ok=1
   stop_daemon
 
+  if [[ $baseline_ok != 1 ]]; then
+    record "EXP-6 INCONCLUSIVE: stage-1 baseline not approved (approve ok=$approve_ok, calendar=$pre)"
+  else
   cfg="$(make_config exp6 facade 3 "$RUN_DIR/exp6-data" scan)"; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6-2.log" || { record "EXP-6: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
@@ -363,22 +423,25 @@ if want_only EXP-6; then
   # Distinguish a genuine scan-approved re-approval from a stale record by
   # waiting out the sweep AND checking the gate's own log lines.
   post="$(wait_status_not calendar_get_events approved 90)"
-  postq="$(tool_status stock_quote)"
+  postq="$(wait_status_not stock_quote approved 30)"
   gate_log="$(grep -cE 'scan-approved|changed since approval|auto-baseline' "$RUN_DIR/exp6-2.log" || true)"
   log "after paraphrased rug pull: calendar=$post stock=$postq (gate log hits: $gate_log)"
-  if [[ "$post" == "approved" && "$postq" == "approved" ]]; then
+  if is_pulled "$post" && is_pulled "$postq"; then
+    pass "EXP-6 paraphrased pull held for review (calendar=$post stock=$postq)"
+    record "EXP-6 HOLDS: calendar=$post stock=$postq"
+  elif [[ "$post" == "approved" || "$postq" == "approved" ]]; then
     if [[ "$gate_log" -gt 0 ]]; then
       hole "EXP-6 paraphrased rug pull AUTO-APPROVED under trust_mode=scan (silent)"
       record "EXP-6 HOLE: scan-mode auto-approved the pull (calendar=$post stock=$postq, gate re-ran)"
     else
-      log "EXP-6 inconclusive: still approved but gate never re-ran (stale record)"
-      record "EXP-6 INCONCLUSIVE: approved without gate activity"
+      log "EXP-6 inconclusive: still approved but gate never re-ran"
+      record "EXP-6 INCONCLUSIVE: approved without gate activity (calendar=$post stock=$postq)"
     fi
   else
-    pass "EXP-6 paraphrased pull held for review (calendar=$post stock=$postq)"
-    record "EXP-6 HOLDS: calendar=$post stock=$postq"
+    record "EXP-6 INCONCLUSIVE: calendar=$post stock=$postq (not both held)"
   fi
   stop_daemon
+  fi
 fi
 
 # ------------------------------------------------------------------ report --
