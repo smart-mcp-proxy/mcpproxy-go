@@ -6133,7 +6133,7 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 		case errors.Is(err, errUpstreamNotFound):
 			return nil, nil, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
 		default:
-			return nil, nil, mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err))
+			return nil, nil, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
 		}
 	}
 	return merged, configDiff, nil
@@ -6172,6 +6172,8 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	var connectionStatus, connectionMessage string
 	if mergedServer.Enabled {
 		connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
+		// Issue #1148: the connection message can carry the upstream URL.
+		connectionMessage = scrubUpstreamText(connectionMessage)
 	} else {
 		connectionStatus = statusDisabled
 		connectionMessage = messageServerDisabled
