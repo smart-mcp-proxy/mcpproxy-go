@@ -692,13 +692,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
-		dispatchCtx, wireTally := managed.WithDispatchTally(dispatchCtx)
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
 			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
 			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
-		p.noteUpstreamDispatched(wireTally) // one attempt per request that reached the transport
+		p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 		callerr.Observe(ctx, result, err)
 		fwdOut := fwdSink.Outbound()
 

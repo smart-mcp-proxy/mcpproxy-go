@@ -303,7 +303,6 @@ func (mc *Client) listToolsUpstream(ctx context.Context) (tools []*config.ToolMe
 // the real core client (test fakes bypass it).
 func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, toolName string, args map[string]interface{}, expectedEpoch *int64) (*mcp.CallToolResult, error) {
 	if mc.coreClient == nil || invoker != toolCaller(mc.coreClient) {
-		noteWireDispatch(ctx)
 		return invoker.CallTool(ctx, toolName, args)
 	}
 	// The identity this call is held against, read before anything can re-init.
@@ -321,7 +320,6 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	if stale == "" {
 		stale = known
 	}
-	noteWireDispatch(ctx)
 	result, err := invoker.CallTool(ctx, toolName, args)
 	if err == nil || !ok || stale == "" || !errors.Is(err, transport.ErrSessionTerminated) {
 		return result, err
@@ -344,7 +342,6 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
-	noteWireDispatch(ctx)
 	return invoker.CallTool(ctx, toolName, args)
 }
 

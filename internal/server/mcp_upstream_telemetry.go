@@ -1,14 +1,16 @@
 package server
 
 import (
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"context"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
 // One telemetry contract for every path that dispatches to an upstream
 // (call_tool_* wrapper, direct routing, and each code_execution JS sub-call):
 //
 //   - upstream_tool_call_count_bucket counts ATTEMPTS, once per request the
-//     managed client actually handed to the transport (noteUpstreamDispatched).
+//     core client actually handed to the transport (noteUpstreamDispatched).
 //     Calls refused before dispatch (validation, quarantine, policy,
 //     disconnected server), calls the limiter shed or retired, calls cancelled
 //     in the admission queue and calls the client refused to send never
@@ -23,16 +25,18 @@ import (
 // Schema v14 marks this definition; see docs/features/telemetry.md.
 
 // noteUpstreamDispatched counts the upstream attempts one logical call made,
-// from the managed client's own tally of requests handed to the transport
-// (managed.DispatchTally): zero for a call cancelled in the admission queue,
+// from the call recorder the dispatch context carries (callerr.BeginDispatch):
+// the core client marks it at the exact point a tools/call is handed to the
+// transport, so it reads zero for a call cancelled in the admission queue,
 // retired by the limiter, refused for a moved connection generation or sent to
 // a disconnected client, and two when session recovery repeated the request.
-// Call it once per logical call, after the upstream call returns. nil-safe.
-func (p *MCPProxyServer) noteUpstreamDispatched(tally *managed.DispatchTally) {
+// Pass the context that was handed to the upstream call, after it returns.
+// nil-safe.
+func (p *MCPProxyServer) noteUpstreamDispatched(dispatchCtx context.Context) {
 	if p == nil {
 		return
 	}
-	for n := tally.Count(); n > 0; n-- {
+	for n := transport.CallRecorderFrom(dispatchCtx).Snapshot().Dispatches; n > 0; n-- {
 		p.recordUpstreamTool()
 	}
 }

@@ -3328,9 +3328,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
-	dispatchCtx, wireTally := managed.WithDispatchTally(dispatchCtx)
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
-	p.noteUpstreamDispatched(wireTally) // one attempt per request that reached the transport
+	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
