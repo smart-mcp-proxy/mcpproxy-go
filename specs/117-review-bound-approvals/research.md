@@ -146,7 +146,7 @@ The scanner gets a new optional interface, `ReviewedServerApprover`, with these 
   6. `lastGoodTools` update (newer-or-equal only);
   7. StateView publish (`seq >= published`).
 - The unlocked tail: `reindexAffectedProfiles`, `reconcileSignatureCache`, `warmSignatureCache`, events.
-- The sweep publishes each server through the gate instead of one batch `RefreshToolsFromDiscovery`. `markZeroToolServersDiscovered` keeps its own path.
+- The sweep publishes each server through the gate instead of one batch `RefreshToolsFromDiscovery`. Lenient empty results also enter the gated section as an observation: they advance `applied` without writing, and the discovery marker is published there (FR-033a, design review r7 #2).
 
 **Lock order**: `captureSnapMu` (global; already held by `commitDiscoveredTools`, `reindexFromLastGoodSnapshot` and `reapplyLastGoodSnapshot`) → per-server approval lock → manager `captureMu` (read) → client `epochMu` → storage manager lock / index lock / supervisor lock.
 
@@ -235,3 +235,9 @@ See spec.md A1-A10 and O1-O4.
 
 1. **Medium, the disable writers bypass the apply lock**: FR-034 now requires every ineligibility writer (quarantine and disable, including bulk) to store and purge under the server's approval lock (`persistServerIneligibleLocked`). Test T306(9c). The bulk path takes per-server locks in sorted order, so two bulk calls cannot deadlock.
 2. **Medium, a saved review is not tied to its server**: `--from-review` must match `data.server.name` before any request is sent, and the fingerprint now covers the server name. CLI test with identical definitions on A and B.
+
+## Design review round 7 (OpenCode gpt-6.1-sol) resolutions
+
+1. **Medium, more disable writers** (PATCH, config reload, restart persist): FR-034 enumerates every disable writer regardless of quarantine. The CI guard also covers `EnableUpstreamServer`. T306(9c) covers each writer.
+2. **Medium, lenient empty captures bypass the fence**: FR-033a. An empty lenient result is an observation that advances `applied` without writing, and the discovery marker is published inside the gated section. Test T306(5e).
+3. **Medium, a marker failure still leaves the snapshot published**: `commitDiscoveredTools` restores `lastGoodTools` and `lastCaptureAt` on `errBaselineMarker`. T104f asserts both. PR-1's declared scope was updated.
