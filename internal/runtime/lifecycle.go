@@ -105,7 +105,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 			// Deduplicated against a discovery already in flight for this
 			// server; a trigger arriving meanwhile is coalesced into one
 			// follow-up run rather than dropped (Sol r3 P2).
-			r.runCoalescedDiscovery(serverName, func() error {
+			r.runCoalescedDiscovery(serverName, func(bool) error {
 				ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
 				defer cancel()
 
@@ -621,49 +621,97 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 // indefinitely.
 func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName string) error {
 	var err error
-	r.runCoalescedDiscovery(serverName, func() error {
-		r.logger.Info("Tool discovery triggered by notification", zap.String("server", serverName))
-		err = r.DiscoverAndIndexToolsForServer(ctx, serverName)
+	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
+		runCtx := ctx
+		if followUp {
+			// A follow-up runs after the notification's own run and may
+			// outlive the notification's 30s deadline: give it a fresh
+			// runtime-scoped timeout, as connect-owned discovery does, so an
+			// expired notification context never turns the follow-up into a
+			// silent no-op (Sol r4 P2).
+			var cancel context.CancelFunc
+			runCtx, cancel = context.WithTimeout(r.AppContext(), discoveryRunTimeout)
+			defer cancel()
+		}
+		r.logger.Info("Tool discovery triggered by notification",
+			zap.String("server", serverName), zap.Bool("follow_up", followUp))
+		discover := r.DiscoverAndIndexToolsForServer
+		if r.notificationDiscoverHook != nil {
+			discover = r.notificationDiscoverHook
+		}
+		err = discover(runCtx, serverName)
 		return err
 	})
 	return err
 }
 
+// discoveryRunTimeout bounds one coalesced discovery run that owns its context.
+const discoveryRunTimeout = 30 * time.Second
+
 // maxCoalescedDiscoveryFollowUps bounds how many follow-up runs one owner
-// performs for triggers coalesced while it ran, so a server that signals
-// tools/list_changed continuously cannot pin a discovery goroutine forever.
+// performs back to back for triggers coalesced while it ran, so a server that
+// signals tools/list_changed continuously cannot pin a discovery goroutine.
 const maxCoalescedDiscoveryFollowUps = 4
+
+// defaultCoalescedDiscoveryContinuationDelay is how long an owner that reached
+// the follow-up limit waits before a fresh worker takes the still-pending
+// trigger (Runtime.coalescedDiscoveryContinuationDelay overrides it in tests).
+const defaultCoalescedDiscoveryContinuationDelay = 2 * time.Second
+
+func (r *Runtime) coalescedContinuationDelay() time.Duration {
+	if r.coalescedDiscoveryContinuationDelay > 0 {
+		return r.coalescedDiscoveryContinuationDelay
+	}
+	return defaultCoalescedDiscoveryContinuationDelay
+}
 
 // runCoalescedDiscovery runs run under the per-server discovery marker. When
 // a discovery for serverName is already in flight, the trigger is recorded as
 // pending and this call returns immediately; the in-flight owner then re-runs
 // once after it finishes (several coalesced triggers collapse into one
 // follow-up), so a trigger that raced the owner's tools/list is never lost
-// (Sol r3 P2).
+// (Sol r3 P2). run is told whether it is such a follow-up (it must then not
+// rely on a context the original trigger owned — Sol r4 P2).
 //
 // Ordering: a trigger records the pending flag BEFORE it tries to take the
 // marker, and the owner checks the flag AFTER it releases the marker. Either
 // the trigger saw the marker held — then its flag was stored before the
 // owner's check — or it took the marker itself and runs.
-func (r *Runtime) runCoalescedDiscovery(serverName string, run func() error) {
+//
+// Bounded, never lossy: after maxCoalescedDiscoveryFollowUps follow-ups the
+// owner returns, and a still-pending trigger is handed to a fresh worker after
+// coalescedContinuationDelay instead of being left to a future
+// connect or notification. Periodic discovery skips quarantined servers, so a
+// burst that ends with an armed contract would otherwise stay unverified
+// (Sol r4 P2). The continuation stops when the runtime shuts down.
+func (r *Runtime) runCoalescedDiscovery(serverName string, run func(followUp bool) error) {
 	r.discoveryRerunPending.Store(serverName, struct{}{})
 	if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
 		r.logger.Debug("Tool discovery already in progress for server; coalescing this trigger into a follow-up run",
 			zap.String("server", serverName))
 		return
 	}
+	r.ownCoalescedDiscovery(serverName, run, false)
+}
+
+// ownCoalescedDiscovery is the owner loop of runCoalescedDiscovery; the caller
+// holds the discovery marker. continued marks a deferred continuation, whose
+// every run is a follow-up.
+func (r *Runtime) ownCoalescedDiscovery(serverName string, run func(followUp bool) error, continued bool) {
 	for followUps := 0; ; followUps++ {
 		// Clear before running: a trigger recorded from here on is either
 		// covered by this run's tools/list or re-arms the flag.
 		r.discoveryRerunPending.Delete(serverName)
-		_ = run()
+		_ = run(continued || followUps > 0)
 		r.discoveryInProgress.Delete(serverName)
 		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
 			return
 		}
 		if followUps >= maxCoalescedDiscoveryFollowUps {
-			r.logger.Warn("Tool discovery follow-up limit reached; a coalesced trigger is left to the next connect or notification",
-				zap.String("server", serverName))
+			r.logger.Warn("Tool discovery follow-up limit reached; deferring the coalesced trigger to a fresh worker",
+				zap.String("server", serverName),
+				zap.Duration("delay", r.coalescedContinuationDelay()))
+			r.scheduleCoalescedDiscoveryContinuation(serverName, run)
 			return
 		}
 		if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
@@ -673,6 +721,29 @@ func (r *Runtime) runCoalescedDiscovery(serverName string, run func() error) {
 		r.logger.Info("Re-running tool discovery for a trigger that arrived while it was in flight",
 			zap.String("server", serverName))
 	}
+}
+
+// scheduleCoalescedDiscoveryContinuation runs a pending coalesced trigger in a
+// fresh, bounded worker after coalescedContinuationDelay. If another
+// owner holds the marker by then, that owner covers the pending flag.
+func (r *Runtime) scheduleCoalescedDiscoveryContinuation(serverName string, run func(followUp bool) error) {
+	appCtx := r.AppContext()
+	go func() {
+		timer := time.NewTimer(r.coalescedContinuationDelay())
+		defer timer.Stop()
+		select {
+		case <-appCtx.Done():
+			return
+		case <-timer.C:
+		}
+		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
+			return
+		}
+		if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+			return
+		}
+		r.ownCoalescedDiscovery(serverName, run, true)
+	}()
 }
 
 // verifyQuarantinedServerContracts runs the tool-approval gate over a

@@ -230,6 +230,13 @@ type Runtime struct {
 	// was in flight; the in-flight owner runs one follow-up for it instead of
 	// the trigger being dropped (Sol r3 P2). Key: serverName.
 	discoveryRerunPending sync.Map
+	// coalescedDiscoveryContinuationDelay overrides the delay before a
+	// deferred coalesced-discovery continuation runs (tests only; zero means
+	// defaultCoalescedDiscoveryContinuationDelay). Set before any discovery.
+	coalescedDiscoveryContinuationDelay time.Duration
+	// notificationDiscoverHook replaces DiscoverAndIndexToolsForServer for
+	// notification-triggered discovery runs (tests only).
+	notificationDiscoverHook func(ctx context.Context, serverName string) error
 
 	// toolApprovalLocks serializes every read-modify-write of one server's
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
