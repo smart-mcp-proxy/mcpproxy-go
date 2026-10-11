@@ -1,0 +1,282 @@
+{
+  "activity_cleanup_interval_min": 60,
+  "activity_max_records": 100000,
+  "activity_max_response_size": 65536,
+  "activity_retention_days": 90,
+  "aggregate_upstream_prompts": false,
+  "allow_server_add": true,
+  "allow_server_remove": true,
+  "api_key": "tpa-lab-key",
+  "call_tool_timeout": "2m0s",
+  "check_server_repo": true,
+  "code_execution_max_parallel": 8,
+  "code_execution_pool_size": 10,
+  "code_execution_timeout_ms": 120000,
+  "data_dir": "./test-data-tpa-lab-docker",
+  "debug_search": false,
+  "disable_management": false,
+  "docker_isolation": {
+    "enabled": false,
+    "mode": "docker",
+    "enable_cache_volume": true,
+    "default_images": {
+      "bash": "alpine:3.18",
+      "binary": "alpine:3.18",
+      "cargo": "rust:1.75-slim",
+      "composer": "php:8.2-cli-alpine",
+      "gem": "ruby:3.2-alpine",
+      "go": "golang:1.21-alpine",
+      "node": "node:22",
+      "npm": "node:22",
+      "npx": "node:22",
+      "php": "php:8.2-cli-alpine",
+      "pip": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "pipx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "python": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "python3": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "ruby": "ruby:3.2-alpine",
+      "rustc": "rust:1.75-slim",
+      "sh": "alpine:3.18",
+      "uvx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "yarn": "node:22"
+    },
+    "registry": "docker.io",
+    "network_mode": "none",
+    "memory_limit": "512m",
+    "cpu_limit": "1.0",
+    "timeout": "30s",
+    "log_max_size": "100m",
+    "log_max_files": "3"
+  },
+  "enable_code_execution": true,
+  "enable_prompts": true,
+  "enable_socket": true,
+  "environment": {
+    "inherit_system_safe": true,
+    "allowed_system_vars": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "SHELL",
+      "TERM",
+      "LANG",
+      "USER",
+      "USERNAME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+      "XDG_RUNTIME_DIR",
+      "LC_ALL",
+      "LC_CTYPE",
+      "LC_NUMERIC",
+      "LC_TIME",
+      "LC_COLLATE",
+      "LC_MONETARY",
+      "LC_MESSAGES",
+      "LC_PAPER",
+      "LC_NAME",
+      "LC_ADDRESS",
+      "LC_TELEPHONE",
+      "LC_MEASUREMENT",
+      "LC_IDENTIFICATION",
+      "DOCKER_HOST",
+      "DOCKER_CONTEXT",
+      "DOCKER_CONFIG",
+      "DOCKER_CERT_PATH",
+      "DOCKER_TLS_VERIFY",
+      "NVM_DIR",
+      "ASDF_DIR",
+      "PYENV_ROOT",
+      "VOLTA_HOME",
+      "HOMEBREW_PREFIX",
+      "COLIMA_HOME"
+    ],
+    "custom_vars": {},
+    "enhance_path": false
+  },
+  "intent_declaration": {
+    "strict_server_validation": true
+  },
+  "listen": "127.0.0.1:8081",
+  "logging": {
+    "level": "info",
+    "enable_file": false,
+    "enable_console": true,
+    "filename": "main.log",
+    "max_size": 10,
+    "max_backups": 5,
+    "max_age": 30,
+    "compress": true,
+    "json_format": false
+  },
+  "mcpServers": [
+    {
+      "quarantined": true,
+      "name": "tpa-lab-victim",
+      "protocol": "stdio",
+      "command": "/tpa-attack-lab",
+      "args": [
+        "--role",
+        "victim"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "created": "2026-10-11T09:27:04.123851+03:00",
+      "updated": "0001-01-01T00:00:00Z",
+      "isolation": {
+        "mode": "docker",
+        "image": "tpa-attack-lab:lab",
+        "network_mode": "none",
+        "extra_args": [
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt",
+          "no-new-privileges",
+          "--tmpfs",
+          "/tmp:rw,noexec,nosuid,size=16m"
+        ]
+      }
+    },
+    {
+      "quarantined": true,
+      "name": "tpa-lab-attacker",
+      "protocol": "stdio",
+      "command": "/tpa-attack-lab",
+      "args": [
+        "--role",
+        "attacker"
+      ],
+      "env": {
+        "TPA_LAB_STAGE": "1"
+      },
+      "oauth": null,
+      "enabled": true,
+      "created": "2026-10-11T09:27:04.123851+03:00",
+      "updated": "0001-01-01T00:00:00Z",
+      "isolation": {
+        "mode": "docker",
+        "image": "tpa-attack-lab:lab",
+        "network_mode": "none",
+        "extra_args": [
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt",
+          "no-new-privileges",
+          "--tmpfs",
+          "/tmp:rw,noexec,nosuid,size=16m"
+        ]
+      }
+    }
+  ],
+  "observability": {
+    "usage_cache_ttl": "5s",
+    "usage_persist_interval": "30s",
+    "metrics": {
+      "enabled": false
+    },
+    "tracing": {
+      "enabled": false,
+      "protocol": "http",
+      "endpoint": "localhost:4318"
+    }
+  },
+  "output_sanitisation": {
+    "response_action": "spotlight",
+    "strip_classes": [
+      "ansi",
+      "c0c1",
+      "bidi",
+      "zero_width"
+    ],
+    "max_redactions": 100
+  },
+  "output_validation": {
+    "mode": "warn",
+    "max_bytes": 5242880,
+    "max_depth": 64,
+    "missing_structured_content": "allow"
+  },
+  "quarantine_enabled": true,
+  "read_only_mode": false,
+  "registries": [
+    {
+      "id": "official",
+      "name": "Official MCP Registry",
+      "description": "The official Model Context Protocol server registry (zero-config, no key required)",
+      "url": "https://registry.modelcontextprotocol.io/",
+      "servers_url": "https://registry.modelcontextprotocol.io/v0.1/servers",
+      "tags": [
+        "verified",
+        "official"
+      ],
+      "protocol": "modelcontextprotocol/registry",
+      "provenance": "official"
+    },
+    {
+      "id": "reference",
+      "name": "Reference Servers",
+      "description": "Curated @modelcontextprotocol reference servers, shipped built-in for offline discovery",
+      "url": "https://github.com/modelcontextprotocol/servers",
+      "servers_url": "builtin://reference",
+      "tags": [
+        "verified",
+        "official",
+        "reference"
+      ],
+      "protocol": "builtin/reference",
+      "provenance": "official"
+    },
+    {
+      "id": "docker-mcp-catalog",
+      "name": "Docker MCP Catalog",
+      "description": "A collection of secure, high-quality MCP servers as docker images",
+      "url": "https://hub.docker.com/catalogs/mcp",
+      "servers_url": "https://hub.docker.com/v2/repositories/mcp/",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/docker",
+      "provenance": "official"
+    }
+  ],
+  "require_mcp_auth": false,
+  "sensitive_data_detection": {
+    "enabled": true,
+    "scan_requests": true,
+    "scan_responses": true,
+    "max_payload_size_kb": 1024,
+    "entropy_threshold": 4.5,
+    "categories": {
+      "api_token": true,
+      "auth_token": true,
+      "cloud_credentials": true,
+      "credit_card": true,
+      "database_credential": true,
+      "high_entropy": true,
+      "private_key": true,
+      "sensitive_file": true
+    }
+  },
+  "telemetry": {
+    "last_startup_outcome": "success",
+    "notice_shown": true
+  },
+  "tls": {
+    "enabled": false,
+    "require_client_cert": false,
+    "hsts": true
+  },
+  "tokenizer": {
+    "enabled": true,
+    "default_model": "gpt-4",
+    "encoding": "cl100k_base"
+  },
+  "tool_call_max_records_per_server": 1000,
+  "tool_call_max_response_size": 65536,
+  "tool_response_limit": 20000,
+  "tools_limit": 15,
+  "toon_min_savings_pct": 15,
+  "toon_output": "off"
+}
