@@ -120,8 +120,13 @@ internal/runtime/supervisor/supervisor.go      # drop retained Tools for disable
 internal/toolreview/errors.go                  # ErrReviewNotRecorded (FR-018)
 internal/httpapi/*                             # 503 mapping for ErrReviewNotRecorded
 internal/runtime/tool_approval_lock.go         # (also) reviewDirtyAt atomic mirror + ToolReviewDirty accessor (FR-018 dispatch refusal)
-internal/server/tool_gate.go                   # reviewDirty verdict in evaluateExactToolGate; callable() false while dirty (spec review r1 #1)
-internal/server/access_chain.go, internal/preflight/* # report the dirty verdict in the explainer and the direct evaluator
+internal/server/tool_gate.go                   # reviewDirty field (orthogonal to class) in evaluateExactToolGate; dispatch-only callable() false while dirty (spec review r1 #1)
+internal/server/mcp.go, mcp_code_execution.go  # dispatch refusal builders: ErrReviewNotRecorded text, zero upstream calls
+internal/server/mcp_direct_callability.go      # decision.reviewDirty, NOT folded into callable (listing/call-time filter/describe); new directRefusalKind (spec review r2 #1)
+internal/server/mcp_routing.go                 # direct dispatch block answers the dirty refusal
+internal/server/access_chain.go                # explainer reports the dirty verdict
+internal/server/server.go                      # Server.UpdateServer PATCH quarantined/enabled via persistServerIneligibleLocked (T309)
+scripts/check-quarantine-writers.sh            # CI guard (T309)
 ```
 
 ## Phasing and merge order
