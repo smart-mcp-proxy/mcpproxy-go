@@ -198,6 +198,50 @@ Raw logs (prefix baseline, all three post-fix runs, the EXP-4 reruns and
 the baseline runner) are kept outside the repo under the maintainer's QA evidence
 folder, `docs/qa/tpa-redteam-2026-10-11/` of the main checkout.
 
+### Review round 1 follow-ups
+
+An independent review of the five fixes asked for changes. Each item was
+either fixed or rejected:
+
+| Finding | Outcome |
+|---|---|
+| RT-01: the schema canonicalizer treated any `required` member as the JSON Schema keyword, including members inside `const`/`enum`/`default`/`examples` literals, so some changes to literal values were auto-approved | Fixed. The walk now only descends into subschema positions (`properties`, `items`, `allOf`/`anyOf`/`oneOf`, `$defs`, `not`, `if`/`then`/`else`, and similar). Literal values and unknown keywords are compared exactly. Covered by `TestRT01_LiteralRequiredMembersAreData` and `TestRT01_LiteralRequiredChange_HeldAtGate` |
+| RT-03: a pre-v4 approval whose stored snapshot had non-default hints re-hashed to its old hint-free hash when the hints flipped to the defaults, so the hash-match path skipped the hint check | Fixed. Every legacy hash shortcut checks the stored hints first: hash match, formula migration, output-schema backfill and legacy-sibling adoption (`legacyHintsKnownToDiffer`). Covered by `TestRT03_Migration_FlipToDefaultsAcrossUpgradeIsHeld` and `TestRT03_LegacySiblingWithKnownHintDrift_DoesNotApprove` |
+| RT-03: a changed record with no previous annotation snapshot was treated as a wildcard on revert | Fixed. A missing snapshot only proves a revert when the live hints are the MCP defaults, the most conservative reading. Non-default hints stay `changed` until an operator confirms them (`TestRT03_RevertWithUnknownPreviousHints`). The `tool_gate_test.go` legacy-sibling fixture now records the approved hints as `PreviousAnnotations`, as the mark-changed path of earlier releases did |
+| RT-03: the version-2 output-schema backfill hashed the live hints without checking the stored snapshot, and did not store a snapshot | Fixed. The backfill only runs when the stored hints match, and it stores a snapshot that agrees with the new hash (`TestRT03_OutputSchemaBackfill_ChecksStoredHints`) |
+| RT-05: the regression test called discovery explicitly, so it would still pass if automatic verification stopped working | Fixed. The connect-time test no longer calls discovery. A new test changes the contract after connect and delivers `tools/list_changed` through the runtime's registered callback (`onUpstreamToolsListChanged`) |
+| RT-06: the ingested contracts and the scan export dropped output schemas, and the divergence key ignored them | Fixed. The scanner-facing export and the stored contracts (current and previous) carry `outputSchema`, and the divergence key includes it. The REST/CLI tool listings keep their existing shape. Covered by `TestRT06_OutputSchemaOnlyDivergence_IsScanned`, `TestRT06_IngestedContracts_CarryOutputSchemas` and `TestRT06_LiveScanExport_CarriesOutputSchema` |
+| RT-06: if the ingested-contract lookup failed, the export silently fell back to the live export only | Fixed. A lookup error now exports nothing. The scan then has the same zero-tool coverage as when the live export fails, so it cannot back an admission (`TestRT06_IngestedLookupError_FailsClosed`) |
+
+No finding was rejected.
+
+Verification on the branch head after the follow-ups:
+
+```sh
+go build ./... && go vet ./... && go vet -tags server ./internal/...
+go test -race -count=1 ./internal/runtime/...                       # ok
+go test -count=1 -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/   # ok
+go test -count=1 ./internal/security/scanner/ ./internal/storage/ ./tests/tpa-attack-lab/   # ok
+golangci-lint run --config .github/.golangci.yml ./...                     # no findings in changed files
+golangci-lint run --config .github/.golangci.yml --build-tags server ./... # no findings in changed files
+
+# fresh state (experiments dir removed), FULL rebuild of image + binary
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection)
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r1/` of the main checkout.
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
