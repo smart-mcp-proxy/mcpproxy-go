@@ -237,6 +237,9 @@ type Runtime struct {
 	// notificationDiscoverHook replaces DiscoverAndIndexToolsForServer for
 	// notification-triggered discovery runs (tests only).
 	notificationDiscoverHook func(ctx context.Context, serverName string) error
+	// connectDiscoverHook replaces DiscoverAndIndexToolsForServer for
+	// connect-owned discovery runs (onServerConnectedDiscovery). Tests only.
+	connectDiscoverHook func(ctx context.Context, serverName string) error
 
 	// toolApprovalLocks serializes every read-modify-write of one server's
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),

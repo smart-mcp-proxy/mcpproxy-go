@@ -245,3 +245,50 @@ func TestToolsListChangedFollowUp_StartedAfterClose_GetsCancelledContext(t *test
 	assert.ErrorIs(t, ctxErrs[1], context.Canceled, "a follow-up that starts after Close runs with a cancelled context")
 	assert.NoError(t, rt.AppContext().Err(), "precondition: Close replaced the app context with a live one")
 }
+
+// TestConnectDiscoveryFollowUp_StartedAfterClose_GetsCancelledContext (Sol r7
+// P2) drives the connect-owned path: Close lands after the owner decided to
+// run a follow-up but before the follow-up built its context. The follow-up
+// must run with a cancelled context; a revert to AppContext() — which Close
+// replaced with context.Background() — would hand it a live one.
+func TestConnectDiscoveryFollowUp_StartedAfterClose_GetsCancelledContext(t *testing.T) {
+	var rt *Runtime
+	var closeOnce sync.Once
+	closeErr := make(chan error, 1)
+	logger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zap.InfoLevel),
+		zap.Hooks(func(e zapcore.Entry) error {
+			if strings.HasPrefix(e.Message, "Re-running tool discovery for a trigger") {
+				closeOnce.Do(func() { closeErr <- rt.Close() })
+			}
+			return nil
+		}))
+	var err error
+	rt, err = New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{{Name: "conn", Enabled: true}}}, "", logger)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	var ctxErrs []error
+	var calls atomic.Int32
+	rt.connectDiscoverHook = func(ctx context.Context, _ string) error {
+		mu.Lock()
+		ctxErrs = append(ctxErrs, ctx.Err())
+		mu.Unlock()
+		if calls.Add(1) == 1 {
+			rt.onServerConnectedDiscovery("conn") // coalesced into a follow-up
+		}
+		return nil
+	}
+	rt.onServerConnectedDiscovery("conn")
+	select {
+	case err := <-closeErr:
+		require.NoError(t, err)
+	default:
+		t.Fatal("precondition: Close must have run between the owner's follow-up decision and the follow-up")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, ctxErrs, 2, "the coalesced connect trigger gets one follow-up run")
+	assert.NoError(t, ctxErrs[0], "precondition: the first run starts before Close")
+	assert.ErrorIs(t, ctxErrs[1], context.Canceled, "a connect follow-up that starts after Close runs with a cancelled context")
+	assert.NoError(t, rt.AppContext().Err(), "precondition: Close replaced the app context with a live one")
+}

@@ -102,22 +102,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 			// upstream connect. Monotonic; cheap; safe to call on every event.
 			r.MarkFirstConnectedServerForActivation()
 
-			// Deduplicated against a discovery already in flight for this
-			// server; a trigger arriving meanwhile is coalesced into one
-			// follow-up run rather than dropped (Sol r3 P2).
-			r.runCoalescedDiscovery(serverName, func(bool) error {
-				ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
-				defer cancel()
-
-				r.logger.Info("Reactive tool discovery triggered", zap.String("server", serverName))
-				if err := r.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
-					r.logger.Error("Failed to discover tools for connected server",
-						zap.String("server", serverName),
-						zap.Error(err))
-					return err
-				}
-				return nil
-			})
+			r.onServerConnectedDiscovery(serverName)
 		})
 		r.logger.Info("Reactive tool discovery callback registered")
 
@@ -659,6 +644,35 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 		return runErr
 	})
 	return ownErr
+}
+
+// onServerConnectedDiscovery runs connect-owned reactive tool discovery,
+// deduplicated against a discovery already in flight for this server; a
+// trigger arriving meanwhile is coalesced into one follow-up run rather than
+// dropped (Sol r3 P2).
+//
+// Every run derives its context from the lifetime context, not AppContext:
+// Close replaces the app context with context.Background(), so a follow-up
+// that starts after shutdown would otherwise run uncancelled (Sol r7 P2).
+func (r *Runtime) onServerConnectedDiscovery(serverName string) {
+	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
+		ctx, cancel := context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
+		defer cancel()
+
+		r.logger.Info("Reactive tool discovery triggered",
+			zap.String("server", serverName), zap.Bool("follow_up", followUp))
+		discover := r.DiscoverAndIndexToolsForServer
+		if r.connectDiscoverHook != nil {
+			discover = r.connectDiscoverHook
+		}
+		if err := discover(ctx, serverName); err != nil {
+			r.logger.Error("Failed to discover tools for connected server",
+				zap.String("server", serverName),
+				zap.Error(err))
+			return err
+		}
+		return nil
+	})
 }
 
 // discoveryRunTimeout bounds one coalesced discovery run that owns its context.
