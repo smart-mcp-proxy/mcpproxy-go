@@ -520,6 +520,12 @@ instance-originated OAuth delete is a binding- and content-conditional
 storage method, so a parked clear either ran before the replacement's save or
 finds a binding or record it does not own and deletes nothing.
 
+**Amended after review R7.1 and R7.3** (§13): "a record it does not own" is
+decided by the record's `Revision` (a per-bucket sequence bumped on every
+write), not by comparing an access token or client ID. The in-memory refresh
+singleflight is keyed by the same binding, so a result computed for one
+binding never reaches a caller holding another.
+
 ### D13. Projection repair is not a config change
 
 A commit has two diffs:
@@ -644,3 +650,22 @@ name-resolved logged-out flag, clears and disconnects in three steps, and can
 race a replacement. That is pre-existing behaviour and is unchanged here.
 Chunk A listed it as out of scope. It is recorded on #1563 (the same
 name-resolution hazard, PR3) rather than widened into PR2.
+
+## 13. Design review round 7 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Transcripts: `docs/qa/0.70.0-ux-2026-10-10/remediation/reviews/s116-spec-r3A.txt`,
+`s116-spec-r3B.txt` and `s116-spec-r3C.txt` (spec review round 3, chunked
+A/B/C). Verdict: FINDINGS (3: one high, two medium). The import-cycle finding
+appeared in all three chunks, and the same-binding clear finding in A and C.
+Each was checked against `main` and the design, and all three were accepted.
+Review rounds used on this design PR: 7 of the 10-round cap.
+
+| # | Sev | Finding | Verification | Resolution |
+|---|---|---|---|---|
+| R7.1 | high | The process-wide `RefreshCoordinator` joins flights by `GenerateServerKey` only and returns the flight's token or error without running the joiner's bound loader. An old-binding caller parked before `Do` can join a replacement's flight and get its token. A replacement can inherit an obsolete flight's failure | Confirmed on `main`: `oauth/refresh_coordinator.go:193-216` (`c.keys[req.Key]`, joiners return `f.tok, f.skipped, f.err`). The latch, cooldown and `lastSavedAt` live in the same per-key state. Call sites are `persistent_token_store.go:437` and `core/client.go:807` | Flights, latch, cooldown and `lastSavedAt` keyed by `(serverKey, CredentialBinding)`; `RefreshRequest.Binding`; `RefreshOutcome.Binding`, and the hook and `RefreshManager` ignore other bindings; `Forget` on clear and purge (FR-014f, data-model §3). T2.16 |
+| R7.2 | medium | `configsvc.ServerGen.Binding()` returned `storage.CredentialBinding`, and `storage.Manager.CheckCommittedView` took `configsvc.ServerGen`. The two packages would import each other | Confirmed: `go list` shows `configsvc` imports only `config`, and `storage` imports `config`, `auth` and `security/scanner`. The specified signatures add both directions | New leaf package `internal/commitview` (standard library only) holds `ServerGen`, `CredentialBinding` and `ErrStaleGeneration`. `configsvc`, `storage` and `upstream` alias them. `TestCommitviewIsLeaf` in PR1, and a two-edition compile of the affected packages in T055d (FR-014g, data-model §2) |
+| R7.3 | medium | The round-6 clears compared the access token (5xx) or client ID (config-build) and assumed a replacement carries different values. A same-binding restart can keep either while changing other fields, and the old clear then erases the client secret, callback port and redirect URI | Confirmed: `bbolt.go:1186-1189` blanks all four client fields on a match. A restart reuses the persisted token without rewriting it, and a DCR re-pin can keep the client ID with a new port | `OAuthTokenRecord.Revision` from the bucket's `NextSequence` on every write. Binding-conditional deletes take the observed revision instead of a field compare, and the `…If` content predicates are removed (FR-014e, data-model §3). T2.15 extended with the same-token and same-client-ID variants, and T048e |
+
+Not taken into this spec: the name-resolved logout sequence
+(`runtime.go:3250-3271`), which all three chunks listed again as out of scope.
+It stays recorded on #1563.

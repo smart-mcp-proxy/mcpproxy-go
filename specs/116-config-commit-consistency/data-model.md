@@ -80,13 +80,10 @@ type Snapshot struct {
     Timestamp         time.Time
     ServerGenerations map[string]ServerGen // immutable
 }
-type ServerGen struct {
-    Gen         int64 // g(name): last create or change
-    Incarnation int64 // inc(name): last create; kept through updates
-    OAuthEpoch  int64 // PR2: G of the create or of the last commit that cleared OAuth state (review R6.1)
-}
+// ServerGen is defined in the leaf package internal/commitview (review R7.2)
+// and aliased here, so configsvc and storage never import each other.
+type ServerGen = commitview.ServerGen
 func (s *Snapshot) ServerGeneration(name string) (ServerGen, bool)
-func (g ServerGen) Binding() storage.CredentialBinding // {Incarnation, OAuthEpoch}; PR2
 
 type PreparedSnapshot struct {
     base   int64            // Version this was prepared against
@@ -107,6 +104,39 @@ Generation rule, computed in `Prepare`:
 | present, not equal | `{Gen: G, Incarnation: base.Incarnation}` |
 | removed and re-created in one commit | `{Gen: G, Incarnation: G}` |
 | absent in next | key dropped |
+
+### Shared value types: `internal/commitview` (PR1 creates it, PR2 extends it; review R7.2)
+
+`configsvc` already imports `config`, and `storage` imports `config`, `auth`
+and `security/scanner`. Neither imports the other today. If `configsvc`
+returned a `storage` type and `storage` accepted a `configsvc` type, the two
+packages would import each other and PR2 would not compile. The value types
+that both sides need therefore live in a new leaf package. That package
+imports only the standard library:
+
+```go
+package commitview // internal/commitview; imports: errors only
+
+type ServerGen struct {
+    Gen         int64 // g(name): last create or change
+    Incarnation int64 // inc(name): last create; kept through updates
+    OAuthEpoch  int64 // PR2: G of the create or of the last commit that cleared OAuth state (review R6.1)
+}
+type CredentialBinding struct{ Incarnation, OAuthEpoch int64 } // PR2
+func (g ServerGen) Binding() CredentialBinding                   // PR2
+
+var ErrStaleGeneration = errors.New("stale config generation")
+```
+
+`configsvc.ServerGen`, `storage.CredentialBinding` and
+`upstream.ErrStaleGeneration` are aliases (`type X = commitview.X`, `var
+ErrStaleGeneration = commitview.ErrStaleGeneration`), so `errors.Is` works
+across packages. `oauth`, `upstream/core` and `upstream/managed` take
+`commitview.CredentialBinding` directly. PR1 adds `TestCommitviewIsLeaf`, which
+runs `go list -deps ./internal/commitview` and fails on any module-internal
+import. T055d compiles and tests `./internal/commitview ./internal/runtime/configsvc
+./internal/storage ./internal/oauth ./internal/upstream/...` bare and with
+`-tags server`.
 
 `OAuthEpoch` (PR2) follows the same table with one difference: on a changed
 entry it is `G` when `config.OAuthConfigChanged(base, next)` is true (the
@@ -197,11 +227,11 @@ func (m *Manager) SaveOAuthTokenIfBound(rec *OAuthTokenRecord, server string, b 
 func (m *Manager) SaveOAuthClientIfBound(..., b CredentialBinding) (bool, error)
 func (m *Manager) SaveOAuthCompletionIfBound(..., b CredentialBinding) (bool, error)
 // Construction-time check (review R6.1): one bbolt View, row must equal sg exactly.
-func (m *Manager) CheckCommittedView(server string, sg configsvc.ServerGen) error // ErrStaleGeneration
-// Instance-originated destructive OAuth operations (review R6.2): binding check,
-// optional record compare, and the delete in one bbolt Update.
-func (m *Manager) DeleteOAuthTokenIfBound(serverKey, server string, b CredentialBinding, expectAccess string) (bool, error)
-func (m *Manager) ClearOAuthClientIfBound(serverKey, server string, b CredentialBinding, match func(*OAuthTokenRecord) bool) (bool, error)
+func (m *Manager) CheckCommittedView(server string, sg commitview.ServerGen) error // commitview.ErrStaleGeneration (review R7.2: storage never imports configsvc)
+// Instance-originated destructive OAuth operations (review R6.2, R7.3): binding
+// check, observed-revision check, and the delete in one bbolt Update.
+func (m *Manager) DeleteOAuthTokenIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error)
+func (m *Manager) ClearOAuthClientIfBound(serverKey, server string, b CredentialBinding, observedRev uint64) (bool, error)
 func (m *Manager) RegisterServerIdentityIfIncarnation(sc *config.ServerConfig, path string, inc int64) (*ServerIdentity, bool, error)
 func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (bool, error) // code_execution exempt
 ```
@@ -257,6 +287,63 @@ written under the current binding, and refresh schedules are keyed by
 gain `OAuthEpoch int64` (`omitempty`). A record without it is accepted only
 while the row's epoch is also 0.
 
+**Refresh flights are bound too (review R7.1).** On `main` the process-wide
+`RefreshCoordinator` (`oauth/refresh_coordinator.go:193-216`) keys flights,
+the terminal latch, the transient cooldown and `lastSavedAt` by
+`GenerateServerKey` alone. A caller that arrives while a flight runs joins it
+and gets that flight's token or error, and its own `Load` never runs. Binding
+the reads and the schedules does not cover this. Suppose an old instance
+reads its token and pauses before `Do`. An OAuth-changing commit (or a remove
+and re-add with the same URL) advances the binding, and the replacement starts
+a refresh under the same key. The old instance then resumes, joins the
+replacement's flight and receives the replacement's token, which it uses on
+its own still-open connection. The reverse also happens: a replacement joins
+an obsolete flight and inherits its failure, or its terminal latch.
+
+PR2 therefore keys the coordinator by binding:
+
+```go
+type RefreshRequest struct {
+    Key     string                       // GenerateServerKey, unchanged
+    Binding commitview.CredentialBinding // NEW: the caller's committed binding
+    // … ServerName, Trigger, ObservedRefreshToken unchanged …
+    Load    func() (*storage.OAuthTokenRecord, error) // the caller's BOUND loader
+    // Save goes through SaveOAuthTokenIfBound with Binding
+}
+type flightKey struct {
+    serverKey string
+    binding   commitview.CredentialBinding
+}
+// keys map[flightKey]*refreshKeyState: flight, latch, cooldown and lastSavedAt
+func (c *RefreshCoordinator) Forget(serverKey string, b commitview.CredentialBinding) // drops the state for one binding
+```
+
+- `Do` joins a flight only when the `flightKey` is equal, so callers with
+  different bindings never share a flight, a result, a latch or a cooldown.
+- The flight runs the `Load` of the request that started it. Every joiner has
+  the same binding, so that loader is also the joiner's bound loader. Under an
+  obsolete binding the bound `Load` returns no record, and the flight returns
+  `ErrNoRefreshToken` with no network request. A flight whose binding goes
+  stale while it is on the network persists through `SaveOAuthTokenIfBound`,
+  which drops the write. Its token reaches only its own joiners, which are the
+  retired or soon-to-be-retired instance.
+- `RefreshOutcome` gains `Binding`. The completion hook and `RefreshManager`
+  act on an outcome only when it equals their schedule key
+  `(name, Incarnation, OAuthEpoch)`, so a stale flight's terminal failure
+  cannot mark the replacement as needing sign-in.
+- `RefreshManager.OnTokenCleared`, the in-memory purge (§PurgeSet) and the
+  OAuth-config clear call `Forget` for the old binding, so the map stays
+  bounded by the live bindings plus in-flight stale ones. A stale flight that
+  is still running removes its own entry when it finishes, because `run`
+  compares the entry pointer before clearing it.
+- Both call sites pass the instance binding: `persistent_token_store.go:437`
+  (the store holds it from construction) and `core/client.go:807` /
+  `core/oauth_refresh.go:161` (`RefreshOAuthTokenDirect`, from the
+  `managed.Client`'s committed view).
+
+The lock order is unchanged: the coordinator's `mu` is a leaf below L2, as
+today.
+
 **Destructive OAuth operations are binding-conditional too (review R6.2).**
 Saves and reuse-reads are not the only local mutations a stale instance can
 make. On `main` an instance also deletes credentials unconditionally:
@@ -282,15 +369,47 @@ captured with their config). Each runs one bbolt `Update`. It reads
 `upstreams[server]` and requires `{Incarnation, OAuthEpoch}` to equal the
 binding. It reads the record and requires the record's own `OAuthEpoch` to
 equal the binding's epoch, under the same legacy-zero rule as reads. Then it
-applies a content compare. For the 5xx path, `expectAccess` is the access
-token the instance's store last served (`PersistentTokenStore` records it in
-`GetToken`). For the four config-build clears, `match` compares the client id
-the hygiene check read. The two existing `…If` predicates are kept as
-`match`. Only then does it delete. On any mismatch it deletes
-nothing and returns `false`, and the caller logs at debug level and goes on
-with a fresh flow. The record compare also covers a same-binding replacement
-(`RestartServer`, `ForceReconnectAll`): the replacement's freshly saved token
-has a different access token, so the old instance's clear does not match it.
+requires the record's `Revision` to equal `observedRev`, the revision of the
+exact record the caller based its decision on. Only then does it delete. On
+any mismatch it deletes nothing and returns `false`, and the caller logs at
+debug level and goes on with a fresh flow.
+
+**Record revision, not a content compare (review R7.3).** A field compare
+cannot stand in for a revision. A same-binding replacement (`RestartServer`,
+`ForceReconnectAll`, Docker recovery) can keep the access token, or re-pin the
+same DCR client ID with a new callback port or redirect URI. A parked old
+clear would then pass the binding, epoch and field checks and erase the
+replacement's record, including `ClientSecret`, `CallbackPort` and
+`RedirectURI` (`bbolt.go:1186-1189`). So `OAuthTokenRecord` gains
+`Revision uint64` (`json:"revision,omitempty"`). **Every** write to the
+`oauth_tokens` bucket sets `Revision = bucket.NextSequence()` inside its own
+transaction. On `main` that is the six `Put` sites in `bbolt.go`
+(`SaveOAuthToken`, `UpdateOAuthClientCredentials`, `saveOAuthClientCredentialsIf`,
+`ClearOAuthClientCredentials`, `UpdateOAuthToken` and
+`clearOAuthClientCredentialsWhere`), plus the PR2
+`…IfBound` savers. Deletes (`DeleteOAuthToken`, `manager.go:2475`
+`ClearOAuthState`) remove the key and need no revision. A unit test enumerates
+the bucket's write paths and fails if one leaves `Revision` unchanged. The
+bucket sequence is persisted and never reused, so a deleted and re-created
+record cannot collide with an older revision. A legacy record reads as
+revision 0 until its first rewrite. The observed revision comes from the same
+read as the decision:
+
+| Clear | `observedRev` |
+|---|---|
+| 5xx `ClearToken` | the revision of the record `PersistentTokenStore.GetToken` last served to this instance |
+| the four config-build clears in `createOAuthConfigInternal` | the revision of the record the hygiene check read |
+| refresh rejected (`persistent_token_store.go:122`, `core/oauth_refresh.go:168`) | the revision of the record the flight's bound `Load` returned |
+| stale DCR client (`core/oauth_stale_dcr_client.go:196`, `:322`) | the revision of the record whose client the authorization used |
+
+The existing `…If` content predicates become redundant, because an equal
+revision implies equal content, and they are removed. When the replacement
+only *read* the record (a restart that reuses the persisted token without
+writing), the revision is unchanged and the old clear still applies. That is
+intended: it acts on exactly the state it inspected, and the replacement
+inspected the same state. Any write by the replacement (a refresh, a sign-in,
+a DCR re-pin, a callback-port change) bumps the revision, and the old clear
+returns `false`.
 The unconditional `BoltDB.DeleteOAuthToken` and `ClearOAuthClientCredentials`
 become unexported storage primitives. The PR2 write-site grep (T055d) forbids
 calling them, or the old exported names, from `internal/upstream/**` and
@@ -477,7 +596,7 @@ The stdio, Docker and launcher `Start` calls run under `gate.Admit`.
 | `ErrServerNotFound` | runtime | name absent from the live config | REST 404, MCP `isError` "Server 'x' not found", CLI exit 1 |
 | `*ServerExistsError` | runtime (moved from server) | create of a present name | REST 409 (unchanged text "already exists") |
 | `ErrServerReplaced` | runtime | captured incarnation (or, for `ExpectGeneration`, generation) no longer current | REST 409 `{"error":"server_replaced"}`, MCP `isError`, CLI exit 1 |
-| `ErrStaleGeneration` | upstream | worker or action bound to an old generation | internal; debug log |
+| `ErrStaleGeneration` | commitview (aliased in upstream and returned by storage's `CheckCommittedView`) | worker or action bound to an old generation | internal; debug log |
 | `ErrRetired` | dialgate | operation on a retired instance | internal; tool calls on a retired instance return the existing "server unavailable" error |
 | `ErrConcurrentPublish` | configsvc | `Publish` saw an unexpected version | internal invariant violation; logged as an error and the commit is aborted |
 

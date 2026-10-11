@@ -149,6 +149,11 @@ is one bbolt `View`, and `DeleteOAuthTokenIfBound`/`ClearOAuthClientIfBound`
 are one bbolt `Update`. Both are L2 leaves taken with no runtime lock held,
 from `oauth`/`core`/workers (rule 5). Neither waits on L0, L1 or L3, so a
 worker parked in one cannot block a commit beyond bbolt's own serialization.
+Keying `RefreshCoordinator` by `(serverKey, binding)` (review R7.1) changes
+only the map key. Its `mu` stays a leaf that is never held across `Load`,
+the network call or a storage write, as on `main`. `Forget` takes only that
+`mu`, so calling it from the commit's in-memory purge adds an L1/L2 → coordinator
+edge and no reverse edge.
 
 **`createMu`** is deleted in PR1, because `configCommitMu` subsumes it. **`asyncMgr`**
 storage operations (`EnableUpstreamServer`/`QuarantineUpstreamServer`) are no
@@ -177,6 +182,7 @@ production, following the `toolApprovalReadHook` and
 | `approvalHooks.afterBaselineBeforeUnquarantine(name, inc)` | scanner `approveServer`, after the L1 section exits | T2.5 (review R5.6) |
 | `oauthHooks.beforePersist(name, binding)` | token store and DCR client save | T2.9, T2.13 |
 | `oauthHooks.beforeBindingCheck(name, sg)` | worker, before `CheckCommittedView` | T2.14 |
+| `oauthHooks.beforeRefreshDo(name, binding)` | `PersistentTokenStore` / `RefreshOAuthTokenDirect`, after the caller's bound read, before `RefreshCoordinator.Do` | T2.16 |
 | `oauthHooks.beforeClear(name, binding, op)` | `DeleteOAuthTokenIfBound` / `ClearOAuthClientIfBound` callers, before the storage tx | T2.15 |
 | `restPatchAfterParse` | httpapi PATCH handler | T1.3 |
 | `dialgate.TestHooks.beforeAdmit` / `afterAdmitBeforeAct` / `beforeTrack` / `afterSweepBeforeBarrier` | dialgate | T4.x, T4.16 |
@@ -191,7 +197,7 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR1: Commit critical section and generations (#1558, #1560, root of #1559; B1)
 
-- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added. Also from design review: the discovery final check and index writes under L1 with a generation check (D15), approval policy read from storage (D16, with global-policy changes taking every L1), `ReconcileLive` vs `ReplaceConfig` (D14), projection repair and `Bootstrap`/`ForceDisk` (D13), removal of the pre-publish hook, and instance generation stamping (`managed.Client.Generation()`).
+- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added. Also from design review: the discovery final check and index writes under L1 with a generation check (D15), approval policy read from storage (D16, with global-policy changes taking every L1), `ReconcileLive` vs `ReplaceConfig` (D14), projection repair and `Bootstrap`/`ForceDisk` (D13), removal of the pre-publish hook, and instance generation stamping (`managed.Client.Generation()`). The leaf package `internal/commitview` for the value types shared by `configsvc`, `storage`, `oauth` and `upstream` (review R7.2).
 - **Not in scope**: the full purge set (PR2), generation checks in workers or the supervisor (PR3), retirement (PR4). Removal still deletes only what each path deletes today, but now synchronously inside the commit for **all** paths (this closes the resurrection window).
 - **Failing-first tests**: T1.1-T1.7 ([quickstart.md](quickstart.md) §T1).
 - **Live verification**: L1 (concurrent apply, add and PATCH; B1 quarantine purge).
@@ -200,9 +206,9 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR2: Atomic removal, purge and incarnation-bound approvals (#1559 remainder, #1562; B2)
 
-- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
+- **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), the `oauth_tokens` record `Revision` behind every binding-conditional delete (review R7.3), refresh-coordinator flights keyed by credential binding (review R7.1), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it.
 - **Depends on**: PR1.
-- **Failing-first tests**: T2.1-T2.15.
+- **Failing-first tests**: T2.1-T2.16, plus T048e (record revision).
 - **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
 - **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
 
