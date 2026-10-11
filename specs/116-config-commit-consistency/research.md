@@ -547,3 +547,29 @@ discovery pass (any trigger), per server:
 
 The order L3(R) → L1 (today's capture path) or L1 → L3(R) (Spec 117 PR-3) is
 unchanged. `Commit` still never holds L1 and L3 together.
+
+## 9. Design review round 3 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Verdict: FINDINGS (7). All were verified and accepted.
+
+| # | Sev | Finding | Resolution |
+|---|---|---|---|
+| R3.1 | high | D15 would re-enter L1: `checkToolApprovals` takes it (`tool_quarantine.go:448`), and so does `deleteToolApprovalLocked` (`lifecycle.go:1179`, `tool_approval_lock.go:86-88`) | **D15 amended**: caller-held variants `checkToolApprovalsHeld` and `deleteToolApprovalHeld`, plus an inventory of every helper reached inside the hold (`recordScanHold`, `pruneAbsentUndecidedApprovals`, index ops, `warmSignatureCache`, StateView publish). Helpers that must stay outside L1 (`reindexAffectedProfiles`, `HandleUpstreamServerChange`) run after release, behind a generation re-check. They only derive from the already-purged global index, so a stale run is harmless. A `TestLockOrder_DiscoveryNoReentry` test drives discovery removing a genuinely absent tool (T1.13) |
+| R3.2 | high | Approval policy reads the **published** config (`resolveToolQuarantineGate`, `tool_quarantine.go:416-431`). Step 6 releases L1 before step 8 publishes, so an approval writer in that window uses the old trust mode | **D16**: approval policy is resolved **from storage under L1**. The per-server fields come from the row (trust mode, quarantined, skip, `auto_approve_tool_changes`), and the global `quarantine_enabled` from `meta`, which the commit writes in its step-6 transaction. The published config is never consulted for an approval decision. Holding L1 through publication was rejected because step 7 takes L3 (W), which inverts `main`'s capture order |
+| R3.3 | high | Windows: a child can spawn descendants between `cmd.Start` and Job assignment (`process_windows.go:123-128`); those escape the Job | **D8 amended**: on Windows, launch with `CREATE_SUSPENDED`, `AssignProcessToJobObject`, then resume (`NtResumeProcess` through `golang.org/x/sys/windows`, already a dependency, v0.48.0), all inside the admitted section. A failed assignment terminates the still-suspended process, which has no descendants yet. The Docker and launcher paths inherit the same helper. T4.12 |
+| R3.4 | high | Manual OAuth `openBrowser` runs `exec.Command(...).Start()` outside any gate (`connection_browser.go:43-44`) | The browser launch is a leaf admitted section (`gate.Admit` around `Start`). **Guarantee**: a browser dispatched before `Retire` returns may still show the authorization page, but the redirect's code exchange goes through the gated transport, and its token write is incarnation-conditional (D12). No credential is sent or persisted for a retired instance. T4.13 |
+| R3.5 | medium | `oauth_completion` keys are `name_<unix seconds>` (`bbolt_oauth_completion.go:18`), not the token-key shape. The manager consumes completion events by name and retries (`manager.go:2682-2710`) | The purge matches completion records by their decoded `ServerName`. Completion events carry the incarnation they belong to, and consumption drops events whose incarnation is not current, including events fetched before a removal (T2.11) |
+| R3.6 | medium | Identity and history writes can recreate purged state: `RegisterServerIdentity` after registration (`lifecycle.go:1574-1578`) and history persistence through `CreateBucketIfNotExists` (`mcp.go:3610`, `storage/manager.go:1199-1202`) | Both become incarnation-conditional in their own transaction (D12). The synthetic `code_execution` history is exempt because it is not an upstream (T2.12) |
+| R3.7 | medium | T1.1 and T1.12 still wait for a competitor that can never return after PR1 | **Dual-mode recipe**: the test releases the parked section as soon as the competitor has **either returned** (the parent, which then fails the assertion) **or been observed blocked** (`commitWaiters()`, or an L1 waiter probe, on the PR, which then passes). It then awaits both and asserts. A single test is therefore failing-first on the parent and never deadlocks on the PR |
+
+### D16. Approval decisions read storage, not the published config
+
+Everything an approval decision depends on is in the bbolt view the commit
+wrote under the same L1:
+- per-server: `TrustMode`, `Quarantined`, `AutoApproveToolChanges`, skip;
+- global: `meta.quarantine_enabled`.
+
+`resolveToolQuarantineGate` becomes `resolveToolQuarantineGateHeld(name)`. It
+reads the row and the meta key in one `View` while the caller holds L1. The
+published config may lag for the few microseconds between steps 6 and 8, and
+nothing that decides trust looks at it.

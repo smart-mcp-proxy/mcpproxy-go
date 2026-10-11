@@ -41,6 +41,7 @@ Branch `116-pr1-config-commit` from `main`.
 - [ ] T018a [P] [US1] `internal/runtime/commit_bootstrap_test.go`: T1.10 (boot with an empty storage and manager repairs the projection and schedules every enabled server; an unchanged `SaveConfiguration` still writes the file; restart keeps generations of unchanged rows)
 - [ ] T018b [P] [US1] `internal/runtime/commit_removal_exclusion_test.go`: T1.11 (formerly T2.3; regression coverage that a parked removal blocks a B toggle, REST update and MCP patch, which then get 404)
 - [ ] T018c [P] [US1] `internal/runtime/discovery_purge_race_test.go`: T1.12 (a pass parked after its approval check vs `QuarantineServer(true)` → no re-index)
+- [ ] T018d [P] [US1] `internal/runtime/discovery_noreentry_test.go` (T1.13) and `internal/runtime/approval_policy_storage_test.go` (T1.14)
 - [ ] T019 [P] [US1] `internal/runtime/lock_order_pr1_test.go`: `TestLockOrder_*` watchdog tests (commit vs capture section; commit vs discovery under the approval lock; a re-entrant `Commit` from inside `fn` is rejected)
 
 ### Implementation
@@ -51,6 +52,7 @@ Branch `116-pr1-config-commit` from `main`.
 - [ ] T023 [US1] `internal/runtime/commit.go`: `Commit`, `CommitTx` ops, pipeline steps 1-6 and 8 plus after-unlock (plan §Commit pipeline). Approval locks taken in sorted order for changed names in step 4, with `UnderApprovalLock` hooks. Compensating disk write on a storage failure. Re-entry guard
 - [ ] T024 [US1] `internal/runtime/commit_reconcile.go`: move `LoadConfiguredServers`' storage phase into step 6 (diff against the stored view; OAuth-config-change clear; newly-quarantined index purge, FR-008; orphan GC on the working copy, with the empty guard at boot only). Keep `LoadConfiguredServers(nil)` as a thin `Commit("reconcile", ReplaceConfig(live))` wrapper for the boot path. Delete the removal goroutines (removal is synchronous in step 6)
 - [ ] T024a [US1] D15: move a discovery pass's final eligibility/generation check and all its index, StateView and last-good writes into one hold of L1 (coordinate with Spec 117 PR-3 G8; skip if already landed) (makes T018c pass). `ReconcileLive()`; delete `LoadConfiguredServers(cfg)`'s captured-argument form (D14)
+- [ ] T024b [US1] `checkToolApprovalsHeld` / `deleteToolApprovalHeld` caller-held variants and the inventory of helpers inside the D15 hold; `resolveToolQuarantineGateHeld` reads the row + `meta.quarantine_enabled` (written by the commit tx) (D16) (makes T018d pass)
 - [ ] T025 [US1] after-unlock workers: spawn connect/disconnect workers for `Changes` (still the legacy manager calls; PR3 binds them), the events, the telemetry `NotifyConfigChanged`
 - [ ] T026 [US1] `ApplyConfig`/`applyConfigLocked`, `ReloadConfiguration`, `UpdateConfig`, `UpdateListenAddress`, `SaveConfiguration` (persist the live config, no storage read), `gateInitialConfig`, `SetServerShared` → `Commit` (makes T011 pass)
 - [ ] T027 [US1] `EnableServer`, `BulkEnableServers`, `QuarantineServer` (index purge in the commit; baseline approval after the commit, unchanged), `RestartServer`'s disk refresh → `Commit` (makes T013 pass)
@@ -83,6 +85,7 @@ Branch `116-pr2-atomic-removal` from `main` after PR1 merges.
 - [ ] T047 [P] [US2] `internal/security/scanner/late_scan_result_test.go`: T2.8 (scan for old `acme` completes after remove + re-add → no job or report under the new incarnation; unforced approve still refused)
 - [ ] T048 [P] [US2] `internal/oauth/late_token_save_test.go`: T2.9 (a `SaveToken` parked after its context check, then remove + re-add with the same URL → no token; the refresh schedule for the old incarnation is dropped)
 - [ ] T046a [P] [US2] `internal/runtime/readd_lastgood_test.go`: T2.10
+- [ ] T046b [P] [US2] `internal/upstream/completion_incarnation_test.go` (T2.11) and `internal/storage/identity_history_incarnation_test.go` (T2.12)
 - [ ] T046 [P] [US2] `internal/storage/toolhash_keys_test.go`: pin the `toolhash` key format (A11) so the purge decision is justified
 
 ### Implementation
@@ -95,6 +98,7 @@ Branch `116-pr2-atomic-removal` from `main` after PR1 merges.
 - [ ] T055 [US2] Scanner: incarnation captured in `approveServer`; baseline save under L1 with the check; `UnquarantineServer` → `Commit(ExpectIncarnation, SetQuarantined(false))` (makes T044 pass)
 - [ ] T055a [US2] Scanner: `Incarnation` on jobs and reports; callbacks use `Save*IfIncarnation`; `approveServer` filters by the current incarnation; removal invalidates the summary cache (makes T047 pass)
 - [ ] T055b [US2] OAuth: `PersistentTokenStore` bound to the incarnation; token, DCR and completion writes use `…IfIncarnation`; `RefreshManager` keyed by `(name, incarnation)` (makes T048 pass)
+- [ ] T055c [US2] Completion events carry the incarnation and the consumer drops stale ones; the completion purge matches by decoded `ServerName`; `RegisterServerIdentityIfIncarnation`, `RecordToolCallIfIncarnation` (`code_execution` exempt) (makes T046b pass)
 - [ ] T056 [US2] REST: `generation`/`incarnation` in server and review payloads; optional `expected_incarnation` on approve/block/unquarantine; 409 `server_replaced`; CLI message passthrough; `oas/swagger.yaml`; `docs/api/rest-api.md`
 - [ ] T057 [P] [US2] Web UI: send `expected_incarnation` from the review and approval actions; vitest in `frontend/tests/unit/`; Playwright sweep per `docs/development/web-ui-verification.md`
 - [ ] T058 [US2] Test-only `mcpproxy debug purge-report` (build tag `qa_hooks`) for live L2 inspection
@@ -150,6 +154,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
 - [ ] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
 - [ ] T085a [P] [US4] `internal/upstream/dialgate/nesting_test.go` + `internal/upstream/core/retire_launch_registration_test.go`: T4.10, T4.11
+- [ ] T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12) and `internal/upstream/core/retire_browser_test.go` (T4.13)
 - [ ] T086 [P] [US4] `internal/upstream/dialgate/bench_test.go`: T4.7
 
 ### Implementation
@@ -159,6 +164,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] T092 [US4] `core`: stdio `client.Start`, Docker launch and launcher spawn under `gate.Admit` (makes T081 pass)
 - [ ] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
 - [ ] T093a [US4] Lock-free `dialgate.WrapTransport` around every core-built mcp-go transport; stdio `cmd.Start` + group/Job registration + `TrackProcess` in one admitted section, with a kill on a Job assignment failure; `Retire` kills before and after its barrier (makes T081a, T085a pass)
+- [ ] T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher); `openBrowser` under `gate.Admit` (makes T085b pass)
 - [ ] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
 - [ ] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
 - [ ] T095 [US4] `AdvanceGenerations` calls `Retire()` on every instance it unregisters, before returning (and so before publish) (makes T085 pass)

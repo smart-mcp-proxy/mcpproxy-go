@@ -154,6 +154,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-007**: every server change MUST land in one bbolt transaction, together with the generation stamps and `meta.config_commit_generation`.
 - **FR-008**: a newly quarantined server MUST be purged from the global and per-profile indexes inside the commit, whatever path set the flag (fixes B1 and r10-C #2).
 - **FR-008a**: every discovery pass MUST perform its final eligibility check (the row exists, `Generation` equals the generation it captured, and the server is not quarantined or disabled) and **all** of its index, StateView and last-good writes in one hold of the server's approval lock (D15).
+- **FR-008b**: every approval decision (discovery, operator approve/block/toggle, scanner, baseline promotion) MUST resolve its policy from storage under the server's approval lock: the row's trust mode, quarantine, skip and auto-approve fields, and `meta.quarantine_enabled` written in the commit transaction (D16). It MUST NOT read the published config.
 - **FR-009**: `scripts/check-upstream-write-sites.sh` MUST fail when `upstreams` rows are written outside `internal/storage`, `internal/runtime/commit*.go` and tests. It MUST run in CI.
 - **FR-010a**: `CommitTx.UnderApprovalLock(name, fn)` MUST run `fn` in step 4 while holding `name`'s approval lock, in the same lock hold as step 6's row write. It is the integration point for Spec 117's review-bound server approval. The storage quarantine flip MUST only ever be the commit's row write.
 - **FR-010**: `configsvc` MUST compute `ServerGenerations` at prepare time. An unchanged entry keeps its generation, and a new or changed entry gets `G`. Generations MUST be monotonic across restarts.
@@ -165,6 +166,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-013**: REST `DELETE /api/v1/servers/{id}`, MCP `upstream_servers remove` and config-driven removal (ApplyConfig, file reload, boot) MUST all use FR-011/FR-012. The asynchronous removal goroutines MUST be deleted.
 - **FR-014**: approval writers (`ApproveTools`, baseline approval on unquarantine, block/unblock, prompt approve/block, scanner baseline+blocks, discovery's `checkToolApprovals` and quarantined capture) MUST capture the incarnation and re-check it against the storage row under the server's approval lock. On a mismatch they MUST write nothing and return `ErrServerReplaced`.
 - **FR-014a**: scan jobs and reports MUST record the incarnation they were started for and MUST be persisted with an incarnation-conditional storage write (row exists and matches, in the same bbolt tx). `approveServer` MUST read only reports of the current incarnation. Removal MUST invalidate the scan-summary cache.
+- **FR-014c**: server-identity registration and per-server tool-call history writes MUST be incarnation-conditional (`code_execution` exempt). OAuth completion events MUST carry their incarnation, the consumer MUST drop stale ones, and the purge MUST match completion records by decoded `ServerName`.
 - **FR-014b**: OAuth token, DCR-client and completion writes MUST be incarnation-conditional in the same way. The token store MUST be bound to the instance's incarnation. Refresh schedules MUST be keyed by `(name, incarnation)` and dropped on mismatch.
 - **FR-015**: scanner approval MUST unquarantine through `Commit` with `ExpectIncarnation(name, inc)`.
 - **FR-016**: prompt-approval writes MUST take the server's approval lock.
@@ -186,6 +188,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 - **FR-024a**: every OAuth preflight, resource auto-detect, metadata discovery and cache fetch MUST use the instance transport through `oauth.Env`. CI MUST reject `http.Get/Head/Post(`, `http.DefaultClient`, `http.DefaultTransport` and transport-less `&http.Client{` in `internal/oauth/**`, `internal/upstream/core/**` and `internal/transport/**` outside an allowlist.
 - **FR-024**: HTTP and SSE MCP traffic MUST use a per-instance `*http.Transport` whose `DialContext` is gated and whose connections gate every `Write`. The OAuth `HTTPClient` (metadata, DCR, authorization-code exchange, refresh) MUST use the same instance transport. `Manager.RefreshOAuthToken` and manual OAuth MUST refuse to run against an unregistered or retired instance.
 - **FR-025a**: the gate's read lock MUST be held only around one leaf operation (a dial syscall, one conn `Write`, or `cmd.Start` + process registration) and never nested. `WrapTransport` MUST NOT take the lock. Stdio process-group/Job registration and `TrackProcess` MUST happen inside the admitted launch section. A failed Job assignment MUST kill the child inside the section. `Retire` MUST kill tracked processes before **and** after its barrier.
+- **FR-025b**: on Windows, stdio, Docker and launcher processes MUST be created suspended, assigned to their Job and resumed inside the admitted section. The OAuth browser launch MUST be an admitted section, and the code exchange and token write it leads to are gated by FR-024 and FR-014b.
 - **FR-025**: `Retire()` MUST be bounded. It sets the latch, cancels the gate context, closes tracked connections, then runs a write-lock barrier. It MUST log a warning when it takes more than 1 s.
 - **FR-026**: tool calls, `tools/list`, health probes and ambiguous-call probes on a retired instance MUST fail with `ErrRetired` and MUST NOT mark the current instance unhealthy.
 
@@ -269,3 +272,7 @@ See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapsho
 | Review R2.2 discovery re-index after purge | FR-008a | PR1 | T1.12 |
 | Review R2.3/R2.4 gate nesting, stdio launch handoff | FR-025a | PR4 | T4.10, T4.11 |
 | Review R2.5 last-good snapshot after re-add | FR-012, FR-021b | PR2, PR3 | T2.10, T3.7 |
+| Review R3.1 D15 re-entry | FR-008a | PR1 | T1.13 |
+| Review R3.2 policy from published config | FR-008b | PR1 | T1.14 |
+| Review R3.3/R3.4 Windows descendants, browser launch | FR-025b | PR4 | T4.12, T4.13 |
+| Review R3.5/R3.6 completion, identity, history | FR-014c | PR2 | T2.11, T2.12 |

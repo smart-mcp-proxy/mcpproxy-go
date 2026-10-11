@@ -31,6 +31,11 @@ file before implementing.
   **blocked** through `r.commitWaiters() == 1` (a test probe counting
   goroutines waiting on `configCommitMu`). Release, then assert the order of
   effects. Never wait for the competitor to return while a lock is still held.
+- **Dual-mode release (review R3.7)**: when one test must be failing-first on
+  the parent and must not deadlock on the PR, release the parked section as
+  soon as the competitor has **either returned or been observed blocked**
+  (`commitWaiters()` / `approvalLockWaiters(name)`), then await both and
+  assert. T1.1 and T1.12 use this.
 - For capture and dial sections: hold the section, start the commit, assert
   that the commit is waiting for that section (`Manager.CaptureReplacementQueued()`
   or `Gate.RetireWaiting()`), release the section, **then** wait for the commit
@@ -66,6 +71,8 @@ go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEn
 | T1.10 | n/a (regression coverage; passes on `main`) | boot with an empty storage and manager; an unchanged `SaveConfiguration` | rows written, every enabled server scheduled, file written (FR-001a, R1.6) |
 | T1.12 | discovery pass parked after `checkToolApprovals`, before its index write (`lifecycle.go:1028`) | `QuarantineServer(true)` returns | after release: no tool of the server is in the global or profile index (FR-008a, R2.2) |
 | T1.11 | exclusion: removal parked at `afterStorage` | B toggle, REST update and MCP patch of the removed server, started in goroutines | all three are blocked (`commitWaiters()==3`). After release: the toggle succeeds, both updates get 404, the server never reappears (formerly T2.3, regression coverage) |
+| T1.13 | n/a | a discovery pass whose upstream dropped a tool | completes without re-entering L1 (watchdog 5 s); the absent tool's record is removed (R3.1) |
+| T1.14 | approval writer parked after acquiring L1 is impossible on the PR, so: commit parked at `afterStorage` (L1 released, before publish) | `ApproveTools`/tool toggle on that server under the new `trust_mode: manual` | the decision uses manual (from storage), not the still-published auto (R3.2). Parent: fails |
 | T1.9 | n/a | restart | after a restart, `Snapshot.Version` is greater than or equal to the persisted `meta.config_commit_generation`, and generations of unchanged servers are kept |
 
 ## T2: Removal and purge (PR2)
@@ -86,6 +93,8 @@ tokens.
 | T2.8 | scanner job for old `acme` parked before its report callback | remove and re-add `acme`, then release: no job or report for the new incarnation; unforced approve refused (R1.1) |
 | T2.9 | `SaveToken` parked after its context check (code exchange) | remove and re-add `acme` (same URL), then release: no token stored; the old schedule dropped (R1.2) |
 | T2.10 | none | remove `acme` and re-add it immediately; make its first discovery fail | the sweep fallback does not reapply the old `lastGoodTools` (R2.5) |
+| T2.11 | completion event for old `acme` fetched, consumer parked | remove + re-add, release | no retry against the replacement; completion record purged (R3.5) |
+| T2.12 | worker parked before `RegisterServerIdentity`; call parked before history write | remove `acme`, release | no identity or history bucket for `acme` (R3.6) |
 | T2.7 | discovery pass for old `acme` parked at `beforeApprovalLock` | remove and re-add, then release: no records with the old incarnation are written |
 
 ## T3: Generation-bound workers (PR3)
@@ -123,6 +132,8 @@ Fixtures (test-only):
 | T4.9 | `preflightPRMScopes`, `autoDetectResource`, `httpFetchRaw` parked before send | retire | zero hits (R1.4) |
 | T4.10 | an admitted HTTP request about to enter its nested dial and write | `Retire` | no deadlock: `Retire` returns ≤1 s, the nested dial/write gets `ErrRetired` (R2.3) |
 | T4.11 | stdio launch parked between `cmd.Start` and group/Job registration (inside the admitted section) | `Retire` (asserts `RetireWaiting()`), release | the child is killed before `Retire` returns; on Windows, a failed Job assignment kills the child and Start fails (R2.4) |
+| T4.12 | Windows-only: a child that spawns a grandchild immediately | `Retire` | the grandchild is in the Job and dead when `Retire` returns (R3.3) |
+| T4.13 | `openBrowser` parked before `Start` | `Retire` | no browser process; a code delivered to the callback afterwards is not exchanged and no token is stored (R3.4) |
 | T4.7 | benchmark | — | `BenchmarkGatedConnWrite` shows < 5% overhead against an ungated conn on a 1 KiB write |
 
 ## Live checks (qa070 harness)

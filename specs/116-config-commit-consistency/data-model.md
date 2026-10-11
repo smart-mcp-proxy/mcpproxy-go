@@ -164,7 +164,7 @@ Deleted in the same transaction as the row:
 | `tool_approvals` | server `name` | `DeleteServerToolApprovals` |
 | `prompt_approvals` | server `name` | `DeleteServerPromptApprovals` (`bbolt.go:790`) |
 | `oauth_tokens` (tokens + DCR client credentials) | **exact** `name` or `name_` + 16 lowercase hex (B2 fix) | `ClearOAuthState`, rewritten |
-| `oauth_completion` | same exact match | new |
+| `oauth_completion` | decoded record `ServerName == name` (keys are `name_<unix>`, review R3.5) | new |
 | `integrity_baselines` | `name` | `DeleteIntegrityBaseline` |
 | `security_reports`, `security_scan_jobs`, `security_scan_job_index` | server `name` | `DeleteServerScanReports`, `DeleteServerScanJobs` |
 | `toolhash` | `name:` prefix with exact separator (A11: verified in T046) | `DeleteToolHash` |
@@ -178,6 +178,8 @@ func (m *Manager) SaveScanReportIfIncarnation(r *ScanReport, inc int64) (bool, e
 func (m *Manager) SaveOAuthTokenIfIncarnation(rec *OAuthTokenRecord, server string, inc int64) (bool, error)
 func (m *Manager) SaveOAuthClientIfIncarnation(...)  (bool, error)
 func (m *Manager) SaveOAuthCompletionIfIncarnation(...) (bool, error)
+func (m *Manager) RegisterServerIdentityIfIncarnation(sc *config.ServerConfig, path string, inc int64) (*ServerIdentity, bool, error)
+func (m *Manager) RecordToolCallIfIncarnation(rec *ToolCallRecord, inc int64) (bool, error) // code_execution exempt
 ```
 
 Each one runs a single bbolt `Update` that reads `upstreams[server]`, compares
