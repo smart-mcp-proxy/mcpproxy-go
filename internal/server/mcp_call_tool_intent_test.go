@@ -93,7 +93,9 @@ func TestDocsCallToolExamples_MatchLiveContract(t *testing.T) {
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		require.NoError(t, err)
-		for _, m := range fence.FindAllStringSubmatch(string(raw), -1) {
+		// Windows checkouts (core.autocrlf) yield CRLF; the fence regex is LF-only.
+		doc := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		for _, m := range fence.FindAllStringSubmatch(doc, -1) {
 			var ex map[string]interface{}
 			if json.Unmarshal([]byte(m[1]), &ex) != nil {
 				// Non-object snippets or snippets with placeholders are not
