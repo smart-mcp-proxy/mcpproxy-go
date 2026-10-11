@@ -393,6 +393,13 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertTrue(source.contains("guard !attempts.isLocked, let decision = ReviewPresentation.approvalDecision("))
         XCTAssertTrue(source.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
         XCTAssertTrue(source.contains(#"Button("Cancel", role: .cancel) { attempts.dropForceCandidate() }; Button("Force Approve""#))
+        // Reject is locked the same way: during a server approval and while this tool's approval is in flight (Sol r2 #1).
+        let reject = try XCTUnwrap(source.range(of: #"Button("Reject", role: .destructive) {"#))
+        let afterReject = source[reject.upperBound...].prefix(500)
+        XCTAssertTrue(afterReject.contains("guard !attempts.isLocked, toolApprovals.begin(tool.name) else { return }"), "Reject reserves the tool like Approve (zcode r2 #1)")
+        XCTAssertTrue(source.contains("private func rejectTool(_ name: String) async { defer { toolApprovals.finish(name) }"))
+        XCTAssertTrue(source.contains(#"Button("Quarantine to Review Again…") { showRequarantineConfirmation = true }.disabled(attempts.isLocked)"#), "zcode r2 #2")
+        XCTAssertTrue(afterReject.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
     }
 
     /// The stale notice is set before the reload, so a newer attempt started

@@ -364,7 +364,12 @@ struct ReviewSheet: View {
                                     Task { await approveTool(tool.name, expected: expected) }
                                 }
                                 .disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))
-                                Button("Reject", role: .destructive) { Task { await rejectTool(tool.name) } }
+                                Button("Reject", role: .destructive) {
+                                    // Same per-tool reservation as Approve, so Approve and Reject on one tool serialize.
+                                    guard !attempts.isLocked, toolApprovals.begin(tool.name) else { return }
+                                    Task { await rejectTool(tool.name) }
+                                }
+                                .disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))
                             }
                         case .approved: Text("Approved").font(.caption).foregroundStyle(.green)
                         case .blocked: Text("Blocked").font(.caption).foregroundStyle(.red)
@@ -388,7 +393,7 @@ struct ReviewSheet: View {
                     Button("Reject Server", role: .destructive) { Task { await rejectServer() } }.disabled(attempts.isLocked)
                 }.padding()
             } else if headline?.state == .approved {
-                HStack { Button("Quarantine to Review Again…") { showRequarantineConfirmation = true } }.padding()
+                HStack { Button("Quarantine to Review Again…") { showRequarantineConfirmation = true }.disabled(attempts.isLocked) }.padding()
             }
         }
         .task(id: serverName) { await load() }
@@ -510,7 +515,7 @@ struct ReviewSheet: View {
         do { try await client.approveSpecificTools(serverName, tools: [name], expectedHashes: expected); await load() }
         catch { if let stale = ReviewPresentation.staleReviewMessage(error) { staleNotice = stale; await load() } else { self.error = error.localizedDescription } }
     }
-    private func rejectTool(_ name: String) async { guard let client = appState.apiClient else { return }; do { try await client.blockSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
+    private func rejectTool(_ name: String) async { defer { toolApprovals.finish(name) }; guard let client = appState.apiClient else { return }; do { try await client.blockSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
     private func rejectServer() async { guard let client = appState.apiClient else { return }; do { try await client.securityRejectServer(serverName); await load() } catch { self.error = error.localizedDescription } }
     private func definitionText(_ tool: ReviewTool) -> String {
         "input schema:\n\(tool.inputSchema?.prettyString ?? "null")\n\noutput schema:\n\(tool.outputSchema?.prettyString ?? "null")\n\nannotations:\n\(tool.annotations?.prettyString ?? "null")"
