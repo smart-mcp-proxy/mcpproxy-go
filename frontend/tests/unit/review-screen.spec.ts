@@ -88,6 +88,21 @@ describe('ReviewScreen (T086)', () => {
     expect(api.listScanHistory).toHaveBeenCalled()
   })
 
+  it('keeps the route change restriction when only the server name changes, and All states still clears it', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review(true))
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'fixture', change: 'changed' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await flushPromises()
+    const select = () => wrapper.get('[data-test="review-filter-state"]').element as HTMLSelectElement
+    expect(select().value).toBe('changed')
+    const before = wrapper.findAll('article[data-test^="review-tool-"]').length
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    expect(select().value).toBe('changed')
+    expect(wrapper.findAll('article[data-test^="review-tool-"]').length).toBe(before)
+    await wrapper.get('[data-test="review-clear-filters"]').trigger('click')
+    expect(select().value).toBe('all')
+  })
+
   it('offers an explicit forced retry only after a dangerous approval rejection', async () => {
     ;(api.securityApprove as any).mockResolvedValueOnce({ success: false, error: 'dangerous baseline finding' }).mockResolvedValueOnce({ success: true })
     const wrapper = await mountScreen()

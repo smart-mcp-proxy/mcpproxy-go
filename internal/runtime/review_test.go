@@ -260,6 +260,93 @@ func TestReviewPayload_RedactsServerSecretsUnconditionally(t *testing.T) {
 	require.NotEqual(t, "client --token secret123", review.Server.Command)
 }
 
+// UX-10 round 1: a shell -c argument is ONE argv leaf to Redaction.Argv, so a
+// low-entropy secret embedded in the command line must be masked by the review
+// payload itself (the UI renders and copies exactly these args).
+func TestReviewPayload_MasksSecretsInsideShellCommandArgs(t *testing.T) {
+	cases := map[string][]string{
+		"space separated flag":      {"-c", "exec npx srv --password hunter2"},
+		"equals flag":               {"-c", "exec npx srv --password=hunter2"},
+		"single quoted value":       {"-lc", "exec npx srv --password 'hunter2 and more'"},
+		"env prefix":                {"-c", "PASSWORD=hunter2 npx srv --port 80"},
+		"single quoted inline":      {"-c", "exec npx srv --password='hunter2 and more'"},
+		"double quoted inline":      {"-c", `exec npx srv --password="hunter2 and more"`},
+		"double quoted value":       {"-c", `exec npx srv --password "hunter2 and more"`},
+		"inline then trailing":      {"-c", "exec npx srv --password='hunter2 and more' --port 80"},
+		"escaped spaces":            {"-c", `exec npx srv --password hunter2\ and\ more`},
+		"escaped spaces eq":         {"-c", `exec npx srv --password=hunter2\ and\ more --port 80`},
+		"escaped quote dq":          {"-c", `exec npx srv --password "hunter2\" and more"`},
+		"escaped quote bare":        {"-c", `exec npx srv --password hunter2\'s\ and\ more`},
+		"quoted flag":               {"-c", "exec npx srv '--password' 'hunter2 and more'"},
+		"dq quoted flag":            {"-c", `exec npx srv "--password" "hunter2 and more"`},
+		"concatenated flag":         {"-c", `exec npx srv '--pass'"word" 'hunter2 and more'`},
+		"escaped flag":              {"-c", `exec npx srv --pass\word hunter2\ and\ more`},
+		"quoted inline flag":        {"-c", "exec npx srv '--password=hunter2 and more' --port 80"},
+		"escaped flag quoted":       {"-c", `exec npx srv \-\-password 'hunter2 and more'`},
+		"ansi-c flag":               {"-c", `exec npx srv $'--password' 'hunter2 and more'`},
+		"ansi-c flag and val":       {"-c", `exec npx srv $'--password' $'hunter2 and more'`},
+		"ansi-c hex flag":           {"-c", `exec npx srv $'\x2d\x2dpassword' 'hunter2 and more'`},
+		"ansi-c octal flag":         {"-c", `exec npx srv $'\055\055password' 'hunter2 and more'`},
+		"ansi-c inline":             {"-c", `exec npx srv $'--password=hunter2 and more' --port 80`},
+		"locale dq flag":            {"-c", `exec npx srv $"--password" "hunter2 and more"`},
+		"ansi-c escaped quote":      {"-c", `exec npx srv --password $'hunter2\' and more' --port 80`},
+		"env assign sq":             {"-c", "PASSWORD='hunter2 and more' exec npx srv"},
+		"env assign dq":             {"-c", `PASSWORD="hunter2 and more" exec npx srv`},
+		"env assign bs":             {"-c", `PASSWORD=hunter2\ and\ more exec npx srv`},
+		"env assign api key":        {"-c", "API_KEY='hunter2 and more' exec npx srv"},
+		"env assign secret":         {"-c", "CLIENT_SECRET='hunter2 and more' exec npx srv"},
+		"env assign ansi-c":         {"-c", `PASSWORD=$'hunter2 and more' exec npx srv`},
+		"env assign export":         {"-c", "export PASSWORD='hunter2 and more'; exec npx srv"},
+		"env assign concat":         {"-c", `PASSWORD='hunter2 'and" more" exec npx srv`},
+		"standalone continuation":   {"-c", "exec npx srv --password \\\n hunter2"},
+		"double continuation":       {"-c", "exec npx srv --password \\\n \\\n hunter2"},
+		"unspaced semicolon assign": {"-c", ":;API_KEY='hunter2 and more' exec npx srv"},
+		"unspaced and assign":       {"-c", ":&&API_KEY='hunter2 and more' exec npx srv"},
+		"unspaced or assign":        {"-c", ":||API_KEY='hunter2 and more' exec npx srv"},
+		"apostrophe then subst":     {"-c", `exec npx srv --name "it's $(helper --password hunter2xyz)"`},
+		"redirect-only subst":       {"-c", `exec npx srv --name "$(<$(helper --password hunter2xyz))"`},
+		"plain env low entropy":     {"-c", `API_KEY=@hunter2xyz exec npx srv`},
+		"plain env client secret":   {"-c", `CLIENT_SECRET=@hunter2xyz exec npx srv`},
+		"ansi-c escaped apostrophe": {"-c", `exec npx srv --name $'it\'s '$(helper --password hunter2xyz)`},
+		"ansi-c in subst multiword": {"-c", `exec npx srv --name "$(printf %s $'it\'s ')" --password 'two hunter2xyz'`},
+		"nested sh -c":              {"-c", `exec sh -c 'exec npx srv --password hunter2xyz'`},
+		"nested bash -lc":           {"-c", `exec bash -lc "exec npx srv --password hunter2xyz"`},
+		"nested two secrets":        {"-c", `exec sh -c 'exec npx srv --password hunter2xyz --token=othersecret'`},
+		"nested quoted multiword":   {"-c", `exec sh -c 'exec npx srv --password="hunter2xyz and more"'`},
+		"flag value looks like cmd": {"-c", `exec npx srv --password 'hunter2xyz --token=othersecret and more'`},
+		"nested flag value cmd":     {"-c", `exec sh -c "exec npx srv --password 'hunter2xyz --token=othersecret and more'"`},
+		"nested no whitespace":      {"-c", `exec sh -c ':;API_KEY=@hunter2xyz;npx'`},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
+				Name: "shellwrap", Enabled: true, Quarantined: true,
+				Protocol: "stdio", Command: "sh", Args: args,
+			}})
+			review, err := rt.GetServerReview(context.Background(), "shellwrap")
+			require.NoError(t, err)
+			encoded, err := json.Marshal(review.Server)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "hunter2")
+			require.NotContains(t, string(encoded), "and more")
+			require.NotContains(t, string(encoded), "more")
+			require.NotContains(t, string(encoded), "and\\\\")
+			require.NotContains(t, string(encoded), "more'")
+			require.NotContains(t, string(encoded), `more"`)
+			require.Len(t, review.Server.Args, 2)
+			require.Equal(t, args[0], review.Server.Args[0])
+			require.Contains(t, review.Server.Args[1], "npx")
+			cfg, cerr := rt.GetConfig()
+			require.NoError(t, cerr)
+			for _, sc := range cfg.Servers {
+				if sc.Name == "shellwrap" {
+					require.Equal(t, args, sc.Args, "redaction must not mutate the stored configuration")
+				}
+			}
+		})
+	}
+}
+
 func TestReviewToolScanVerdict_UsesToolFindingsAndHeldFallback(t *testing.T) {
 	record := &storage.ToolApprovalRecord{ToolName: "delete", HeldVerdict: "dangerous"}
 	require.Equal(t, "warnings", reviewToolScanVerdict([]scanner.ScanFinding{{
@@ -282,6 +369,26 @@ func TestReviewToolScanVerdict_UsesToolFindingsAndHeldFallback(t *testing.T) {
 func TestReviewUnifiedDiffUsesReadableSingleLineHunk(t *testing.T) {
 	require.Equal(t, "@@ -1 +1 @@\n-old\n+new", reviewUnifiedDiff("old", "new"))
 	require.Empty(t, reviewUnifiedDiff("same", "same"))
+}
+
+func TestGetServerReview_RedactsWhitespaceFreeShellCommand(t *testing.T) {
+	args := []string{"-c", "API_KEY=@hunter2xyz;npx"}
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
+		Name: "nows", Enabled: true, Quarantined: true, Protocol: "stdio", Command: "sh", Args: args,
+	}})
+	review, err := rt.GetServerReview(context.Background(), "nows")
+	require.NoError(t, err)
+	encoded, err := json.Marshal(review.Server)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "hunter2xyz")
+	require.Contains(t, review.Server.Args[1], "npx")
+	cfg, cerr := rt.GetConfig()
+	require.NoError(t, cerr)
+	for _, sc := range cfg.Servers {
+		if sc.Name == "nows" {
+			require.Equal(t, args, sc.Args)
+		}
+	}
 }
 
 // UX-04: an ordinary pending review (filed by discovery, no ApprovedAt) is

@@ -182,8 +182,12 @@ describe('ReviewScreen default selection (D43)', () => {
     expect(forceDialog.close).toHaveBeenCalled()
     await wrapper.findAll('dialog')[1].get('button.btn-error').trigger('click')
     await flushPromises()
-    // Never fail open: the forced call uses the new server's own default block list, not [] from the old attempt.
-    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', true, ['write_x'])
+    // Never fail open: the old attempt's block list is gone and a force click without a fresh decision is refused.
+    expect(api.securityApprove).toHaveBeenCalledTimes(1)
+    // A fresh approval derives the new server's own default block list, not [] from the old attempt.
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'other', false, ['write_x'])
   })
 
   it('a late dangerous 409 for the previous server does not open the force dialog on the next one', async () => {
@@ -209,6 +213,29 @@ describe('ReviewScreen default selection (D43)', () => {
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     await flushPromises()
     expect(api.securityApprove).toHaveBeenLastCalledWith('other', false, ['write_x'])
+  })
+
+  it('a late approval success from an earlier visit does not clear the current visit (A -> B -> A)', async () => {
+    let resolveOld: (v: { success: boolean }) => void = () => {}
+    ;(api.securityApprove as any).mockReturnValueOnce(new Promise(r => { resolveOld = r }))
+    const wrapper = await mountScreen()
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'other' })
+    await flushPromises()
+    await wrapper.setProps({ serverName: 'fixture' })
+    await flushPromises()
+    await wrapper.get('[data-test="review-allow-read_file"]').setValue(false)
+    resolveOld({ success: true })
+    await flushPromises()
+    expect(checked(wrapper, 'read_file')).toBe(false)
+    expect(wrapper.emitted('approved')).toBeUndefined()
+    ;(api.securityApprove as any).mockResolvedValueOnce({ success: true })
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    const last = (api.securityApprove as any).mock.calls.at(-1)
+    expect(last[0]).toBe('fixture')
+    expect(last[2]).toContain('read_file')
   })
 
   it('a late rescan failure for the previous server does not set an error on the next one', async () => {

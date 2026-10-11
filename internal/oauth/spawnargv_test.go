@@ -181,3 +181,61 @@ func TestArgv_UnchangedByTheSpawnRule(t *testing.T) {
 			"would make the write doors refuse the client's echo")
 	assert.Equal(t, argv, AuditRedaction.Argv(argv))
 }
+
+// TestSpawnArgv_BackslashNewlineContinuation: a POSIX shell deletes a
+// backslash-newline pair (outside single quotes), so `--to\<nl>ken hunter2xyz`
+// is the flag --token with value hunter2xyz. Stored args stay unchanged.
+func TestSpawnArgv_BackslashNewlineContinuation(t *testing.T) {
+	cmds := []string{
+		"exec npx srv --to\\\nken hunter2xyz",
+		"exec npx srv \"--to\\\nken\" hunter2xyz",
+		"API_\\\nKEY=hunter2xyz exec npx srv",
+		"exec npx srv \"API_\\\nKEY=hunter2xyz\"",
+	}
+	for _, cmd := range cmds {
+		argv := []string{"sh", "-c", cmd}
+		orig := append([]string(nil), argv...)
+		for name, out := range map[string]string{
+			"argv":    strings.Join(AuditRedaction.SpawnArgv(argv), " "),
+			"cmdline": AuditRedaction.CommandString(cmd),
+		} {
+			assertNoSecretFragment(t, out, "hunter2xyz", 5)
+			assert.Contains(t, out, "npx srv", name+": "+cmd)
+		}
+		assert.Equal(t, orig, argv, "stored args must be unchanged")
+	}
+}
+
+// TestSpawnArgv_StandaloneContinuationAndControlOperators: a standalone
+// backslash-newline between a sensitive flag and its value is whitespace to the
+// shell, and ;, && and || end a command even when unspaced, so an assignment
+// that follows them is still an assignment.
+func TestSpawnArgv_StandaloneContinuationAndControlOperators(t *testing.T) {
+	type tc struct{ cmd, secret string }
+	cases := []tc{
+		{"exec npx srv --password \\\n hunter2xyz", "hunter2xyz"},
+		{"exec npx srv --password \\\n \\\n hunter2xyz", "hunter2xyz"},
+		{"exec npx srv --password \\\n\\\nhunter2xyz", "hunter2xyz"},
+		{"exec npx srv --password \\\nhunter2xyz", "hunter2xyz"},
+		{":;API_KEY='hunter2xyz and more' exec npx srv", "hunter2xyz"},
+		{":;API_KEY='hunter2xyz and more' exec npx srv", "more"},
+		{":&&API_KEY='hunter2xyz and more' exec npx srv", "more"},
+		{":||API_KEY='hunter2xyz and more' exec npx srv", "more"},
+		{":|API_KEY='hunter2xyz and more' exec npx srv", "more"},
+		{"true;API_KEY=\"hunter2xyz and more\";exec npx srv", "more"},
+		{"exec npx srv;--password hunter2xyz", "hunter2xyz"},
+	}
+	for _, c := range cases {
+		argv := []string{"sh", "-c", c.cmd}
+		orig := append([]string(nil), argv...)
+		for name, out := range map[string]string{
+			"argv":  strings.Join(AuditRedaction.SpawnArgv(argv), " "),
+			"spawn": AuditRedaction.CommandString(c.cmd),
+			"live":  LiveRedaction.CommandString(c.cmd),
+		} {
+			assert.NotContains(t, out, c.secret, name+": "+c.cmd)
+			assert.Contains(t, out, "npx srv", name+": "+c.cmd)
+		}
+		assert.Equal(t, orig, argv, "stored args must be unchanged")
+	}
+}

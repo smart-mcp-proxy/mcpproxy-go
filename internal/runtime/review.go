@@ -220,6 +220,18 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		Args: append([]string(nil), server.Args...), WorkingDir: server.WorkingDir,
 		URL: server.URL, Env: copyStringMap(server.Env), Headers: copyStringMap(server.Headers),
 	}
+	// Redaction.Argv treats a whole `sh -c "<command line>"` element as one leaf,
+	// so a low-entropy secret inside it survives. The review payload is display
+	// only (never echoed back through a write door), so it can afford the
+	// token-level command-string rule that the shared read doors must not take.
+	// It runs on the RAW element, before the generic pass: that pass can cut a
+	// quoted inline value (--password='a b') mid-quote, leaving unbalanced
+	// quoting that the token splitter then cannot group.
+	for i, arg := range contractServer.Args {
+		// Every element, not only whitespace-bearing ones: `API_KEY=@x;npx` is a
+		// whole command line with no whitespace in it.
+		contractServer.Args[i] = oauth.LiveRedaction.CommandString(arg)
+	}
 	oauth.RedactServerSecretFields(&contractServer)
 	reviewServer := ReviewServer{
 		Name: contractServer.Name, Transport: reviewTransport(server.Protocol),
