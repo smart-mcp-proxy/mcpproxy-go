@@ -52,7 +52,7 @@ final class ReviewPayloadTests: XCTestCase {
             "Text(verbatim: definitionText(tool))", "Text(verbatim: diffText(tool))",
             "Baseline scan:", "Fetch tool definitions", "discoverServerTools(serverName)", "approveSpecificTools",
             "blockSpecificTools", "securityRejectServer", "Reject Server",
-            "Text(tool.scanVerdict)", "Dangerous findings detected", "approve(decision, force: true)",
+            "Text(tool.scanVerdict)", "Dangerous findings detected", "send(decision, force: true)",
             "NotificationCenter.default.publisher(for: .reviewChanged)",
             "NotificationCenter.default.publisher(for: .scanSettled)",
 			"prettyString", "diff.description", "input schema:\\n",

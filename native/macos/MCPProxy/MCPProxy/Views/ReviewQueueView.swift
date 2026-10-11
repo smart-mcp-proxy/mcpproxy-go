@@ -215,6 +215,19 @@ enum ReviewPresentation {
         }
     }
 
+    /// Per-tool approvals in flight, reserved at the click: a second click on
+    /// the same tool is not sent until the first answers (PR #1572 review).
+    struct ToolApprovals: Equatable {
+        private(set) var inFlight: Set<String> = []
+
+        func isApproving(_ name: String) -> Bool { inFlight.contains(name) }
+
+        /// Reserves `name`; false (do not send) while it is already in flight.
+        mutating func begin(_ name: String) -> Bool { inFlight.insert(name).inserted }
+
+        mutating func finish(_ name: String) { inFlight.remove(name) }
+    }
+
     /// The decision for approving `server` from `review` with the current
     /// `allowed` selection (`everything` = Approve All). Nil when no review is
     /// loaded or the loaded review belongs to another server, so nothing can
@@ -266,6 +279,7 @@ struct ReviewSheet: View {
     /// One approval at a time; the force confirmation re-sends the decision
     /// of the attempt that failed (UX-02 cross-review r5).
     @State private var attempts = ReviewPresentation.ApprovalAttempts()
+    @State private var toolApprovals = ReviewPresentation.ToolApprovals()
     /// Orders review loads: only the newest response for this server is shown.
     @State private var loadGeneration = 0
     @State private var error: String?
@@ -337,8 +351,10 @@ struct ReviewSheet: View {
                                 Button("Approve") {
                                     // Bind to the definition on screen NOW, not when the task runs.
                                     guard case let .some(expected) = ReviewPresentation.toolApprovalExpected(server: serverName, tool: tool.name, review: review) else { return }
+                                    guard toolApprovals.begin(tool.name) else { return }
                                     Task { await approveTool(tool.name, expected: expected) }
                                 }
+                                .disabled(toolApprovals.isApproving(tool.name))
                                 Button("Reject", role: .destructive) { Task { await rejectTool(tool.name) } }
                             }
                         case .approved: Text("Approved").font(.caption).foregroundStyle(.green)
@@ -378,9 +394,9 @@ struct ReviewSheet: View {
             rescanning = false
             Task { await load() }
         }
-        .alert("Approve without seeing tools?", isPresented: $showBlindApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Approve", role: .destructive) { if let decision = pendingDecision { Task { await approve(decision, force: false) } } } } message: { Text("No tool definitions were captured. Fetch them before approval whenever possible.") }
+        .alert("Approve without seeing tools?", isPresented: $showBlindApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Approve", role: .destructive) { if let decision = pendingDecision { send(decision, force: false) } } } message: { Text("No tool definitions were captured. Fetch them before approval whenever possible.") }
         .alert("Quarantine \(serverName) to review again?", isPresented: $showRequarantineConfirmation) { Button("Cancel", role: .cancel) {}; Button("Quarantine", role: .destructive) { Task { await requarantine() } } } message: { Text("Agents lose access to every tool on \(serverName) until you approve it again.") }
-        .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Force Approve", role: .destructive) { if let decision = attempts.takeForceCandidate() { Task { await approve(decision, force: true) } } } } message: { Text("Force approval activates this server despite dangerous baseline scan findings.") }
+        .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) { Button("Cancel", role: .cancel) {}; Button("Force Approve", role: .destructive) { if let decision = attempts.takeForceCandidate() { send(decision, force: true) } } } message: { Text("Force approval activates this server despite dangerous baseline scan findings.") }
     }
 
     private var headline: ReviewPresentation.Headline? { review.map(ReviewPresentation.headline) }
@@ -428,7 +444,17 @@ struct ReviewSheet: View {
     private func requestApprove(everything: Bool) {
         guard !attempts.isApproving, let decision = ReviewPresentation.approvalDecision(server: serverName, review: review, allowed: allowed, everything: everything) else { return }
         if decision.blind { pendingDecision = decision; showBlindApprovalConfirmation = true; return }
-        Task { await approve(decision, force: false) }
+        send(decision, force: false)
+    }
+    /// Reserves the attempt synchronously, at the click, then sends it. The
+    /// toggles and approve buttons lock before the request is scheduled, so a
+    /// selection change cannot fall between the captured decision and the
+    /// request. A click while another attempt is in flight is not sent, so it
+    /// can neither race it nor replace the decision its force confirmation
+    /// re-sends (UX-02 cross-review r5, PR #1572 review).
+    private func send(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) {
+        guard attempts.begin(decision) else { return }
+        Task { await approve(decision, force: force) }
     }
     /// Sends `decision` exactly as captured at the click. The force retry
     /// re-sends the decision of the attempt that triggered it (D43.5): its
@@ -436,19 +462,17 @@ struct ReviewSheet: View {
     /// review that reloaded meanwhile (a new or changed tool) therefore fails
     /// as out of date instead of pairing the old block list with definitions
     /// the operator never decided on.
+    /// `decision` was reserved by `send`; every path below finishes it.
     private func approve(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) async {
-        guard let client = appState.apiClient, decision.server == serverName else { return }
+        guard let client = appState.apiClient, decision.server == serverName else { attempts.finish(decision, dangerous: false); return }
         if decision.blind, review?.server.definitionsCaptured == true {
             // Definitions arrived after the blind confirmation was asked for:
             // review them instead of approving them unseen.
+            attempts.finish(decision, dangerous: false)
             pendingDecision = nil
             staleNotice = "Tool definitions were captured since you chose to approve. Review them, then approve again."
             return
         }
-        // One attempt at a time (UX-02 cross-review r5): a click while one is
-        // in flight is not sent, so it can neither race it nor replace the
-        // decision its force confirmation re-sends.
-        guard attempts.begin(decision) else { return }
         error = nil; staleNotice = nil
         do {
             try await client.securityApproveServer(decision.server, force: force, block: decision.block, expectedHashes: decision.expected)
@@ -471,6 +495,7 @@ struct ReviewSheet: View {
     }
     /// `expected` was captured from the review on screen at the click.
     private func approveTool(_ name: String, expected: [String: String]?) async {
+        defer { toolApprovals.finish(name) }
         guard let client = appState.apiClient else { return }
         error = nil; staleNotice = nil
         do { try await client.approveSpecificTools(serverName, tools: [name], expectedHashes: expected); await load() }

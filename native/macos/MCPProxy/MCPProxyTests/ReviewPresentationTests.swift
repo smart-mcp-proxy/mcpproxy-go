@@ -301,4 +301,63 @@ final class ReviewPresentationTests: XCTestCase {
         XCTAssertTrue(after[style.upperBound...].prefix(400).contains(".disabled(attempts.isApproving)"),
                       "the allow toggles must be disabled while an approval is in flight (UX-02 r6)")
     }
+
+    // MARK: Reservation at the click (UX-02 cross-review, PR #1572 r1)
+
+    func testPerToolApprovalIsReservedOncePerTool() {
+        var tools = ReviewPresentation.ToolApprovals()
+        XCTAssertTrue(tools.begin("read_file"))
+        XCTAssertTrue(tools.isApproving("read_file"))
+        XCTAssertFalse(tools.begin("read_file"), "a second click on the same tool is not sent while the first is in flight")
+        XCTAssertTrue(tools.begin("write_file"), "another tool is independent")
+        tools.finish("read_file")
+        XCTAssertFalse(tools.isApproving("read_file"))
+        XCTAssertTrue(tools.begin("read_file"))
+    }
+
+    private func sheetSource() throws -> String {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
+        return try String(contentsOf: path)
+    }
+
+    private func body(of function: String, in source: String) throws -> Substring {
+        let start = try XCTUnwrap(source.range(of: function), "missing \(function)")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    private func ")?.lowerBound ?? rest.endIndex
+        return rest[..<end]
+    }
+
+    /// The server approval is reserved synchronously, in the click handler,
+    /// before its Task is scheduled: the toggles lock at the click, so a
+    /// selection change can no longer slip in between the captured decision
+    /// and the request (Sol r1 #1).
+    func testServerApprovalIsReservedBeforeItsTaskIsScheduled() throws {
+        let source = try sheetSource()
+        let send = try body(of: "private func send(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) {", in: source)
+        let begin = try XCTUnwrap(send.range(of: "guard attempts.begin(decision) else { return }"))
+        let task = try XCTUnwrap(send.range(of: "Task {"))
+        XCTAssertLessThan(begin.lowerBound, task.lowerBound)
+        let approve = try body(of: "private func approve(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) async {", in: source)
+        XCTAssertFalse(approve.contains("attempts.begin("), "the async request must not be the place the attempt is reserved")
+        // Every entry point goes through send: the click, the blind and the force confirmation.
+        XCTAssertEqual(source.components(separatedBy: "Task { await approve(").count - 1, 1, "approve(...) must only be scheduled by send(...)")
+        XCTAssertTrue(send.contains("Task { await approve(decision, force: force) }"))
+        XCTAssertTrue(source.contains("send(decision, force: true)"))
+        XCTAssertTrue(source.contains("send(decision, force: false)"))
+    }
+
+    /// Per-tool Approve is reserved at the click and disabled while in flight (Sol r1 #2).
+    func testPerToolApprovalIsReservedAtTheClickAndDisabledInFlight() throws {
+        let source = try sheetSource()
+        let button = try XCTUnwrap(source.range(of: "Button(\"Approve\") {"))
+        let after = source[button.upperBound...].prefix(700)
+        let begin = try XCTUnwrap(after.range(of: "guard toolApprovals.begin(tool.name) else { return }"))
+        let task = try XCTUnwrap(after.range(of: "Task {"))
+        XCTAssertLessThan(begin.lowerBound, task.lowerBound)
+        XCTAssertTrue(after.contains(".disabled(toolApprovals.isApproving(tool.name))"))
+        let approveTool = try body(of: "private func approveTool(_ name: String, expected: [String: String]?) async {", in: source)
+        XCTAssertTrue(approveTool.contains("defer { toolApprovals.finish(name) }"))
+    }
 }

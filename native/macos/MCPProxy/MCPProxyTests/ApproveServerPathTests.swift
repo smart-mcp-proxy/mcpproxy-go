@@ -166,7 +166,7 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertTrue(source.contains("status == 409"))
         XCTAssertTrue(source.contains("message.localizedCaseInsensitiveContains(\"dangerous\")"))
         XCTAssertTrue(source.contains("showForceApprovalConfirmation = true"))
-        XCTAssertTrue(source.contains("approve(decision, force: true)"))
+        XCTAssertTrue(source.contains("send(decision, force: true)"))
         XCTAssertTrue(source.contains("Button(\"Reject Server\", role: .destructive)"))
         XCTAssertTrue(source.contains("securityRejectServer(serverName)"))
         XCTAssertTrue(source.contains("Text(tool.scanVerdict)"))
