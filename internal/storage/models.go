@@ -312,23 +312,30 @@ const MaxToolHeldSignals = 16
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName           string                  `json:"server_name"`
-	ToolName             string                  `json:"tool_name"`
-	ApprovedHash         string                  `json:"approved_hash"`
-	CurrentHash          string                  `json:"current_hash"`
-	HashSchemaVersion    uint64                  `json:"hash_schema_version,omitempty"`
-	Status               string                  `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt           time.Time               `json:"approved_at"`
-	ApprovedBy           string                  `json:"approved_by"`
-	PreviousDescription  string                  `json:"previous_description,omitempty"`
-	CurrentDescription   string                  `json:"current_description,omitempty"`
-	PreviousAnnotations  *config.ToolAnnotations `json:"previous_annotations,omitempty"`
-	CurrentAnnotations   *config.ToolAnnotations `json:"current_annotations,omitempty"`
-	PreviousSchema       string                  `json:"previous_schema,omitempty"`
-	CurrentSchema        string                  `json:"current_schema,omitempty"`
-	PreviousOutputSchema string                  `json:"previous_output_schema,omitempty"`
-	CurrentOutputSchema  string                  `json:"current_output_schema,omitempty"`
-	Disabled             bool                    `json:"disabled,omitempty"`
+	ServerName        string `json:"server_name"`
+	ToolName          string `json:"tool_name"`
+	ApprovedHash      string `json:"approved_hash"`
+	CurrentHash       string `json:"current_hash"`
+	HashSchemaVersion uint64 `json:"hash_schema_version,omitempty"`
+	// CurrentHashSchemaVersion is the hash formula version CurrentHash was
+	// computed with, stamped by every runtime write that recomputes
+	// CurrentHash. Zero means unknown (a record written before this field
+	// existed). ApproveCurrentHash uses it so an approval that copies
+	// CurrentHash into ApprovedHash carries the version of the hash it copied
+	// (red-team RT-03, Sol r4 P1). Additive and omitted when zero.
+	CurrentHashSchemaVersion uint64                  `json:"current_hash_schema_version,omitempty"`
+	Status                   string                  `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt               time.Time               `json:"approved_at"`
+	ApprovedBy               string                  `json:"approved_by"`
+	PreviousDescription      string                  `json:"previous_description,omitempty"`
+	CurrentDescription       string                  `json:"current_description,omitempty"`
+	PreviousAnnotations      *config.ToolAnnotations `json:"previous_annotations,omitempty"`
+	CurrentAnnotations       *config.ToolAnnotations `json:"current_annotations,omitempty"`
+	PreviousSchema           string                  `json:"previous_schema,omitempty"`
+	CurrentSchema            string                  `json:"current_schema,omitempty"`
+	PreviousOutputSchema     string                  `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema      string                  `json:"current_output_schema,omitempty"`
+	Disabled                 bool                    `json:"disabled,omitempty"`
 
 	// DefinitionChangedAt is when the stored CurrentDescription,
 	// CurrentSchema or CurrentOutputSchema last differed from the prior
@@ -435,6 +442,19 @@ func (r *ToolApprovalRecord) SetScanHold(reason, verdict string, signals []strin
 		return
 	}
 	r.HeldSignals = out
+}
+
+// ApproveCurrentHash copies CurrentHash into ApprovedHash. HashSchemaVersion
+// follows the copied hash: it takes CurrentHashSchemaVersion when that is known
+// and is kept otherwise. A legacy hint-free CurrentHash must not be stamped as
+// the hint-aware version (Sol r2 P1), and a CurrentHash this binary recomputed
+// must not keep a legacy version whose unknown-hints wildcard would let a later
+// annotation flip match it unchecked (Sol r4 P1).
+func (r *ToolApprovalRecord) ApproveCurrentHash() {
+	r.ApprovedHash = r.CurrentHash
+	if r.CurrentHashSchemaVersion != 0 {
+		r.HashSchemaVersion = r.CurrentHashSchemaVersion
+	}
 }
 
 // ClearScanHold drops any scan-hold evidence. Called on every transition out of

@@ -451,9 +451,9 @@ func (b *BoltDB) SaveIntegrityBaselineWithBlocks(baseline *scanner.IntegrityBase
 				return fmt.Errorf("decode tool approval %q: %w", block.ToolName, err)
 			}
 			record.Status = ToolApprovalStatusApproved
-			record.ApprovedHash = record.CurrentHash
-			// Keep HashSchemaVersion: it describes CurrentHash's formula, which
-			// copying the hash does not recompute (red-team RT-03, Sol r2 P1).
+			record.ApproveCurrentHash()
+			// HashSchemaVersion follows the copied hash's formula (red-team
+			// RT-03, Sol r2 and r4 P1; see ApproveCurrentHash).
 			record.ApprovedAt = block.ApprovedAt
 			record.ApprovedBy = block.ApprovedBy
 			record.PreviousDescription = ""
