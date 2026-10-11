@@ -83,3 +83,14 @@ func TestRegistryViewPrecomputesPhraseText(t *testing.T) {
 		t.Fatal("MatchText must fall back to NormalizedText")
 	}
 }
+
+// TestFoldConfusables_AdjacentLookalikeWordsAreOrderIndependent: whether a
+// whole-look-alike word folds depends only on pass-1 neighbours, so adjacent
+// ambiguous words fold the same way in either order (review round 3).
+func TestFoldConfusables_AdjacentLookalikeWordsAreOrderIndependent(t *testing.T) {
+	a := NormalizeForPhrase("please make a summary сору сору")
+	b := NormalizeForPhrase("сору сору please make a summary")
+	if a != "please make a summary copy сору" || b != "сору copy please make a summary" {
+		t.Fatalf("order-dependent folding: %q / %q", a, b)
+	}
+}

@@ -215,11 +215,12 @@ func foldConfusables(s string) string {
 	// resolvedLatin reports whether token ti reads as a Latin word AFTER pass 1:
 	// a mixed word restored to Cyrillic ("Игнoрируй" → "игнорируй") is not a
 	// Latin neighbour, even though it contained a Latin letter.
+	pass1 := append([]int(nil), dir...) // pass 2 reads an immutable snapshot
 	resolvedLatin := func(ti int) bool {
 		if ti < 0 || ti >= len(toks) {
 			return false
 		}
-		switch dir[ti] {
+		switch pass1[ti] {
 		case foldLatin:
 			return true
 		case foldCyr, undecided:
