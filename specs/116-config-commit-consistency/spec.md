@@ -145,13 +145,15 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 
 - **FR-001**: `Runtime.Commit(reason string, fn func(*CommitTx) error) (*CommitResult, error)` MUST hold `configCommitMu` from reading the live config until publication. Steps 1-8 MUST run in the order given in [plan.md](plan.md) §Commit pipeline.
 - **FR-001a**: a commit MUST diff `next` against both `base` (config diff: generations, publish, events) and the stored view (projection diff: storage writes). It MAY skip steps 4-8 only when both diffs are empty and neither `Bootstrap()` (boot reconcile: seed generations from matching stored rows, schedule workers for every enabled server) nor `ForceDisk()` (`SaveConfiguration`) was requested. The `configsvc` pre-publish hook MUST be removed. Admission runs only in step 2.
-- **FR-002**: `CommitTx` MUST provide `Server`, `CreateServer`, `UpdateServer(name, fn)`, `SetEnabled`, `SetQuarantined`, `RemoveServer`, `ReplaceConfig`, `MutateGlobal`, `ExpectGeneration(name, g)` and `ExpectIncarnation(name, inc)`. Existence and `exists` checks MUST use the commit's working copy of the live config, never storage alone.
+- **FR-001b**: `ReplaceConfig(cfg)` MUST only receive a config the caller submitted in the same call, or the file read inside the lock. Reconciliation MUST use `ReconcileLive()`, which takes no argument. The captured-argument form of `LoadConfiguredServers` MUST be deleted (D14).
+- **FR-002**: `CommitTx` MUST provide `Server`, `CreateServer`, `UpdateServer(name, fn)`, `SetEnabled`, `SetQuarantined`, `RemoveServer`, `ReplaceConfig`, `ReconcileLive`, `MutateGlobal`, `ExpectGeneration(name, g)` and `ExpectIncarnation(name, inc)`. Existence and `exists` checks MUST use the commit's working copy of the live config, never storage alone.
 - **FR-003**: these MUST be `Commit` callers: `ApplyConfig`, `ReloadConfiguration` (one publish: the raw file is never published unpinned), the boot reconcile, `UpdateConfig`, `UpdateListenAddress`, `SaveConfiguration`, REST add/update/patch/enable/disable/quarantine/unquarantine/remove, MCP `upstream_servers` add/update/patch/remove, MCP `quarantine_security quarantine_server`, `BulkEnableServers`, `SetServerShared`, registry source add/edit/remove, the `RestartServer` disk refresh, and `gateInitialConfig`.
 - **FR-004**: `SaveConfiguration` MUST NOT read the server list from storage. It MUST persist the live snapshot, keeping today's pending-aware handling.
 - **FR-005**: reconcile (today `LoadConfiguredServers`) MUST run inside the commit against the commit's working copy. Orphan GC of tool approvals and call history MUST use that copy. The empty-set guard applies only at boot.
 - **FR-006**: REST PATCH and MCP update/patch MUST resolve omitted fields, map merges, isolation and forward-header validation inside `UpdateServer`'s callback, on a copy of the live entry (including `Shared` and `AuthBroker`).
 - **FR-007**: every server change MUST land in one bbolt transaction, together with the generation stamps and `meta.config_commit_generation`.
 - **FR-008**: a newly quarantined server MUST be purged from the global and per-profile indexes inside the commit, whatever path set the flag (fixes B1 and r10-C #2).
+- **FR-008a**: every discovery pass MUST perform its final eligibility check (the row exists, `Generation` equals the generation it captured, and the server is not quarantined or disabled) and **all** of its index, StateView and last-good writes in one hold of the server's approval lock (D15).
 - **FR-009**: `scripts/check-upstream-write-sites.sh` MUST fail when `upstreams` rows are written outside `internal/storage`, `internal/runtime/commit*.go` and tests. It MUST run in CI.
 - **FR-010a**: `CommitTx.UnderApprovalLock(name, fn)` MUST run `fn` in step 4 while holding `name`'s approval lock, in the same lock hold as step 6's row write. It is the integration point for Spec 117's review-bound server approval. The storage quarantine flip MUST only ever be the commit's row write.
 - **FR-010**: `configsvc` MUST compute `ServerGenerations` at prepare time. An unchanged entry keeps its generation, and a new or changed entry gets `G`. Generations MUST be monotonic across restarts.
@@ -159,7 +161,7 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 ### Functional Requirements: Removal and purge (PR2)
 
 - **FR-011**: `CommitTx.RemoveServer` MUST, inside the commit and under the server's approval lock, delete the row and the whole purge set in one bbolt transaction. OAuth keys MUST match exactly: `name` or `name + "_" + 16 lowercase hex` (fixes B2).
-- **FR-012**: the removal commit MUST also purge the server from the global and per-profile search indexes. It MUST cancel the OAuth refresh schedule, revoke the inspection exemption, drop the toolsig cache and the discovery generation, and unregister the manager instance.
+- **FR-012**: the removal commit MUST also purge the server from the global and per-profile search indexes. It MUST cancel the OAuth refresh schedule, revoke the inspection exemption, drop the toolsig cache, the discovery generation and `lastGoodTools`/`lastCaptureAt`, and unregister the manager instance.
 - **FR-013**: REST `DELETE /api/v1/servers/{id}`, MCP `upstream_servers remove` and config-driven removal (ApplyConfig, file reload, boot) MUST all use FR-011/FR-012. The asynchronous removal goroutines MUST be deleted.
 - **FR-014**: approval writers (`ApproveTools`, baseline approval on unquarantine, block/unblock, prompt approve/block, scanner baseline+blocks, discovery's `checkToolApprovals` and quarantined capture) MUST capture the incarnation and re-check it against the storage row under the server's approval lock. On a mismatch they MUST write nothing and return `ErrServerReplaced`.
 - **FR-014a**: scan jobs and reports MUST record the incarnation they were started for and MUST be persisted with an incarnation-conditional storage write (row exists and matches, in the same bbolt tx). `approveServer` MUST read only reports of the current incarnation. Removal MUST invalidate the scan-summary cache.
@@ -177,11 +179,13 @@ An operator removes server `acme` with REST, MCP or a config edit. They later ad
 
 ### Functional Requirements: Retirement barrier (PR4)
 
+- **FR-021b**: cached tool snapshots (`lastGoodTools`) MUST carry `{Incarnation, Gen}`. A reapply (sweep fallback or approval reindex) MUST reject a snapshot whose stamp differs from the current row.
 - **FR-022**: each `managed.Client` instance MUST own a `dialgate.Gate`. Step 7 MUST call `Retire()` on every instance it unregisters, before publishing (step 8).
 - **FR-023**: `exec.Cmd.Start` for stdio, the Docker isolation launch and the launcher spawn MUST run under `Gate.Admit`.
 - **FR-023a**: every mcp-go `transport.Interface` that core builds (stdio, streamable HTTP, SSE) MUST be wrapped by `dialgate.WrapTransport`, which gates `Start`, `SendRequest` and `SendNotification`. For stdio, `Retire` MUST also kill the process group (Windows: terminate the Job Object) synchronously.
 - **FR-024a**: every OAuth preflight, resource auto-detect, metadata discovery and cache fetch MUST use the instance transport through `oauth.Env`. CI MUST reject `http.Get/Head/Post(`, `http.DefaultClient`, `http.DefaultTransport` and transport-less `&http.Client{` in `internal/oauth/**`, `internal/upstream/core/**` and `internal/transport/**` outside an allowlist.
 - **FR-024**: HTTP and SSE MCP traffic MUST use a per-instance `*http.Transport` whose `DialContext` is gated and whose connections gate every `Write`. The OAuth `HTTPClient` (metadata, DCR, authorization-code exchange, refresh) MUST use the same instance transport. `Manager.RefreshOAuthToken` and manual OAuth MUST refuse to run against an unregistered or retired instance.
+- **FR-025a**: the gate's read lock MUST be held only around one leaf operation (a dial syscall, one conn `Write`, or `cmd.Start` + process registration) and never nested. `WrapTransport` MUST NOT take the lock. Stdio process-group/Job registration and `TrackProcess` MUST happen inside the admitted launch section. A failed Job assignment MUST kill the child inside the section. `Retire` MUST kill tracked processes before **and** after its barrier.
 - **FR-025**: `Retire()` MUST be bounded. It sets the latch, cancels the gate context, closes tracked connections, then runs a write-lock barrier. It MUST log a warning when it takes more than 1 s.
 - **FR-026**: tool calls, `tools/list`, health probes and ambiguous-call probes on a retired instance MUST fail with `ErrRetired` and MUST NOT mark the current instance unhealthy.
 
@@ -260,4 +264,8 @@ See [data-model.md](data-model.md): `CommitTx`, `CommitResult`, `PreparedSnapsho
 | Review R1.3 stdio writes after retire | FR-023a | PR4 | T4.8 |
 | Review R1.4 OAuth preflight clients | FR-024a | PR4 | T4.9 |
 | Review R1.5 stale supervisor disconnect | FR-018 | PR3 | T3.6 |
-| Review R1.6 boot / no-op commits | FR-001a | PR1 | T1.10 |
+| Review R1.6 boot / no-op commits | FR-001a | PR1 | T1.10 (regression) |
+| Review R2.1 stale replacement | FR-001b | PR1 | T1.1 |
+| Review R2.2 discovery re-index after purge | FR-008a | PR1 | T1.12 |
+| Review R2.3/R2.4 gate nesting, stdio launch handoff | FR-025a | PR4 | T4.10, T4.11 |
+| Review R2.5 last-good snapshot after re-add | FR-012, FR-021b | PR2, PR3 | T2.10, T3.7 |

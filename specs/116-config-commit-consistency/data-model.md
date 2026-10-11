@@ -31,7 +31,8 @@ func (tx *CommitTx) UpdateServer(name string, fn func(cur *config.ServerConfig) 
 func (tx *CommitTx) SetEnabled(name string, enabled bool) error
 func (tx *CommitTx) SetQuarantined(name string, q bool) error            // stamps the explicit bit (#937)
 func (tx *CommitTx) RemoveServer(name string) error                      // ErrServerNotFound
-func (tx *CommitTx) ReplaceConfig(cfg *config.Config)                    // ApplyConfig / Reload / boot
+func (tx *CommitTx) ReplaceConfig(cfg *config.Config)                    // authoritative only: caller-submitted or file read under the lock (D14)
+func (tx *CommitTx) ReconcileLive()                                      // projection repair of the base; no argument
 func (tx *CommitTx) ExpectGeneration(name string, gen int64) error       // ErrServerReplaced at commit time
 func (tx *CommitTx) ExpectIncarnation(name string, inc int64) error      // ErrServerReplaced at commit time
 func (tx *CommitTx) Bootstrap()   // boot only: seed generations from matching stored rows; schedule all enabled servers (D13)
@@ -196,7 +197,7 @@ type PurgeReport struct {
 The in-memory purge runs in the same commit, after the transaction:
 search-index `DeleteServerTools` + `reindexAffectedProfiles`,
 `RefreshManager.OnTokenCleared`, `Supervisor.RevokeInspectionExemption`, the
-toolsig cache drop and `discoveryGeneration` reset. Call stats and the limiter
+toolsig cache drop, `discoveryGeneration` reset, and `lastGoodTools`/`lastCaptureAt` deletion (review R2.5). Call stats and the limiter
 are already dropped by manager unregistration.
 
 ## 4. Manager generations (PR3), `internal/upstream`
@@ -265,7 +266,7 @@ func (g *Gate) DialContext(next func(ctx context.Context, network, addr string) 
 func (g *Gate) Transport(base *http.Transport) *http.Transport                // Clone + gated DialContext (+ DialTLSContext if set)
 func (g *Gate) Context() context.Context
 func (g *Gate) Retire()                                                       // idempotent, bounded
-func (g *Gate) OnRetire(fn func())                                            // stdio: kill the process group synchronously
+func (g *Gate) TrackProcess(p ProcessHandle)                                  // called inside the admitted launch section (pgid / Job handle)
 func WrapTransport(g *Gate, t transport.Interface) transport.Interface         // gates Start/SendRequest/SendNotification
 func (g *Gate) Retired() bool
 func (g *Gate) RetireWaiting() bool // test probe: Retire is blocked on an admitted section
@@ -274,8 +275,13 @@ type gatedConn struct{ net.Conn; g *Gate }
 func (c *gatedConn) Write(b []byte) (int, error) // RLock; if retired → ErrRetired; Conn.Write; RUnlock
 ```
 
+The read lock is held only around **one leaf operation** (a dial syscall, one
+`Write`, or `cmd.Start` + process registration + `TrackProcess`) and is never
+nested. `WrapTransport` takes no lock (review R2.3).
+
 The order inside `Retire`: `retired.Store(true)` → `cancel()` → close every
-tracked conn → `mu.Lock(); mu.Unlock()`. Any section admitted before
+tracked conn → kill every tracked process → `mu.Lock(); mu.Unlock()` → kill
+anything tracked during the drain → poll ≤1 s for exit (review R2.4). Any section admitted before
 `retired` was set has finished by the time the barrier returns, because its
 conn is closed or its `cmd.Start` has returned. Any later `RLock` observes
 `retired`.

@@ -508,3 +508,42 @@ The commit skips work only when both are empty and nothing is forced. Boot
 forced cases. Generations survive restarts through the row stamps: at boot a
 row whose content equals the file entry keeps its stored `{Gen, Incarnation}`,
 and everything else gets the boot `G`.
+
+## 8. Design review round 2 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Verdict: FINDINGS (6). All were verified and accepted. Round 1's resolutions
+were not disputed, except where R2.3, R2.4 and R2.6 refine them.
+
+| # | Sev | Finding | Resolution |
+|---|---|---|---|
+| R2.1 | high | `ReplaceConfig(old)` from a caller holding a stale captured config would still delete B. The real #1558 path is the **post-publish** async reconcile (`runtime.go:2075`, `:2104-2106`), not a replacement | **D14**: two different ops. `ReplaceConfig(cfg)` is authoritative and used only with a config the caller owns and submitted in this call (PUT/apply body, the file read inside the lock by reload, boot). `ReconcileLive()` takes **no argument** and reconciles the base read inside the lock. `LoadConfiguredServers(cfg)`'s captured-argument form is deleted, and ApplyConfig/Reload reconcile inside their own commit. T1.1 parks the real downstream path: a `reconcileEntry` seam at today's `LoadConfiguredServers` entry (`lifecycle.go:1396`), which T001 adds on `main` as test infrastructure |
+| R2.2 | high | Discovery checks approvals under L1 but indexes **after** releasing it (`lifecycle.go:1018-1040`). A pass that checked before the commit can re-index a server the commit has just purged (quarantine or removal) | **D15**: a discovery pass's final eligibility check (row `Generation` == captured generation, not quarantined/disabled, row present) **and** its index/StateView/last-good writes run under L1 in one hold. The commit's step 6 bumps the row generation and purges under the same L1, so a pass either finishes before the purge (and is purged) or sees the new generation and writes nothing. Index writes under L1 are already allowed (L1 → L1'). This is the same rule as Spec 117 G8. Whichever PR lands first implements it: 116 PR1 T024a, or 117 PR-3 |
+| R2.3 | high | Wrapping whole transport operations with the same `RWMutex` that dials and writes take recursively nests `RLock`, deadlocking behind a queued `Retire`, and would make `Retire` wait for responses | **D8 rule**: the gate `RWMutex` read side is held **only around one leaf operation**: a dial syscall, one `net.Conn.Write`, or `cmd.Start` + process registration. It is never held while calling code that can itself admit. `WrapTransport` takes **no lock**: it checks the atomic latch and merges the gate context into the operation context. The byte-level gate gives the ordering guarantee. Test T4.10: retire while an admitted request is about to enter its nested dial and write |
+| R2.4 | high | The process group and Windows Job are registered **after** `Start` returns (`connection_stdio.go:259-275`, `process_windows.go:40-43`), so a kill hook can miss a just-launched child | **D8 rule**: the admitted stdio section is `cmd.Start` **plus** process-group / Job registration **plus** `gate.TrackProcess(handle)`, all under one read lock. If Job assignment fails, the child is killed inside the section and Start fails. `Retire` order: latch → cancel ctx → close conns → kill every tracked process (closing their pipes) → write-lock barrier (waits for in-flight launch sections) → **kill again** anything registered during the drain → poll ≤1 s for exit. A stdin write blocked on a full pipe is unblocked by the kill |
+| R2.5 | high | `lastGoodTools`/`lastCaptureAt` are keyed by name and survive removal. A fast re-add can reapply the old snapshot through the sweep fallback (`lifecycle.go:2659-2680`) or the approval reindex (`tool_quarantine.go:2006-2027`) | Added to the in-memory purge (FR-012). Cached snapshots are stamped with `{Incarnation, Gen}`, and reapply rejects a mismatch (FR-021b, T063a) |
+| R2.6 | medium | T2.7 parks inside `checkToolApprovals` (it holds L1, which removal needs). T1.10 already passes on `main`. T1.5's stale read is the append copy at `config_cow.go:93`, not the existence check | T2.7 parks at a new `beforeApprovalLock` seam. T1.10 is reclassified as regression coverage (not failing-first). T1.5 parks after the `Config()` read at line 93, before `UpdateConfig` |
+
+### D14. Authoritative replacement versus reconciliation
+
+| Op | Input | Used by |
+|---|---|---|
+| `ReplaceConfig(cfg)` | a config the caller submitted **in this call**, or the file read inside the lock | `ApplyConfig` (PUT/apply), `ReloadConfiguration`, boot |
+| `ReconcileLive()` | none (base read under the lock) | projection repair: periodic/explicit reconcile, after-restart repair |
+
+No API accepts a previously captured snapshot as a replacement.
+
+### D15. Discovery writes are generation-checked under the approval lock
+
+```
+discovery pass (any trigger), per server:
+  capture tools + (inc, gen) of the instance
+  lock L1(name)
+    row := storage upstream row
+    if row missing || row.Generation != gen || row quarantined/disabled → record-for-review only (117 rules) / drop; unlock
+    checkToolApprovals (inc check, D10)
+    index mutation + StateView publish + lastGoodTools{inc,gen}
+  unlock L1(name)
+```
+
+The order L3(R) → L1 (today's capture path) or L1 → L3(R) (Spec 117 PR-3) is
+unchanged. `Commit` still never holds L1 and L3 together.

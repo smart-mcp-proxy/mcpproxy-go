@@ -55,15 +55,16 @@ go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEn
 
 | ID | Park | Competing commit | Assert after release |
 |---|---|---|---|
-| T1.1 | stale-read: reload/apply caller parked at `beforeCommit` **after** capturing the pre-B config (today's `ApplyConfig` async goroutine captures `&configCopy`) | REST add B, approve all, block one tool, record one call | B row, approvals, block and history present. Rediscovery keeps the block. Same with an `ApplyConfig` that removes A in the parked commit: A gone, B intact |
+| T1.1 | stale-read: `ApplyConfig` returns; its downstream reconcile is parked at the `reconcileEntry` seam (`LoadConfiguredServers` entry on `main`; inside the apply commit after PR1, where the add of B then blocks on L0) | REST add B, approve all, block one tool, record one call | B row, approvals, block and history present. Rediscovery keeps the block. Same with an `ApplyConfig` that removes A in the parked commit: A gone, B intact |
 | T1.2 | `ApplyConfig` (quarantine and disable A) at `afterStorage` | none (the stale-snapshot window no longer exists). Then toggle B | A quarantined and disabled in live, storage, disk and manager. B toggled. No async reconcile goroutine exists (assert with the goroutine-count probe) |
 | T1.3 | REST PATCH `{args}` at `restPatchAfterParse` | MCP patch sets `trust_mode: manual`, removes the forwarding allowlist, disables, adds env K2. REST PUT adds header H2 | PATCH result has the new args **and** manual trust, no allowlist, disabled, K2, H2. Repeat with MCP update parked inside its callback (it must block on L0, not read early) |
 | T1.4 | stale-read: reconcile caller parked at `beforeCommit` holding an explicit `quarantined:false` | `QuarantineServer(name,true)` | quarantined in all stores, tools absent from global and profile index, `SaveUpstreamKeepingQuarantine` never refuses |
-| T1.5 | stale-read: `upstream_servers add` parked at `beforeCommit` (today, after `createServer` reads `Config()`) | `ApplyConfig` changing `profiles` | the profiles change survives. The add's server is present. Previously `config_cow.go:74` would publish a copy of the stale `Config()` |
+| T1.5 | stale-read: `upstream_servers add` parked after the `Config()` read at `config_cow.go:93`, before `UpdateConfig` (after PR1 the seam sits before `Commit`) | `ApplyConfig` changing `profiles` | the profiles change survives. The add's server is present. Previously `config_cow.go:74` would publish a copy of the stale `Config()` |
 | T1.6 | none | MCP `quarantine_security quarantine_server` on an indexed trusted server | `retrieve_tools` returns 0 hits for its tools immediately after the call returns (B1) |
 | T1.7 | none | REST and MCP patches of a `Shared=true` + `auth_broker` server | both fields survive in live and on disk (r9-B #2) |
 | T1.8 | n/a | static | `scripts/check-upstream-write-sites.sh` fails on a planted direct `SaveUpstreamServer` in `internal/server`, and passes on the PR |
-| T1.10 | n/a | boot with an empty storage and manager; an unchanged `SaveConfiguration` | rows written, every enabled server scheduled, file written (FR-001a, R1.6) |
+| T1.10 | n/a (regression coverage; passes on `main`) | boot with an empty storage and manager; an unchanged `SaveConfiguration` | rows written, every enabled server scheduled, file written (FR-001a, R1.6) |
+| T1.12 | discovery pass parked after `checkToolApprovals`, before its index write (`lifecycle.go:1028`) | `QuarantineServer(true)` returns | after release: no tool of the server is in the global or profile index (FR-008a, R2.2) |
 | T1.11 | exclusion: removal parked at `afterStorage` | B toggle, REST update and MCP patch of the removed server, started in goroutines | all three are blocked (`commitWaiters()==3`). After release: the toggle succeeds, both updates get 404, the server never reappears (formerly T2.3, regression coverage) |
 | T1.9 | n/a | restart | after a restart, `Snapshot.Version` is greater than or equal to the persisted `meta.config_commit_generation`, and generations of unchanged servers are kept |
 
@@ -84,7 +85,8 @@ tokens.
 | T2.6 | `foo` and `foo_bar` both with tokens; remove `foo` | `foo_bar`'s token readable (B2) |
 | T2.8 | scanner job for old `acme` parked before its report callback | remove and re-add `acme`, then release: no job or report for the new incarnation; unforced approve refused (R1.1) |
 | T2.9 | `SaveToken` parked after its context check (code exchange) | remove and re-add `acme` (same URL), then release: no token stored; the old schedule dropped (R1.2) |
-| T2.7 | discovery pass for old `acme` parked inside `checkToolApprovals` before writing | remove and re-add, then release: no records with the old incarnation are written |
+| T2.10 | none | remove `acme` and re-add it immediately; make its first discovery fail | the sweep fallback does not reapply the old `lastGoodTools` (R2.5) |
+| T2.7 | discovery pass for old `acme` parked at `beforeApprovalLock` | remove and re-add, then release: no records with the old incarnation are written |
 
 ## T3: Generation-bound workers (PR3)
 
@@ -95,6 +97,7 @@ tokens.
 | T3.3 | supervisor `ActionConnect` and `ActionReconnect` at `beforeExecuteAction` | remove, replace or quarantine | the action is a no-op. The manager holds only the latest generation |
 | T3.4 | `RestartServer(s)` worker parked | remove s | no client for s |
 | T3.5 | (a) capture parked **before** `WithCurrentClientOnEpoch`; (b) capture parked inside it | (a) replace the endpoint, commit returns, release capture; (b) start the commit, assert `CaptureReplacementQueued()`, release capture, await commit | (a) the capture finds the instance unregistered and persists nothing; (b) the capture completed before the replacement (the old definitions are recorded under the old incarnation and then superseded). No `review.changed` for old definitions after the commit |
+| T3.7 | approval reindex with a cached snapshot stamped with an old `Gen` | the endpoint changes | reapply rejected; re-list instead (FR-021b) |
 | T3.6 | old `ActionDisconnect` at `beforeExecuteAction` | the newer commit installs and connects the replacement | release: `DisconnectServerAt` returns `ErrStaleGeneration`, the replacement stays connected (R1.5) |
 
 ## T4: Retirement barrier (PR4)
@@ -118,6 +121,8 @@ Fixtures (test-only):
 | T4.6 | a tool call in flight on an instance being retired | retire | the call fails as unavailable. The replacement instance's health is unaffected |
 | T4.8 | `SendRequest` on a launched stdio instance, parked before the gate | retire | `ErrRetired`, nothing on the child's stdin, process group dead when `Retire` returns (R1.3) |
 | T4.9 | `preflightPRMScopes`, `autoDetectResource`, `httpFetchRaw` parked before send | retire | zero hits (R1.4) |
+| T4.10 | an admitted HTTP request about to enter its nested dial and write | `Retire` | no deadlock: `Retire` returns ≤1 s, the nested dial/write gets `ErrRetired` (R2.3) |
+| T4.11 | stdio launch parked between `cmd.Start` and group/Job registration (inside the admitted section) | `Retire` (asserts `RetireWaiting()`), release | the child is killed before `Retire` returns; on Windows, a failed Job assignment kills the child and Start fails (R2.4) |
 | T4.7 | benchmark | — | `BenchmarkGatedConnWrite` shows < 5% overhead against an ungated conn on a 1 KiB write |
 
 ## Live checks (qa070 harness)
