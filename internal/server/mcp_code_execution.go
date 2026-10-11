@@ -1037,6 +1037,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	} else {
 		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
+	u.proxy.noteUpstreamDispatched(err) // each JS sub-call is one attempt; nil-safe
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)
@@ -1076,6 +1077,8 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			}
 		}
 	}
+	// Activation: only after the output policy above let the result through.
+	u.proxy.noteUpstreamSuccess(result, err)
 	duration := time.Since(startTime)
 
 	// Record the tool call with timing and result. Issue #935: code_execution

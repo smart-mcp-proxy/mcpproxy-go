@@ -163,9 +163,8 @@ func TestRealToolCall_MarksFirstRealToolCallEver(t *testing.T) {
 	require.True(t, after2.FirstRealToolCallEver)
 }
 
-// An ATTEMPTED call must not mark activation. recordUpstreamTool runs at the top
-// of handleCallToolVariant — before validation, quarantine checks, connectivity,
-// and the upstream call itself — so a call that is malformed, blocked by
+// An ATTEMPTED call must not mark activation. recordUpstreamTool counts a
+// dispatch attempt — separate from success — so a call that is malformed, blocked by
 // quarantine, aimed at a disabled tool, or sent to a disconnected server reaches
 // it and then fails.
 //

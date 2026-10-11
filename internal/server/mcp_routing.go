@@ -697,6 +697,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		} else {
 			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
+		p.noteUpstreamDispatched(err) // one attempt per actual dispatch
 		callerr.Observe(ctx, result, err)
 		fwdOut := fwdSink.Outbound()
 
@@ -812,6 +813,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
 		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, scrubForRecord(responseText, fwdOut), truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
+
+		// Activation: same success contract as call_tool_* (usable result only).
+		if activityStatus == "success" {
+			p.recordRealToolCallSuccess()
+		}
 
 		return forwarded, nil
 	}
