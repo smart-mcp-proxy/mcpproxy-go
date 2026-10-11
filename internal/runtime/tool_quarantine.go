@@ -331,6 +331,51 @@ func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.
 	}
 }
 
+// refreshHeldContractSnapshot records a further change to an already-held
+// (changed) contract: the Current* snapshot is replaced with the live
+// contract, stale scan-hold evidence of the superseded contract is dropped,
+// and a tool_description_changed event names the move. ApprovedHash,
+// HashSchemaVersion and the Previous* (approved-contract) evidence are kept,
+// so the record stays changed until an operator confirms or the server
+// reverts. A no-op when the live contract is the recorded one.
+func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) {
+	if existing == nil || existing.CurrentHash == currentHash {
+		return
+	}
+	contentMoved := existing.CurrentDescription != tool.Description ||
+		existing.CurrentSchema != schemaJSON ||
+		existing.CurrentOutputSchema != outputSchemaJSON ||
+		!reflect.DeepEqual(existing.CurrentAnnotations, tool.Annotations)
+	oldHash, oldDesc, oldSchema := existing.CurrentHash, existing.CurrentDescription, existing.CurrentSchema
+	existing.CurrentHash = currentHash
+	existing.CurrentDescription = tool.Description
+	existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
+	existing.CurrentSchema = schemaJSON
+	existing.CurrentOutputSchema = outputSchemaJSON
+	if contentMoved {
+		existing.ClearScanHold()
+	}
+	if r.storageManager == nil {
+		return
+	}
+	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
+		r.logger.Error("Failed to refresh the held contract snapshot",
+			zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
+		return
+	}
+	if !contentMoved {
+		return
+	}
+	r.logger.Warn("Held tool contract changed again while awaiting confirmation",
+		zap.String("server", serverName),
+		zap.String("tool", toolName),
+		zap.String("approved_hash", existing.ApprovedHash),
+		zap.String("previous_current_hash", oldHash),
+		zap.String("current_hash", currentHash))
+	r.emitToolQuarantineEvent(serverName, toolName, "tool_description_changed",
+		oldHash, currentHash, oldDesc, tool.Description, oldSchema, schemaJSON)
+}
+
 // collectPeerToolMetadata returns every OTHER connected server's current tools,
 // keyed by server name, projected onto config.ToolMetadata for the synchronous
 // scan gate. It is the cross-server context that lets the peer-dependent
@@ -1042,6 +1087,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				}
 				continue
 			}
+			// The held contract moved on again (A → held B → held C, Sol r3
+			// P2): refresh the Current* snapshot so review output and the
+			// ingested-contract scan input (RT-06) describe what the server
+			// serves now. ApprovedHash and the Previous* evidence of the
+			// approved contract stay untouched, so the record stays changed
+			// and a revert to the approved contract is still recognised.
+			r.refreshHeldContractSnapshot(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash)
 			// trust_mode: scan (spec 086 stage 2, tightened by RT-02): a
 			// still-changed record is never re-baselined by the scan. The scan
 			// re-runs only to keep the hold evidence current (FR-018): matched
