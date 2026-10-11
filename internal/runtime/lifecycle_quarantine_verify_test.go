@@ -65,3 +65,26 @@ func TestRT05_QuarantinedServer_ContractChangeDetectedDuringQuarantine(t *testin
 	require.NoError(t, err)
 	assert.Empty(t, indexed, "a quarantined server's tools must never be indexed")
 }
+
+// TestRT05_NeverApprovedQuarantinedServer_ReviewStaysUncaptured: the
+// connect-time verification only protects an approved baseline. A quarantined
+// server that was never approved keeps an uncaptured review (no records) until
+// an operator or scan inspects it explicitly.
+func TestRT05_NeverApprovedQuarantinedServer_ReviewStaysUncaptured(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	upstream := httptest.NewServer(captureTestServer("fresh", "some_tool"))
+	t.Cleanup(upstream.Close)
+
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	rt.StartBackgroundInitialization()
+	settleQuarantinedCapture(t, rt, "quarantined", upstream.URL)
+	require.NoError(t, rt.DiscoverAndIndexToolsForServer(context.Background(), "quarantined"))
+
+	records, err := rt.storageManager.ListToolApprovals("quarantined")
+	require.NoError(t, err)
+	assert.Empty(t, records, "no review records are captured for a never-approved quarantined server")
+}

@@ -626,7 +626,8 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 }
 
 // verifyQuarantinedServerContracts runs the tool-approval gate over a
-// connected quarantined server's live tools/list WITHOUT indexing it (RT-05):
+// connected quarantined server's live tools/list WITHOUT indexing it (RT-05),
+// when the server has an approved baseline to protect:
 // approved contracts that changed are marked changed, new tools are filed
 // pending, and nothing reaches the search index or routing surfaces. Unlike
 // the explicit review refresh it never requests an inspection exemption or a
@@ -635,6 +636,13 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 // connection is skipped (the next connect or tools/list_changed re-runs it).
 func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverName string) {
 	if r.upstreamManager == nil || r.storageManager == nil || r.skipQuarantinedContractVerify {
+		return
+	}
+	// Only a server with an approved baseline has contracts that can go
+	// stale (a re-quarantined, previously trusted server — EXP-2a). A server
+	// that was never approved keeps its review uncaptured until an operator
+	// or scan explicitly inspects it (UX-02 review snapshot semantics).
+	if !r.serverHasApprovedBaseline(serverName) {
 		return
 	}
 	capture := r.discoveryGeneration(serverName)
@@ -661,6 +669,21 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 		r.logger.Info("Verified quarantined server tool contracts against approvals (not indexed)",
 			zap.String("server", serverName), zap.Int("tools", len(tools)))
 	}
+}
+
+// serverHasApprovedBaseline reports whether any of the server's tool-approval
+// records is approved or changed (changed implies it was approved once).
+func (r *Runtime) serverHasApprovedBaseline(serverName string) bool {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return false
+	}
+	for _, rec := range records {
+		if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
+			return true
+		}
+	}
+	return false
 }
 
 // quarantinedCaptureIsCurrent confirms that the tools/list response belongs to
