@@ -215,7 +215,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 
   As defence in depth, an apply that finds the server quarantined under the lock also purges the server's shared index entries before returning. An index left populated by a writer this list missed then heals on the next pass.
 
-  For the config path (`newlyQuarantined` → purge, then `SaveUpstreamServer`): The config path saves the quarantined storage record **before** purging, inside that section, so an apply that takes the lock afterwards sees the quarantine. The profile-index refresh may follow outside the section.
+  Today the config path purges first and then calls `SaveUpstreamServer` (`newlyQuarantined`). Under this requirement it saves the quarantined storage record **before** purging, inside that section, so an apply that takes the lock afterwards sees the quarantine. The profile-index refresh may follow outside the section.
 - **FR-036**: The upstream manager MUST retire a client it removes or replaces, under its capture writer lock. An inventory captured by a retired client, or under an epoch that is no longer current, MUST be discarded without writes.
 - **FR-037**: `lastGoodTools` MUST store the complete capture identity (seq, epoch, client) with the snapshot and MUST NOT be replaced by an older capture. Re-applying the snapshot (approval reindex, sweep fallback) is allowed only while that capture is still current (client not replaced or retired, epoch unchanged). Otherwise the approval reindex re-lists the server and the sweep fallback skips it.
 - **FR-038**: The profile-index refresh, signature-cache reconcile, SSE events and activity records MUST run after the lock is released.
