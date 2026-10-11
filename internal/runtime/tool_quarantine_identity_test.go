@@ -1177,7 +1177,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 				} else {
 					assert.Equal(t, got.CurrentHash, got.ApprovedHash, "baselined only from the sibling's approved contract")
 				}
-				assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), got.HashSchemaVersion, "adoption raises the hash version")
+				assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), got.HashSchemaVersion, "adoption raises the hash version")
 				version, err := rt.storageManager.GetSchemaVersion()
 				require.NoError(t, err)
 				assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), version, "the migration completes once no approved record is below the current hash version")
@@ -1370,7 +1370,7 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 			assert.True(t, result.BlockedTools["erase"])
 			rec, err := rt.storageManager.GetToolApproval("a", "erase")
 			require.NoError(t, err)
-			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion, "the hash-match branch refreshed the record ...")
+			assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion, "the hash-match branch refreshed the record ...")
 			assert.False(t, rec.IdentityKeyed, "... but a served, user-disabled pre-105 record keeps waiting for a namespaced tool")
 
 			result, err = rt.checkToolApprovals("a", bothServed)

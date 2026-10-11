@@ -18,8 +18,10 @@ When an upstream server connects and reports its tools, MCPProxy computes a SHA2
 - Tool name
 - Tool description
 - Tool input schema (JSON)
+- Tool output schema (JSON), when the tool declares one
+- The safety-relevant annotation hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), by effective value. An omitted hint counts as its MCP default, and the free-form `title` is ignored. Tools whose hints are all at their defaults keep the same hash they had before hints were included.
 
-This hash is compared against previously approved hashes to detect changes.
+This hash is compared against previously approved hashes to detect changes. A tool that flips its hints (for example from destructive to read-only) while keeping its description and schema is therefore held as `changed`, like any other rug pull. Approvals recorded by older releases are migrated on the first discovery after an upgrade without re-review, as long as the stored contract still matches.
 
 ### Tool Approval States
 

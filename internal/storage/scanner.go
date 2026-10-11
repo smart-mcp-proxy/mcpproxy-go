@@ -452,7 +452,7 @@ func (b *BoltDB) SaveIntegrityBaselineWithBlocks(baseline *scanner.IntegrityBase
 			}
 			record.Status = ToolApprovalStatusApproved
 			record.ApprovedHash = record.CurrentHash
-			record.HashSchemaVersion = OutputSchemaHashSchemaVersion
+			record.HashSchemaVersion = ToolApprovalHashSchemaVersion
 			record.ApprovedAt = block.ApprovedAt
 			record.ApprovedBy = block.ApprovedBy
 			record.PreviousDescription = ""

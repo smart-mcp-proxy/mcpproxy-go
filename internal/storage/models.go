@@ -183,6 +183,20 @@ const CurrentSchemaVersion = 3
 // MCP outputSchema in the tool approval hash baseline.
 const OutputSchemaHashSchemaVersion = 3
 
+// AnnotationHashSchemaVersion is the per-record HashSchemaVersion that starts
+// folding the safety-relevant tool annotation hints (readOnlyHint,
+// destructiveHint, idempotentHint, openWorldHint) into the tool approval hash
+// (red-team RT-03). Tools whose effective hints are the MCP defaults keep a
+// byte-identical hash, so only tools with non-default hints get a new hash;
+// records below this version are migrated by the formula-change path in
+// runtime.checkToolApprovals without re-review when their stored contract
+// still matches.
+const AnnotationHashSchemaVersion = 4
+
+// ToolApprovalHashSchemaVersion is the HashSchemaVersion stamped on every tool
+// approval record whose hashes this binary computes.
+const ToolApprovalHashSchemaVersion = AnnotationHashSchemaVersion
+
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
 	ID             string                  `json:"id"`

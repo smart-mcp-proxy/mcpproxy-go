@@ -23,13 +23,17 @@ import (
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
-// Uses toolName + description + input schema JSON + output schema JSON.
-// Annotations are intentionally EXCLUDED because:
-// 1. They are metadata hints, not functional changes to the tool
-// 2. They may not be stable across reconnections (some servers omit them)
-// 3. Including them caused false "tool_description_changed" spam on every reconnect
-// 4. This matches the upstream client's hash.ComputeToolHashWithOutputSchema approach
-// The annotations parameter is kept for API compatibility but ignored.
+// Uses toolName + description + input schema JSON + output schema JSON + the
+// safety-relevant annotation hints (RT-03, see safetyHintsFingerprint).
+//
+// Only the four behavioral hints are folded in — never the free-form title or
+// the raw annotations JSON, which caused false "tool_description_changed" spam
+// on reconnects when the whole annotations object was hashed. The hints are
+// compared by their EFFECTIVE value (an omitted hint means its MCP default), so
+// a server that omits annotations and one that spells out the defaults hash
+// identically, and a tool whose effective hints are the defaults keeps the
+// pre-RT-03 hash byte-for-byte. A flip such as destructive → readOnly-lying
+// changes the hash and lands on the rug-pull gate like any contract change.
 func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
 	return calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, "", annotations)
 }
@@ -52,8 +56,54 @@ func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON
 		h.Write([]byte("|"))
 		h.Write([]byte(normalized))
 	}
-	// Annotations excluded from hash — see comment above
+	// Safety hints are folded in only when they differ from the MCP defaults,
+	// so tools with default hints keep the pre-RT-03 hash (no migration).
+	if hints := safetyHintsFingerprint(annotations); hints != "" {
+		h.Write([]byte("|hints:"))
+		h.Write([]byte(hints))
+	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// safetyHintsFingerprint renders the EFFECTIVE values of the safety-relevant
+// MCP tool annotation hints, or "" when they are all at their defaults
+// (readOnlyHint=false, destructiveHint=true, idempotentHint=false,
+// openWorldHint=true — the most conservative reading). These hints steer
+// read/write routing (call_tool_read vs call_tool_write) and review tiers, so a
+// flip is a contract change the approval gate must see (RT-03).
+func safetyHintsFingerprint(annotations *config.ToolAnnotations) string {
+	readOnly, destructive, idempotent, openWorld := false, true, false, true
+	if annotations != nil {
+		if annotations.ReadOnlyHint != nil {
+			readOnly = *annotations.ReadOnlyHint
+		}
+		if annotations.DestructiveHint != nil {
+			destructive = *annotations.DestructiveHint
+		}
+		if annotations.IdempotentHint != nil {
+			idempotent = *annotations.IdempotentHint
+		}
+		if annotations.OpenWorldHint != nil {
+			openWorld = *annotations.OpenWorldHint
+		}
+	}
+	if !readOnly && destructive && !idempotent && openWorld {
+		return ""
+	}
+	return fmt.Sprintf("readOnly=%t,destructive=%t,idempotent=%t,openWorld=%t", readOnly, destructive, idempotent, openWorld)
+}
+
+// storedSafetyHintsMatch reports whether a record's stored annotation snapshot
+// carries the same effective safety hints as the live tool. A record written
+// before the hints were part of the hash (HashSchemaVersion below
+// storage.AnnotationHashSchemaVersion) whose snapshot was never captured (nil)
+// has UNKNOWN hints; it is accepted so an upgrade does not force a mass
+// re-review — the first pass under this binary then baselines the live hints.
+func storedSafetyHintsMatch(stored *config.ToolAnnotations, hashSchemaVersion uint64, live *config.ToolAnnotations) bool {
+	if stored == nil && hashSchemaVersion < storage.AnnotationHashSchemaVersion {
+		return true
+	}
+	return safetyHintsFingerprint(stored) == safetyHintsFingerprint(live)
 }
 
 // normalizeJSON parses a JSON string and re-serializes with sorted keys.
@@ -537,7 +587,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				backfilledHash := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, outputSchemaJSON, tool.Annotations)
 				existing.ApprovedHash = backfilledHash
 				existing.CurrentHash = backfilledHash
-				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.CurrentDescription = storedDesc
 				existing.CurrentSchema = normalizeJSON(storedSchema)
 				existing.CurrentOutputSchema = outputSchemaJSON
@@ -634,7 +684,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					ToolName:            toolName,
 					CurrentHash:         currentHash,
 					ApprovedHash:        currentHash,
-					HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
+					HashSchemaVersion:   storage.ToolApprovalHashSchemaVersion,
 					Status:              storage.ToolApprovalStatusApproved,
 					ApprovedBy:          approvedBy,
 					ApprovedAt:          now,
@@ -678,7 +728,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				ServerName:          serverName,
 				ToolName:            toolName,
 				CurrentHash:         currentHash,
-				HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
+				HashSchemaVersion:   storage.ToolApprovalHashSchemaVersion,
 				Status:              storage.ToolApprovalStatusPending,
 				CurrentDescription:  tool.Description,
 				CurrentAnnotations:  capturedToolAnnotations(tool.Annotations),
@@ -787,9 +837,9 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					zap.String("tool", toolName))
 			}
 			// Update current hash/description/schema in case they differ from storage
-			if existing.CurrentHash != currentHash || existing.CurrentOutputSchema != outputSchemaJSON || existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+			if existing.CurrentHash != currentHash || existing.CurrentOutputSchema != outputSchemaJSON || existing.HashSchemaVersion < storage.ToolApprovalHashSchemaVersion {
 				existing.CurrentHash = currentHash
-				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
@@ -852,7 +902,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
-				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = promoteBy
 				existing.PreviousDescription = ""
@@ -909,7 +959,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// place so a genuine revert then read as a rug pull.
 		if existing.Status == storage.ToolApprovalStatusChanged {
 			// Only restore if the tool reverted to the PREVIOUS (approved) contract
-			if revertedToPreviousContract(existing, tool.Description, schemaJSON, outputSchemaJSON) {
+			if revertedToPreviousContract(existing, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionRevert); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -946,7 +996,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
-				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = "auto-approve-changes"
 				existing.CurrentDescription = tool.Description
@@ -1009,7 +1059,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			if storedOutputSchema == "" {
 				storedOutputSchema = outputSchemaJSON
 			}
-			rehashedFromStored := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, storedOutputSchema, nil)
+			// The stored annotation snapshot is part of the stored contract
+			// (RT-03): a pre-RT-03 record whose hints are unchanged re-hashes to
+			// the current hash here and is migrated without review.
+			rehashedFromStored := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, storedOutputSchema, existing.CurrentAnnotations)
+			hintsMatch := storedSafetyHintsMatch(existing.CurrentAnnotations, existing.HashSchemaVersion, tool.Annotations)
 
 			// Also check legacy and with-annotations formulas
 			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
@@ -1031,6 +1085,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.CurrentDescription = tool.Description
 				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
@@ -1077,7 +1132,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			} else {
 				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
 			}
-			if descMatch && schemaMatch && outputSchemaMatch {
+			if descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1086,6 +1141,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.CurrentDescription = tool.Description
 				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
@@ -1109,6 +1165,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.Bool("desc_match", descMatch),
 				zap.Bool("schema_match", schemaMatch),
 				zap.Bool("output_schema_match", outputSchemaMatch),
+				zap.Bool("annotation_hints_match", hintsMatch),
 				zap.Int("stored_desc_len", len(existing.CurrentDescription)),
 				zap.Int("current_desc_len", len(tool.Description)),
 				zap.Int("stored_schema_len", len(existing.CurrentSchema)),
@@ -1128,7 +1185,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// that normalizeJSON does not absorb, such as the order of the
 			// "required" list, may differ). Any structural difference falls
 			// through to the change gate below and is held for review.
-			if descMatch && outputSchemaMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
+			if descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1137,6 +1194,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.CurrentDescription = tool.Description
 				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
@@ -1166,7 +1224,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
-				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = "auto-approve-changes"
 				existing.CurrentDescription = tool.Description
@@ -1236,7 +1294,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
 			existing.CurrentHash = currentHash
-			existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+			existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 			existing.CurrentDescription = tool.Description
 			existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 			existing.CurrentSchema = schemaJSON
@@ -1256,6 +1314,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.String("tool", toolName),
 				zap.String("approved_hash", existing.ApprovedHash),
 				zap.String("current_hash", currentHash),
+				zap.Bool("annotation_hints_changed", !hintsMatch),
 				zap.Bool("quarantine_enforced", enforceQuarantine))
 
 			// Always block changed tools when quarantine is globally enabled,
@@ -1304,8 +1363,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 // stored (a pre-output-schema record, or a producer that recorded only the
 // description) is not evidence and is not compared — the same idiom as
 // legacySiblingApprovesContract.
-func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string) bool {
+func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) bool {
 	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
+		return false
+	}
+	// RT-03: an annotation-only flip keeps description and schemas equal, so
+	// the hints must match too or the flip would be "reverted" on the very
+	// next pass.
+	if !storedSafetyHintsMatch(existing.PreviousAnnotations, existing.HashSchemaVersion, annotations) {
 		return false
 	}
 	if existing.PreviousSchema != "" && normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {
@@ -1634,7 +1699,7 @@ func (g neverBaselinedGate) lifted() bool {
 func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, prior map[string]*storage.ToolApprovalRecord, tool *config.ToolMetadata, currentHash, schemaJSON, outputSchemaJSON string, gate neverBaselinedGate) {
 	toolName := existing.ToolName
 	existing.CurrentHash = currentHash
-	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+	existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 	existing.CurrentDescription = tool.Description
 	existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 	existing.CurrentSchema = schemaJSON
@@ -1773,7 +1838,7 @@ func (r *Runtime) adoptLegacyLockForNewTool(serverName, toolName string, prior m
 		ServerName:           serverName,
 		ToolName:             toolName,
 		Status:               sibling.Status,
-		HashSchemaVersion:    storage.OutputSchemaHashSchemaVersion,
+		HashSchemaVersion:    storage.ToolApprovalHashSchemaVersion,
 		ApprovedAt:           sibling.ApprovedAt,
 		ApprovedBy:           sibling.ApprovedBy,
 		PreviousDescription:  sibling.PreviousDescription,
@@ -1842,6 +1907,11 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 		return true
 	}
+	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion && !annotationsKnownToDiffer(sibling.CurrentAnnotations, tool.Annotations) &&
+		sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
+		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
+		return true
+	}
 	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
 			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
@@ -1854,7 +1924,14 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	descMatch := sibling.CurrentDescription == tool.Description
 	schemaMatch := sibling.CurrentSchema == "" || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
 	outputMatch := sibling.CurrentOutputSchema == "" || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
-	return descMatch && schemaMatch && outputMatch
+	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
+	return descMatch && schemaMatch && outputMatch && hintsMatch
+}
+
+// annotationsKnownToDiffer is true only when a stored annotation snapshot
+// exists and its effective safety hints differ from the live ones.
+func annotationsKnownToDiffer(stored, live *config.ToolAnnotations) bool {
+	return stored != nil && safetyHintsFingerprint(stored) != safetyHintsFingerprint(live)
 }
 
 func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
@@ -2049,7 +2126,7 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
-		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = approvedBy
 		record.PreviousDescription = ""
@@ -2204,7 +2281,7 @@ func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy str
 		schemaJSON = normalizeJSON(schemaJSON)
 		outputSchemaJSON := normalizeJSON(tool.OutputSchemaJSON)
 		record.CurrentHash = calculateToolApprovalHashWithOutputSchema(toolName, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations)
-		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 		record.CurrentDescription = tool.Description
 		record.CurrentSchema = schemaJSON
 		record.CurrentOutputSchema = outputSchemaJSON
@@ -2564,7 +2641,7 @@ func (r *Runtime) blockToolsLocked(serverName string, toolNames []string, blocke
 		// Approve + disable in a single write — all-or-nothing.
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
-		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = blockedBy
 		record.PreviousDescription = ""
