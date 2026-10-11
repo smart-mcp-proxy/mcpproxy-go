@@ -639,43 +639,55 @@ func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName str
 // pending, and nothing reaches the search index or routing surfaces. Unlike
 // the explicit review refresh it never requests an inspection exemption or a
 // connection — it only uses a connection the supervisor already keeps — and
-// it is best effort: a disconnected client, a failed list or a superseded
-// connection is skipped (the next connect or tools/list_changed re-runs it).
-func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverName string) {
+// it is best effort: a disconnected client or a failed list is skipped (the
+// next connect or tools/list_changed re-runs it).
+//
+// It reports superseded=true when the list was captured under a connection
+// that was replaced before the gate ran. The caller's stale-generation retry
+// must then re-verify under the replacement: that connection's own connect
+// callback may have been dropped by the in-progress dedup, and periodic
+// discovery skips quarantined servers, so nothing else would verify it
+// (Sol r2 P2).
+func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverName string) (superseded bool) {
 	if r.upstreamManager == nil || r.storageManager == nil || r.skipQuarantinedContractVerify {
-		return
+		return false
 	}
 	// Only a server with an approved baseline has contracts that can go
 	// stale (a re-quarantined, previously trusted server — EXP-2a). A server
 	// that was never approved keeps its review uncaptured until an operator
 	// or scan explicitly inspects it (UX-02 review snapshot semantics).
 	if !r.serverHasApprovedBaseline(serverName) {
-		return
+		return false
 	}
 	capture := r.discoveryGeneration(serverName)
 	client, ok := r.upstreamManager.GetClient(serverName)
 	if !ok || client == nil || !client.IsConnected() {
-		return
+		return false
 	}
 	tools, err := client.ListTools(ctx)
 	if err != nil {
 		r.logger.Debug("Quarantined contract verification: tools/list failed",
 			zap.String("server", serverName), zap.Error(err))
-		return
+		return false
 	}
-	if len(tools) == 0 || !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
-		return
+	if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
+		return true
+	}
+	if len(tools) == 0 {
+		return false
 	}
 	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
 	if err != nil {
 		r.logger.Warn("Quarantined contract verification failed",
 			zap.String("server", serverName), zap.Error(err))
-		return
+		return false
 	}
-	if published {
-		r.logger.Info("Verified quarantined server tool contracts against approvals (not indexed)",
-			zap.String("server", serverName), zap.Int("tools", len(tools)))
+	if !published {
+		return true
 	}
+	r.logger.Info("Verified quarantined server tool contracts against approvals (not indexed)",
+		zap.String("server", serverName), zap.Int("tools", len(tools)))
+	return false
 }
 
 // serverHasApprovedBaseline reports whether any of the server's tool-approval
@@ -905,8 +917,11 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 		// window while the (possibly armed) upstream ran. Hash-compare its
 		// live contracts now, without indexing anything, so a rug pull is
 		// recorded as changed before an unquarantine can serve it.
-		if r.serverIsQuarantined(serverName) {
-			r.verifyQuarantinedServerContracts(ctx, serverName)
+		if r.serverIsQuarantined(serverName) && r.verifyQuarantinedServerContracts(ctx, serverName) {
+			// Superseded: report unpublished so the stale-generation
+			// retry in discoverAndIndexToolsForServer re-verifies the
+			// replacement connection.
+			return false, nil
 		}
 		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))

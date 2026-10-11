@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,4 +145,78 @@ func TestRT05_NeverApprovedQuarantinedServer_ReviewStaysUncaptured(t *testing.T)
 	records, err := rt.storageManager.ListToolApprovals("quarantined")
 	require.NoError(t, err)
 	assert.Empty(t, records, "no review records are captured for a never-approved quarantined server")
+}
+
+// TestRT05_QuarantinedVerification_ReplacedClientIsReverified: the automatic
+// verification lists the approved contract from connection A, and A is
+// replaced by B (serving the armed contract) before the gate runs. A's
+// capture is discarded; B's own connect callback is dropped by the
+// in-progress dedup (held here, as the reactive callback for A holds it), and
+// periodic discovery skips quarantined servers. The stale-generation retry
+// must therefore re-verify under B in the same discovery call (Sol r2 P2).
+// The discovery is invoked exactly once and asserted without polling.
+func TestRT05_QuarantinedVerification_ReplacedClientIsReverified(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	first := httptest.NewServer(approvedRT05Server())
+	t.Cleanup(first.Close)
+	second := httptest.NewServer(captureTestServer("armed", "calendar_get_events"))
+	t.Cleanup(second.Close)
+
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	seedRT05Approval(t, rt)
+
+	rt.StartBackgroundInitialization()
+	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
+	require.Eventually(t, func() bool {
+		_, busy := rt.discoveryInProgress.Load("quarantined")
+		return !busy
+	}, 10*time.Second, 20*time.Millisecond)
+	rec, err := rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "A serves the approved contract")
+
+	// Hold the dedup marker for the whole call, as the reactive connect
+	// callback that started this verification does: B's connect callback is
+	// dropped and cannot mask the gap.
+	rt.discoveryInProgress.Store("quarantined", struct{}{})
+	defer rt.discoveryInProgress.Delete("quarantined")
+
+	var replaced atomic.Bool
+	rt.quarantinedCaptureBeforePersist = func() {
+		if !replaced.CompareAndSwap(false, true) {
+			return
+		}
+		cfgB := *cfgA
+		cfgB.URL = second.URL
+		desired, err := rt.GetDesiredConfig()
+		require.NoError(t, err)
+		require.Len(t, desired.Servers, 1)
+		desired.Servers[0] = &cfgB
+		rt.UpdateConfig(desired, "")
+		waitQuarantinedCaptureBound(t, rt, "quarantined", second.URL)
+	}
+
+	require.NoError(t, rt.discoverAndIndexToolsForServer(context.Background(), "quarantined", false))
+	require.True(t, replaced.Load(), "the client must be replaced during the automatic verification")
+
+	rec, err = rt.storageManager.GetToolApproval("quarantined", "calendar_get_events")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the replacement connection's armed contract must be verified in the same call")
+	assert.Equal(t, "armed definition", rec.CurrentDescription)
+	assert.True(t, rt.serverIsQuarantined("quarantined"))
+	indexed, err := rt.indexManager.GetToolsByServer("quarantined")
+	require.NoError(t, err)
+	assert.Empty(t, indexed, "a quarantined server's tools must never be indexed")
+}
+
+// approvedRT05Server serves the contract seedRT05Approval approved.
+func approvedRT05Server() *mcpserver.StreamableHTTPServer {
+	srv := mcpserver.NewMCPServer("approved", "0.0.1", mcpserver.WithToolCapabilities(true))
+	srv.AddTool(mcp.NewTool("calendar_get_events", mcp.WithDescription("Lists calendar events.")), func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("ok"), nil
+	})
+	return mcpserver.NewStreamableHTTPServer(srv)
 }
