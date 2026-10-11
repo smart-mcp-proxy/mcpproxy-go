@@ -6870,10 +6870,20 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
 			return
 		}
-		s.writeSuccess(w, map[string]interface{}{
+		response := map[string]interface{}{
 			"approved": count,
 			"message":  fmt.Sprintf("Approved %d tools for server %s", count, serverID),
-		})
+		}
+		if _, outcome, ok := s.toolApprovalOutcomeFor(serverID); ok {
+			outcome.addTo(response)
+			if held := outcome.StillPending + outcome.StillChanged; held > 0 {
+				response["message"] = fmt.Sprintf("Approved %d tools for server %s; %d still need review", count, serverID, held)
+			}
+		} else {
+			response["outcome_unavailable"] = true
+			response["message"] = fmt.Sprintf("Approved %d tools for server %s, but the remaining tool state could not be read back; check it with GET /api/v1/servers/%s/review", count, serverID, serverID)
+		}
+		s.writeSuccess(w, response)
 		return
 	}
 
@@ -6887,11 +6897,42 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
-		"approved": len(req.Tools),
-		"tools":    req.Tools,
-		"message":  fmt.Sprintf("Approved %d tools for server %s", len(req.Tools), serverID),
-	})
+	// UX-02: report what actually applied. "approved" counts the requested
+	// tools whose records now read approved (it used to echo the request
+	// length even for names with no record); "not_approved" lists the rest.
+	// When the records cannot be read back the outcome is unknown: report 0
+	// applied with outcome_unavailable rather than echoing the request.
+	approved := 0
+	response := map[string]interface{}{"tools": req.Tools}
+	records, outcome, ok := s.toolApprovalOutcomeFor(serverID)
+	if !ok {
+		response["approved"] = 0
+		response["outcome_unavailable"] = true
+		response["message"] = fmt.Sprintf("Approval of %d tools for server %s was submitted, but the resulting state could not be read back; check it with GET /api/v1/servers/%s/review", len(req.Tools), serverID, serverID)
+		s.writeSuccess(w, response)
+		return
+	}
+	byName := make(map[string]*storage.ToolApprovalRecord, len(records))
+	for _, rec := range records {
+		if rec != nil {
+			byName[rec.ToolName] = rec
+		}
+	}
+	var notApproved []string
+	for _, name := range req.Tools {
+		if rec := byName[name]; rec != nil && rec.Status == storage.ToolApprovalStatusApproved {
+			approved++
+		} else {
+			notApproved = append(notApproved, name)
+		}
+	}
+	if len(notApproved) > 0 {
+		response["not_approved"] = notApproved
+	}
+	outcome.addTo(response)
+	response["approved"] = approved
+	response["message"] = fmt.Sprintf("Approved %d of %d requested tools for server %s", approved, len(req.Tools), serverID)
+	s.writeSuccess(w, response)
 }
 
 // handleBlockTools handles POST /api/v1/servers/{id}/tools/block

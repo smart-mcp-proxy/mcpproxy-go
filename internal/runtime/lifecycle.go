@@ -1176,7 +1176,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 				r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
 					zap.String("server", serverName),
 					zap.String("legacy_key", toolName))
-			} else if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
+			} else if err := r.deleteToolApprovalLocked(serverName, toolName); err != nil {
 				r.logger.Debug("Failed to delete tool approval for removed tool",
 					zap.String("tool", fullToolName),
 					zap.Error(err))
@@ -2177,7 +2177,17 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
-	if err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined); err != nil {
+	// UX-02: flip storage under the server's tool-approval lock. An in-flight
+	// discovery pass finishes first (its quarantine decision then precedes the
+	// flip), and every later pass reads the flipped storage value under the
+	// same lock (checkToolApprovals consults storage, fail closed) even before
+	// the runtime config below catches up — so a just-quarantined server is
+	// never auto-baselined. The lock is NOT held across SaveConfiguration /
+	// LoadConfiguredServers, which can start discovery.
+	unlockApprovals := r.lockToolApprovals(serverName)
+	err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined)
+	unlockApprovals()
+	if err != nil {
 		r.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
 		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
 	}

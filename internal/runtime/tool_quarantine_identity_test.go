@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1603,35 +1604,41 @@ func TestStampRemainingLegacyToolApprovals_ConcurrentOperatorDisableSurvives(t *
 		}))
 	}
 
-	t.Run("deterministic: the operator disables the orphan between the sweep's listing and its stamp", func(t *testing.T) {
+	// UX-02: discovery passes and operator writes are serialized per server
+	// (lockToolApprovals), so an operator disable issued while the sweep is
+	// between its listing and its stamp can no longer land in that window: it
+	// waits for the pass and is applied after it. The disable must still
+	// survive — never overwritten by the stale listing.
+	t.Run("deterministic: an operator disable issued between the sweep's listing and its stamp waits for the pass and survives", func(t *testing.T) {
 		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
 		seedUnstampedEnabled(t, rt)
 		fired := false
+		disableDone := make(chan error, 1)
+		var landedInWindow bool
 		rt.legacyStampBeforeWrite = func() {
 			fired = true
-			require.NoError(t, rt.SetToolEnabled("a", "erase", false, "user"))
-			rec, err := rt.storageManager.GetToolApproval("a", "erase")
-			require.NoError(t, err)
-			require.True(t, rec.Disabled, "fixture: the operator write landed in the window")
-			require.False(t, rec.IdentityKeyed, "fixture: a restricting pre-105 record stays unstamped (saveReadToolApproval)")
+			go func() { disableDone <- rt.SetToolEnabled("a", "erase", false, "user") }()
+			select {
+			case <-disableDone:
+				landedInWindow = true
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
 		// "erase" is an orphan of this pass, so it is in the sweep's listing.
 		_, err := rt.checkToolApprovals("a", other)
 		require.NoError(t, err)
 		require.True(t, fired, "fixture: the sweep must have reached its stamp with erase listed")
+		require.False(t, landedInWindow, "the operator write must wait for the in-flight pass on the same server")
+		require.NoError(t, <-disableDone)
 
 		rec, err := rt.storageManager.GetToolApproval("a", "erase")
 		require.NoError(t, err)
 		assert.True(t, rec.Disabled, "the operator's disable must survive the sweep, never be overwritten by the stale listing")
-		assert.False(t, rec.IdentityKeyed, "a record that restricts at write time must not be stamped")
 		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-
-		// The block still binds a namespaced tool the operator hid it for.
-		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
-			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
-		})
-		require.NoError(t, err)
-		assert.True(t, result.BlockedTools["ns:erase"], "the legacy consult must still see the block")
+		// The sweep ran first and stamped the then-unrestricting orphan; the
+		// later operator write keeps that stamp (it is the control case
+		// followed by a disable).
+		assert.True(t, rec.IdentityKeyed)
 	})
 
 	t.Run("control: with no concurrent write the orphan is stamped", func(t *testing.T) {
@@ -1688,9 +1695,6 @@ func TestStampConsultedLegacySibling_ConcurrentOperatorDisableSurvives(t *testin
 	nsErase := []*config.ToolMetadata{
 		{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
 	}
-	v2Erase := []*config.ToolMetadata{
-		{ServerName: "a", Name: "v2:erase", RawName: "v2:erase", Description: desc, ParamsJSON: schema},
-	}
 	seedUnstampedEnabled := func(t *testing.T, rt *Runtime) {
 		t.Helper()
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
@@ -1698,34 +1702,42 @@ func TestStampConsultedLegacySibling_ConcurrentOperatorDisableSurvives(t *testin
 		}))
 	}
 
-	t.Run("deterministic: the operator disables the sibling between the consult's read and its stamp", func(t *testing.T) {
+	// UX-02: the operator write is serialized behind the in-flight pass (see
+	// the orphan-sweep variant above): it cannot land between the consult's
+	// read and its stamp, waits for the pass, and the disable survives.
+	t.Run("deterministic: an operator disable issued between the consult's read and its stamp waits for the pass and survives", func(t *testing.T) {
 		rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "a", Enabled: true}})
 		seedUnstampedEnabled(t, rt)
 		fired := false
+		disableDone := make(chan error, 1)
+		var landedInWindow bool
 		rt.consultStampBeforeWrite = func() {
+			if fired {
+				return
+			}
 			fired = true
-			require.NoError(t, rt.SetToolEnabled("a", "erase", false, "user"))
-			rec, err := rt.storageManager.GetToolApproval("a", "erase")
-			require.NoError(t, err)
-			require.True(t, rec.Disabled, "fixture: the operator write landed in the window")
-			require.False(t, rec.IdentityKeyed, "fixture: a restricting pre-105 record stays unstamped (saveReadToolApproval)")
+			go func() { disableDone <- rt.SetToolEnabled("a", "erase", false, "user") }()
+			select {
+			case <-disableDone:
+				landedInWindow = true
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
 		// Only "ns:erase" is served: it collapses to the unstamped "erase",
 		// so the pass consults it and reaches the stamp.
 		_, err := rt.checkToolApprovals("a", nsErase)
 		require.NoError(t, err)
 		require.True(t, fired, "fixture: the consult must have reached its stamp")
+		require.False(t, landedInWindow, "the operator write must wait for the in-flight pass on the same server")
+		require.NoError(t, <-disableDone)
 
 		rec, err := rt.storageManager.GetToolApproval("a", "erase")
 		require.NoError(t, err)
 		assert.True(t, rec.Disabled, "the operator's disable must survive the consult stamp, never be overwritten by the stale read")
-		assert.False(t, rec.IdentityKeyed, "a record that restricts at write time must not be stamped")
 		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-
-		// The block still binds a later namespaced tool that collapses to it.
-		result, err := rt.checkToolApprovals("a", v2Erase)
-		require.NoError(t, err)
-		assert.True(t, result.BlockedTools["v2:erase"], "the legacy consult must still lend the block")
+		// The consult stamped the then-unrestricting sibling first; the later
+		// disable keeps the stamp, so it binds "erase" only.
+		assert.True(t, rec.IdentityKeyed)
 	})
 
 	t.Run("control: with no concurrent write the consulted sibling is stamped", func(t *testing.T) {

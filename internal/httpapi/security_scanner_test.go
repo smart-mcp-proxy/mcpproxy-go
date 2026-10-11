@@ -17,6 +17,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // --- Mock SecurityController ---
@@ -216,7 +217,22 @@ func (m *mockSecurityController) GetScanReportByJobID(_ context.Context, jobID s
 // it, so these tests authenticate the way a real caller does.
 type secTestController struct {
 	baseController
-	servers []map[string]interface{}
+	servers   []map[string]interface{}
+	approvals []*storage.ToolApprovalRecord
+	listErr   error
+}
+
+func (m *secTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	var out []*storage.ToolApprovalRecord
+	for _, a := range m.approvals {
+		if a.ServerName == serverName {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 func (m *secTestController) GetCurrentConfig() *config.Config {
@@ -606,9 +622,10 @@ func TestSecurityHandlerApproveServer(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var resp map[string]string
+	var resp map[string]interface{}
 	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, "my-server", resp["server_name"])
 }
 
 func TestSecurityHandlerApproveServerWithBlocks(t *testing.T) {
@@ -625,6 +642,61 @@ func TestSecurityHandlerApproveServerWithBlocks(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.True(t, secCtrl.approvedForce)
 	require.Equal(t, []string{"delete_issue", "remove_user"}, secCtrl.approvedBlocks)
+}
+
+// UX-02: a successful approval reports the post-approval tool state, so tools
+// left pending or changed are visible instead of hidden behind "approved".
+func TestSecurityHandlerApproveServerReportsRemainingHolds(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	logger := zap.NewNop().Sugar()
+	ctrl := &secTestController{approvals: []*storage.ToolApprovalRecord{
+		{ServerName: "my-server", ToolName: "read_a", Status: storage.ToolApprovalStatusApproved},
+		{ServerName: "my-server", ToolName: "read_b", Status: storage.ToolApprovalStatusApproved},
+		{ServerName: "my-server", ToolName: "delete_a", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+		{ServerName: "my-server", ToolName: "read_c", Status: storage.ToolApprovalStatusPending},
+		{ServerName: "other", ToolName: "x", Status: storage.ToolApprovalStatusPending},
+	}}
+	srv := NewServer(ctrl, logger, nil)
+	srv.SetSecurityController(secCtrl)
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(`{"block":["delete_a"]}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, float64(2), resp["approved_count"])
+	assert.Equal(t, float64(1), resp["blocked_count"])
+	assert.Equal(t, float64(1), resp["still_pending"])
+	assert.Equal(t, float64(0), resp["still_changed"])
+	assert.Equal(t, []interface{}{"read_c"}, resp["held_tools"])
+}
+
+// UX-02 review: when the post-approval state cannot be read back, the
+// response says so instead of looking like a complete (legacy) approval.
+func TestSecurityHandlerApproveServerFlagsUnreadableOutcome(t *testing.T) {
+	ctrl := &secTestController{listErr: fmt.Errorf("decode failure")}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetSecurityController(&mockSecurityController{})
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(`{}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, true, resp["outcome_unavailable"])
+	assert.NotContains(t, resp, "approved_count")
 }
 
 func TestSecurityHandlerApproveServerWithUnknownBlockIsBadRequest(t *testing.T) {

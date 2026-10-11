@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -165,7 +166,66 @@ func runReviewWrite(server, operation string, value interface{}) error {
 	if resp.StatusCode != http.StatusOK {
 		return parseAPIError(response, resp.StatusCode, strings.ReplaceAll(operation, "/", " "))
 	}
-	return formatReviewResponse(ResolveOutputFormat(), response, false)
+	if err := formatReviewResponse(ResolveOutputFormat(), response, false); err != nil {
+		return err
+	}
+	warnApprovalHolds(os.Stderr, server, response)
+	return nil
+}
+
+// warnApprovalHolds prints a warning to w when an approval response reports
+// tools that still need review (UX-02): a partial outcome must not read as a
+// completed approval. It goes to stderr so JSON/YAML stdout stays parseable.
+// Responses from cores that predate the counts carry no fields and print
+// nothing.
+func warnApprovalHolds(w io.Writer, server string, raw []byte) {
+	var envelope struct {
+		Data struct {
+			StillPending int      `json:"still_pending"`
+			StillChanged int      `json:"still_changed"`
+			HeldTools    []string `json:"held_tools"`
+			Unavailable  bool     `json:"outcome_unavailable"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return
+	}
+	d := envelope.Data
+	if d.Unavailable {
+		fmt.Fprintf(w, "Warning: the resulting tool approval state on server '%s' could not be read back; some tools may still need review. Check with: mcpproxy review show %s\n", server, server)
+		return
+	}
+	if d.StillPending+d.StillChanged == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Warning: %d tool(s) on server '%s' still need review (%d pending, %d changed)", d.StillPending+d.StillChanged, server, d.StillPending, d.StillChanged)
+	if len(d.HeldTools) > 0 {
+		fmt.Fprintf(w, ": %s", strings.Join(d.HeldTools, ", "))
+	}
+	fmt.Fprintf(w, ". Inspect them with: mcpproxy review show %s\n", server)
+}
+
+// approvalCountsSuffix renders the applied approval counts of an approval
+// response (UX-02) as ": N tools approved, ..." for table output, or "" when
+// the response predates the counts.
+func approvalCountsSuffix(value map[string]interface{}) string {
+	if counts := approvalCounts(value); counts != "" {
+		return ": " + counts
+	}
+	return ""
+}
+
+// approvalCounts renders "N tools approved, B blocked, P still pending, C
+// changed", or "" when the response carries no counts.
+func approvalCounts(value map[string]interface{}) string {
+	approvedCount, ok := value["approved_count"].(float64)
+	if !ok {
+		return ""
+	}
+	blocked, _ := value["blocked_count"].(float64)
+	pending, _ := value["still_pending"].(float64)
+	changed, _ := value["still_changed"].(float64)
+	return fmt.Sprintf("%d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
 }
 
 var errReviewAllWithTools = fmt.Errorf("--all cannot be combined with --tools")
@@ -321,12 +381,15 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	table := &clioutput.TableFormatter{}
 	if message, _ := value["message"].(string); message != "" {
+		if counts := approvalCounts(value); counts != "" {
+			message += " (server now: " + counts + ")"
+		}
 		fmt.Println(message)
 		return nil
 	}
 	if status, _ := value["status"].(string); status != "" {
 		if serverName, _ := value["server_name"].(string); serverName != "" {
-			fmt.Printf("%s server %s\n", strings.ToUpper(status[:1])+status[1:], serverName)
+			fmt.Printf("%s server %s%s\n", strings.ToUpper(status[:1])+status[1:], serverName, approvalCountsSuffix(value))
 			return nil
 		}
 	}
