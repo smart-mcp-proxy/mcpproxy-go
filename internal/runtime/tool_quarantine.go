@@ -2177,7 +2177,10 @@ func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, appr
 
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
-		record.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
+		// HashSchemaVersion describes the formula CurrentHash was computed
+		// with; copying the hash does not recompute it, so the version is
+		// kept. Stamping a pre-RT-03 (hint-free) hash as version 4 would let
+		// a later flip to default hints match it unchecked (Sol r2 P1).
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = approvedBy
 		record.PreviousDescription = ""
@@ -2692,7 +2695,10 @@ func (r *Runtime) blockToolsLocked(serverName string, toolNames []string, blocke
 		// Approve + disable in a single write — all-or-nothing.
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
-		record.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
+		// HashSchemaVersion describes the formula CurrentHash was computed
+		// with; copying the hash does not recompute it, so the version is
+		// kept. Stamping a pre-RT-03 (hint-free) hash as version 4 would let
+		// a later flip to default hints match it unchecked (Sol r2 P1).
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = blockedBy
 		record.PreviousDescription = ""

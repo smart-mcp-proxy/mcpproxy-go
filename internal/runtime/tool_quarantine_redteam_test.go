@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -596,5 +597,89 @@ func TestRT03_OutputSchemaBackfill_ChecksStoredHints(t *testing.T) {
 		result, err = rt.checkToolApprovals("notes", []*config.ToolMetadata{liveTool(rt03Annotations(false, true))})
 		require.NoError(t, err)
 		assert.True(t, result.BlockedTools["notes_export"])
+	})
+}
+
+// --- Sol review round 2 regressions ---
+
+// RT-03 (Sol r2 P1): an operator approve or block of a pending pre-RT-03
+// record — before the upgraded binary's first discovery pass — copies the
+// hint-free CurrentHash into ApprovedHash. Stamping that hash as version 4
+// would skip the stored-hints comparison, so a later flip from the stored
+// non-default hints to the defaults (which re-hashes to the old hint-free
+// value) would be accepted. The version must describe the copied hash.
+func TestRT03_ApproveOrBlockBeforeFirstDiscovery_KeepsLegacyVersion(t *testing.T) {
+	seedPending := func(t *testing.T, rt *Runtime) {
+		t.Helper()
+		schema := normalizeJSON(rt03Schema)
+		v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "notes", ToolName: "notes_export",
+			CurrentHash:        v3Hash,
+			HashSchemaVersion:  storage.OutputSchemaHashSchemaVersion,
+			Status:             storage.ToolApprovalStatusPending,
+			CurrentDescription: rt03Desc,
+			CurrentSchema:      schema,
+			CurrentAnnotations: rt03Annotations(true, false),
+			IdentityKeyed:      true,
+		}))
+		require.NoError(t, rt.storageManager.SetSchemaVersion(storage.CurrentSchemaVersion))
+	}
+	paths := map[string]func(t *testing.T, rt *Runtime){
+		"approve": func(t *testing.T, rt *Runtime) {
+			n, err := rt.approveToolsLocked("notes", []string{"notes_export"}, "operator", false)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		},
+		"block": func(t *testing.T, rt *Runtime) {
+			n, err := rt.blockToolsLocked("notes", []string{"notes_export"}, "operator")
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		},
+		"scan-approval block": func(t *testing.T, rt *Runtime) {
+			require.NoError(t, rt.storageManager.SaveIntegrityBaselineWithBlocks(
+				&scanner.IntegrityBaseline{ServerName: "notes"},
+				[]scanner.ToolApprovalBlock{{ToolName: "notes_export", ApprovedAt: time.Now(), ApprovedBy: "operator"}},
+			))
+		},
+	}
+	for name, decide := range paths {
+		t.Run(name, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			seedPending(t, rt)
+			decide(t, rt)
+
+			rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+			require.NoError(t, err)
+			require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion,
+				"copying a hint-free hash must not stamp it as the hint-aware version")
+
+			// The upstream drops its readOnly claim: the hint-free hash
+			// matches, but the stored snapshot proves the hints changed.
+			for pass := 1; pass <= 2; pass++ {
+				result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(nil)})
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["notes_export"], "pass %d", pass)
+				rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d: hint flip to defaults is held", pass)
+			}
+		})
+	}
+
+	t.Run("unchanged hints migrate after approval", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+		seedPending(t, rt)
+		_, err := rt.approveToolsLocked("notes", []string{"notes_export"}, "operator", false)
+		require.NoError(t, err)
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(true, false))})
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["notes_export"])
+		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.Equal(t, uint64(storage.AnnotationHashSchemaVersion), rec.HashSchemaVersion, "discovery re-hashes and re-stamps")
+		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
 	})
 }
