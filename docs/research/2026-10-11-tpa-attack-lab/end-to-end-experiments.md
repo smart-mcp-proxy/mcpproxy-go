@@ -286,6 +286,51 @@ SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
 
 Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r2/` of the main checkout.
 
+### Review round 3 follow-ups
+
+A third review (Sol 6.1, REQUEST_CHANGES at `c826d2317`) raised seven items.
+All seven were in scope and were fixed. None was rejected. RT-04 and RT-07
+(detect engine) stay deferred to the concurrent SEC-01 PR, so EXP-3 is still
+expected to show HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-06: a source-backed or manual scan failed open when the live export was empty or errored, or when `tools.json` serialization or write failed. The ingested-contract lookup was skipped, no error was set, and a stale clean `tools.json` was scanned | Fixed in `exportToolDefinitionsFull`. The stored contracts are read independently of the live export and are scanned when the live list is empty or fails. `tools.json` is always rewritten, including as an empty list, so a stale file is never what gets scanned. A serialization or write failure sets `Err`. A live export that still fails after the retry, with nothing ingested, writes nothing: Pass 1 aborts and Pass 2 records a failed job. A non-zero count always carries tool names, so it can never read as a legacy whole-server coverage claim. Tests: `TestRT06_EmptyLiveExport_ScansIngestedContracts` (empty list and error), `TestRT06_EmptyLiveExport_NoIngested_OverwritesStaleToolsJSON`, `TestRT06_LiveExportError_StartScanFailsOverStaleToolsJSON`, `TestRT06_ToolsJSONWriteFailure_FailsClosed` (export and `StartScan`) and `TestRT06_Pass2_LiveExportError_FailsClosed` |
+| P2 RT-02/RT-06: A → held B → held C stayed recorded as B | Fixed. `refreshHeldContractSnapshot` updates `Current*` and drops stale hold evidence. It keeps `ApprovedHash`, `HashSchemaVersion` and the `Previous*` evidence, and emits `tool_description_changed`. The record stays changed, and a revert to A still restores it. Test: `TestCheckToolApprovals_HeldChange_ChangesAgain_RefreshesSnapshot`. Without the fix the test fails |
+| P2 RT-05: a `tools/list_changed` notification dropped by the in-progress dedup was never reconciled for a quarantined server | Fixed. `runCoalescedDiscovery` (used by the connect callback and the list_changed handler) records a trigger that meets an in-flight discovery. The owner then runs a follow-up, capped at 4. A trigger sets its pending flag before it tries to take the marker, and the owner checks the flag after it releases the marker, so a trigger cannot be lost between the two |
+| P2 RT-05 test: the notification test polled and retried the trigger | Fixed. `TestRT05_QuarantinedServer_ContractChangeDetectedOnListChanged` now calls the handler once. The new `TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp` delivers exactly one notification during an in-flight verification, after that verification has listed the approved contract. It asserts the follow-up without polling, and it fails without the fix |
+| P2 suite: EXP-2a reported HOLDS for `pending` and checked only `calendar_get_events` | Fixed. `exp2a_verdict` (in `scripts/lib/tpa-lab-verdicts.sh`) needs both `calendar_get_events` and `stock_quote` to be changed or blocked. `approved` on either is HOLE, and anything else is INCONCLUSIVE. Predicate tests are in `tests/tpa-attack-lab/scripts_test.go` |
+| P2 suite: the suite exited 0 after a failed baseline approval, a failed scan or a confirmed bypass | Fixed. `suite_exit_status` exits 1 on any HOLE, PARTIAL-HOLE, `HOLE?`, INCONCLUSIVE or unrecognised result, or when nothing ran. The deferred `EXP-3 HOLE` is the one allowed failure. This is tested |
+| P2 suite: an `IMAGE` override built one tag while the config still ran `tpa-attack-lab:lab` | Fixed. The experiment suite writes `$IMAGE` into every isolation block of each generated config. `lab_config_use_image` refuses any config whose servers are not Docker-isolated with `network_mode: none`. `run-tpa-lab-docker.sh` runs the checked-in config, so it rejects an override that config would not run. `TPA_LAB_PREFLIGHT_ONLY=1` stops it after preflight for tests. All of this is tested |
+
+Verification on the branch head after the round-3 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/security/scanner/ ./internal/runtime/ ./tests/tpa-attack-lab/
+go test -timeout 25m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/... ./tests/tpa-attack-lab/   # all ok
+go test -race -timeout 20m ./internal/runtime/                              # ok (399.9s)
+golangci-lint run --config .github/.golangci.yml ./internal/security/scanner/... ./internal/runtime/... ./tests/tpa-attack-lab/...
+golangci-lint run --config .github/.golangci.yml --build-tags server ./internal/security/scanner/... ./internal/runtime/... ./tests/tpa-attack-lab/...
+#   both: only the pre-existing govet "inline reflect.Ptr" in internal/runtime/event_bus.go (untouched since main)
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+#   suite result: PASS (every experiment holds; EXP-3 is the deferred RT-04/RT-07 hole)   exit 0
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh     # artifacts from the run above, no Go change since
+#   Risk Score: 93/100, dangerous threats (malicious_code, exfiltration,
+#   rug_pull, tool_poisoning, prompt_injection); both containers tpa-attack-lab:lab, NETWORKS none
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r3/` of the main checkout.
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -305,3 +350,13 @@ Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r2
   `changed`, new tools are filed as pending, and nothing is indexed. A
   quarantined server that was never approved keeps an uncaptured review until
   someone inspects it, as before.
+- A discovery trigger (connect or `tools/list_changed`) that arrives while a
+  discovery for the same server is running is no longer dropped. It runs as a
+  follow-up, up to 4 per owner.
+- A scan whose live tool export is empty now scans the contracts the proxy
+  ingested. The scan fails rather than proceeding when the live export keeps
+  failing with nothing ingested, or when `tools.json` cannot be written.
+  `tools.json` in a source dir is always rewritten, including as an empty
+  list.
+- `scripts/tpa-lab-redteam-experiments.sh` now exits non-zero on any hole or
+  inconclusive result, except the deferred EXP-3.
