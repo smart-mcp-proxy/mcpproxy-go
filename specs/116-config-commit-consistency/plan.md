@@ -123,7 +123,7 @@ L2 storage.Manager.mu → bbolt tx                    (leaf)
 L1' index (bleve) writes                            (taken under L1 in step 6; leaf w.r.t. L0-L2)
 L3 upstream.Manager.captureMu (W in commit, R in capture) → L4 Manager.mu
 L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
-L6 configsvc.updateMu (pre-publish hook + observers run here)
+L6 configsvc.updateMu (leaf observers only; the pre-publish hook is removed, review R1.7)
 L7 Runtime.mu                                        (leaf: field swaps only)
 ```
 

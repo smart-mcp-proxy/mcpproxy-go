@@ -372,6 +372,11 @@ Spec 117 PR-3's inverted order (approval lock → `captureMu`(R) → `epochMu`,
   same way. Internal `net/http` retries must open or reuse a gated connection,
   so they are covered too.
 
+**Amended after review R1.3/R1.4** (§7): mcp-go transports are wrapped by
+`dialgate.WrapTransport` (stdio stdin writes included). `Retire` kills a stdio
+process group synchronously. Every OAuth preflight, discovery and cache fetch
+takes the instance transport through `oauth.Env`.
+
 **Invariant.** An instance admitted before `Retire` returns may already have
 launched or written. The asynchronous `Disconnect` terminates it. Nothing new
 starts after `Retire` returns.
@@ -463,3 +468,43 @@ here.
 | Capture sequence and `managed.Client.Retire()` / `CaptureIsCurrent` (117 PR-3), "manager retires replaced clients" | Same retirement point as 116 PR3/PR4 | There is one `Retire()` per instance. 116 PR3's `AdvanceGenerations` is the manager-side retirement point for commit-driven replacement. 117's `Retire()` (capture invalid) and 116 PR4's `Gate.Retire()` (dial barrier) are one method: whichever lands second extends it |
 | Lock order `captureSnapMu → approval lock → captureMu(R) → epochMu` | 116 adds `configCommitMu → approval locks` (released) `→ captureMu(W)` | The union is acyclic: `Commit` never takes `captureSnapMu`, never holds an approval lock while taking `captureMu`, and no holder of `captureSnapMu`, an approval lock, `captureMu` or `epochMu` calls `Commit` |
 | `QuarantineServer` purge moved under the approval lock (117) | 116 runs the index purge in step 6 under the approval lock | Same outcome. The 116 commit subsumes it |
+
+## 7. Design review round 1 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
+
+Verdict: FINDINGS (8). Each was checked against the code before it was
+accepted. All 8 were genuine, and their resolutions are folded into the spec:
+
+| # | Sev | Finding (verified at) | Resolution |
+|---|---|---|---|
+| R1.1 | high | Scan jobs and reports are saved from asynchronous scanner callbacks keyed by name (`scanner/service.go:892-916`). A scan started for the old `acme` can finish after the purge and restore a clean report that a replacement's approval then reads (`:1733`) | **D12**: scan jobs and reports carry the incarnation they were started for. They are written with `Save*IfIncarnation`, which checks the `upstreams` row incarnation in the same bbolt tx and drops the write on mismatch or a missing row. `approveServer` only reads reports of the current incarnation. Removal invalidates the scan-summary cache (FR-014a, T047, T055a) |
+| R1.2 | high | `PersistentTokenStore.SaveToken` checks the context once and then upserts (`persistent_token_store.go:232-293`, `bbolt.go:1112-1133`). A delayed code-exchange or refresh result recreates purged tokens, and the same-name/same-URL re-add inherits them | **D12**: token, DCR-client and `oauth_completion` writes become `…IfIncarnation` conditional writes. The token store is constructed with the instance's incarnation. `RefreshManager` schedules are keyed by `(name, incarnation)` and dropped on mismatch (FR-014b, T048, T055b) |
+| R1.3 | high | Gating `cmd.Start` does not gate later writes to the child's stdin. Initialize, notifications and tool calls go through mcp-go's stdio transport (`connection_stdio.go:235-244`, `:289-292`) | **D8 amended**: every mcp-go `transport.Interface` that core builds (stdio, streamable HTTP, SSE) is wrapped by `dialgate.WrapTransport`. It gates `Start`/`SendRequest`/`SendNotification` under the read lock. For stdio, `Retire` also kills the process group synchronously (SIGKILL / Job Object terminate, which is bounded). A stdio instance can then make no write after `Retire` returns (FR-023a, T081a) |
+| R1.4 | high | OAuth preflight and discovery use their own clients: `http.Head` (`oauth/config.go:2048`), `autoDetectResource`'s client (`:637`), `httpFetchRaw` (`discovery_cache.go:299-307`) | **D8 amended**: an `oauth.Env{Transport, Ctx}` is threaded through every preflight, discovery and cache-fetch helper and `CreateOAuthConfig*`. `scripts/check-upstream-write-sites.sh` (PR4 extension) forbids `http.Get/Head/Post(`, `http.DefaultClient`, `http.DefaultTransport` and `&http.Client{` without an explicit gated transport in `internal/oauth/**`, `internal/upstream/core/**` and `internal/transport/**` (FR-024a, T084a, T099) |
+| R1.5 | high | Supervisor disconnects (`ActionDisconnect` and the first leg of `ActionReconnect`, `supervisor.go:611-616`) resolve the client by name when they run (`actor_pool.go:146-154`), and the design had no generation-bound disconnect | `DisconnectServerAt(name, gen)` added. It acts only on the instance registered at `gen`, and every disconnect leg uses it (FR-018, T061a) |
+| R1.6 | high | No-op detection would skip boot reconciliation: `configsvc.NewService` already holds the file config (`service.go:79-87`), so `ReplaceConfig(live)` compares equal while storage and the manager are empty. An unchanged `SaveConfiguration` would skip its disk write | **D13**: step 6 diffs `next` against the **stored view** (rows plus generation stamps), not against `base`, so storage is always repaired. `tx.Bootstrap()` (boot only) seeds generations from the stored rows that match and schedules workers for every enabled server. `tx.ForceDisk()` (`SaveConfiguration`) always writes the file. The skip rule is "next == base **and** stored view consistent **and** not forced" (FR-001a) |
+| R1.7 | medium | The admission pre-publish hook reads storage (`config_load_admission_gate.go:311`, `:408`) under `configsvc.updateMu`, which contradicts "L6 is a leaf" | The pre-publish hook is **removed** in PR1. Every publish goes through `Commit`, whose step 2 runs admission once on captured inputs before `Prepare`. The only observer left under L6 is the profile-index warm (`server/profile_tool.go:892`, its own `warmMu`, a leaf) (T021) |
+| R1.8 | medium | Several T tests park inside `configCommitMu` (or inside the capture or admitted section) and then wait for a competing commit to return, which deadlocks the test. T2.3 already passes on PR1 | quickstart restructured into **stale-read tests** (the writer is parked **before** `Commit`, at its own read site) and **exclusion tests** (park inside, assert the competitor is **blocked** through a `commitWaiters()` probe, release, assert the order). T3.5/T4.x release the held section before awaiting the commit. T2.3 moved to PR1 as regression coverage |
+
+### D12. Asynchronous writers of purge-set state are incarnation-conditional
+
+Some state in the purge set is written by asynchronous workers that outlive a
+removal: scanner callbacks, OAuth token persistence, refresh scheduling and
+discovery. Gating the network is not enough, because the write is local. Each
+such write is a storage method that takes the expected incarnation and, **in
+the same bbolt transaction**, checks that the `upstreams` row exists and
+carries that incarnation. The commit's purge runs in one transaction with the
+row delete (D4), so either the write committed first (and is purged) or it
+sees the row missing or re-incarnated (and is dropped). No lock is needed
+beyond bbolt's own serialization, so this adds no lock-order edge.
+
+### D13. Projection repair is not a config change
+
+A commit has two diffs:
+- **Config diff** (`base` → `next`): decides generations, publication and events.
+- **Projection diff** (`next` → stored view): decides storage writes.
+
+The commit skips work only when both are empty and nothing is forced. Boot
+(`Bootstrap`) and an explicit `SaveConfiguration` (`ForceDisk`) are the two
+forced cases. Generations survive restarts through the row stamps: at boot a
+row whose content equals the file entry keeps its stored `{Gen, Incarnation}`,
+and everything else gets the boot `G`.

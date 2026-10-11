@@ -34,6 +34,8 @@ func (tx *CommitTx) RemoveServer(name string) error                      // ErrS
 func (tx *CommitTx) ReplaceConfig(cfg *config.Config)                    // ApplyConfig / Reload / boot
 func (tx *CommitTx) ExpectGeneration(name string, gen int64) error       // ErrServerReplaced at commit time
 func (tx *CommitTx) ExpectIncarnation(name string, inc int64) error      // ErrServerReplaced at commit time
+func (tx *CommitTx) Bootstrap()   // boot only: seed generations from matching stored rows; schedule all enabled servers (D13)
+func (tx *CommitTx) ForceDisk()   // SaveConfiguration: always write the file (D13)
 func (tx *CommitTx) MutateGlobal(fn func(cfg *config.Config) error) error // listen, registries, …
 // UnderApprovalLock registers fn to run in pipeline step 4 while the commit
 // holds name's approval lock (Spec 117 review-bound server approval). fn may
@@ -107,6 +109,10 @@ Generation rule, computed in `Prepare`:
 explicit-quarantine bit, `Shared` and `AuthBroker`, and ignores
 `Created`/`Updated`.
 
+The pre-publish hook (`SetPrePublishHook`) is removed (review R1.7). Admission
+runs in commit step 2. Observers stay, but they must be leaves (today only the
+profile-index warm).
+
 `Update` and `UpdateIfCurrent` are kept only as thin wrappers that call
 `Prepare`+`Publish`. After PR1 they are called only from `commit.go`.
 `ReloadFromFile` is replaced by the commit's `ReplaceConfig` path, so the raw
@@ -163,6 +169,20 @@ Deleted in the same transaction as the row:
 | `toolhash` | `name:` prefix with exact separator (A11: verified in T046) | `DeleteToolHash` |
 | Spec 117 tool-baseline marker (when it has landed) | `name` | `MarkToolBaselineDecided`'s bucket; the purge is its only clearer |
 
+### Incarnation-conditional writes (PR2, D12)
+
+```go
+func (m *Manager) SaveScanJobIfIncarnation(job *ScanJob, inc int64) (written bool, err error)
+func (m *Manager) SaveScanReportIfIncarnation(r *ScanReport, inc int64) (bool, error)
+func (m *Manager) SaveOAuthTokenIfIncarnation(rec *OAuthTokenRecord, server string, inc int64) (bool, error)
+func (m *Manager) SaveOAuthClientIfIncarnation(...)  (bool, error)
+func (m *Manager) SaveOAuthCompletionIfIncarnation(...) (bool, error)
+```
+
+Each one runs a single bbolt `Update` that reads `upstreams[server]`, compares
+its `Incarnation`, and writes only on a match. `ScanJob` and `ScanReport` gain
+`Incarnation int64` (`omitempty`).
+
 Not in the set: `activity_records` (audit history), `agent_tokens` and
 client credentials (A5), `toolstats` (aggregate counters, not trust).
 
@@ -208,6 +228,7 @@ func (m *Manager) AdvanceGenerations(changes []GenerationChange) []*managed.Clie
 func (m *Manager) AddServerConfigAt(name string, cfg *config.ServerConfig, gen int64) error // ErrStaleGeneration
 func (m *Manager) RemoveServerAt(name string, gen int64) error                            // ErrStaleGeneration
 func (m *Manager) ConnectServerAt(ctx context.Context, name string, gen int64) error        // ErrStaleGeneration
+func (m *Manager) DisconnectServerAt(name string, gen int64) error                         // exact instance only
 ```
 
 `managed.Client` gains `Generation() int64` (set when installed, restamped on
@@ -244,7 +265,10 @@ func (g *Gate) DialContext(next func(ctx context.Context, network, addr string) 
 func (g *Gate) Transport(base *http.Transport) *http.Transport                // Clone + gated DialContext (+ DialTLSContext if set)
 func (g *Gate) Context() context.Context
 func (g *Gate) Retire()                                                       // idempotent, bounded
+func (g *Gate) OnRetire(fn func())                                            // stdio: kill the process group synchronously
+func WrapTransport(g *Gate, t transport.Interface) transport.Interface         // gates Start/SendRequest/SendNotification
 func (g *Gate) Retired() bool
+func (g *Gate) RetireWaiting() bool // test probe: Retire is blocked on an admitted section
 
 type gatedConn struct{ net.Conn; g *Gate }
 func (c *gatedConn) Write(b []byte) (int, error) // RLock; if retired → ErrRetired; Conn.Write; RUnlock

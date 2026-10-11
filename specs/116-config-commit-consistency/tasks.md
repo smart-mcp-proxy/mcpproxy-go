@@ -38,12 +38,14 @@ Branch `116-pr1-config-commit` from `main`.
 - [ ] T016 [P] [US1] `internal/server/shared_authbroker_patch_test.go`: T1.7 (REST and MCP patch keep `Shared` and `AuthBroker`)
 - [ ] T017 [P] [US1] `internal/runtime/configsvc/generations_test.go`: generation rule table (data-model §2), incarnation kept on update and reset on recreate, `SeedVersion` monotonic (T1.9)
 - [ ] T018 [P] [US1] `internal/storage/server_commit_test.go`: `ApplyServerCommit` is all-or-nothing (inject an error on the 2nd row → no row changed), writes the meta generation, stamps Generation/Incarnation
+- [ ] T018a [P] [US1] `internal/runtime/commit_bootstrap_test.go`: T1.10 (boot with an empty storage and manager repairs the projection and schedules every enabled server; an unchanged `SaveConfiguration` still writes the file; restart keeps generations of unchanged rows)
+- [ ] T018b [P] [US1] `internal/runtime/commit_removal_exclusion_test.go`: T1.11 (formerly T2.3; regression coverage that a parked removal blocks a B toggle, REST update and MCP patch, which then get 404)
 - [ ] T019 [P] [US1] `internal/runtime/lock_order_pr1_test.go`: `TestLockOrder_*` watchdog tests (commit vs capture section; commit vs discovery under the approval lock; a re-entrant `Commit` from inside `fn` is rejected)
 
 ### Implementation
 
 - [ ] T020 [US1] `internal/config/server_entry_equal.go`: `ServerEntryEqual` (ignores Created/Updated; includes the explicit bit, Shared, AuthBroker) with a table test
-- [ ] T021 [US1] `configsvc`: `ServerGen`, `Snapshot.ServerGenerations`, `Prepare`/`Publish`/`SeedVersion`. Re-express `Update`/`UpdateIfCurrent` on top. Remove `ReloadFromFile`'s raw publish (makes T017 pass)
+- [ ] T021 [US1] `configsvc`: remove `SetPrePublishHook` (admission moves to commit step 2, R1.7); `ServerGen`, `Snapshot.ServerGenerations`, `Prepare`/`Publish`/`SeedVersion`. Re-express `Update`/`UpdateIfCurrent` on top. Remove `ReloadFromFile`'s raw publish (makes T017 pass)
 - [ ] T022 [US1] storage: `UpstreamRecord.Generation/Incarnation`, `ApplyServerCommit` (one tx; saves through the quarantine-keeping invariant; deletes as today: row + call history), meta key (makes T018 pass)
 - [ ] T023 [US1] `internal/runtime/commit.go`: `Commit`, `CommitTx` ops, pipeline steps 1-6 and 8 plus after-unlock (plan §Commit pipeline). Approval locks taken in sorted order for changed names in step 4, with `UnderApprovalLock` hooks. Compensating disk write on a storage failure. Re-entry guard
 - [ ] T024 [US1] `internal/runtime/commit_reconcile.go`: move `LoadConfiguredServers`' storage phase into step 6 (diff against the stored view; OAuth-config-change clear; newly-quarantined index purge, FR-008; orphan GC on the working copy, with the empty guard at boot only). Keep `LoadConfiguredServers(nil)` as a thin `Commit("reconcile", ReplaceConfig(live))` wrapper for the boot path. Delete the removal goroutines (removal is synchronous in step 6)
@@ -73,20 +75,23 @@ Branch `116-pr2-atomic-removal` from `main` after PR1 merges.
 
 - [ ] T040 [P] [US2] `internal/runtime/removal_purge_test.go`: T2.1 across REST, MCP, ApplyConfig, reload, and the empty set; asserts per bucket (data-model §PurgeSet)
 - [ ] T041 [P] [US2] `internal/server/readd_clean_test.go`: T2.2 (identical tools and prompts are pending on a manual-trust re-add; unforced scanner approve fails; no OAuth token is reused)
-- [ ] T042 [P] [US2] `internal/runtime/removal_exclusion_test.go`: T2.3 (removal parked at `afterStorage` vs B toggle, REST update, MCP patch)
 - [ ] T043 [P] [US2] `internal/runtime/approve_incarnation_test.go`: T2.4 (re-add rejects; an unrelated `disabled_tools` edit does not reject) + T2.7 (discovery write after re-add dropped)
 - [ ] T044 [P] [US2] `internal/security/scanner/approve_incarnation_test.go`: T2.5
 - [ ] T045 [P] [US2] `internal/storage/oauth_exact_key_test.go`: T2.6 (B2)
+- [ ] T047 [P] [US2] `internal/security/scanner/late_scan_result_test.go`: T2.8 (scan for old `acme` completes after remove + re-add → no job or report under the new incarnation; unforced approve still refused)
+- [ ] T048 [P] [US2] `internal/oauth/late_token_save_test.go`: T2.9 (a `SaveToken` parked after its context check, then remove + re-add with the same URL → no token; the refresh schedule for the old incarnation is dropped)
 - [ ] T046 [P] [US2] `internal/storage/toolhash_keys_test.go`: pin the `toolhash` key format (A11) so the purge decision is justified
 
 ### Implementation
 
 - [ ] T050 [US2] `internal/storage/purge.go`: `PurgeServer` inside the `ApplyServerCommit` tx for each `Removes` entry; `PurgeReport`. Rewrite `ClearOAuthState` with the exact key match (`name` or `name_` + 16 lowercase hex) (makes T045 pass)
-- [ ] T051 [US2] `commit.go` step 6: removal purge under L1; in-memory purge (index + profile reindex, `RefreshManager.OnTokenCleared`, `RevokeInspectionExemption`, toolsig drop, discovery generation reset); `CommitResult.Purged`; activity `purged` metadata (makes T040 and T042 pass)
+- [ ] T051 [US2] `commit.go` step 6: removal purge under L1; in-memory purge (index + profile reindex, `RefreshManager.OnTokenCleared`, `RevokeInspectionExemption`, toolsig drop, discovery generation reset); `CommitResult.Purged`; activity `purged` metadata (makes T040 pass)
 - [ ] T052 [US2] Collapse REST `RemoveServer` and MCP `handleRemoveUpstream` onto `Commit(RemoveServer)` and delete their ad hoc cleanup (makes T041 pass)
 - [ ] T053 [US2] Incarnation binding: `approvalHooks`; capture in `ApproveTools`, block/unblock, `approveBaselineToolsForServer`, `checkToolApprovals`/capture; re-check against the storage row under L1; `ErrServerReplaced` (makes T043 pass)
 - [ ] T054 [US2] Prompt approvals (`internal/server/prompt_quarantine.go`) under L1 with the incarnation check
 - [ ] T055 [US2] Scanner: incarnation captured in `approveServer`; baseline save under L1 with the check; `UnquarantineServer` → `Commit(ExpectIncarnation, SetQuarantined(false))` (makes T044 pass)
+- [ ] T055a [US2] Scanner: `Incarnation` on jobs and reports; callbacks use `Save*IfIncarnation`; `approveServer` filters by the current incarnation; removal invalidates the summary cache (makes T047 pass)
+- [ ] T055b [US2] OAuth: `PersistentTokenStore` bound to the incarnation; token, DCR and completion writes use `…IfIncarnation`; `RefreshManager` keyed by `(name, incarnation)` (makes T048 pass)
 - [ ] T056 [US2] REST: `generation`/`incarnation` in server and review payloads; optional `expected_incarnation` on approve/block/unquarantine; 409 `server_replaced`; CLI message passthrough; `oas/swagger.yaml`; `docs/api/rest-api.md`
 - [ ] T057 [P] [US2] Web UI: send `expected_incarnation` from the review and approval actions; vitest in `frontend/tests/unit/`; Playwright sweep per `docs/development/web-ui-verification.md`
 - [ ] T058 [US2] Test-only `mcpproxy debug purge-report` (build tag `qa_hooks`) for live L2 inspection
@@ -108,11 +113,12 @@ independent of PR2.
 - [ ] T061 [P] [US3] `internal/runtime/supervisor/stale_action_generation_test.go`: T3.3 with the **real** `ActorPoolSimple` + `upstream.Manager` (no settle-before-act)
 - [ ] T062 [P] [US3] `internal/runtime/restart_generation_test.go`: T3.4
 - [ ] T063 [P] [US3] `internal/runtime/capture_generation_test.go`: T3.5
+- [ ] T061a [P] [US3] `internal/runtime/supervisor/stale_disconnect_test.go`: T3.6 (an old `ActionDisconnect` parked, then a newer commit installs and connects the replacement, then release → the replacement stays connected)
 - [ ] T064 [P] [US3] `internal/upstream/manager_generation_test.go`: `*At` methods; `AdvanceGenerations` unregisters vs restamps; a removed tombstone refuses re-registration at the old generation and is overwritten by a create
 
 ### Implementation
 
-- [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu); `managed.Client.Generation()` (makes T064 pass)
+- [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu); `DisconnectServerAt`, `managed.Client.Generation()` (makes T064 and T061a pass)
 - [ ] T071 [US3] `commit.go` step 7 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
 - [ ] T072 [US3] Post-commit workers use `*At` with `(name, g)` (makes T060 pass)
 - [ ] T073 [US3] Supervisor: actions carry `ServerGen.Gen` from their snapshot; `ActorPoolSimple` uses `*At`; `ErrStaleGeneration` → debug + no-op (makes T061 pass)
@@ -137,6 +143,8 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] T083 [P] [US4] `internal/transport/retire_retry_test.go`: T4.3 (flaky reused connection forces a retry; zero hits after retirement; Retire bounded)
 - [ ] T084 [P] [US4] `internal/upstream/core/retire_oauth_test.go`: T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused)
 - [ ] T085 [P] [US4] `internal/runtime/retire_capture_test.go`: T4.5; `internal/upstream/retire_inflight_call_test.go`: T4.6
+- [ ] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
+- [ ] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
 - [ ] T086 [P] [US4] `internal/upstream/dialgate/bench_test.go`: T4.7
 
 ### Implementation
@@ -145,10 +153,13 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] T091 [US4] `managed.NewClient` creates the gate; the CLI client gets an always-open gate; `Disconnect` does not retire (only the manager retires)
 - [ ] T092 [US4] `core`: stdio `client.Start`, Docker launch and launcher spawn under `gate.Admit` (makes T081 pass)
 - [ ] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
+- [ ] T093a [US4] `dialgate.WrapTransport` around every core-built mcp-go transport; `Gate.OnRetire` kills the stdio process group / Job Object synchronously (makes T081a pass)
+- [ ] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
 - [ ] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
 - [ ] T095 [US4] `AdvanceGenerations` calls `Retire()` on every instance it unregisters, before returning (and so before publish) (makes T085 pass)
 - [ ] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
 - [ ] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
+- [ ] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
 - [ ] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
