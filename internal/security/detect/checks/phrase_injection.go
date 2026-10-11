@@ -68,6 +68,10 @@ type phraseFamily struct {
 	// leadingBoundary marks a pattern whose match begins with a consumed
 	// non-letter boundary character (the non-English families, SEC-01).
 	leadingBoundary bool
+	// softReason, when set, explains why this family is review-only by design
+	// (its base sits below the hard floor); it replaces the generic
+	// "quoted/described position" wording in the finding detail.
+	softReason string
 }
 
 // overrideVerbs are imperative base forms of "stop obeying" (normalized:
@@ -172,7 +176,7 @@ var phraseFamilies = []phraseFamily{
 	},
 	{ // "Treat everything you were told before as void" (SEC-01): declaring the
 		// agent's prior directives void, then (by implication) replacing them.
-		re:     regexp.MustCompile(`\b(?:treat|consider|regard|deem) (?:everyth\w*|anyth\w*|all(?: of)?(?: the| your)?(?: previous| prior| earlier)?(?: instruction\w*| directiv\w*| messag\w*)?) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct)\w*)?[^.!?]{0,30}?\bas (?:void|null|invalid|obsolete|cancel\w*|irrelevant|outdat\w*|moot|supersed\w*|non-?binding)\b`),
+		re:     regexp.MustCompile(`\b(?:treat|consider|regard|deem) (?:(?:everyth\w*|anyth\w*|all(?: of)?(?: the| your)?) (?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct)\w*|(?:all(?: of)?(?: the| your)? |the |your )?(?:previous |prior |earlier |original |above )?(?:instruction|directiv|guidance|guidelin|system prompt)\w*(?: (?:that )?you (?:were|have been|has been|had been|was) (?:told|given|sent|provid)\w*)?)[^.!?]{0,30}?\bas (?:void|null|invalid|obsolete|cancel\w*|irrelevant|outdat\w*|moot|supersed\w*|non-?binding)\b`),
 		base:   0.88,
 		threat: detect.ThreatPromptInjection,
 		what:   "instruction-voiding directive",
@@ -201,31 +205,48 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		return nil
 	}
 
+	// Scan the de-obfuscated PhraseText AND the plain NormalizedText: folding
+	// can only ever ADD matches this way, never hide one that the plain
+	// normalization exposed (SEC-01 review round 1).
+	texts := []string{text}
+	if tool.NormalizedText != "" && tool.NormalizedText != text {
+		texts = append(texts, tool.NormalizedText)
+	}
+
 	matched := false
 	bestConf := 0.0
 	bestMatch := ""
 	bestWhat := ""
 	bestThreat := ""
-	var bestRe *regexp.Regexp
-	for _, fam := range allPhraseFamilies {
-		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
-			// The non-English families spell their word boundary as a consumed
-			// non-letter (Go's \b is ASCII-only); for those only, start the match
-			// and the position window at the first letter so a quote right before
-			// the phrase still counts as quoting it. Other families keep their
-			// match start exactly as before.
-			start := loc[0]
-			if fam.leadingBoundary {
-				start += len(text[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(text[loc[0]:loc[1]], isNotWordRune))
-			}
-			conf := fam.base * detect.ClassifyPositionForRecall(text, start).Discount()
-			if !matched || conf > bestConf {
-				matched = true
-				bestConf = conf
-				bestMatch = text[start:loc[1]]
-				bestWhat = fam.what
-				bestThreat = fam.threat
-				bestRe = fam.re
+	bestSoftReason := ""
+	bestDeobfuscated := false
+	for ti, t := range texts {
+		for _, fam := range allPhraseFamilies {
+			for _, loc := range fam.re.FindAllStringIndex(t, -1) {
+				// The non-English families spell their word boundary as a consumed
+				// non-letter (Go's \b is ASCII-only); for those only, start the
+				// match and the position window at the first letter so a quote
+				// right before the phrase still counts as quoting it. Other
+				// families keep their match start exactly as before.
+				start := loc[0]
+				if fam.leadingBoundary {
+					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
+					if negatedOverride(t[:start]) {
+						continue
+					}
+				}
+				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
+				if !matched || conf > bestConf {
+					matched = true
+					bestConf = conf
+					bestMatch = t[start:loc[1]]
+					bestWhat = fam.what
+					bestThreat = fam.threat
+					bestSoftReason = fam.softReason
+					// Only the de-obfuscated view (index 0, when it differs) can
+					// produce a match the plain text does not contain.
+					bestDeobfuscated = ti == 0 && len(texts) > 1 && !fam.re.MatchString(tool.NormalizedText)
+				}
 			}
 		}
 	}
@@ -238,7 +259,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	// de-obfuscation (homoglyphs, leet digits, separator/letter spacing), so an
 	// operator understands why the raw description does not read that way.
 	obfuscated := ""
-	if tool.NormalizedText != "" && text != tool.NormalizedText && bestRe != nil && !bestRe.MatchString(tool.NormalizedText) {
+	if bestDeobfuscated {
 		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 
@@ -254,6 +275,9 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 			conf = phraseSoftFloor
 		}
 		detail = fmt.Sprintf("Description references a %s%s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, obfuscated, bestMatch)
+		if bestSoftReason != "" && bestConf >= phraseSoftFloor {
+			detail = fmt.Sprintf("Description contains a %s%s (%q) — surfaced for review, not auto-blocked (%s).", bestWhat, obfuscated, bestMatch, bestSoftReason)
+		}
 	}
 
 	return []detect.Signal{{
@@ -304,3 +328,17 @@ func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
 }
 
 func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
+
+// negatedOverride reports whether a non-English override is negated by the
+// word right before it ("не игнорируй …", "nie ignoruj …", "non ignorare …"),
+// which turns the directive into its opposite. prefix is the text before the
+// match's first letter.
+func negatedOverride(prefix string) bool {
+	p := strings.TrimRight(prefix, " ")
+	for _, neg := range []string{"не", "nie", "non", "no", "não", "nao", "ne", "niet", "nicht", "ні"} {
+		if strings.HasSuffix(p, " "+neg) || p == neg {
+			return true
+		}
+	}
+	return false
+}

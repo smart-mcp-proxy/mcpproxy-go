@@ -111,14 +111,27 @@ func classifyLetter(r rune) int {
 	}
 }
 
+// confusableToken is one letter-run (word) with its script census.
+type confusableToken struct {
+	start, end     int // rune offsets [start,end)
+	counts         scriptCount
+	canLatin       bool // every non-Latin letter has a Latin look-alike
+	canCyr         bool // every Latin letter has a Cyrillic look-alike, the rest is Cyrillic
+	hasLatinLetter bool
+}
+
 // foldConfusables applies the homoglyph folding described on
 // NormalizeForPhrase, one letter-run (word) at a time.
+//
+// A token made ENTIRELY of look-alike letters (Cyrillic "все", "сору") is
+// ambiguous: it is either a genuine Cyrillic word or a fully disguised Latin
+// one. It is folded to Latin only when the text is predominantly Latin AND an
+// adjacent word contains Latin letters, so a Russian sentence quoted inside an
+// English description keeps its own words ("Игнорируй все предыдущие …" stays
+// matchable by the Russian family).
 func foldConfusables(s string) string {
 	runes := []rune(s)
 
-	// Document script balance: decides whether a token made ENTIRELY of
-	// look-alike letters is a disguised Latin word (Latin-majority text) or a
-	// genuine word of a Cyrillic/Greek text.
 	var doc scriptCount
 	for _, r := range runes {
 		switch classifyLetter(r) {
@@ -132,62 +145,65 @@ func foldConfusables(s string) string {
 	}
 	latinMajority := doc.latin > doc.cyrillic+doc.other
 
-	changed := false
+	var toks []confusableToken
 	for i := 0; i < len(runes); {
 		if !unicode.IsLetter(runes[i]) {
 			i++
 			continue
 		}
+		t := confusableToken{start: i, canLatin: true, canCyr: true}
 		j := i
-		var tc scriptCount
-		// canLatin: every non-Latin letter has a Latin look-alike, so folding
-		// yields a pure Latin word. canCyr: every Latin letter has a Cyrillic
-		// look-alike and the rest is Cyrillic, so folding yields a pure
-		// Cyrillic word.
-		canLatin, canCyr := true, true
 		for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.Is(unicode.Mn, runes[j])) {
 			r := runes[j]
 			switch classifyLetter(r) {
 			case 0:
-				tc.latin++
+				t.counts.latin++
+				t.hasLatinLetter = true
 				if _, ok := toCyrillic[r]; !ok {
-					canCyr = false
+					t.canCyr = false
 				}
 			case 1:
-				tc.cyrillic++
+				t.counts.cyrillic++
 				if _, ok := toLatin[r]; !ok {
-					canLatin = false
+					t.canLatin = false
 				}
 			case 2:
-				tc.other++
-				canCyr = false
+				t.counts.other++
+				t.canCyr = false
 				if _, ok := toLatin[r]; !ok {
-					canLatin = false
+					t.canLatin = false
 				}
 			default:
 				if unicode.IsLetter(r) {
-					canLatin, canCyr = false, false
+					t.canLatin, t.canCyr = false, false
 				}
 			}
 			j++
 		}
-		nonLatin := tc.cyrillic + tc.other
-		mixed := tc.latin > 0 && nonLatin > 0
-		toLat := false
-		toCyr := false
+		t.end = j
+		toks = append(toks, t)
+		i = j
+	}
+
+	changed := false
+	for ti, t := range toks {
+		nonLatin := t.counts.cyrillic + t.counts.other
+		mixed := t.counts.latin > 0 && nonLatin > 0
+		latinNeighbour := (ti > 0 && toks[ti-1].hasLatinLetter) || (ti+1 < len(toks) && toks[ti+1].hasLatinLetter)
+		toLat, toCyr := false, false
 		switch {
-		case mixed && canLatin && canCyr:
+		case mixed && t.canLatin && t.canCyr:
 			toLat = latinMajority
 			toCyr = !latinMajority
-		case mixed && canLatin:
+		case mixed && t.canLatin:
 			toLat = true
-		case mixed && canCyr:
+		case mixed && t.canCyr:
 			toCyr = true
-		case tc.latin == 0 && nonLatin > 0 && canLatin && latinMajority:
-			// A whole word of look-alikes inside Latin text: a disguised Latin word.
+		case t.counts.latin == 0 && nonLatin > 0 && t.canLatin && latinMajority && latinNeighbour:
+			// A whole word of look-alikes between Latin words: a disguised Latin word.
 			toLat = true
 		}
-		for k := i; k < j; k++ {
+		for k := t.start; k < t.end; k++ {
 			c := classifyLetter(runes[k])
 			if toLat && c != 0 {
 				if l, ok := toLatin[runes[k]]; ok {
@@ -201,14 +217,11 @@ func foldConfusables(s string) string {
 					changed = true
 				}
 			}
-		}
-		for k := i; k < j; k++ {
 			if l, ok := latinLookalikes[runes[k]]; ok {
 				runes[k] = l
 				changed = true
 			}
 		}
-		i = j
 	}
 	if !changed {
 		return s

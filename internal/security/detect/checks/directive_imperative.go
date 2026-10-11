@@ -166,17 +166,25 @@ func (c *DirectiveImperative) Inspect(tool detect.ToolView, _ detect.RegistryVie
 	if text == "" {
 		return nil
 	}
+	// Scan both the de-obfuscated and the plain normalized text so folding can
+	// only add matches (SEC-01).
+	texts := []string{text}
+	if tool.NormalizedText != "" && tool.NormalizedText != text {
+		texts = append(texts, tool.NormalizedText)
+	}
 
 	bestConf := 0.0
 	bestMatch := ""
 	bestWhat := ""
-	for _, fam := range directiveFamilies {
-		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
-			conf := fam.base * detect.ClassifyPosition(text, loc[0]).Discount()
-			if conf > bestConf {
-				bestConf = conf
-				bestMatch = text[loc[0]:loc[1]]
-				bestWhat = fam.what
+	for _, t := range texts {
+		for _, fam := range directiveFamilies {
+			for _, loc := range fam.re.FindAllStringIndex(t, -1) {
+				conf := fam.base * detect.ClassifyPosition(t, loc[0]).Discount()
+				if conf > bestConf {
+					bestConf = conf
+					bestMatch = t[loc[0]:loc[1]]
+					bestWhat = fam.what
+				}
 			}
 		}
 	}
