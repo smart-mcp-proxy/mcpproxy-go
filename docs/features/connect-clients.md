@@ -20,6 +20,14 @@ If Claude Code or Codex reaches for `gh` or `curl` instead of the proxied tools,
 snippet from [Agent Instructions](/features/agent-instructions) to its `CLAUDE.md` / `AGENTS.md`.
 :::
 
+:::note Version
+Requires MCPProxy v0.70.0 or later for the `--profile`, `--lock`, `--switchable` and `--keyless` flags of
+`mcpproxy connect` and the `mcpproxy client` commands (`set-profile`, `lock`, `unlock`, `add`, `rotate`, `forget`,
+`upgrade-admin-key-holders`). Older releases only support `connect` with `--list`, `--all`,
+`--force` and `--name`. Check with `mcpproxy version`. A test in the repository parses the
+`mcpproxy` commands in this guide and fails when one is not in the command tree.
+:::
+
 ## Clients hub
 
 The Clients hub in the Web UI and macOS app brings client presence, Endpoint &
