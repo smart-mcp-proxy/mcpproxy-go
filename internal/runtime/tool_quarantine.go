@@ -1161,18 +1161,21 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.Int("stored_schema_len", len(existing.CurrentSchema)),
 				zap.Int("current_schema_len", len(schemaJSON)))
 
-			// LAST RESORT: If description and output schema match, auto-approve even
-			// if input schema normalization differs. Output schema is part of the
-			// approved contract and must not be bypassed here.
+			// LAST RESORT: If description and output schema match AND the input
+			// schema differs only in serialization (RT-01), auto-approve. Output
+			// schema is part of the approved contract and must not be bypassed here.
 			//
-			// EXCLUDED under trust_mode: scan. This fallback fires when the input
-			// schema genuinely differs after normalization (pure key-order/whitespace
-			// noise is already absorbed by the schemaMatch check above), and the
-			// scanner covers InputSchema — a TPA payload injected into an
-			// input-schema field description would otherwise auto-approve here without
-			// ever being scanned. In scan mode we fall through to the scan gate so
-			// the changed definition is actually scanned (fail closed on non-green).
-			if !scanMode && descMatch && outputSchemaMatch {
+			// RT-01 (red-team 2026-10-11): this branch used to fire on ANY input
+			// schema difference once the description matched, in every trust mode
+			// except scan — a "sneaky" rug pull that keeps the description
+			// byte-identical and only adds a parameter (e.g. an exfiltration sink)
+			// was silently auto-approved in the default manual mode. It now fires
+			// only when the two schemas are structurally identical (same property
+			// set, same required set, same types and constraints — only ordering
+			// that normalizeJSON does not absorb, such as the order of the
+			// "required" list, may differ). Any structural difference falls
+			// through to the change gate below and is held for review.
+			if descMatch && outputSchemaMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
