@@ -149,6 +149,9 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 			params.Restricted = true
 			params.TokenServers = authCtx.AllowedServers
 			params.TokenProfilePin = authCtx.ProfilePin
+			// Issue #1548 follow-up: the caller's own permission tier, which
+			// dispatch checks against every tool it calls.
+			params.TokenPermissions = authCtx.Permissions
 		}
 	}
 	return params

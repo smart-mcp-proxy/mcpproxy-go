@@ -158,6 +158,33 @@ type ToolPolicyReader interface {
 	ProfileToolDecision(serverName, toolName string) ProfileToolDecision
 }
 
+// TokenPermissionDecision is the caller's credential permission tier verdict
+// for one existing tool (issue #1548 follow-up).
+type TokenPermissionDecision struct {
+	// Blocked is true when the tool's tier, established from its effective
+	// annotations, is a permission the credential does not hold.
+	Blocked bool
+	// Indeterminate is true when no authoritative annotations establish the
+	// tool's tier (dispatch then fails closed to destructive) and the
+	// credential lacks that fail-closed permission. The evaluator lets every
+	// other gate answer first — a transient connection state stays its
+	// retryable verdict — but never reports such a tool ready.
+	Indeterminate bool
+	// Detail is the exact refusal text dispatch returns for the same call.
+	Detail string
+}
+
+// TokenPermissionReader reads the caller's agent-token permission tier.
+// Implementations MUST make the decision dispatch makes for the same caller
+// (the target tool's tier from its effective annotations, then the
+// credential's permission check), never a parallel re-implementation of it;
+// the glue layer is the only implementation. A nil reader means the caller
+// holds no restricting permissions (an operator, an administrator session, an
+// unauthenticated or confined-anonymous session) — never a default-deny.
+type TokenPermissionReader interface {
+	TokenPermissionDecision(serverName, toolName string) TokenPermissionDecision
+}
+
 // ---------------------------------------------------------------------------
 // Request / result types
 // ---------------------------------------------------------------------------
@@ -179,6 +206,9 @@ type EvalContext struct {
 	// nil means no profile policy is in effect (an unprofiled operator, or a
 	// pure-unit evaluation); it is never a default-deny.
 	ToolPolicy ToolPolicyReader
+	// TokenPermissions is the caller's credential permission tier (issue #1548
+	// follow-up). nil means no token permissions restrict the caller.
+	TokenPermissions TokenPermissionReader
 
 	// Tier selects the disclosure rules (FR-013).
 	Tier Tier
@@ -417,6 +447,19 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		return unavailable(id, ReasonToolBlockedByProfile, detail), nil
 	}
 
+	// 5c. token_permission_denied (issue #1548 follow-up) — the credential's
+	//     permission tier, decided as dispatch decides it: after the profile
+	//     gate (a profile exclusion keeps its scope-silent answer) and ahead of
+	//     the tool-level and connection gates, matching handleCallToolVariant.
+	//     Not scope-silenced: discovery lists a tool above the token's tier.
+	var permission TokenPermissionDecision
+	if ec.TokenPermissions != nil {
+		permission = ec.TokenPermissions.TokenPermissionDecision(serverName, toolName)
+	}
+	if permission.Blocked {
+		return unavailable(id, ReasonTokenPermissionDenied, tokenPermissionDetail(permission, id)), nil
+	}
+
 	configDenied, err := ec.Policy.ToolConfigDenied(serverName, toolName)
 	if err != nil {
 		return Result{}, fmt.Errorf("preflight: read tool config policy for %q: %w", id, err)
@@ -472,6 +515,13 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		return res, nil
 	}
 
+	// 13b. An indeterminate tier (no authoritative annotations, so dispatch
+	//      fails closed to destructive) that every earlier gate let through is
+	//      refused here: such a tool must never read as ready.
+	if permission.Indeterminate {
+		return unavailable(id, ReasonTokenPermissionDenied, tokenPermissionDetail(permission, id)), nil
+	}
+
 	// 14. Annotation filters (spec 094 order: read_only_only →
 	//     exclude_destructive → exclude_open_world; the first filter that
 	//     excludes owns the omission).
@@ -501,6 +551,15 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 		ready.Hash = FormatPin(approval.HashSchemaVersion, approval.CurrentHash)
 	}
 	return ready, nil
+}
+
+// tokenPermissionDetail is the refusal text for a permission verdict, with a
+// generic fallback for a reader that supplies none.
+func tokenPermissionDetail(decision TokenPermissionDecision, id string) string {
+	if decision.Detail != "" {
+		return decision.Detail
+	}
+	return fmt.Sprintf("Tool %q requires a permission the calling token does not hold.", id)
 }
 
 // NotFound builds the canonical not_found result for an id, WITHOUT consulting

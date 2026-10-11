@@ -894,6 +894,8 @@ mcpproxy tools preflight <server:tool> [<server:tool>...] [flags]
 | `12` | `unknown_ids` | At least one requested id is unknown in your view (typo, removed server) | Fix the job's tool list |
 | `1` | — | The command itself failed (daemon unreachable, invalid arguments, rejected request) | Investigate |
 
+When the CLI authenticates with an agent token (`MCPPROXY_API_KEY=mcp_agt_...` over TCP), the check is evaluated as that token, exactly as its own calls are: a tool above the token's permissions (`read` / `write` / `destructive`) reports `token_permission_denied` and the run exits `11`. The operator API key and the Unix socket hold no token permissions and are never narrowed by them.
+
 **Examples:**
 ```bash
 mcpproxy tools preflight gh-ops:sync_issues slack:post_message

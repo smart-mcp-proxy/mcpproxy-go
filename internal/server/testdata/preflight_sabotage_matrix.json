@@ -658,6 +658,34 @@
       }
     },
     {
+      "scenario": "token_permission_denied",
+      "surface": "e2e",
+      "tier": "agent_token",
+      "sabotage": "issue #1548 follow-up: an unpinned agent token minted with permissions [read] checks an approved, healthy write tool over REST; dispatch's target-tier gate refuses it with 'Permission denied: token does not have ...', so preflight names the same refusal (TestPreflightTokenPermission_RESTUnpinnedTokens)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "token_permission_denied",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
+      "scenario": "mcp_check_token_permission_denied",
+      "surface": "mcp-check",
+      "tier": "agent_token",
+      "sabotage": "issue #1548 follow-up: a session authenticated by a read-only agent token checks a write tool in band; the routed surface lists it (discovery does not hide a tier-exceeding tool), so the check names the permission refusal instead of answering ready (TestPreflightTokenPermission_InBandCheck)",
+      "expect": {
+        "status": "unavailable",
+        "reason": "token_permission_denied",
+        "retryable": false,
+        "action": "configure",
+        "verdict": "blocked",
+        "exit_code": 11
+      }
+    },
+    {
       "scenario": "mcp_check_profile_hidden",
       "surface": "mcp-check",
       "tier": "agent_token",

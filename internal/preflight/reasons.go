@@ -69,6 +69,17 @@ const (
 	// profile-excluded tool (Spec 108 FR-011) and the check must not confirm
 	// what discovery withholds.
 	ReasonToolBlockedByProfile Reason = "tool_blocked_by_profile"
+	// ReasonTokenPermissionDenied (issue #1548 follow-up) is the caller's
+	// agent-token permission tier (read / write / destructive) refusing a tool
+	// that exists: the preflight projection of dispatch's "Permission denied:
+	// token does not have '<tier>' permission required for tool ..." refusal,
+	// decided from the same effective annotations. Added additively. Unlike a
+	// profile exclusion it is NOT scope-silenced at the agent-token tier:
+	// discovery (retrieve_tools, routed describe_tool) still lists a tool above
+	// the token's tier, and the access explainer reports it visible but
+	// blocked, so the check names the refusal rather than calling it absent.
+	// Operator callers hold no token permissions and never see it.
+	ReasonTokenPermissionDenied Reason = "token_permission_denied"
 )
 
 // Class groups reasons by what an operator must do about them. It drives the
@@ -190,6 +201,11 @@ var reasonTable = map[Reason]reasonSpec{
 		verdict: VerdictBlocked, exitCode: ExitBlocked,
 		remediation: "The profile's tool policy (max_tier, tools.deny/allow, unannotated handling) excludes this tool; check under a profile that allows it, or have an operator adjust the profile (mcpproxy access explain --profile <name> --tool <server:tool>).",
 	},
+	ReasonTokenPermissionDenied: {
+		class: ClassPermanentConfig, retryable: false, action: health.ActionConfigure,
+		verdict: VerdictBlocked, exitCode: ExitBlocked,
+		remediation: "The credential's permissions (read/write/destructive) do not include this tool's tier; use a token minted with that permission (mcpproxy token create --permissions ...), or check a tool within the token's tier.",
+	},
 	ReasonNotFound: {
 		class: ClassPermanentConfig, retryable: false, action: health.ActionConfigure,
 		verdict: VerdictUnknownIDs, exitCode: ExitUnknownIDs,
@@ -214,6 +230,7 @@ var Precedence = []Reason{
 	ReasonServerDisabled,
 	ReasonNotFound,
 	ReasonToolBlockedByProfile,
+	ReasonTokenPermissionDenied,
 	ReasonToolDeniedByConfig,
 	ReasonToolBlockedByUser,
 	ReasonToolChanged,

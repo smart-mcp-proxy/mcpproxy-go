@@ -1746,6 +1746,13 @@ func (p *MCPProxyServer) lookupToolGate(serverName, toolName string) (string, js
 	return tierForAnnotations(identity.Annotations, identity.Found), captured
 }
 
+// tokenTierRefusalText is the target-tier refusal handleCallToolVariant
+// returns for a scoped caller lacking the tool's tier permission. Preflight
+// reports the same bytes (issue #1548 follow-up).
+func tokenTierRefusalText(perm, serverName, toolName string) string {
+	return fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", perm, serverName, toolName)
+}
+
 // tierForAnnotations maps one lookupToolAnnotationsFound result to the
 // permission tier it requires. It is split from lookupToolPermission so a
 // caller that already holds the StateView read (handleCallToolVariant, which

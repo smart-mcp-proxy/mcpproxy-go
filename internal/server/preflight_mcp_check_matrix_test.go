@@ -79,11 +79,27 @@ func assertMatrixCell(t *testing.T, scenario sabotageScenario, result describeCh
 }
 
 // scopedAgentContext is the session every in-band row is observed under: an
-// agent token scoped to the fixture's own servers.
+// agent token scoped to the fixture's own servers. It holds every permission
+// tier, so each row observes the state it sabotages rather than the token's
+// permission gate (issue #1548 follow-up: preflight now applies that gate as
+// dispatch does, and the fixture's tools carry no snapshot annotations, which
+// dispatch classifies as destructive). token_permission_denied has a cell of
+// its own, driven under readOnlyAgentContext.
 func scopedAgentContext() context.Context {
 	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "matrix-bot",
+		AllowedServers: []string{"gh", "locked", "off", "denied"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+}
+
+// readOnlyAgentContext is scopedAgentContext's token minted with the read
+// permission only.
+func readOnlyAgentContext() context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "matrix-ro-bot",
 		AllowedServers: []string{"gh", "locked", "off", "denied"},
 		Permissions:    []string{auth.PermRead},
 	})
@@ -175,6 +191,30 @@ func TestPreflightMatrixMCPSurfaces(t *testing.T) {
 			assertMatrixCell(t, scenario, payload.Results[0], payload.Verdict)
 		})
 	}
+
+	// --- token permission tier (issue #1548 follow-up) ---
+	// A read-only token checks a write tool the routed surface lists: the
+	// check names the refusal dispatch would return, never ready.
+	driven["mcp_check_token_permission_denied"] = true
+	t.Run("mcp_check_token_permission_denied", func(t *testing.T) {
+		scenario := scenarios["mcp_check_token_permission_denied"]
+		injectPreflightSnapshot(t, fixture, preflight.RuntimeStateReady,
+			&config.ToolAnnotations{ReadOnlyHint: boolPtr(false), DestructiveHint: boolPtr(false)})
+		payload, raw := fixture.check(t, readOnlyAgentContext(), []interface{}{"gh:create_issue"}, nil)
+		require.Len(t, payload.Results, 1)
+		assertMatrixCell(t, scenario, payload.Results[0], payload.Verdict)
+		// The tier comes from the live effective-annotation seam (the injected
+		// snapshot here only stubs connection state), which holds no metadata
+		// for this fixture tool, so dispatch's fail-closed destructive tier is
+		// the one named — exactly what dispatch would refuse with.
+		assert.Equal(t, tokenTierRefusalText(auth.PermDestructive, "gh", "create_issue"), payload.Results[0].Detail)
+		assert.NotContains(t, raw, "\"hash\"", "no hash is ever returned in band")
+
+		// Control: the same tool under the all-tier session is ready.
+		payload, _ = fixture.check(t, scopedAgentContext(), []interface{}{"gh:create_issue"}, nil)
+		require.Len(t, payload.Results, 1)
+		assert.Equal(t, preflight.StatusReady, payload.Results[0].Status)
+	})
 
 	// --- profile-hidden collapse (issue #1548) ---
 	// A session pinned to a read-capped profile checks an existing tool the
@@ -457,9 +497,11 @@ func TestPreflightInBandRESTParityAtAgentTokenTier(t *testing.T) {
 	// the token's allowed_servers in its params.
 	inBand, _ := fixture.check(t, scopedAgentContext(), inBandIDs, nil)
 	rest, err := fixture.proxy.RunPreflight(context.Background(), preflight.Params{
-		Tools:        restRefs,
-		Tier:         preflight.TierAgentToken,
-		TokenServers: []string{"gh", "locked", "off", "denied"},
+		Tools:            restRefs,
+		Tier:             preflight.TierAgentToken,
+		Restricted:       true,
+		TokenServers:     []string{"gh", "locked", "off", "denied"},
+		TokenPermissions: []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
 	})
 	require.NoError(t, err)
 	require.Len(t, rest.Results, len(ids))

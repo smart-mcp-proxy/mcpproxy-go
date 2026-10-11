@@ -484,6 +484,8 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		assert.Equal(t, preflight.TierOperator, params.Tier)
 		assert.Nil(t, params.TokenServers)
 		assert.Empty(t, params.TokenProfilePin)
+		assert.False(t, params.Restricted)
+		assert.Nil(t, params.TokenPermissions, "an operator holds no token permissions")
 		assert.Equal(t, "work", params.Profile)
 		assert.True(t, params.Filters.ReadOnlyOnly)
 		assert.True(t, params.Filters.ExcludeOpenWorld)
@@ -556,6 +558,7 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		authCtx := (&auth.AgentToken{
 			Name:           "cron",
 			AllowedServers: []string{"ctl"},
+			Permissions:    []string{auth.PermRead},
 			ProfilePin:     "pinned",
 		}).AuthContext()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/preflight", nil)
@@ -564,8 +567,11 @@ func TestPreflightParams_TierDetection(t *testing.T) {
 		params := preflightParams(req, body, tools)
 
 		assert.Equal(t, preflight.TierAgentToken, params.Tier)
+		assert.True(t, params.Restricted)
 		assert.Equal(t, []string{"ctl"}, params.TokenServers)
 		assert.Equal(t, "pinned", params.TokenProfilePin)
+		assert.Equal(t, []string{auth.PermRead}, params.TokenPermissions,
+			"issue #1548 follow-up: the token's own permission tier travels with it")
 	})
 }
 

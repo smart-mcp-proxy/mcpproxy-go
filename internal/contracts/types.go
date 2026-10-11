@@ -1449,8 +1449,8 @@ const (
 	PreflightStatusUnavailable PreflightStatus = "unavailable"
 )
 
-// PreflightReason is the closed 16-code failure enum (Spec 098 FR-003, plus
-// tool_blocked_by_profile from issue #1548).
+// PreflightReason is the closed 17-code failure enum (Spec 098 FR-003, plus
+// tool_blocked_by_profile and token_permission_denied from issue #1548).
 // Evolution is additive-only; consumers MUST treat an unknown code as
 // non-retryable. `server_saturated` is reserved and deliberately absent.
 type PreflightReason = string
@@ -1475,6 +1475,10 @@ const (
 	// effective profile tool policy excludes an existing tool. Operator tier
 	// only; the agent-token tier answers not_found (FR-013).
 	PreflightReasonToolBlockedByProfile PreflightReason = "tool_blocked_by_profile"
+	// PreflightReasonTokenPermissionDenied (issue #1548 follow-up, additive):
+	// the calling agent token's permissions do not include an existing tool's
+	// tier. Shown at the agent-token tier (discovery lists the tool).
+	PreflightReasonTokenPermissionDenied PreflightReason = "token_permission_denied"
 )
 
 // PreflightVerdict is the set-level aggregate: the worst class present. It

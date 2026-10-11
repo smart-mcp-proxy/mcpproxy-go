@@ -3086,7 +3086,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// (always) and a destructive one (strict off).
 		targetPerm := tierForAnnotations(annotations, annotationsFound)
 		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
-			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
+			errMsg := tokenTierRefusalText(targetPerm, serverName, actualToolName)
 			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}

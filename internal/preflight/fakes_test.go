@@ -110,6 +110,26 @@ func (f *fakeToolPolicy) ProfileToolDecision(serverName, toolName string) Profil
 	return ProfileToolDecision{}
 }
 
+// fakeTokenPermissions is a credential permission-tier gate keyed by
+// "server:tool" (issue #1548 follow-up). It records every id it was asked about.
+type fakeTokenPermissions struct {
+	blocked       map[string]string // id -> refusal detail
+	indeterminate map[string]string // id -> refusal detail when the tier is unknown
+	asked         []string
+}
+
+func (f *fakeTokenPermissions) TokenPermissionDecision(serverName, toolName string) TokenPermissionDecision {
+	key := serverName + ":" + toolName
+	f.asked = append(f.asked, key)
+	if detail, ok := f.blocked[key]; ok {
+		return TokenPermissionDecision{Blocked: true, Detail: detail}
+	}
+	if detail, ok := f.indeterminate[key]; ok {
+		return TokenPermissionDecision{Indeterminate: true, Detail: detail}
+	}
+	return TokenPermissionDecision{}
+}
+
 var errBoom = errors.New("boom")
 
 // --- world builder ----------------------------------------------------------
@@ -129,6 +149,9 @@ type world struct {
 	pins      map[string]string
 	// toolPolicy is nil unless a test puts a profile tool policy in effect.
 	toolPolicy *fakeToolPolicy
+	// tokenPerms is nil unless a test puts a credential permission tier in
+	// effect.
+	tokenPerms *fakeTokenPermissions
 }
 
 // filterSet is an alias-free local mirror of the annotation filters so tests
@@ -188,6 +211,9 @@ func (w *world) ctx() EvalContext {
 	if w.toolPolicy != nil {
 		ec.ToolPolicy = w.toolPolicy
 	}
+	if w.tokenPerms != nil {
+		ec.TokenPermissions = w.tokenPerms
+	}
 	ec.Filters.ReadOnlyOnly = w.filters.readOnlyOnly
 	ec.Filters.ExcludeDestructive = w.filters.excludeDestructive
 	ec.Filters.ExcludeOpenWorld = w.filters.excludeOpenWorld
@@ -232,6 +258,23 @@ func (w *world) blockByProfile() *world {
 		w.toolPolicy = &fakeToolPolicy{blocked: map[string]string{}}
 	}
 	w.toolPolicy.blocked[id] = "blocked by profile: gh:sync is a write tool; profile \"research\" allows read tools only"
+	return w
+}
+
+const fakeTokenPermissionDetail = "Permission denied: token does not have 'write' permission required for tool 'gh:sync'"
+
+func (w *world) lackTokenPermission() *world {
+	if w.tokenPerms == nil {
+		w.tokenPerms = &fakeTokenPermissions{blocked: map[string]string{}, indeterminate: map[string]string{}}
+	}
+	w.tokenPerms.blocked[id] = fakeTokenPermissionDetail
+	return w
+}
+func (w *world) tokenTierUnknown() *world {
+	if w.tokenPerms == nil {
+		w.tokenPerms = &fakeTokenPermissions{blocked: map[string]string{}, indeterminate: map[string]string{}}
+	}
+	w.tokenPerms.indeterminate[id] = "Permission denied: token does not have 'destructive' permission required for tool 'gh:sync'"
 	return w
 }
 func (w *world) approval(mut func(*ApprovalState)) *world {

@@ -168,6 +168,12 @@ func TestEvaluate_EveryReasonCell(t *testing.T) {
 			ref:    ToolRef{ID: id},
 			reason: ReasonToolBlockedByProfile,
 		},
+		{
+			name:   "token_permission_denied",
+			build:  func() *world { return healthyWorld().lackTokenPermission() },
+			ref:    ToolRef{ID: id},
+			reason: ReasonTokenPermissionDenied,
+		},
 	}
 
 	seen := map[Reason]bool{}

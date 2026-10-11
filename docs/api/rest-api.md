@@ -835,6 +835,7 @@ see the feature page).
 | `not_found` | false | `configure` | `unknown_ids` | 12 |
 | `server_not_configured` | false | `configure` | `unknown_ids` | 12 |
 | `tool_blocked_by_profile` (operator tier only) | false | `configure` | `blocked` | 11 |
+| `token_permission_denied` (agent-token callers only) | false | `configure` | `blocked` | 11 |
 
 `tool_blocked_by_profile` (added for issue #1548) means the effective profile
 tool policy — the token's pin or client binding, plus any `profile` in the
@@ -842,6 +843,15 @@ body, all of which must admit the tool — excludes an existing tool (tier cap,
 deny rule, unannotated handling). `detail` is the exact `blocked by profile: ...`
 text `call_tool_*` would return. A caller at the agent-token tier receives the
 scope-silent `not_found` instead, matching discovery, which hides the tool.
+
+`token_permission_denied` (issue #1548 follow-up) means the calling agent
+token's permissions (`read`, `write`, `destructive`) do not include the tier
+of an existing tool, derived from its effective annotations exactly as
+`call_tool_*` derives it. `detail` is the exact `Permission denied: token does
+not have '<tier>' permission required for tool '<server:tool>'` text dispatch
+returns. It composes with the profile policy (both must admit the tool) and
+is reported to the token itself, since discovery lists the tool. An operator
+API key holds no token permissions and never receives it.
 
 A `tool_pending_approval` occurrence for a tool the server's discovery
 snapshot contains but that has **no stored approval record yet** carries
