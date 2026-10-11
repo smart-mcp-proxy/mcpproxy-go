@@ -330,6 +330,9 @@ func (c *PhraseInjection) inspectSquashed(text string) []detect.Signal {
 
 func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
 
+// negationWindow is how far back (bytes) negatedEnglish looks for a negator.
+const negationWindow = 160
+
 // englishNegators are normalized words that, right before an override verb,
 // turn it into a safeguard ("do not forget the previous instructions").
 var englishNegators = []string{"do not", "does not", "did not", "must not", "should not", "shall not", "will not", "cannot", "never", "not"}
@@ -342,6 +345,14 @@ var englishNegators = []string{"do not", "does not", "did not", "must not", "sho
 // the change under trust_mode=scan — so an attacker gains nothing by adding a
 // negator except losing the hard block.
 func negatedEnglish(prefix string) bool {
+	// Bounded look-back: only the last negationWindow bytes can hold the
+	// negator, which keeps the per-match cost constant. Without the bound a
+	// long punctuation-free run of repeated directives made every match rescan
+	// the whole preceding sentence (quadratic, SEC-01 review round 7). A rune
+	// cut at the window edge decodes as RuneError, which is not a letter.
+	if len(prefix) > negationWindow {
+		prefix = prefix[len(prefix)-negationWindow:]
+	}
 	// Only sentence punctuation ends the scope: "Do not, under any
 	// circumstances, set aside …" is still negated.
 	if i := strings.LastIndexAny(prefix, ".!?;"); i >= 0 {
