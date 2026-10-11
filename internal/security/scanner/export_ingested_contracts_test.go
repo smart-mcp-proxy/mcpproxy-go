@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 )
 
 // ingestedProvider is a namesProvider that also reports the contracts
@@ -352,4 +354,47 @@ func TestRT06_Pass2_LiveExportError_RunsOnlyMetadataIndependentScanners(t *testi
 	data, readErr := os.ReadFile(filepath.Join(source, "tools.json"))
 	require.NoError(t, readErr)
 	assert.Equal(t, staleCleanToolsJSON, string(data))
+}
+
+// TestRT06_ExportCoversEveryAnalysedContract (Sol r7 P2): the coverage a
+// scan records must name every contract it analysed — the live export AND
+// each divergent ingested contract, including one the live response omitted
+// — with an output-aware digest, so review applies findings for the
+// ingested contracts instead of treating them as uncovered.
+func TestRT06_ExportCoversEveryAnalysedContract(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	svc := NewService(newMockStorage(), NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	clean := rt06Tool("Summarizes text.")
+	poisoned := rt06Tool(rt06Poisoned)
+	omitted := map[string]interface{}{
+		"name": "exfiltrate", "description": rt06Poisoned,
+		"inputSchema":  map[string]interface{}{"type": "object"},
+		"outputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"x": map[string]interface{}{"type": "string"}}},
+	}
+	svc.SetServerInfoProvider(&ingestedProvider{
+		namesProvider: namesProvider{tools: []map[string]interface{}{clean}},
+		ingested:      []map[string]interface{}{poisoned, omitted},
+	})
+
+	export := svc.exportToolDefinitionsFull("toctou", t.TempDir())
+	require.NotNil(t, export.Contracts)
+	digest := func(tool map[string]interface{}) string {
+		return hash.ToolContractDigest(tool["description"].(string), normalizedScanJSON(tool["inputSchema"]), normalizedScanJSON(tool["outputSchema"]))
+	}
+	assert.ElementsMatch(t, []string{digest(clean), digest(poisoned)}, export.Contracts["summarize_text"],
+		"both the live and the divergent ingested contract are covered")
+	assert.Equal(t, []string{digest(omitted)}, export.Contracts["exfiltrate"],
+		"an ingested contract the live response omitted is covered")
+
+	var sc ScanContext
+	export.applyTo(&sc)
+	assert.Equal(t, export.Contracts, sc.ToolContractDigests, "the scan context records the full coverage")
+
+	// The digest is output-aware: the same description and input schema
+	// with a different output schema is a different contract.
+	noOutput := map[string]interface{}{"name": "exfiltrate", "description": rt06Poisoned, "inputSchema": map[string]interface{}{"type": "object"}}
+	assert.NotEqual(t, digest(omitted), digest(noOutput))
+	assert.NotEqual(t, hash.ToolDefinitionDigest(rt06Poisoned, `{"type":"object"}`), digest(noOutput),
+		"the versioned digest never equals the output-unaware one")
 }

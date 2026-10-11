@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -2427,7 +2428,11 @@ type toolExport struct {
 	Count  int
 	Names  []string
 	Hashes map[string]string
-	At     time.Time
+	// Contracts holds the output-aware digest of every analysed contract
+	// per tool name (live and divergent ingested), see
+	// ScanContext.ToolContractDigests.
+	Contracts map[string][]string
+	At        time.Time
 	// Err is set when the export must not be scanned at all: the tool
 	// contracts discovery ingested could not be read (RT-06). A source-backed
 	// scan would otherwise read whatever tools.json the source dir already
@@ -2448,6 +2453,7 @@ type toolExport struct {
 // applyTo records the export on the scan context.
 func (e toolExport) applyTo(sc *ScanContext) {
 	sc.ToolsExported, sc.ToolNames, sc.ToolHashes, sc.ToolsExportedAt = e.Count, e.Names, e.Hashes, e.At
+	sc.ToolContractDigests = e.Contracts
 }
 
 // exportToolDefinitionsStamped runs exportToolDefinitions and also records the
@@ -2539,7 +2545,39 @@ func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolEx
 		zap.Int("scanned_contracts", len(scanned)),
 		zap.String("path", toolsPath),
 	)
-	return toolExport{Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered), Data: data}
+	return toolExport{
+		Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered),
+		// Every analysed contract — not only the live list — is covered
+		// (Sol r7 P2): an ingested contract the live response omitted or
+		// answered differently was scanned too, so its findings apply.
+		Contracts: ToolContractDigests(scanned),
+		Data:      data,
+	}
+}
+
+// ToolContractDigests maps each exported tool name to the sorted,
+// de-duplicated hash.ToolContractDigest of every definition exported under
+// that name.
+func ToolContractDigests(tools []map[string]interface{}) map[string][]string {
+	digests := make(map[string][]string, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		digest := hash.ToolContractDigest(description, normalizedScanJSON(tool["inputSchema"]), normalizedScanJSON(tool["outputSchema"]))
+		if !slices.Contains(digests[name], digest) {
+			digests[name] = append(digests[name], digest)
+		}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	for name := range digests {
+		sort.Strings(digests[name])
+	}
+	return digests
 }
 
 // withDivergentIngestedContracts returns the live export plus every contract
