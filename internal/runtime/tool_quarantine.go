@@ -2452,6 +2452,11 @@ func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy str
 		record.CurrentDescription = tool.Description
 		record.CurrentSchema = schemaJSON
 		record.CurrentOutputSchema = outputSchemaJSON
+		// The hint-aware hash needs its hint snapshot (RT-03): a record
+		// with nil annotations re-hashes as default hints, so a later
+		// non-default → default flip would pass as a formula migration
+		// (Sol r7 P2).
+		record.CurrentAnnotations = capturedToolAnnotations(tool.Annotations)
 	}
 
 	if r.resolveToolQuarantineGate(serverName).active() {

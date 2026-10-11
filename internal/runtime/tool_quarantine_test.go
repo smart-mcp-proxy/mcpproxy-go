@@ -1218,3 +1218,60 @@ func TestCheckToolApprovals_HeldChange_ChangesAgain_RefreshesSnapshot(t *testing
 	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
 	assert.Equal(t, hashA, rec.ApprovedHash)
 }
+
+// TestSetToolEnabled_SynthesizedRecordCapturesAnnotations (Sol r7 P2, RT-03):
+// a toggle-synthesized record stamps a hint-aware hash and must also capture
+// the snapshot's annotations. Otherwise, after approval before discovery, a
+// non-default → default hint flip re-hashes the stored contract (nil hints)
+// equal to the live one and the formula-migration branch approves it silently.
+func TestSetToolEnabled_SynthesizedRecordCapturesAnnotations(t *testing.T) {
+	cases := map[string][]*config.ServerConfig{
+		"active gate, approved by name": {{Name: "github", Enabled: true}},
+		"lifted gate":                   {{Name: "github", Enabled: true, TrustMode: string(config.TrustModeAuto)}},
+	}
+	for label, servers := range cases {
+		t.Run(label, func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, nil, servers)
+			hinted := &config.ToolAnnotations{ReadOnlyHint: boolP(true)}
+			rt.Supervisor().StateView().UpdateServer("github", func(s *stateview.ServerStatus) {
+				s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "github", true, true, true
+				s.Tools = []stateview.ToolInfo{{
+					Name: "wipe", Description: "Wipes things",
+					InputSchema: map[string]interface{}{"type": "object"},
+					Annotations: hinted,
+				}}
+			})
+			require.NoError(t, rt.SetToolEnabled("github", "wipe", false, "admin"))
+			record, err := rt.storageManager.GetToolApproval("github", "wipe")
+			require.NoError(t, err)
+			require.NotNil(t, record.CurrentAnnotations, "the synthesized record captures the snapshot's hints")
+			assert.Equal(t, true, *record.CurrentAnnotations.ReadOnlyHint)
+			if record.Status != storage.ToolApprovalStatusApproved {
+				require.NoError(t, rt.ApproveTools("github", []string{"wipe"}, "user"))
+			}
+			require.NoError(t, rt.SetToolEnabled("github", "wipe", true, "admin"))
+			// The operator now reviews every change (a lifted gate baselined
+			// the record; manual trust holds what changes after it).
+			cur := rt.Config()
+			next := *cur
+			sc := *cur.Servers[0]
+			sc.TrustMode = string(config.TrustModeManual)
+			next.Servers = []*config.ServerConfig{&sc}
+			rt.UpdateConfig(&next, "")
+
+			// The upstream drops its readOnly hint (non-default → default).
+			flipped := []*config.ToolMetadata{{
+				ServerName: "github", Name: "wipe", Description: "Wipes things",
+				ParamsJSON: `{"type":"object"}`,
+			}}
+			for pass := 1; pass <= 2; pass++ {
+				result, err := rt.checkToolApprovals("github", flipped)
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["wipe"], "pass %d: a hint flip is a contract change, not a formula migration", pass)
+				record, err = rt.storageManager.GetToolApproval("github", "wipe")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusChanged, record.Status, "pass %d", pass)
+			}
+		})
+	}
+}
