@@ -256,12 +256,12 @@
           "type": "array"
         },
         "tier": {
-          "description": "classify: tier to assign; \"\" removes the classification.",
+          "description": "classify: tier to assign; \"none\" removes the classification.",
           "enum": [
             "read",
             "write",
             "destructive",
-            ""
+            "none"
           ],
           "type": "string"
         },

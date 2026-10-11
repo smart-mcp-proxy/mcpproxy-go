@@ -167,7 +167,7 @@ func TestProfilesTool_SchemaPropertiesEqualProfileConfigPlusOpArgs(t *testing.T)
 	assert.Equal(t, []string{"read", "write", "destructive"}, tool.InputSchema.Properties["max_tier"].(map[string]any)["enum"])
 	assert.Equal(t, []string{"deny", "as_write", "as_read"}, tool.InputSchema.Properties["unannotated"].(map[string]any)["enum"])
 	assert.Equal(t, []string{"locked", "switchable"}, tool.InputSchema.Properties["mode"].(map[string]any)["enum"])
-	assert.Equal(t, []string{"read", "write", "destructive", ""}, tool.InputSchema.Properties["tier"].(map[string]any)["enum"])
+	assert.Equal(t, []string{"read", "write", "destructive", "none"}, tool.InputSchema.Properties["tier"].(map[string]any)["enum"])
 
 	// A tool object is a typed object of allow/deny/classify, never an opaque string.
 	tools := tool.InputSchema.Properties["tools"].(map[string]any)
@@ -674,8 +674,14 @@ func TestProfilesTool_CreateRenameDeleteClassifyResults(t *testing.T) {
 	classified := f.ok(map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": "read"})
 	assert.Equal(t, map[string]any{"github:search_code": "read"}, classified["profile"].(map[string]any)["tools"].(map[string]any)["classify"])
 	assert.Contains(t, classified, "warnings")
-	cleared := f.ok(map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": ""})
+	cleared := f.ok(map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": "none"})
 	assert.Nil(t, cleared["profile"].(map[string]any)["tools"].(map[string]any)["classify"])
+
+	// The legacy "" reset is still accepted at runtime (back-compat), though no
+	// longer advertised (#1576).
+	f.ok(map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": "write"})
+	legacy := f.ok(map[string]any{"operation": "classify", "name": "tmp", "tool": "github:search_code", "tier": ""})
+	assert.Nil(t, legacy["profile"].(map[string]any)["tools"].(map[string]any)["classify"])
 
 	renamed := f.ok(map[string]any{"operation": "rename", "name": "tmp", "new_name": "tmp2"})
 	assert.Equal(t, "tmp2", renamed["profile"].(map[string]any)["name"])

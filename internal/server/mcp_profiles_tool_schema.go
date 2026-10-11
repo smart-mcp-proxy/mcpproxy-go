@@ -20,6 +20,13 @@ var profilesOperations = []string{
 	"list_clients", "effective_tools", "explain",
 }
 
+// profilesTierNone is the advertised sentinel that removes a classification.
+// The tier enum cannot carry an empty string: Google Gemini rejects any function
+// declaration with an empty enum member (HTTP 400), which broke every request of
+// a client listing this tool (#1576). Execution maps it to the internal "" reset;
+// a legacy "" is still accepted at runtime but no longer advertised.
+const profilesTierNone = "none"
+
 // profilesMutatingOps are the operations that write profiles, bindings or
 // tokens. Each calls the FR-008a guard before writing and is refused under
 // read_only_mode and disable_management.
@@ -40,7 +47,7 @@ var profilesOpArgs = []struct {
 	{name: "reassign_to", typ: "string", desc: "delete: another existing profile that takes over the clients and tokens."},
 	{name: "force", typ: "boolean", desc: "delete: delete although in use, leaving pins dangling (never overrides the anonymous_profile)."},
 	{name: "tool", typ: "string", desc: "classify, explain: upstream tool as server:tool."},
-	{name: "tier", typ: "string", enum: []string{"read", "write", "destructive", ""}, desc: "classify: tier to assign; \"\" removes the classification."},
+	{name: "tier", typ: "string", enum: []string{"read", "write", "destructive", profilesTierNone}, desc: "classify: tier to assign; \"none\" removes the classification."},
 	{name: "client", typ: "string", desc: "assign, explain, effective_tools, list_clients: client id."},
 	{name: "profile", typ: "string", desc: "assign: profile to bind (\"\" = All servers). explain, list_clients: profile name (list_clients \"-\" = All servers)."},
 	{name: "mode", typ: "string", enum: []string{"locked", "switchable"}, desc: "assign: binding mode; omitted keeps the current mode (profile \"\" is switchable)."},
