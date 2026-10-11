@@ -88,7 +88,7 @@ The following is **never** collected:
 - Tool names or descriptions
 - API keys, tokens, or credentials
 - File paths or environment variables
-- Your raw IP address (the receiver does not store it; see [Data handling](#data-handling) for what the receiver does keep)
+- Your raw IP address is not part of the payload. The receiver's handling of the connection IP changed in a receiver update that is rolling out separately; see [Data handling](#data-handling) for what it does and does not keep
 - User identity, email, or account information
 - Server-edition IdP issuer URLs, tenant ids, client ids, or group names (only the provider family and a bucketed member count are sent — schema v13)
 - Tool call content, arguments, or responses
@@ -142,9 +142,9 @@ The onboarding connect-step status (a v4 field) gains a fourth value in v7:
 | `previous_shutdown` | fixed enum `clean` \| `crash` | How the **previous** process instance ended: `clean` = the graceful-shutdown path ran; `crash` = it didn't (SIGKILL, panic, power loss). Absent on a first-ever run — a fresh install is never reported as a crash. Stable across all heartbeats of the current instance | One enum value about our own process lifecycle; no stack traces, no session timing |
 | `last_error_code` | fixed enum (`MCPX_*`) | The most recently observed stable diagnostic code (same fixed set as `diagnostics.error_code_counts_24h`), persisted across restarts so a post-crash heartbeat carries the pre-crash code. Absent when no error was ever recorded | Only the enum code is stored and sent — **never** error messages, server names, paths, or stack traces. The scanner rejects any value outside the fixed diagnostics catalog |
 
-Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` + `last_error_code` record how the **previous** run of an install ended.
+Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` records how the **previous** run of an install ended, and `last_error_code` the latest persisted diagnostic.
 
-**How to read churn with these fields.** `previous_shutdown` and `last_error_code` are prior-session evidence: they are carried by a heartbeat sent after a restart, so they describe the run before it. They cannot explain why an install goes silent, because a terminal crash would be reported by a later heartbeat that, for a churned install, never arrives. Silence has competing explanations that these fields cannot separate (the user went offline, opted out, uninstalled, or simply stopped using the app). Use them to ask whether installs with a crashed previous run return less often than others, as a correlation, not as the cause of churn for any one install.
+**How to read churn with these fields.** `previous_shutdown` is prior-session evidence: it is fixed at startup, so every heartbeat of a run reports how the run before it ended. `last_error_code` is different: it is re-read on every heartbeat as the latest persisted diagnostic code, so it can reflect an error from the current run and has no reliable session attribution. Neither can explain why an install goes silent, because a terminal crash would be reported by a later heartbeat that, for a churned install, never arrives. Silence has competing explanations that these fields cannot separate (the user went offline, opted out, uninstalled, or simply stopped using the app). Use `previous_shutdown` to ask whether installs with a crashed previous run return less often than others, as a correlation, not as the cause of churn for any one install.
 
 ### Activation: `first_real_tool_call_ever`
 
@@ -335,8 +335,9 @@ Development builds (a version that is not a release number) never send telemetry
 ## Data handling
 
 - Telemetry data is sent to a Cloudflare Worker over HTTPS
-- The Worker does not store your raw source IP address. Cloudflare's edge sees the connection's IP address in order to deliver the request, as it does for any HTTPS request. The Worker keeps the heartbeat payload fields described on this page, a server-assigned timestamp, and coarse geography derived by Cloudflare. It does not persist the IP address itself.
-- Heartbeats stored before the receiver stopped keeping IP addresses may still hold one; the change did not rewrite or delete historical rows. Clearing historical values is a separate operation.
+- Cloudflare's edge sees the connection's IP address in order to deliver the request, as it does for any HTTPS request.
+- **Rollout dependency.** The receiver update (`fix/assess-ip-minimization` in `smart-mcp-proxy/mcpproxy-telemetry`) stops persisting the raw source IP: the Worker then keeps only the heartbeat payload fields described on this page, a server-assigned timestamp, and coarse geography derived by Cloudflare. Until that update is deployed, the previously deployed receiver may still store the IP address with each heartbeat. This page describes the target contract; treat the deployed receiver revision, not this page, as the source of truth until the rollout is confirmed.
+- Heartbeats stored before the receiver stopped keeping IP addresses may still hold one; the change does not rewrite or delete historical rows. Clearing or pseudonymizing historical values is a separate operation.
 - Data is stored in Cloudflare D1 (EU region)
 - Used only for aggregate product analytics
 - No third-party analytics services receive the data
