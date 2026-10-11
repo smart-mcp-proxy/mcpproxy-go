@@ -437,6 +437,11 @@ func squashedClauses(text string) string {
 	// Homoglyph folding reads the script majority of the whole field, not of
 	// each short clause (SEC-01 review, Sol round 7).
 	latin := detect.LatinMajority(text)
+	// Fold homoglyphs across the whole field BEFORE cutting it into clauses,
+	// so a fully look-alike chunk still sees its Latin neighbours in the
+	// adjacent clauses (SEC-01 review, Sol round 8). Letter-run lengths and
+	// boundaries are then read on the folded text.
+	text = detect.FoldHomoglyphsIn(text, latin)
 	runs := newLetterRuns(text)
 	var b strings.Builder
 	prev := 0

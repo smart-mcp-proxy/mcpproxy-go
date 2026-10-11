@@ -94,3 +94,20 @@ func TestFoldConfusables_AdjacentLookalikeWordsAreOrderIndependent(t *testing.T)
 		t.Fatalf("order-dependent folding: %q / %q", a, b)
 	}
 }
+
+// TestFoldHomoglyphsIn_NeighboursAcrossClauses (SEC-01 review, Sol round 8):
+// a fully look-alike chunk folds to Latin when its Latin neighbours sit across
+// sentence punctuation, and genuine Cyrillic prose keeps its spelling.
+func TestFoldHomoglyphsIn_NeighboursAcrossClauses(t *testing.T) {
+	for in, want := range map[string]string{
+		"sys. тем. pro. mpt.":               "sys. tem. pro. mpt.",
+		"sys． тем． pro． mpt．":               "sys. tem. pro. mpt.",
+		"Поиск по базе. Тем. Мост.":         "Поиск по базе. Тем. Мост.",
+		"Search. Поиск по базе. Тем. Мост.": "Search. Поиск по базе. Тем. Мост.",
+	} {
+		text := in
+		if got := FoldHomoglyphsIn(text, LatinMajority(text)); got != want {
+			t.Errorf("FoldHomoglyphsIn(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

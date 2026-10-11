@@ -67,6 +67,20 @@ func NormalizeForPhraseIn(s string, latinMajority bool) string {
 	return Normalize(s)
 }
 
+// FoldHomoglyphsIn applies NFKC, format-rune stripping and homoglyph folding
+// (the first steps of NormalizeForPhraseIn) to a WHOLE text before a caller
+// cuts it into fragments. Folding needs a word's neighbours: an entirely
+// look-alike chunk ("тем" in "sys. тем. pro. mpt.") folds to Latin only beside
+// a Latin word, and once the text is cut into clauses those neighbours sit in
+// other fragments (SEC-01 review, Sol round 8). Genuine Cyrillic prose keeps
+// its spelling because its neighbours are Cyrillic too.
+func FoldHomoglyphsIn(s string, latinMajority bool) string {
+	if s == "" {
+		return ""
+	}
+	return foldConfusables(stripFormatRunes(norm.NFKC.String(s)), latinMajority)
+}
+
 // Squash reduces text to its letters only. Phrase checks use it as a last,
 // soft-tier pass that is indifferent to ANY spacing or punctuation scheme the
 // earlier steps did not anticipate ("s y s t e m p r o m p t").
