@@ -70,8 +70,8 @@
           <button v-if="filtersActive" type="button" class="btn btn-ghost btn-sm" data-test="review-clear-filters" @click="clearFilters">Clear filters</button>
         </div>
         <div v-if="review.server.quarantined && review.server.definitions_captured" class="flex flex-wrap items-center gap-2">
-          <button type="button" class="btn btn-outline btn-sm" :disabled="!filtersActive || filteredTools.length === 0" :title="filtersActive ? '' : 'Narrow the list with a search or filter first. Use Approve all to allow everything.'" data-test="review-bulk-allow" @click="bulkSet(true)">Allow all filtered ({{ filteredTools.length }})</button>
-          <button type="button" class="btn btn-outline btn-sm" :disabled="filteredTools.length === 0" data-test="review-bulk-block" @click="bulkSet(false)">Block all filtered ({{ filteredTools.length }})</button>
+          <button type="button" class="btn btn-outline btn-sm" :disabled="approving || !filtersActive || filteredTools.length === 0" :title="filtersActive ? '' : 'Narrow the list with a search or filter first. Use Approve all to allow everything.'" data-test="review-bulk-allow" @click="bulkSet(true)">Allow all filtered ({{ filteredTools.length }})</button>
+          <button type="button" class="btn btn-outline btn-sm" :disabled="approving || filteredTools.length === 0" data-test="review-bulk-block" @click="bulkSet(false)">Block all filtered ({{ filteredTools.length }})</button>
         </div>
         <p class="text-sm text-base-content/70" data-test="review-range" aria-live="polite">{{ rangeText }}</p>
       </div>
@@ -83,7 +83,7 @@
         <div class="card-body gap-3 p-4">
           <div class="flex flex-wrap justify-between gap-2">
             <div class="min-w-0"><h3 class="font-mono font-semibold break-all">{{ tool.name }}</h3><span class="badge badge-outline mt-1">{{ tool.tier }}</span> <span class="badge badge-ghost mt-1">{{ tool.scan_verdict }}</span></div>
-            <label v-if="toolState(tool, review.server.quarantined) === 'allow-toggle'" class="label cursor-pointer gap-2"><span class="label-text">Allow this tool</span><input v-model="allowedTools" class="checkbox checkbox-primary" type="checkbox" :value="tool.name" :data-test="`review-allow-${tool.name}`" @change="recordChoice(tool, ($event.target as HTMLInputElement).checked)"></label>
+            <label v-if="toolState(tool, review.server.quarantined) === 'allow-toggle'" class="label cursor-pointer gap-2"><span class="label-text">Allow this tool</span><input v-model="allowedTools" class="checkbox checkbox-primary" type="checkbox" :value="tool.name" :disabled="approving" :data-test="`review-allow-${tool.name}`" @change="recordChoice(tool, ($event.target as HTMLInputElement).checked)"></label>
             <div v-else-if="toolState(tool, review.server.quarantined) === 'approve-reject'" class="join"><button class="btn btn-sm" @click="approveTool(tool.name)">Approve</button><button class="btn btn-sm btn-outline btn-error" @click="blockTool(tool.name)">Reject</button></div>
             <span v-else class="badge" :class="toolState(tool, review.server.quarantined) === 'blocked' ? 'badge-error badge-outline' : 'badge-success badge-outline'" :data-test="`review-tool-state-${tool.name}`">{{ toolState(tool, review.server.quarantined) === 'blocked' ? 'Blocked' : 'Approved' }}</span>
           </div>
@@ -124,7 +124,7 @@
       <ScanHistory />
     </template>
 
-    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="approve(false)">Approve without seeing tools</button></div></div></dialog>
+    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="confirmBlindApprove">Approve without seeing tools</button></div></div></dialog>
     <dialog ref="forceDialog" class="modal"><div class="modal-box"><h3 class="font-bold text-lg">Dangerous findings detected</h3><p class="py-3">The baseline scan found dangerous findings. Force approval activates this server despite that warning.</p><div class="modal-action"><button class="btn" @click="forceDialog?.close()">Cancel</button><button class="btn btn-error" @click="approve(true)">Force approve server</button></div></div></dialog>
       <dialog ref="requarantineDialog" class="modal" data-test="review-requarantine-dialog"><div class="modal-box"><h3 class="font-bold text-lg">Quarantine {{ serverName }} to review again?</h3><p class="py-3">Agents lose access to every tool on {{ serverName }} until you approve it again.</p><div class="modal-action"><button class="btn" data-test="review-requarantine-cancel" @click="requarantineDialog?.close?.()">Cancel</button><button class="btn btn-warning" :disabled="requarantining" data-test="review-requarantine-confirm" @click="requarantine">Quarantine</button></div></div></dialog>
   </section>
@@ -149,6 +149,8 @@ const notice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
+// The blind confirmation is bound to the (empty) review that opened it and to the choice made at click time.
+let blindReview: ServerReviewResponse | null = null; let blindEverything = false
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
 const headline = computed(() => review.value ? reviewHeadline(review.value) : { state: 'review', title: '', subtitle: '' })
 const banner = computed(() => {
@@ -215,33 +217,46 @@ function invalidateForceRetry() { if (lastBlock.value === null) return; lastBloc
 let loadGeneration = 0
 // Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
 let visitGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
   rescanning.value = true
   const res = await api.startScan(server)
-  if (server !== props.serverName || visit !== visitGeneration) return // late response for a server the screen no longer shows
+  if (!isCurrent(server, visit)) return // late response for a server the screen no longer shows
   if (!res.success) { rescanning.value = false; error.value = res.error || 'Failed to start scan' }
 }
 function requestRequarantine() { requarantineDialog.value?.showModal?.() }
+// A response belongs to the screen only while it is still on the server and visit that started it (A -> B -> A included).
+const isCurrent = (server: string, visit: number) => server === props.serverName && visit === visitGeneration
 async function requarantine() {
+  const server = props.serverName; const visit = visitGeneration
   requarantining.value = true
-  const res = await api.quarantineServer(props.serverName)
+  const res = await api.quarantineServer(server)
+  if (!isCurrent(server, visit)) return
   requarantining.value = false
   requarantineDialog.value?.close?.()
   if (!res.success) { error.value = res.error || 'Quarantine failed'; return }
   await load()
 }
 async function fetchDefinitions() {
+  const server = props.serverName; const visit = visitGeneration
   scanning.value = true
-  const res = await api.discoverServerTools(props.serverName)
+  const res = await api.discoverServerTools(server)
+  if (!isCurrent(server, visit)) return
   scanning.value = false
   if (!res.success) { error.value = res.error || 'Failed to capture tool definitions'; return }
   await load()
 }
-function requestApprove(everything: boolean) { if (refreshing.value) return; if (!review.value?.server.definitions_captured) { confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
-function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
+function requestApprove(everything: boolean) { if (refreshing.value) return; if (!review.value?.server.definitions_captured) { blindReview = review.value; blindEverything = everything; confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false, everything ? [] : undefined) }
+function closeConfirm() { confirmOpen.value = false; blindReview = null; confirmDialog.value?.close?.() }
+// Confirming a blind approval only counts for the review that opened the dialog; a refresh in between may have captured tools the operator has not seen.
+function confirmBlindApprove() {
+  if (refreshing.value) return
+  if (blindReview === null || blindReview !== review.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE; return }
+  const everything = blindEverything
+  void approve(false, everything ? [] : undefined)
+}
 // The force retry re-sends the block list of the attempt that triggered it (D43.5).
 async function approve(force: boolean, block?: string[]) {
   if (refreshing.value) return // never derive a block list from a list a refresh is about to replace
@@ -253,7 +268,7 @@ async function approve(force: boolean, block?: string[]) {
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
   const res = await api.securityApprove(server, force, blocked)
-  if (server !== props.serverName || visit !== visitGeneration) return // the watcher on serverName already reset approving and the force state
+  if (!isCurrent(server, visit)) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
     const message = res.error || 'Approval failed'
@@ -265,9 +280,16 @@ async function approve(force: boolean, block?: string[]) {
   }
   choices.clear(); emit('approved'); await load()
 }
-async function rejectServer() { approving.value = true; const res = await api.securityReject(props.serverName); approving.value = false; if (!res.success) error.value = res.error || 'Reject failed'; else await load() }
-async function approveTool(name: string) { await api.approveTools(props.serverName, [name]); await load() }
-async function blockTool(name: string) { await api.blockTools(props.serverName, [name]); await load() }
+async function rejectServer() {
+  const server = props.serverName; const visit = visitGeneration
+  approving.value = true
+  const res = await api.securityReject(server)
+  if (!isCurrent(server, visit)) return
+  approving.value = false
+  if (!res.success) error.value = res.error || 'Reject failed'; else await load()
+}
+async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.approveTools(server, [name]); if (isCurrent(server, visit)) await load() }
+async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.blockTools(server, [name]); if (isCurrent(server, visit)) await load() }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
@@ -277,7 +299,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; approving.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
