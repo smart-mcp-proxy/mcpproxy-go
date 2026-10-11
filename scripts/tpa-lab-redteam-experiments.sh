@@ -194,9 +194,55 @@ else:
     print('not-found')"
 }
 
+# unquarantine — returns non-zero unless the API reported success (Sol r4 P2).
 unquarantine() {
-  curl -s -X POST -H "X-API-Key: $API_KEY" \
-    "$API_URL/servers/tpa-lab-attacker/unquarantine" >/dev/null
+  local resp
+  resp="$(curl -s -X POST -H "X-API-Key: $API_KEY" \
+    "$API_URL/servers/tpa-lab-attacker/unquarantine")"
+  python3 -c 'import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: sys.exit(1)
+sys.exit(0 if isinstance(d,dict) and d.get("success") is True else 1)' "$resp" 2>/dev/null \
+    || { log "unquarantine failed: ${resp:0:200}"; return 1; }
+}
+
+# server_quarantined — "true"/"false" from the REST server list, else "unknown".
+server_quarantined() {
+  curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    for s in json.load(sys.stdin).get("data",{}).get("servers",[]):
+        if s.get("name") == "tpa-lab-attacker":
+            print("true" if s.get("quarantined") else "false"); break
+    else: print("unknown")
+except Exception: print("unknown")' || echo unknown
+}
+
+# tool_indexed <tool> — "yes"/"no" whether tpa-lab-attacker:<tool> is in the
+# search index (what clients can discover), "unknown" when the search failed.
+tool_indexed() {
+  curl -sf -G -H "X-API-Key: $API_KEY" --data-urlencode "q=$1" --data-urlencode "limit=100" \
+    "$API_URL/index/search" 2>/dev/null | python3 -c '
+import json,sys
+want = sys.argv[1]
+try:
+    res = json.load(sys.stdin).get("data",{}).get("results") or []
+    hit = any((r.get("tool") or {}).get("server_name") == "tpa-lab-attacker" and
+              (r.get("tool") or {}).get("name") in (want, "tpa-lab-attacker:" + want) for r in res)
+    print("yes" if hit else "no")
+except Exception: print("unknown")' "$1" || echo unknown
+}
+
+# wait_indexed <tool> <timeout_s> — "yes" once the tool is indexed, else the
+# last tool_indexed answer.
+wait_indexed() {
+  local s
+  for i in $(seq 1 "${2:-90}"); do
+    s="$(tool_indexed "$1")"
+    [[ "$s" == "yes" ]] && { echo yes; return; }
+    sleep 1
+  done
+  echo "$s"
 }
 
 # wait_status <tool> — poll until the approval record exists (post-unquarantine
@@ -315,18 +361,29 @@ if want_only EXP-2; then
   # Phase 2b: operator unquarantines (the normal flow for an already-vetted
   # server) → the sweep must re-list and the contract-hash gate must fire.
   # The sweep is asynchronous (observed ~13s), so wait out the stale status.
-  unquarantine
+  # The EXP-2a records already read "changed", so prove the
+  # post-unquarantine flow itself (Sol r4 P2): the unquarantine succeeded,
+  # the server is no longer quarantined, discovery ran (the unchanged
+  # benign_calculator reached the index) and the held tools stayed out of it.
+  unq_ok=0; unquarantine && unq_ok=1
+  quarantined="$(server_quarantined)"
+  discovered="$(wait_indexed benign_calculator 90)"
   cal="$(wait_status_not calendar_get_events approved 90)"
   stock="$(wait_status_not stock_quote approved 30)"
+  cal_idx="$(tool_indexed calendar_get_events)"
+  stock_idx="$(tool_indexed stock_quote)"
   notes="$(tool_status notes_export)"
-  log "2b) after unquarantine re-discovery: calendar=$cal stock=$stock notes_export=$notes"
-  if is_pulled "$cal" && is_pulled "$stock"; then
-    pass "EXP-2b description+schema rug pulls detected (changed/blocked)"
-    record "EXP-2b HOLDS: calendar=$cal stock=$stock"
-  else
-    hole "EXP-2b rug pull NOT detected after unquarantine: calendar=$cal stock=$stock"
-    record "EXP-2b HOLE: calendar=$cal stock=$stock"
-  fi
+  log "2b) after unquarantine (ok=$unq_ok quarantined=$quarantined discovered=$discovered): calendar=$cal (indexed=$cal_idx) stock=$stock (indexed=$stock_idx) notes_export=$notes"
+  case "$(exp2b_verdict "$unq_ok" "$quarantined" "$discovered" "$cal" "$stock" "$cal_idx" "$stock_idx")" in
+    HOLDS)
+      pass "EXP-2b description+schema rug pulls held after unquarantine (changed/blocked, not indexed)"
+      record "EXP-2b HOLDS: calendar=$cal stock=$stock (unquarantined, discovered, held tools not indexed)" ;;
+    HOLE)
+      hole "EXP-2b rug pull NOT held after unquarantine: calendar=$cal ($cal_idx) stock=$stock ($stock_idx)"
+      record "EXP-2b HOLE: calendar=$cal (indexed=$cal_idx) stock=$stock (indexed=$stock_idx)" ;;
+    *)
+      record "EXP-2b INCONCLUSIVE: unquarantine ok=$unq_ok quarantined=$quarantined discovered=$discovered calendar=$cal stock=$stock" ;;
+  esac
   stop_daemon
   fi
 fi
@@ -338,9 +395,13 @@ if want_only EXP-3; then
   start_daemon "$cfg" "$RUN_DIR/exp3.log" || { record "EXP-3: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp3-scan.txt")"
   log "scan verdict: $v (full output: $RUN_DIR/exp3-scan.txt)"
-  if [[ "$v" == "scan-failed" || "$v" == "stale-report" ]]; then record "EXP-3 INCONCLUSIVE: scan=$v"
-  elif [[ "$v" == "dangerous" ]]; then pass "EXP-3 mutants flagged dangerous (detector improved!)"; record "EXP-3 HOLDS: mutants → dangerous"
-  else hole "EXP-3 mutant tools scan '$v' — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v"; fi
+  # Only a recognised clean/warnings verdict is the deferred detector hole;
+  # an unreadable or unknown report is INCONCLUSIVE (Sol r4 P2).
+  case "$(exp3_verdict "$v")" in
+    HOLDS) pass "EXP-3 mutants flagged dangerous (detector improved!)"; record "EXP-3 HOLDS: mutants → dangerous" ;;
+    HOLE) hole "EXP-3 mutant tools scan '$v' — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v" ;;
+    *) record "EXP-3 INCONCLUSIVE: scan=$v" ;;
+  esac
   stop_daemon
 fi
 

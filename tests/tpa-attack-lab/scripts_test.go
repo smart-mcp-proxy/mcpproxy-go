@@ -194,3 +194,99 @@ func TestRunLabDockerRejectsImageOverride(t *testing.T) {
 		t.Fatalf("default image must pass preflight (%v):\n%s", err, out)
 	}
 }
+
+// TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole (Sol r4 P2): only a
+// recognised clean/warnings verdict may be recorded as the deferred EXP-3
+// detector hole; an unreadable or unknown report is INCONCLUSIVE and fails
+// the suite.
+func TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole(t *testing.T) {
+	lib := verdictsLib(t)
+	for _, tc := range []struct{ in, want string }{
+		{"dangerous", "HOLDS"},
+		{"clean", "HOLE"},
+		{"warnings", "HOLE"},
+		{"unknown", "INCONCLUSIVE"},
+		{"scan-failed", "INCONCLUSIVE"},
+		{"stale-report", "INCONCLUSIVE"},
+		{"", "INCONCLUSIVE"},
+	} {
+		got, code := runLib(t, lib, `exp3_verdict "$1"`, tc.in)
+		if code != 0 || got != tc.want {
+			t.Errorf("exp3_verdict(%q) = %q (exit %d), want %q", tc.in, got, code, tc.want)
+		}
+	}
+	// End to end through the result line the suite records for it.
+	_, code := runLib(t, lib, `v=unknown; case "$(exp3_verdict "$v")" in HOLE) r="EXP-3 HOLE: mutants verdict=$v";; HOLDS) r="EXP-3 HOLDS";; *) r="EXP-3 INCONCLUSIVE: scan=$v";; esac; suite_exit_status "$r"`)
+	if code == 0 {
+		t.Error("an unknown EXP-3 report must fail the suite")
+	}
+}
+
+// TestExp2bVerdictRequiresProvenUnquarantine (Sol r4 P2): the EXP-2a records
+// already read "changed", so EXP-2b HOLDS only when the unquarantine itself
+// succeeded, the server is no longer quarantined, post-unquarantine discovery
+// ran, and both held tools stayed out of the index.
+func TestExp2bVerdictRequiresProvenUnquarantine(t *testing.T) {
+	lib := verdictsLib(t)
+	for _, tc := range []struct {
+		name                                     string
+		unq, quarantined, discovered, cal, stock string
+		calIdx, stockIdx, want                   string
+	}{
+		{"held after a proven unquarantine", "1", "false", "yes", "changed", "changed", "no", "no", "HOLDS"},
+		{"failed unquarantine", "0", "true", "no", "changed", "changed", "no", "no", "INCONCLUSIVE"},
+		{"unquarantine reported ok but still quarantined", "1", "true", "yes", "changed", "changed", "no", "no", "INCONCLUSIVE"},
+		{"server state unknown", "1", "unknown", "yes", "changed", "changed", "no", "no", "INCONCLUSIVE"},
+		{"discovery never ran", "1", "false", "no", "changed", "changed", "no", "no", "INCONCLUSIVE"},
+		{"stale approval", "1", "false", "yes", "approved", "changed", "no", "no", "HOLE"},
+		{"held but indexed", "1", "false", "yes", "changed", "changed", "yes", "no", "HOLE"},
+		{"index unknown", "1", "false", "yes", "changed", "changed", "unknown", "no", "INCONCLUSIVE"},
+		{"pending", "1", "false", "yes", "pending", "changed", "no", "no", "INCONCLUSIVE"},
+	} {
+		got, code := runLib(t, lib, `exp2b_verdict "$@"`, tc.unq, tc.quarantined, tc.discovered, tc.cal, tc.stock, tc.calIdx, tc.stockIdx)
+		if code != 0 || got != tc.want {
+			t.Errorf("%s: exp2b_verdict = %q (exit %d), want %q", tc.name, got, code, tc.want)
+		}
+	}
+}
+
+// TestRunLabDockerResolvesDataDirFromAnyCwd (Sol r4 P2): the baseline runner
+// must keep the daemon's state and socket inside the worktree whatever
+// directory it is invoked from.
+func TestRunLabDockerResolvesDataDirFromAnyCwd(t *testing.T) {
+	verdictsLib(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(project, "scripts", "run-tpa-lab-docker.sh")
+	cmd := exec.Command("bash", script)
+	cmd.Dir = t.TempDir() // somewhere else entirely
+	cmd.Env = append(os.Environ(), "IMAGE=tpa-attack-lab:lab", "TPA_LAB_PREFLIGHT_ONLY=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("preflight failed (%v):\n%s", err, out)
+	}
+	want := "cwd=" + project + " data_dir=" + filepath.Join(project, "test-data-tpa-lab-docker")
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("want %q in preflight output:\n%s", want, out)
+	}
+}
+
+func TestLabConfigDataDirResolvesRelativeAgainstBase(t *testing.T) {
+	lib := verdictsLib(t)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "cfg.json")
+	if err := os.WriteFile(cfg, []byte(`{"data_dir":"./state"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, code := runLib(t, lib, `lab_config_data_dir "$1" "$2"`, cfg, "/base/root"); code != 0 || got != "/base/root/state" {
+		t.Errorf("relative data_dir = %q (exit %d)", got, code)
+	}
+	if err := os.WriteFile(cfg, []byte(`{"data_dir":"/abs/state"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, code := runLib(t, lib, `lab_config_data_dir "$1" "$2"`, cfg, "/base/root"); code != 0 || got != "/abs/state" {
+		t.Errorf("absolute data_dir = %q (exit %d)", got, code)
+	}
+}

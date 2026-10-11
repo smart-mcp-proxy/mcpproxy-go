@@ -45,9 +45,20 @@ while IFS= read -r cfg_image; do
     exit 1
   fi
 done < <(lab_config_images "$CONFIG")
+# The checked-in config's data_dir is relative: the daemon and every CLI call
+# below resolve it against their working directory. Run from the project
+# root, whatever the caller's cwd, so state and the tray socket both land in
+# $DATA_DIR inside the worktree (Sol r4 P2), and refuse a config whose
+# data_dir resolves anywhere else.
+cd "$PROJECT_DIR"
+cfg_data_dir="$(lab_config_data_dir "$CONFIG" "$PROJECT_DIR")" || exit 1
+if [[ "$cfg_data_dir" != "$DATA_DIR" ]]; then
+  echo "ERROR: $CONFIG data_dir resolves to $cfg_data_dir, not $DATA_DIR." >&2
+  exit 1
+fi
 # Test hook: stop after the preflight checks, before building or starting
 # anything (tests/tpa-attack-lab/scripts_test.go).
-[[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok"; exit 0; }
+[[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok (cwd=$PWD data_dir=$cfg_data_dir)"; exit 0; }
 
 mkdir -p "$DATA_DIR"
 export MCPPROXY_TRAY_ENDPOINT="unix://$DATA_DIR/mcpproxy.sock"
