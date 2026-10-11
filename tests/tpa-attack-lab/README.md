@@ -150,7 +150,7 @@ to fire — the victim provides the peer context.
 | V16 | `config_helper` | Embedded live-looking token + `.env` path | `secret.embedded` soft |
 | V17 | `summarize_text` | Instruction override (classic corpus phrase) | `phrase.injection` hard |
 | V18 | `daily_briefing` | Soft coercion: tool-priority claim + secrecy | `directive.imperative` soft → warnings |
-| V19 | `notes_export` | **Rug pull via annotation-only flip** (destructive → readOnly-lying, desc+schema identical) | HOLE: hash excludes annotations → gate never sees the flip (EXP-5) |
+| V19 | `notes_export` | **Rug pull via annotation-only flip** (destructive → readOnly-lying, desc+schema identical) | fixed by RT-03: safety hints are in the contract hash → `status=changed` (EXP-5) |
 | M01–M06 | `mutant_*`, `filesystem_read`, `translate_text` (profile `mutants`) | Offline-verified evasion mutants served live | scan soft/clean end-to-end (EXP-3) |
 | T01 | `summarize_text`, `convert_currency` (profile `toctou`) | TOCTOU contract switching between discovery and scan export | scan export attacker-controllable (EXP-4) |
 | C01–C03 | `benign_*`, `lab_arm_stage2` | Controls (must scan clean) | no findings |
@@ -187,9 +187,11 @@ These behaviors are pinned by `lab_test.go` and worth knowing when triaging:
   `capability.mismatch`.
 - `docs_export` is caught by shadowing; its "send … to https://…" sentence
   does not trip `phrase.injection`.
-- Tool annotations are **excluded** from the rug-pull contract hash (by
-  design), so an annotation-only flip (e.g. `readOnlyHint` → false) is
-  invisible to the change gate.
+- Before RT-03, tool annotations were **excluded** from the rug-pull contract
+  hash, so an annotation-only flip was invisible to the change gate. The
+  approval hash now includes the effective safety hints (readOnly,
+  destructive, idempotent, openWorld), and the flip is held as `changed`
+  (EXP-5 HOLDS).
 
 ## Regression tests
 

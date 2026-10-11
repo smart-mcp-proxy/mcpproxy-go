@@ -87,3 +87,130 @@ paraphrase coverage improves.
   `TestTOCTOUContractsDifferByDescriptionOnly`).
 - `notes_export` — annotation-flip rug pull (pinned by
   `TestAnnotationFlipKeepsContractInputsIdentical`).
+
+## Post-fix results (2026-10-11)
+
+Fixes for RT-01, RT-02, RT-03, RT-05 and RT-06 from `llm-report.md` landed on
+`feat/tpa-attack-lab` (rebased onto `main` @ `c9c1ad2d1`), one commit each.
+RT-04 and RT-07 (detect-engine hardening, `internal/security/detect`) are
+deferred because a concurrent PR is changing that package, so EXP-3 is
+expected to stay a hole.
+
+| Fix | Commit subject | Component |
+|---|---|---|
+| RT-01 | Hold schema-only rug pulls instead of auto-approving on description match | `runtime/tool_quarantine.go`, `runtime/tool_contract_equivalence.go`: the description-match fallback only applies when the input schemas are structurally identical (only the order of `required` may differ) |
+| RT-02 | Hold changed tool contracts for confirmation under trust_mode scan | `runtime/tool_quarantine.go`: under `trust_mode: scan` a changed contract is always held as `changed`. A clean scan only clears hold evidence. The changed→approved invariant no longer accepts the scan reason. New tools stay scan-gated |
+| RT-03 | Fold safety annotation hints into the tool approval hash | `runtime/tool_quarantine.go`, `storage/models.go`: the effective `readOnly/destructive/idempotent/openWorld` hints are hashed when they differ from the MCP defaults. `HashSchemaVersion` becomes 4. Pre-v4 approvals migrate through the formula-change path without re-review |
+| RT-05 | Verify quarantined servers' tool contracts without indexing them | `runtime/lifecycle.go`: reactive discovery for a connected quarantined server that has an approved baseline hash-compares its contracts through the inspection-capture path, without indexing them |
+| RT-06 | Scan the tool contracts discovery ingested, not only a fresh export | `security/scanner/service.go`, `server/server.go`: ingested contracts that the live export does not reproduce are added to the scan input and logged as a divergence |
+
+### Before / after
+
+All runs used fresh experiment state with Docker-isolated upstreams
+(distroless, `network_mode: none`; `docker ps` shows `NETWORKS none` for both
+lab containers).
+
+| EXP | Before (current `main`, pre-fix) | After |
+|---|---|---|
+| EXP-1 | HOLDS: baseline scan → dangerous | **HOLDS**: baseline scan → dangerous (unchanged) |
+| EXP-2a | HOLE (window): `calendar=approved` while re-quarantined | **HOLDS**: `calendar=changed` while still quarantined. The log shows `Verified quarantined server tool contracts against approvals (not indexed)` |
+| EXP-2b | HOLE: `calendar=changed stock=approved` (schema-only pull auto-approved) | **HOLDS**: `calendar=changed stock=changed`. `notes_export=changed` too, from the RT-03 annotation flip |
+| EXP-3 | HOLE: mutants verdict=warnings | HOLE: mutants verdict=warnings (RT-04 deferred, as expected) |
+| EXP-4 | PARTIAL-HOLE: scan=clean on poisoned server; flap caught | **HOLDS**: `scan=dangerous, stored=changed`. The log shows `Scan export diverges from the tool contracts discovery ingested; scanning the ingested contracts too` for `convert_currency` and `summarize_text` |
+| EXP-5 | HOLE: `notes_export=approved` after the annotation flip | **HOLDS**: `notes_export=changed` |
+| EXP-6 | HOLE: `calendar=approved stock=approved` (scan-approved) | **HOLDS**: `calendar=changed stock=changed`. The log shows `Tool change held for operator confirmation (trust_mode: scan, clean verdict does not auto-approve a changed contract)` |
+
+On the first post-fix run, EXP-4 came out `INCONCLUSIVE: scan=clean,
+stored=approved` with `rug-pull flags: 0`. In that run the toctou fixture's
+single poisoned `tools/list` answer was used up by a list call other than the
+discovery pass that writes approvals. Discovery only ever saw the clean
+contract, so there was nothing poisoned to ingest or scan. This is a race in
+the fixture: its list counter is per process, and its `DeleteTools`/`AddTool`
+re-registration starts a burst of `tools/list_changed` events. It is not a
+regression. Three isolated fresh reruns (`ONLY=EXP-4`) and a second full fresh
+run all printed `EXP-4 HOLDS: scan=dangerous, stored=changed`.
+
+### Commands and summary output
+
+```sh
+# pre-fix baseline on main c9c1ad2d1 + lab commit (fresh state, full rebuild)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLE (window): re-quarantined restart → no re-discovery; stale stage-1 approved contract while armed server runs; caught only after unquarantine (~13s sweep)
+#   EXP-2b HOLE: calendar=changed stock=approved
+#   EXP-3 HOLE: mutants verdict=warnings
+#   EXP-4 PARTIAL-HOLE: scan=clean on poisoned server; poisoned list auto-baselined; flap caught (changed)
+#   EXP-5 HOLE: annotation flip unseen (notes_export=approved)
+#   EXP-6 HOLE: scan-mode auto-approved the pull (calendar=approved stock=approved, gate re-ran)
+
+# post-fix run 1 (fresh state, FULL rebuild of image + binary; no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings
+#   EXP-4 INCONCLUSIVE: scan=clean, stored=approved      (fixture race, see above)
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+
+# EXP-4 isolated reruns, fresh exp4-data each time (3/3)
+ONLY=EXP-4 SKIP_BUILD=1 scripts/tpa-lab-redteam-experiments.sh
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+
+# post-fix run 2 (fresh state, same artifacts)
+SKIP_BUILD=1 scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+
+# final run on the branch head (fresh state, FULL rebuild, after the RT-03
+# revert and RT-05 baseline-only follow-ups)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed
+#   EXP-3 HOLE: mutants verdict=warnings
+#   EXP-4 HOLDS: scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed
+#   EXP-6 HOLDS: calendar=changed stock=changed
+
+# baseline daemon runner (rule: baseline scan must stay dangerous; run after
+# run 2 and again after the final run, same result)
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
+#   Risk Score: 93/100, dangerous threats (tool_poisoning, exfiltration,
+#   malicious_code, prompt_injection, rug_pull); both containers NETWORKS none
+```
+
+Unit tests that pin each fix:
+- `internal/runtime/tool_quarantine_redteam_test.go`, tests `TestRT01_*`, `TestRT02_*` and `TestRT03_*`. These include the migration path that keeps existing approvals through an upgrade.
+- `internal/runtime/lifecycle_quarantine_verify_test.go`, test `TestRT05_*`. It fails without the fix.
+- `internal/security/scanner/export_ingested_contracts_test.go`, tests `TestRT06_*`.
+
+The four existing scan-mode tests in `tool_quarantine_scan_test.go` that
+expected a clean verdict to re-approve a change were rewritten for the RT-02
+policy.
+
+Raw logs (prefix baseline, all three post-fix runs, the EXP-4 reruns and
+the baseline runner) are kept outside the repo under the maintainer's QA evidence
+folder, `docs/qa/tpa-redteam-2026-10-11/` of the main checkout.
+
+### Behavior changes to note
+
+- `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
+  changes as in `manual`. New tools are still admitted on a clean scan. The
+  docs, the Web UI trust-mode copy and the `--trust-mode` help text were
+  updated to match.
+- Tool approval records are now written at `HashSchemaVersion` 4. Preflight
+  pins become `sha256/v4:…` once a record is re-saved. Tools whose hints are
+  at their defaults keep their hash. Tools with non-default hints get a new hash
+  through the formula-migration path, and their approval is kept.
+- A connected quarantined server that already has an approved baseline (one
+  that was trusted before and then re-quarantined) now has its contracts
+  re-checked on connect and on `tools/list_changed`. Changes are marked
+  `changed`, new tools are filed as pending, and nothing is indexed. A
+  quarantined server that was never approved keeps an uncaptured review until
+  someone inspects it, as before.
