@@ -395,7 +395,14 @@ const STRIP: Array<[string, string, Record<string, string | null>]> = [
 ]
 for (const [id, landing, rest] of STRIP) {
   test(`Home strip ${id} lands on ${landing} with filtered REST (SC-009)`, async ({ page }) => {
-    await goto(page, '/', `[data-test="${id}"]`)
+    // An empty fleet (run-web-smoke.sh without MCPPROXY_FIXTURE_PATH) shows
+    // the "Get started" card instead of the strip by design (#1467), so wait
+    // for either and pin that empty state rather than timing out on the strip.
+    await goto(page, '/', `[data-test="${id}"], [data-test="home-getting-started"]`)
+    if (await page.locator('[data-test="home-getting-started"]').isVisible()) {
+      await expect(page.locator('[data-test="usage-summary-strip"]')).toHaveCount(0)
+      test.skip(true, 'no fixture servers: Home shows Get started instead of the usage strip')
+    }
     const seen = collect(page, /^\/api\/v1\/activity$/)
     await page.locator(`[data-test="${id}"]`).click()
     await expect(page).toHaveURL(new RegExp(landing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
