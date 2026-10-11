@@ -153,6 +153,8 @@ func TestPhraseInjection_SEC01_ReviewFalsePositives(t *testing.T) {
 		"N'ignorez pas les instructions précédentes.",
 		"Do not set aside any prior guidance.",
 		"Never forget everything you were told.",
+		"Do not under any circumstances set aside any prior guidance.",
+		"Never intentionally forget everything you were told.",
 	} {
 		tv, reg := sec01View(desc)
 		for _, s := range c.Inspect(tv, reg) {

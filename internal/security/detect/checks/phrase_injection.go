@@ -334,24 +334,20 @@ func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigi
 // turn it into a safeguard ("do not forget the previous instructions").
 var englishNegators = []string{"do not", "does not", "did not", "must not", "should not", "shall not", "will not", "cannot", "never", "not"}
 
-// negatedEnglish reports whether prefix (normalized text before a match) ends
-// with a negator, optionally followed by one adverb ("never ever", "do not
-// simply"). Only the current clause counts: anything before the last
-// sentence/clause punctuation is ignored.
+// negatedEnglish reports whether the current clause of prefix (normalized
+// text before a match, cut at the last sentence/clause punctuation) contains
+// a negator anywhere ("do not under any circumstances set aside …", "never
+// intentionally forget …"). Conservative by design: a negated-looking clause
+// only DOWNGRADES the match to the SOFT tier — it stays visible and still holds
+// the change under trust_mode=scan — so an attacker gains nothing by adding a
+// negator except losing the hard block.
 func negatedEnglish(prefix string) bool {
 	if i := strings.LastIndexAny(prefix, ".!?;:,"); i >= 0 {
 		prefix = prefix[i+1:]
 	}
-	fields := strings.Fields(prefix)
-	if n := len(fields); n > 0 {
-		switch fields[n-1] {
-		case "ever", "simply", "just", "also", "ever,":
-			fields = fields[:n-1]
-		}
-	}
-	tail := " " + strings.Join(fields, " ")
+	clause := " " + strings.Join(strings.Fields(prefix), " ") + " "
 	for _, n := range englishNegators {
-		if strings.HasSuffix(tail, " "+n) {
+		if strings.Contains(clause, " "+n+" ") {
 			return true
 		}
 	}
