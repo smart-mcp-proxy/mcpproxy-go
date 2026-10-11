@@ -209,6 +209,16 @@ func TestReviewApproveReportsAppliedCountsAndWarnsOnHolds(t *testing.T) {
 	require.Equal(t, ": 165 tools approved, 15 blocked, 0 still pending, 0 changed",
 		approvalCountsSuffix(map[string]interface{}{"approved_count": float64(165), "blocked_count": float64(15), "still_pending": float64(0), "still_changed": float64(0)}))
 	require.Empty(t, approvalCountsSuffix(nil))
+
+	// tools/approve responses carry a message; the counts are appended to it.
+	msg := []byte(`{"data":{"approved":2,"message":"Approved 2 of 2 requested tools for server lr","approved_count":165,"blocked_count":15,"still_pending":0,"still_changed":0}}`)
+	output = captureReviewOutput(t, func() error { return formatReviewResponse("table", msg, false) })
+	require.Contains(t, output, "Approved 2 of 2 requested tools for server lr (server now: 165 tools approved, 15 blocked, 0 still pending, 0 changed)")
+
+	// An unreadable outcome is warned about, never shown as a clean approval.
+	var unknown strings.Builder
+	warnApprovalHolds(&unknown, "lr", []byte(`{"data":{"status":"approved","server_name":"lr","outcome_unavailable":true}}`))
+	require.Contains(t, unknown.String(), "could not be read back")
 }
 
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {

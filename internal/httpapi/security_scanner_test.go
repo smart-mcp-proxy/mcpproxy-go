@@ -219,9 +219,13 @@ type secTestController struct {
 	baseController
 	servers   []map[string]interface{}
 	approvals []*storage.ToolApprovalRecord
+	listErr   error
 }
 
 func (m *secTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var out []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {
 		if a.ServerName == serverName {
@@ -671,6 +675,28 @@ func TestSecurityHandlerApproveServerReportsRemainingHolds(t *testing.T) {
 	assert.Equal(t, float64(1), resp["still_pending"])
 	assert.Equal(t, float64(0), resp["still_changed"])
 	assert.Equal(t, []interface{}{"read_c"}, resp["held_tools"])
+}
+
+// UX-02 review: when the post-approval state cannot be read back, the
+// response says so instead of looking like a complete (legacy) approval.
+func TestSecurityHandlerApproveServerFlagsUnreadableOutcome(t *testing.T) {
+	ctrl := &secTestController{listErr: fmt.Errorf("decode failure")}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetSecurityController(&mockSecurityController{})
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(`{}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, true, resp["outcome_unavailable"])
+	assert.NotContains(t, resp, "approved_count")
 }
 
 func TestSecurityHandlerApproveServerWithUnknownBlockIsBadRequest(t *testing.T) {

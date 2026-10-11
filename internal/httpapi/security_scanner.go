@@ -398,6 +398,8 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{"status": "approved", "server_name": name}
 	if _, outcome, ok := s.toolApprovalOutcomeFor(name); ok {
 		outcome.addTo(response)
+	} else {
+		response["outcome_unavailable"] = true
 	}
 	s.writeSuccess(w, response)
 }

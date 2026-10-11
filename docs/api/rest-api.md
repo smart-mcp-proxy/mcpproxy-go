@@ -548,7 +548,8 @@ it reports what actually applied:
 `POST /api/v1/servers/{id}/security/approve` returns the same four counts (and
 `held_tools`) next to `status: "approved"` and `server_name`. `status` keeps its
 meaning — the server approval is done — so check `still_pending` and
-`still_changed` to know whether every tool is usable.
+`still_changed` to know whether every tool is usable. When the tool state
+cannot be read back it returns `outcome_unavailable: true` instead of counts.
 
 #### POST /api/v1/servers/{name}/tools/block
 

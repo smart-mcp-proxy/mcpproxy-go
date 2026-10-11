@@ -184,12 +184,17 @@ func warnApprovalHolds(w io.Writer, server string, raw []byte) {
 			StillPending int      `json:"still_pending"`
 			StillChanged int      `json:"still_changed"`
 			HeldTools    []string `json:"held_tools"`
+			Unavailable  bool     `json:"outcome_unavailable"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return
 	}
 	d := envelope.Data
+	if d.Unavailable {
+		fmt.Fprintf(w, "Warning: the resulting tool approval state on server '%s' could not be read back; some tools may still need review. Check with: mcpproxy review show %s\n", server, server)
+		return
+	}
 	if d.StillPending+d.StillChanged == 0 {
 		return
 	}
@@ -204,6 +209,15 @@ func warnApprovalHolds(w io.Writer, server string, raw []byte) {
 // response (UX-02) as ": N tools approved, ..." for table output, or "" when
 // the response predates the counts.
 func approvalCountsSuffix(value map[string]interface{}) string {
+	if counts := approvalCounts(value); counts != "" {
+		return ": " + counts
+	}
+	return ""
+}
+
+// approvalCounts renders "N tools approved, B blocked, P still pending, C
+// changed", or "" when the response carries no counts.
+func approvalCounts(value map[string]interface{}) string {
 	approvedCount, ok := value["approved_count"].(float64)
 	if !ok {
 		return ""
@@ -211,7 +225,7 @@ func approvalCountsSuffix(value map[string]interface{}) string {
 	blocked, _ := value["blocked_count"].(float64)
 	pending, _ := value["still_pending"].(float64)
 	changed, _ := value["still_changed"].(float64)
-	return fmt.Sprintf(": %d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
+	return fmt.Sprintf("%d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
 }
 
 var errReviewAllWithTools = fmt.Errorf("--all cannot be combined with --tools")
@@ -367,6 +381,9 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	table := &clioutput.TableFormatter{}
 	if message, _ := value["message"].(string); message != "" {
+		if counts := approvalCounts(value); counts != "" {
+			message += " (server now: " + counts + ")"
+		}
 		fmt.Println(message)
 		return nil
 	}
