@@ -33,6 +33,11 @@ type Engine struct {
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
 
+	// runScannerContainer runs a scanner container. Nil means
+	// docker.RunScanner; tests replace it to observe the run config and to
+	// act while the container "runs".
+	runScannerContainer func(ctx context.Context, cfg ScannerRunConfig) (stdout, stderr string, exitCode int, err error)
+
 	// isolationMode is the engine-wide DEFAULT isolation mode ("docker",
 	// "sandbox", "none", or "" == docker for back-compat), used only when a
 	// ScanRequest does not carry a per-server IsolationMode. The per-server
@@ -162,18 +167,54 @@ var toolMetadataIndependentScanners = map[string]bool{
 // toolDefinitionsGate decides, before a Docker scanner runs, whether the
 // tools.json it would read may be analysed: not at all when the definitions
 // could not be exported (only metadata-independent scanners run, Sol r4 P2),
-// and only while it still holds the exported snapshot (Sol r4 P1).
+// and only while it still holds the exported snapshot (Sol r4 P1). A scanner
+// independent of tool metadata never reads tools.json, so a later change to
+// the file must not fail or discard its CVE audit (Sol r5 P2).
 func toolDefinitionsGate(s *ScannerPlugin, req ScanRequest) error {
-	if req.ToolDefinitionsUnavailable && !toolMetadataIndependentScanners[s.ID] {
-		return fmt.Errorf("scanner %s skipped: the tool definitions could not be exported for this scan, and the source dir may hold a tools.json this scan did not write", s.ID)
+	if toolMetadataIndependentScanners[s.ID] {
+		return nil
 	}
 	if req.ToolDefinitionsUnavailable {
-		return nil
+		return fmt.Errorf("scanner %s skipped: the tool definitions could not be exported for this scan, and the source dir may hold a tools.json this scan did not write", s.ID)
 	}
 	if err := checkToolDefinitionsIntact(req); err != nil {
 		return fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
 	return nil
+}
+
+// toolDefinitionsSnapshotMounts writes the exported tool definitions into a
+// proxy-owned, read-only snapshot file and returns the bind mounts that lay
+// it over tools.json in both source mount points of a Docker scanner. The
+// scanner therefore reads the exported contracts even if the upstream
+// rewrites (and later restores) tools.json in its own source dir while the
+// container runs — a swap the before/after integrity checks cannot see
+// (RT-06, Sol r5). Nothing is mounted for scanners independent of tool
+// metadata or when nothing was exported. The returned cleanup removes the
+// snapshot.
+func (e *Engine) toolDefinitionsSnapshotMounts(s *ScannerPlugin, req ScanRequest, jobID string) ([]string, func(), error) {
+	noop := func() {}
+	if toolMetadataIndependentScanners[s.ID] || len(req.ToolDefinitions) == 0 {
+		return nil, noop, nil
+	}
+	root := filepath.Join(e.dataDir, "scanner-snapshots")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
+	}
+	dir, err := os.MkdirTemp(root, jobID+"-"+s.ID+"-")
+	if err != nil {
+		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	path := filepath.Join(dir, "tools.json")
+	if err := os.WriteFile(path, req.ToolDefinitions, 0o444); err != nil {
+		cleanup()
+		return nil, noop, fmt.Errorf("write tool definitions snapshot: %w", err)
+	}
+	return []string{
+		path + ":/scan/source/tools.json:ro",
+		path + ":/src/tools.json:ro",
+	}, cleanup, nil
 }
 
 // checkToolDefinitionsIntact reports an error when the tools.json in the
@@ -726,6 +767,13 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
+	snapshotMounts, cleanupSnapshot, err := e.toolDefinitionsSnapshotMounts(s, req, jobID)
+	if err != nil {
+		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	defer cleanupSnapshot()
+	extraMounts = append(extraMounts, snapshotMounts...)
+
 	// Log which env keys are being passed (redact values for security)
 	envKeys := make([]string, 0, len(env))
 	for k := range env {
@@ -754,14 +802,19 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		DisableNoNewPrivileges: e.disableNoNewPrivileges,
 	}
 
-	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)
+	run := e.runScannerContainer
+	if run == nil {
+		run = e.docker.RunScanner
+	}
+	stdout, stderr, exitCode, err := run(ctx, cfg)
 	logs := scannerLogs{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if err != nil {
 		return nil, logs, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
 	}
-	// A swap of tools.json while the container ran would detach its verdict
-	// from the exported contracts (RT-06, Sol r4 P1).
-	if err := checkToolDefinitionsIntact(req); err != nil {
+	// The scanner read the proxy-owned snapshot; a tools.json that no longer
+	// holds it is still evidence of tampering, so the result is discarded
+	// (RT-06, Sol r4 P1). Metadata-independent scanners are exempt.
+	if err := toolDefinitionsGate(s, req); err != nil {
 		return nil, logs, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
 
