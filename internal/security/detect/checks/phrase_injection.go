@@ -434,11 +434,14 @@ var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s
 // end beside a short raw token (see chunkMark).
 func squashedClauses(text string) string {
 	text = foldClauseBreaks(text)
+	// Homoglyph folding reads the script majority of the whole field, not of
+	// each short clause (SEC-01 review, Sol round 7).
+	latin := detect.LatinMajority(text)
 	runs := newLetterRuns(text)
 	var b strings.Builder
 	prev := 0
 	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
-		b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:loc[1]])))
+		b.WriteString(detect.Squash(detect.NormalizeForPhraseIn(text[prev:loc[1]], latin)))
 		mark := clauseMark
 		if !strings.ContainsAny(text[loc[0]:loc[1]], `{}[]"`) &&
 			(runs.trailing(loc[1]) <= squashedChunkLen || runs.leading(loc[1]) <= squashedChunkLen) {
@@ -447,7 +450,7 @@ func squashedClauses(text string) string {
 		b.WriteString(mark)
 		prev = loc[1]
 	}
-	b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:])))
+	b.WriteString(detect.Squash(detect.NormalizeForPhraseIn(text[prev:], latin)))
 	return b.String()
 }
 

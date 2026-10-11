@@ -37,9 +37,30 @@ func NormalizeForPhrase(s string) string {
 	if s == "" {
 		return ""
 	}
+	return NormalizeForPhraseIn(s, LatinMajority(s))
+}
+
+// LatinMajority reports whether Latin letters outnumber Cyrillic, Greek and
+// Armenian letters together in s (after NFKC). It is the document-level
+// script census homoglyph folding uses to decide which way an ambiguous mixed
+// token ("тeм": Cyrillic т/м, Latin e) folds.
+func LatinMajority(s string) bool {
+	return scriptCensus([]rune(norm.NFKC.String(s))).latinMajority()
+}
+
+// NormalizeForPhraseIn is NormalizeForPhrase for one fragment (clause) of a
+// larger text, with the script majority taken from the WHOLE text
+// (LatinMajority of it). A short fragment's own census is not evidence: the
+// chunk "тeм." of "sys. тeм. pro. mpt." has a Cyrillic majority on its own,
+// which would fold it to "тем" and hide "system prompt" from the squashed pass
+// (SEC-01 review, Sol round 7).
+func NormalizeForPhraseIn(s string, latinMajority bool) string {
+	if s == "" {
+		return ""
+	}
 	s = norm.NFKC.String(s)
 	s = stripFormatRunes(s)
-	s = foldConfusables(s)
+	s = foldConfusables(s, latinMajority)
 	s = foldLeetTokens(s)
 	s = joinSeparatedLetters(s)
 	s = joinSpacedLetters(s)
@@ -98,6 +119,24 @@ var toCyrillic = map[rune]rune{
 
 type scriptCount struct{ latin, cyrillic, other int }
 
+func (c scriptCount) latinMajority() bool { return c.latin > c.cyrillic+c.other }
+
+// scriptCensus counts the Latin, Cyrillic and Greek/Armenian letters of runes.
+func scriptCensus(runes []rune) scriptCount {
+	var doc scriptCount
+	for _, r := range runes {
+		switch classifyLetter(r) {
+		case 0:
+			doc.latin++
+		case 1:
+			doc.cyrillic++
+		case 2:
+			doc.other++
+		}
+	}
+	return doc
+}
+
 func classifyLetter(r rune) int {
 	switch {
 	case unicode.Is(unicode.Latin, r):
@@ -129,21 +168,11 @@ type confusableToken struct {
 // adjacent word contains Latin letters, so a Russian sentence quoted inside an
 // English description keeps its own words ("Игнорируй все предыдущие …" stays
 // matchable by the Russian family).
-func foldConfusables(s string) string {
+//
+// latinMajority is the script census of the whole text the fragment s belongs
+// to (see NormalizeForPhraseIn); for a whole text it is LatinMajority(s).
+func foldConfusables(s string, latinMajority bool) string {
 	runes := []rune(s)
-
-	var doc scriptCount
-	for _, r := range runes {
-		switch classifyLetter(r) {
-		case 0:
-			doc.latin++
-		case 1:
-			doc.cyrillic++
-		case 2:
-			doc.other++
-		}
-	}
-	latinMajority := doc.latin > doc.cyrillic+doc.other
 
 	var toks []confusableToken
 	for i := 0; i < len(runes); {
