@@ -190,7 +190,14 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - The caller MUST advance `applied` to the failed capture's seq F, as an observation fence, so an older in-flight capture can no longer apply and clear the state.
   - The server MUST be marked **review-dirty at F** (in memory, under its approval lock).
   - Dirty clears only when a **fresh upstream capture with seq > F** persists all its records. A snapshot reconciliation (approval/block reindex) never clears it and is not performed while the server is dirty: the reindex re-lists instead, so retained older definitions cannot be re-applied over a partially recorded newer one.
-  - While dirty, the guard sits in the **common locked approval path**, so every entry point hits it. That covers `approveToolsLocked` (behind `ApproveTools`, the MCP `approve_tool` and the reviewed variants), `ApproveAllTools`, `approveBaselineToolsForServerCount` and `CommitServerApproval`.
+  - While dirty, the guard sits in **every locked transition that makes a tool reachable** (design review r10 #1). That covers:
+    - `approveToolsLocked` (behind `ApproveTools`, the MCP `approve_tool` and the reviewed variants);
+    - `ApproveAllTools` and `approveBaselineToolsForServerCount`;
+    - `CommitServerApproval`;
+    - single and bulk **enable** of an approved record (`setToolEnabledNoEmit`, `tool_quarantine.go:2185-2208`, and `SetAllToolsEnabled`, `:2375`);
+    - any approval synthesized under a lifted gate (`newToggleSynthesizedRecord`).
+
+    Disabling and blocking stay available while dirty. A block writes approved+disabled, and the enable guard keeps that state from becoming a bypass.
   - A bound request (PR-2 present) fails with the 409 out-of-date error (`stale_tools.changed` lists the tools whose writes failed). An unbound request, from any surface, fails with the typed `toolreview.ErrReviewNotRecorded`, which maps to HTTP 503 "tool definitions could not be recorded; retry the capture" (MCP: a tool error with the same text). A non-review unquarantine leaves pending tools pending while dirty.
   - FR-018 lives in PR-3 because it needs the capture sequence. Until PR-3 lands, a storage write failure during a capture can leave a stale definition approvable, as on main today. This residual risk is recorded in O5.
   - Scope note: after a restart the flag is gone, and the records reflect the last capture that was fully recorded. A definition the core never recorded is the same as an upstream change not yet captured, which binding cannot see by design. The next capture records it.

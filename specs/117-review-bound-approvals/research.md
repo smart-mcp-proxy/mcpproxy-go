@@ -255,3 +255,10 @@ See spec.md A1-A10 and O1-O4.
 2. **High, legacy approvals bypassed the dirty guard**: the guard is in the common locked approval path, covering `approveToolsLocked`, `ApproveAllTools`, baseline promotion and `CommitServerApproval`, with `ErrReviewNotRecorded` → 503. T306d(d) tests the legacy methods directly.
 3. **Medium, the supervisor republishes retained tools for disabled servers**: PR-3 scope now includes the supervisor change, and T306(9c) runs a reconciliation after the purge.
 4. **Low, T306(5r) is not failing-first on main**: reclassified as a composition regression.
+
+## Design review round 10 (OpenCode gpt-6.1-sol, final round under the 10-round cap) resolutions
+
+1. **High, enabling an approved+disabled tool bypassed the dirty guard**: the FR-018 guard now covers every reachability transition: single/bulk enable and toggle-synthesized approvals. Disable and block stay allowed. T306d(d2) checks for zero dispatch.
+2. **Medium, PR-3's changed → changed-again fault test depends on PR-2's FR-017**: reclassified as a composition test that runs once PR-2 is merged. PR-3's standalone failing-first suite uses only branches that write records on main.
+
+Round 10 reached the review-round cap. These two fixes were applied after the last review and **have not been re-reviewed** (no round 11, per the cap rule). The first implementation PR's review covers them.

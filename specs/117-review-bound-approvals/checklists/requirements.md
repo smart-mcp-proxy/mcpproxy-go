@@ -57,3 +57,4 @@
 - Round 7 (opencode gpt-6.1-sol): FINDINGS, 3 medium, all accepted and resolved (research.md "Design review round 7").
 - Round 8 (opencode gpt-6.1-sol): FINDINGS, 2 high and 1 medium, all accepted and resolved (research.md "Design review round 8").
 - Round 9 (opencode gpt-6.1-sol): FINDINGS, 2 high, 1 medium and 1 low, all accepted and resolved (research.md "Design review round 9").
+- Round 10 (opencode gpt-6.1-sol): FINDINGS, 1 high and 1 medium, resolved after the review. The cap was reached, so these resolutions have **not** been re-reviewed. Sol confirmed the #1572 wire contract matches in rounds 6, 8 and 10.
