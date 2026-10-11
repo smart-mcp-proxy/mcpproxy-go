@@ -117,6 +117,7 @@ type CommitTx struct {
 	skipDisk        bool
 	suppressWorkers bool
 	disk            *commitDiskPlan
+	path            string // UpdateConfig's new file path; published only with the commit
 	desired         *config.Config
 	onPublish       []func(oldCfg, newCfg *config.Config)
 	after           []func(*CommitResult)
@@ -360,9 +361,14 @@ func (tx *CommitTx) UnderApprovalLock(name string, fn func() error) error {
 
 // --- unexported plumbing used by the runtime's own commit callers ---
 
-func (tx *CommitTx) noDisk()                       { tx.skipDisk = true }
-func (tx *CommitTx) noWorkers()                    { tx.suppressWorkers = true }
-func (tx *CommitTx) setDisk(p *commitDiskPlan)     { tx.disk = p }
+func (tx *CommitTx) noDisk()                   { tx.skipDisk = true }
+func (tx *CommitTx) noWorkers()                { tx.suppressWorkers = true }
+func (tx *CommitTx) setDisk(p *commitDiskPlan) { tx.disk = p }
+
+// setPath makes p the config file path of this commit: step 5 writes it, and
+// step 8 publishes it with the snapshot (r.cfgPath follows). A commit that
+// fails before step 8 leaves the old path published (review round 3).
+func (tx *CommitTx) setPath(p string)              { tx.path = p }
 func (tx *CommitTx) setDesired(cfg *config.Config) { tx.desired = cfg }
 
 // publishHook runs in step 8 with Runtime.mu held, after r.cfg was swapped.
@@ -570,7 +576,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	}
 	prepared, err := r.configSvc.Prepare(configsvc.PrepareInput{
 		Config: tx.next, Source: reason, Type: updateType,
-		Replaced: replaced, Seed: seed,
+		Replaced: replaced, Seed: seed, Path: tx.path,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrCommitInvariant, err)
@@ -604,6 +610,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		}
 		sort.Strings(batch.Removes)
 		sort.Strings(batch.Replaces)
+		batch.OAuthClears = r.commitOAuthClears(tx, changes, stored, replaced, batch.Saves)
 		qe := tx.next.IsQuarantineEnabled()
 		if enabled, ok, _ := r.storageManager.StoredQuarantineEnabled(); !ok || enabled != qe {
 			batch.QuarantineEnabled = &qe
@@ -619,17 +626,22 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	// including a global-only commit with no row to write (review round 1):
 	// the seed after a restart is that value, so skipping it would let the
 	// next process publish a generation below this one's.
+	curPath := r.configSvc.Current().Path
+	pathChanged := tx.path != "" && tx.path != curPath
 	storageNeeded := batch != nil && (len(batch.Saves) > 0 || len(batch.Removes) > 0 || len(batch.Replaces) > 0 ||
-		batch.QuarantineEnabled != nil || configChanged || tx.bootstrap)
+		batch.QuarantineEnabled != nil || configChanged || tx.bootstrap || pathChanged)
 
-	path := r.configSvc.Current().Path
+	path := curPath
+	if tx.path != "" {
+		path = tx.path
+	}
 	if tx.disk != nil && tx.disk.path != "" {
 		path = tx.disk.path
 	}
 	diskNeeded := path != "" && !tx.skipDisk && (configChanged || tx.forceDisk || tx.disk != nil)
 
 	// Skip rule (FR-001a): nothing to do unless something changed or was forced.
-	if !configChanged && !storageNeeded && !diskNeeded && !tx.bootstrap && len(tx.hooks) == 0 {
+	if !configChanged && !storageNeeded && !diskNeeded && !tx.bootstrap && !pathChanged && len(tx.hooks) == 0 {
 		if tx.reconcile {
 			if h := hooks.reconcileExit; h != nil {
 				h()
@@ -736,7 +748,6 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		}
 	}
 	purged := r.commitIndexPurge(tx, changes, batch, stored)
-	r.commitOAuthClears(tx, changes)
 	if tx.reconcile || len(tx.removed) > 0 || len(tx.replaced) > 0 || (batch != nil && len(batch.Removes) > 0) {
 		r.commitOrphanGC(tx)
 	}
@@ -751,7 +762,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	}
 
 	// The restart-required-only apply: disk written, nothing hot changed.
-	publish := configChanged || storageNeeded || tx.bootstrap
+	publish := configChanged || storageNeeded || tx.bootstrap || pathChanged
 	if !publish {
 		if tx.desired != nil {
 			r.mu.Lock()
@@ -952,25 +963,41 @@ func baseEntry(cfg *config.Config, name string) *config.ServerConfig {
 	return nil
 }
 
-// commitOAuthClears clears cached OAuth state for every server whose OAuth
-// configuration changed (as the reconcile did on main).
-func (r *Runtime) commitOAuthClears(tx *CommitTx, changes map[string]ServerChange) {
-	if r.storageManager == nil {
-		return
-	}
-	for name, ch := range changes {
-		if ch.Kind != configsvc.ChangeUpdated {
+// commitOAuthClears returns the servers whose cached OAuth state (tokens and
+// DCR client credentials) the storage step deletes in the row transaction
+// (data-model §1, review round 3), because their OAuth configuration changed:
+//
+//   - relative to the base snapshot (an edit through any writer), and
+//   - relative to the stored row (as main's reconcile did): an OAuth-only file
+//     edit made while the daemon was stopped is already in the boot commit's
+//     base, so only the stored row still holds the old OAuth config.
+//
+// Only names whose row this commit writes qualify; a replaced name is a new
+// server whose state PR2's purge handles. The result is sorted.
+func (r *Runtime) commitOAuthClears(tx *CommitTx, changes map[string]ServerChange, stored map[string]*storage.StoredServer, replaced map[string]bool, saves []storage.ServerSave) []string {
+	var names []string
+	for _, s := range saves {
+		name := s.Config.Name
+		if replaced[name] {
 			continue
 		}
-		prev, next := baseEntry(tx.base.Config, name), tx.entry(name)
-		if prev == nil || next == nil || !config.OAuthConfigChanged(prev.OAuth, next.OAuth) {
-			continue
+		next := s.Config
+		clear := false
+		if ch, ok := changes[name]; ok && ch.Kind == configsvc.ChangeUpdated {
+			if prev := baseEntry(tx.base.Config, name); prev != nil && config.OAuthConfigChanged(prev.OAuth, next.OAuth) {
+				clear = true
+			}
 		}
-		r.logger.Info("OAuth config changed, clearing cached OAuth state", zap.String("server", name))
-		if err := r.storageManager.ClearOAuthState(name); err != nil {
-			r.logger.Warn("Failed to clear OAuth state", zap.String("server", name), zap.Error(err))
+		if row, ok := stored[name]; ok && row.Config != nil && config.OAuthConfigChanged(row.Config.OAuth, next.OAuth) {
+			clear = true
+		}
+		if clear {
+			r.logger.Info("OAuth config changed, clearing cached OAuth state in the config commit", zap.String("server", name))
+			names = append(names, name)
 		}
 	}
+	sort.Strings(names)
+	return names
 }
 
 // commitOrphanGC drops tool-approval records and call history of servers that

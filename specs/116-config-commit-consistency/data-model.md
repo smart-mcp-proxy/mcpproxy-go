@@ -229,7 +229,18 @@ type UpstreamRecord struct {
 `OAuthEpoch` is set to `G` on create and by every commit that clears the
 server's OAuth state because `config.OAuthConfigChanged` is true. That clear
 (`lifecycle.go:1488-1489`, `:1543-1551` on `main`) moves into the commit
-transaction in PR1, and PR2 stamps the epoch in the same transaction. Any
+transaction in PR1: `ServerCommitBatch.OAuthClears` lists the names, and
+`ApplyServerCommit` deletes their `oauth_tokens` keys (tokens and DCR client
+credentials) in the same bbolt transaction as the rows, before the saves, so
+the new OAuth config and the removal of the old credentials commit or roll
+back together; a failure aborts the commit, the file is compensated, and the
+old row and credentials stay. A name is cleared when its OAuth config differs
+from the base snapshot's entry or from its stored row (the latter covers an
+OAuth-only file edit made while the daemon was stopped, which the boot
+commit's base already holds; review round 3 on PR1). PR1 keeps
+`ClearOAuthState`'s key set (`name` and the `name_` prefix); PR2 narrows the
+shared helper to the exact match (B2) and stamps the epoch in the same
+transaction. Any
 other update keeps the epoch. A row without the field reads as 0.
 
 ### Meta key (**persisted**)

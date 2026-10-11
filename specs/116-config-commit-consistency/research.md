@@ -297,10 +297,13 @@ disconnect retired instances in the background.
 
 **Assumption A2.** When the compensating disk write fails after a storage
 failure, the error is logged at error level and the disk stays ahead of the
-live config until the next commit rewrites it. When it succeeds after a failed
-reload, the disk again holds the operator's edit that the reload could not
-apply: disk is ahead of live exactly as it was before the reload, and the next
-reload or commit applies it (review R9.2). Today a failed save already
+live config until the next commit rewrites it. A failed reload writes nothing
+(the reload commit never writes the file), so the disk still holds the
+operator's edit the reload could not apply. The next reload applies it; the
+next disk-writing commit writes the live config and erases it, as `main`'s
+`SaveConfiguration` does. When a disk-writing commit fails in storage, the
+compensation restores the file's previous bytes, any unapplied edit included
+(review R9.2, corrected in PR1 review round 3; see plan.md). Today a failed save already
 leaves "in-memory stores agree, disk stale" (`lifecycle.go:1751-1760`). This
 keeps that guarantee.
 

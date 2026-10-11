@@ -114,14 +114,30 @@ It does not rebuild a file from memory. `pendingAwareDiskConfig`
 `desiredCfg`, and it returns `nil` when nothing restart-gated is pending, so
 it is not the file. Two cases show the difference. With a restart-required
 change pending, disk intentionally differs from the live snapshot (R5.5,
-T1.16). During `ReloadConfiguration` the file holds an operator edit that the
-commit is applying and that memory has not seen yet, so compensating from
-memory would erase that edit (R9.2, T1.18). The raw bytes cover both cases,
-and the absent-file case too. The restore records a self-write marker for the
-restored bytes, so the watcher does not re-run the failed reload in a loop.
-The operator's edit stays on disk and is applied by the next reload or commit.
-That is the same "disk ahead of live" state as before the failed reload
-(assumption A2). An external write that lands between the capture and the
+T1.16). And a disk-writing commit (a server toggle, a PATCH) can run while
+the file holds an operator edit that no reload has applied yet, so
+compensating from memory would erase that edit (R9.2, T1.18 variant c). The
+raw bytes cover these cases, and the absent-file case too. The restore records
+a self-write marker for the restored bytes, so the watcher does not re-run a
+reload in a loop.
+
+`ReloadConfiguration` itself never writes the file (`tx.noDisk()`): a failed
+reload of an edit A→A+B leaves the file at A+B with nothing to compensate,
+and live config and storage at A (T1.18 main case). What happens to B next
+depends on the next writer (review round 3 on PR1; corrects R9.2):
+
+- the next **reload** (the watcher on the next edit, or a manual reload)
+  reads the file and applies B;
+- the next **disk-writing commit** (`SaveConfiguration`, a server add,
+  update, toggle or removal, an `ApplyConfig`) builds from the live config, so
+  on success it writes A plus its own change and **B is gone from disk**. This
+  is `main`'s behaviour too (its `SaveConfiguration` writes the in-memory
+  config), and making such commits merge unapplied file edits is out of scope
+  for Spec 116. If that commit fails in storage, compensation restores A+B.
+
+So the "disk ahead of live" state after a failed reload (assumption A2) lasts
+until the next reload or the next disk-writing commit, whichever comes first,
+and only the reload keeps B. An external write that lands between the capture and the
 restore is overwritten. That window lies inside one commit, and today's
 `SaveConfiguration` already has it.
 

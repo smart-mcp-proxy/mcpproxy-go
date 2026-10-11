@@ -2436,43 +2436,15 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 		return fmt.Errorf("storage not initialized")
 	}
 
-	// Delete the exact server name key (legacy) and any hashed serverKey entries.
-	// Tokens are stored using oauth.GenerateServerKey(name, url) which prefixes the server
-	// name and appends a hash of the URL; clear both to ensure logout actually removes tokens.
 	cleared := 0
-	if err := m.db.DeleteOAuthToken(serverName); err == nil {
-		cleared++
-	}
-
 	if err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		if bucket == nil {
 			return fmt.Errorf("oauth token bucket not found")
 		}
-
-		// Collect the whole prefix range before deleting any of it. bbolt cursors
-		// are invalidated by mutations made during iteration ("Changing data while
-		// traversing with a cursor may cause it to be invalidated and return
-		// unexpected keys and/or values" — bbolt cursor.go): once any write in this
-		// transaction has materialised the leaf into a node, deleting through the
-		// cursor shifts the remaining entries under its index and Next() skips one.
-		// A key skipped here leaves an access token, a refresh token and the DCR
-		// client secret on disk after the user logged out, still reachable by
-		// PersistentTokenStore and RefreshManager.
-		prefix := []byte(serverName + "_")
-		var keys [][]byte
-		cursor := bucket.Cursor()
-		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
-			keys = append(keys, append([]byte(nil), k...))
-		}
-
-		for _, k := range keys {
-			if err := bucket.Delete(k); err != nil {
-				return err
-			}
-			cleared++
-		}
-		return nil
+		n, err := clearOAuthStateTx(bucket, serverName)
+		cleared = n
+		return err
 	}); err != nil {
 		return fmt.Errorf("failed to clear OAuth state: %w", err)
 	}
@@ -2482,6 +2454,45 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 		m.logger.Debugw("No OAuth tokens found to clear (expected if already removed)", "server", serverName)
 	}
 	return nil
+}
+
+// clearOAuthStateTx deletes a server's cached OAuth state (tokens and DCR
+// client credentials) inside the caller's transaction: the exact server name
+// key (legacy) and every hashed serverKey entry. Tokens are stored under
+// oauth.GenerateServerKey(name, url), which prefixes the server name and
+// appends a hash of the URL; both forms are cleared so a logout or an OAuth
+// config change actually removes them. It returns the number of keys deleted.
+//
+// The whole prefix range is collected before any of it is deleted. bbolt
+// cursors are invalidated by mutations made during iteration ("Changing data
+// while traversing with a cursor may cause it to be invalidated and return
+// unexpected keys and/or values" — bbolt cursor.go): once any write in this
+// transaction has materialised the leaf into a node, deleting through the
+// cursor shifts the remaining entries under its index and Next() skips one.
+// A key skipped here leaves an access token, a refresh token and the DCR
+// client secret on disk, still reachable by PersistentTokenStore and
+// RefreshManager.
+func clearOAuthStateTx(bucket *bbolt.Bucket, serverName string) (int, error) {
+	cleared := 0
+	if bucket.Get([]byte(serverName)) != nil {
+		if err := bucket.Delete([]byte(serverName)); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	prefix := []byte(serverName + "_")
+	var keys [][]byte
+	cursor := bucket.Cursor()
+	for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+		keys = append(keys, append([]byte(nil), k...))
+	}
+	for _, k := range keys {
+		if err := bucket.Delete(k); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	return cleared, nil
 }
 
 // CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.

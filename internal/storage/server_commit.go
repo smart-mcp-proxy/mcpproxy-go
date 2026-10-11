@@ -55,6 +55,12 @@ type ServerCommitBatch struct {
 	// QuarantineEnabled, when non-nil, is written to
 	// meta.quarantine_enabled in the same transaction (D16).
 	QuarantineEnabled *bool
+	// OAuthClears are names whose cached OAuth state (tokens and DCR client
+	// credentials, the ClearOAuthState key set) is deleted in this
+	// transaction because their OAuth configuration changed (data-model §1,
+	// review round 3): the new OAuth config and the removal of the old
+	// credentials commit or roll back together.
+	OAuthClears []string
 }
 
 // StoredServer is one upstreams row as a config entry plus its stamp.
@@ -111,6 +117,11 @@ func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
 			return fmt.Errorf("%w: replaced %q has no new row", ErrInvariant, n)
 		}
 	}
+	for _, n := range b.OAuthClears {
+		if !saved[n] {
+			return fmt.Errorf("%w: OAuth clear for %q without a row save", ErrInvariant, n)
+		}
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -126,6 +137,17 @@ func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
 			}
 			if err := deleteToolCallHistoryForNameTx(tx, name); err != nil {
 				return fmt.Errorf("delete tool call history for %s: %w", name, err)
+			}
+		}
+		// Before the saves, so any later failure in this transaction rolls
+		// the clear back together with the rows.
+		if len(b.OAuthClears) > 0 {
+			if tokens := tx.Bucket([]byte(OAuthTokenBucket)); tokens != nil {
+				for _, name := range b.OAuthClears {
+					if _, err := clearOAuthStateTx(tokens, name); err != nil {
+						return fmt.Errorf("clear OAuth state for %s: %w", name, err)
+					}
+				}
 			}
 		}
 		for _, s := range b.Saves {

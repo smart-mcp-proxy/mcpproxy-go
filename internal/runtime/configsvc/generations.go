@@ -77,6 +77,10 @@ type PrepareInput struct {
 	// Seed carries stored stamps for servers whose base snapshot has no
 	// generation, so generations survive a restart (data-model §2, D13).
 	Seed map[string]SeedStamp
+	// Path, when non-empty, is the config file path the snapshot publishes
+	// with. It moves only when Publish succeeds (Spec 116 PR1 review round 3:
+	// a failed commit must not leave a new path published).
+	Path string
 }
 
 // PreparedSnapshot is a snapshot computed against a base version and not yet
@@ -87,6 +91,7 @@ type PreparedSnapshot struct {
 	generation int64
 	updateType UpdateType
 	source     string
+	pathSet    bool
 	snap       *Snapshot
 	Changes    map[string]ServerChange
 }

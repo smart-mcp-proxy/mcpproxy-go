@@ -725,7 +725,7 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 	}
 	if _, err := r.Commit("runtime_update", func(tx *CommitTx) error {
 		if cfgPath != "" {
-			r.configSvc.UpdatePath(cfgPath)
+			tx.setPath(cfgPath)
 		}
 		tx.ReplaceConfig(cfg)
 		return nil

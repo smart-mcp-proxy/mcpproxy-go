@@ -224,15 +224,20 @@ func (s *Service) prepareLocked(in PrepareInput) (*PreparedSnapshot, error) {
 	if updateType == "" {
 		updateType = UpdateTypeModify
 	}
+	path := current.Path
+	if in.Path != "" {
+		path = in.Path
+	}
 	return &PreparedSnapshot{
 		base:       s.version,
 		generation: g,
 		updateType: updateType,
 		source:     in.Source,
+		pathSet:    in.Path != "",
 		Changes:    changes,
 		snap: &Snapshot{
 			Config:            in.Config,
-			Path:              current.Path,
+			Path:              path,
 			Version:           g,
 			Timestamp:         time.Now(),
 			ServerGenerations: gens,
@@ -246,7 +251,9 @@ func (s *Service) publishLocked(p *PreparedSnapshot) {
 	current := s.Current()
 	s.version = p.generation
 	snap := p.snap
-	snap.Path = current.Path
+	if !p.pathSet {
+		snap.Path = current.Path
+	}
 	snap.Timestamp = time.Now()
 	s.snapshot.Store(snap)
 

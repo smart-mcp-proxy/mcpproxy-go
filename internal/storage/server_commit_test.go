@@ -180,3 +180,50 @@ func TestApplyServerCommit_InTransactionFailureRollsBack(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), seed, "meta untouched")
 }
+
+// Review round 3 (data-model §1): the OAuth clear of a commit is part of the
+// row transaction. A failure later in the same transaction keeps the old
+// credentials; a successful commit removes both key forms of the cleared
+// server and nothing of the others.
+func TestApplyServerCommit_OAuthClearRollsBackWithRows(t *testing.T) {
+	m := newCommitTestManager(t)
+	q := commitEntry("q")
+	q.Quarantined = true
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 1, Saves: []ServerSave{
+		{Config: commitEntry("o"), Stamp: stamp(1, 1)},
+		{Config: q, Stamp: stamp(1, 1)},
+	}}))
+	keys := []string{"o", "o_0123456789abcdef", "other_0123456789abcdef"}
+	for _, k := range keys {
+		require.NoError(t, m.db.SaveOAuthToken(&OAuthTokenRecord{ServerName: k, AccessToken: "at", ClientID: "dcr"}))
+	}
+	present := func(k string) bool {
+		rec, err := m.db.GetOAuthToken(k)
+		return err == nil && rec != nil
+	}
+
+	err := m.ApplyServerCommit(&ServerCommitBatch{
+		Generation:  2,
+		OAuthClears: []string{"o"},
+		Saves: []ServerSave{
+			{Config: commitEntry("o", "new"), Stamp: stamp(2, 1)},
+			{Config: commitEntry("q"), Stamp: stamp(2, 1)}, // lowers a recorded quarantine: refused in the tx
+		},
+	})
+	require.ErrorIs(t, err, ErrInvariant)
+	for _, k := range keys {
+		assert.True(t, present(k), "%s must survive the rolled-back commit", k)
+	}
+
+	require.ErrorIs(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 2, OAuthClears: []string{"o"}}), ErrInvariant,
+		"a clear without the row save it belongs to is a caller bug")
+
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{
+		Generation:  2,
+		OAuthClears: []string{"o"},
+		Saves:       []ServerSave{{Config: commitEntry("o", "new"), Stamp: stamp(2, 1)}},
+	}))
+	assert.False(t, present("o"))
+	assert.False(t, present("o_0123456789abcdef"))
+	assert.True(t, present("other_0123456789abcdef"))
+}
