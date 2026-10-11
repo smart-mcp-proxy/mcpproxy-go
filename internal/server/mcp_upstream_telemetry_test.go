@@ -132,43 +132,67 @@ func TestUpstreamTelemetry_ActivationAndAttemptsOnEveryDispatchPath(t *testing.T
 }
 
 // Each JS sub-call is one attempt, counted separately from the code_execution
-// invocation (a built-in call). Eleven sub-calls cross the 1-10 bucket edge,
-// which a per-invocation count could never do.
+// invocation (a built-in call). The bucket edge makes the count exact: ten
+// sub-calls stay in "1-10" (an extra count for the invocation, or any double
+// count, would cross into "11-100"), and one more sub-call from a second
+// invocation crosses it (a missed count would not).
 func TestUpstreamTelemetry_JSSubCallsCountedSeparatelyFromInvocation(t *testing.T) {
 	pinTelemetryEnvEnabledForServer(t)
 	f := newDirectRoutingFixture(t, directServerSpec{server: "fixture", tools: []toolSpec{readSpec("probe")}})
 	f.rt.SetTelemetry("v0.70.0", "personal")
 	ctx := fullTierAgentOn("fixture")
+	run := func(n int) {
+		res, err := f.proxy.handleCodeExecution(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{
+			Name: "code_execution",
+			Arguments: map[string]interface{}{
+				"code":    fmt.Sprintf(`var n = 0; for (var i = 0; i < %d; i++) { if (call_tool("fixture", "probe", {}).ok) n++; } ({ n: n })`, n),
+				"input":   map[string]interface{}{},
+				"options": map[string]interface{}{"timeout_ms": 10000, "max_tool_calls": 0},
+			},
+		}})
+		require.NoError(t, err)
+		require.False(t, res.IsError, "%v", res.Content)
+	}
 
-	res, err := f.proxy.handleCodeExecution(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{
-		Name: "code_execution",
-		Arguments: map[string]interface{}{
-			"code":    `var n = 0; for (var i = 0; i < 11; i++) { if (call_tool("fixture", "probe", {}).ok) n++; } ({ n: n })`,
-			"input":   map[string]interface{}{},
-			"options": map[string]interface{}{"timeout_ms": 10000, "max_tool_calls": 0},
-		},
-	}})
-	require.NoError(t, err)
-	require.False(t, res.IsError, "%v", res.Content)
+	run(10)
+	require.Equal(t, int64(10), f.ups["fixture"].count.Load())
+	require.Equal(t, "1-10", f.proxy.telemetryRegistry().Snapshot().UpstreamToolCallCountBucket)
+	require.True(t, loadActivationFromRuntime(t, f.rt).FirstRealToolCallEver)
+
+	run(1)
 	require.Equal(t, int64(11), f.ups["fixture"].count.Load())
 	require.Equal(t, "11-100", f.proxy.telemetryRegistry().Snapshot().UpstreamToolCallCountBucket)
-	require.True(t, loadActivationFromRuntime(t, f.rt).FirstRealToolCallEver)
 }
 
-// A wrapper dispatch is one attempt, not two (no double count with the
-// activation stamp or any inner seam).
-func TestUpstreamTelemetry_WrapperDispatchCountsExactlyOnce(t *testing.T) {
-	pinTelemetryEnvEnabledForServer(t)
-	f := newDirectRoutingFixture(t, directServerSpec{server: "fixture", tools: []toolSpec{readSpec("probe")}})
-	f.rt.SetTelemetry("v0.70.0", "personal")
-	ctx := fullTierAgentOn("fixture")
-	for i := 0; i < 11; i++ {
-		req := mcp.CallToolRequest{}
-		req.Params.Name = contracts.ToolVariantRead
-		req.Params.Arguments = map[string]interface{}{"name": "fixture:probe", "args": map[string]interface{}{}}
-		_, err := f.proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
-		require.NoError(t, err)
+// A dispatch is one attempt on the wrapper and direct paths, not two. Ten
+// calls stay in "1-10" (any double count crosses the edge); the eleventh
+// crosses it (a missed count would not).
+func TestUpstreamTelemetry_DispatchCountsExactlyOnce(t *testing.T) {
+	for _, path := range []telPath{telWrapper, telDirect} {
+		path := path
+		t.Run(string(path), func(t *testing.T) {
+			pinTelemetryEnvEnabledForServer(t)
+			f := newDirectRoutingFixture(t, directServerSpec{server: "fixture", tools: []toolSpec{readSpec("probe")}})
+			f.rt.SetTelemetry("v0.70.0", "personal")
+			ctx := fullTierAgentOn("fixture")
+			one := func() {
+				if path == telDirect {
+					f.call(t, ctx, "fixture", "probe")
+					return
+				}
+				req := mcp.CallToolRequest{}
+				req.Params.Name = contracts.ToolVariantRead
+				req.Params.Arguments = map[string]interface{}{"name": "fixture:probe", "args": map[string]interface{}{}}
+				_, err := f.proxy.handleCallToolVariant(ctx, req, contracts.ToolVariantRead)
+				require.NoError(t, err)
+			}
+			for i := 0; i < 10; i++ {
+				one()
+			}
+			require.Equal(t, int64(10), f.ups["fixture"].count.Load())
+			require.Equal(t, "1-10", f.proxy.telemetryRegistry().Snapshot().UpstreamToolCallCountBucket)
+			one()
+			require.Equal(t, "11-100", f.proxy.telemetryRegistry().Snapshot().UpstreamToolCallCountBucket)
+		})
 	}
-	require.Equal(t, int64(11), f.ups["fixture"].count.Load())
-	require.Equal(t, "11-100", f.proxy.telemetryRegistry().Snapshot().UpstreamToolCallCountBucket)
 }

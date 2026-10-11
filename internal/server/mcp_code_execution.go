@@ -1032,12 +1032,13 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	parentFwdSink := headerfwd.SinkFrom(ctx)
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	dispatchCtx, wireTally := managed.WithDispatchTally(dispatchCtx)
 	if certified.certified() {
 		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
 		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
-	u.proxy.noteUpstreamDispatched(err) // each JS sub-call is one attempt; nil-safe
+	u.proxy.noteUpstreamDispatched(wireTally) // each JS sub-call counts its own requests; nil-safe
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
 	parentFwdSink.Merge(fwdOut)

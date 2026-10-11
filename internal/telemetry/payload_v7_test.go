@@ -110,7 +110,7 @@ func TestPayloadV7_ZeroNewFieldsShapeCompatibleWithV6(t *testing.T) {
 	js := string(data)
 
 	if !strings.Contains(js, `"schema_version":14`) {
-		t.Errorf("expected schema_version:13 even on a zero-valued payload, got:\n%s", js)
+		t.Errorf("expected schema_version:14 even on a zero-valued payload, got:\n%s", js)
 	}
 	for _, forbidden := range []string{
 		`"wizard_shown"`,
