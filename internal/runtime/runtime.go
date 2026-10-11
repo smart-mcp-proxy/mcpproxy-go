@@ -279,6 +279,12 @@ type Runtime struct {
 	// linearization region immediately before review records are stored. It is
 	// test-only and nil in production.
 	quarantinedCaptureDuringPersist func()
+	// skipQuarantinedContractVerify turns off the connect/list_changed-time
+	// contract verification of quarantined servers (RT-05). Test-only, for
+	// suites that count a quarantined upstream's tools/list calls and must
+	// see only the explicit inspection capture's. Set before
+	// StartBackgroundInitialization; false in production.
+	skipQuarantinedContractVerify bool
 
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between

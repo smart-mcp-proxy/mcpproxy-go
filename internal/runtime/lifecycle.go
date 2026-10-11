@@ -625,6 +625,44 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 	return fmt.Errorf("list tools for quarantined server %s: %w", serverName, lastErr)
 }
 
+// verifyQuarantinedServerContracts runs the tool-approval gate over a
+// connected quarantined server's live tools/list WITHOUT indexing it (RT-05):
+// approved contracts that changed are marked changed, new tools are filed
+// pending, and nothing reaches the search index or routing surfaces. Unlike
+// the explicit review refresh it never requests an inspection exemption or a
+// connection — it only uses a connection the supervisor already keeps — and
+// it is best effort: a disconnected client, a failed list or a superseded
+// connection is skipped (the next connect or tools/list_changed re-runs it).
+func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverName string) {
+	if r.upstreamManager == nil || r.storageManager == nil || r.skipQuarantinedContractVerify {
+		return
+	}
+	capture := r.discoveryGeneration(serverName)
+	client, ok := r.upstreamManager.GetClient(serverName)
+	if !ok || client == nil || !client.IsConnected() {
+		return
+	}
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		r.logger.Debug("Quarantined contract verification: tools/list failed",
+			zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	if len(tools) == 0 || !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
+		return
+	}
+	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+	if err != nil {
+		r.logger.Warn("Quarantined contract verification failed",
+			zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	if published {
+		r.logger.Info("Verified quarantined server tool contracts against approvals (not indexed)",
+			zap.String("server", serverName), zap.Int("tools", len(tools)))
+	}
+}
+
 // quarantinedCaptureIsCurrent confirms that the tools/list response belongs to
 // the currently managed client and the same supervisor/managed-client
 // generation captured before the request. Pointer equality closes the gap
@@ -831,6 +869,15 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// full sweep (HandleUpstreamServerChange → DiscoverAndIndexTools), not this
 	// single-server path, so the guard does not strand a newly-trusted server.
 	if !r.serverEligibleForIndexing(serverName) {
+		// RT-05 (red-team 2026-10-11): a quarantined server is kept connected
+		// for inspection, and a restart re-quarantined by config used to leave
+		// its stale APPROVED contracts unchecked for the whole quarantine
+		// window while the (possibly armed) upstream ran. Hash-compare its
+		// live contracts now, without indexing anything, so a rug pull is
+		// recorded as changed before an unquarantine can serve it.
+		if r.serverIsQuarantined(serverName) {
+			r.verifyQuarantinedServerContracts(ctx, serverName)
+		}
 		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return true, nil
