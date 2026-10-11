@@ -174,7 +174,7 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR1: Commit critical section and generations (#1558, #1560, root of #1559; B1)
 
-- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added.
+- **Scope**: `Commit`/`CommitTx`, two-phase `configsvc` with `ServerGenerations`, persisted generation, `ApplyServerCommit` (saves plus the existing row and history delete), the in-commit reconcile replacing `LoadConfiguredServers`' storage phase, `SaveConfiguration` persisting the live config, and every writer in FR-003 converted. PATCH and MCP update/patch resolve inside the callback. Quarantine purges the index inside the commit on every path (B1). `createMu` is removed. `check-upstream-write-sites.sh` is added. Also from design review: the discovery final check and index writes under L1 with a generation check (D15), approval policy read from storage (D16, with global-policy changes taking every L1), `ReconcileLive` vs `ReplaceConfig` (D14), projection repair and `Bootstrap`/`ForceDisk` (D13), removal of the pre-publish hook, and instance generation stamping (`managed.Client.Generation()`).
 - **Not in scope**: the full purge set (PR2), generation checks in workers or the supervisor (PR3), retirement (PR4). Removal still deletes only what each path deletes today, but now synchronously inside the commit for **all** paths (this closes the resurrection window).
 - **Failing-first tests**: T1.1-T1.7 ([quickstart.md](quickstart.md) §T1).
 - **Live verification**: L1 (concurrent apply, add and PATCH; B1 quarantine purge).
@@ -191,7 +191,7 @@ in place. This is the guard against the rejected branch's scope creep.
 
 ### PR3: Generation-bound workers and supervisor (#1563)
 
-- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`, `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
+- **Scope**: `Manager.desired`, `AddServerConfigAt`/`RemoveServerAt`/`ConnectServerAt`/`DisconnectServerAt`/`ReplaceInstanceAt` (including `ForceReconnectAll` and Docker recovery), `AdvanceGenerations` (unregister or restamp, under L3 W + L4) called at commit step 7, workers and supervisor actions and `RestartServer` moved to the `*At` methods, capture and discovery carrying the generation, the CI grep extended to forbid the legacy manager mutators in `internal/runtime/**`.
 - **Depends on**: PR1 (generations). Independent of PR2.
 - **Failing-first tests**: T3.1-T3.5.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
