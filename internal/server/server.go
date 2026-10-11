@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	gruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -2120,15 +2121,18 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	}
 
 	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
+	// Copy-on-write: the published config (and its Servers slice) is read
+	// lock-free by the supervisor and others, so never mutate it in place.
+	if published := s.runtime.Config(); published != nil {
+		currentConfig := *published
+		currentConfig.Servers = slices.Clone(published.Servers)
 		for i, sc := range currentConfig.Servers {
 			if sc.Name == serverName {
 				currentConfig.Servers[i] = existing
 				break
 			}
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
+		s.runtime.UpdateConfig(&currentConfig, "")
 	}
 
 	// Save configuration to file
