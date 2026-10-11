@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -430,13 +431,14 @@ var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s
 // them with clauseMark, or chunkMark where the boundary is a line or sentence
 // end beside a short raw token (see chunkMark).
 func squashedClauses(text string) string {
+	runs := newLetterRuns(text)
 	var b strings.Builder
 	prev := 0
 	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
 		b.WriteString(detect.Squash(detect.NormalizeForPhrase(text[prev:loc[1]])))
 		mark := clauseMark
 		if !strings.ContainsAny(text[loc[0]:loc[1]], `{}[]"`) &&
-			(trailingLetterRun(text[:loc[1]]) <= squashedChunkLen || leadingLetterRun(text[loc[1]:]) <= squashedChunkLen) {
+			(runs.trailing(loc[1]) <= squashedChunkLen || runs.leading(loc[1]) <= squashedChunkLen) {
 			mark = chunkMark
 		}
 		b.WriteString(mark)
@@ -446,30 +448,74 @@ func squashedClauses(text string) string {
 	return b.String()
 }
 
-// trailingLetterRun is the length of the last run of letters in s, ignoring
-// trailing non-letters ("sys. tem." → 3).
-func trailingLetterRun(s string) int {
-	rs := []rune(strings.TrimRightFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }))
-	n := 0
-	for i := len(rs) - 1; i >= 0 && unicode.IsLetter(rs[i]); i-- {
-		n++
-	}
-	return n
+// letterRuns answers, for any rune boundary i of a text, how long the letter
+// run just before i is (trailing) and just after i is (leading), skipping
+// non-letters, capped at squashedChunkLen+1 since callers only compare with
+// squashedChunkLen. Both tables are filled in one pass each, so classifying
+// every clause boundary is linear in the text: re-reading the whole prefix or
+// suffix per boundary was quadratic on boundary-dense, upstream-controlled
+// tool metadata (SEC-01 review, Sol round 5).
+type letterRuns struct {
+	before, after []uint8
 }
 
-// leadingLetterRun is the length of the first run of letters in s, ignoring
-// leading non-letters (" pro. mpt" → 3). Empty input counts as long.
-func leadingLetterRun(s string) int {
-	rs := []rune(strings.TrimLeftFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }))
-	if len(rs) == 0 {
-		return squashedChunkLen + 1
+func newLetterRuns(s string) letterRuns {
+	const limit = squashedChunkLen + 1
+	r := letterRuns{before: make([]uint8, len(s)+1), after: make([]uint8, len(s)+1)}
+	// before[i]: the last letter run in s[:i], ignoring trailing non-letters;
+	// 0 when s[:i] has no letters ("sys. tem." → 3).
+	var cur, last uint8
+	inRun := false
+	for i, c := range s {
+		if inRun {
+			r.before[i] = cur
+		} else {
+			r.before[i] = last
+		}
+		if unicode.IsLetter(c) {
+			if !inRun {
+				cur, inRun = 0, true
+			}
+			if cur < limit {
+				cur++
+			}
+		} else if inRun {
+			last, inRun = cur, false
+		}
 	}
-	n := 0
-	for n < len(rs) && unicode.IsLetter(rs[n]) {
-		n++
+	if inRun {
+		r.before[len(s)] = cur
+	} else {
+		r.before[len(s)] = last
 	}
-	return n
+	// after[i]: the first letter run in s[i:], ignoring leading non-letters;
+	// empty or letterless input counts as long (" pro. mpt" → 3).
+	r.after[len(s)] = limit
+	next := uint8(limit) // after[] of the following rune start
+	runHere := uint8(0)  // length of the letter run starting at the following rune
+	for i := len(s); i > 0; {
+		c, size := utf8.DecodeLastRuneInString(s[:i])
+		i -= size
+		if unicode.IsLetter(c) {
+			if runHere < limit {
+				runHere++
+			}
+			next = runHere
+		} else {
+			runHere = 0
+		}
+		r.after[i] = next
+	}
+	return r
 }
+
+// trailing is the length of the last run of letters in text[:i], ignoring
+// trailing non-letters, capped at squashedChunkLen+1.
+func (r letterRuns) trailing(i int) int { return int(r.before[i]) }
+
+// leading is the length of the first run of letters in text[i:], ignoring
+// leading non-letters, capped at squashedChunkLen+1; no letters counts as long.
+func (r letterRuns) leading(i int) int { return int(r.after[i]) }
 
 // jsonLineBreakEscape matches the JSON escapes for line breaks, plus an
 // escaped backslash so "\\n" (a literal backslash then n) is left alone.
