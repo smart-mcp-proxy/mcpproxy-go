@@ -1601,11 +1601,15 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if secApproveForce {
-		fmt.Printf("Server %q force-approved.\n", serverName)
-	} else {
-		fmt.Printf("Server %q approved.\n", serverName)
+	var envelope struct {
+		Data map[string]interface{} `json:"data"`
 	}
+	_ = json.Unmarshal(respBody, &envelope)
+	verb := "approved"
+	if secApproveForce {
+		verb = "force-approved"
+	}
+	fmt.Printf("Server %q %s%s.\n", serverName, verb, approvalCountsSuffix(envelope.Data))
 	warnApprovalHolds(os.Stderr, serverName, respBody)
 	return nil
 }

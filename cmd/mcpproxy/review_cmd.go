@@ -200,6 +200,20 @@ func warnApprovalHolds(w io.Writer, server string, raw []byte) {
 	fmt.Fprintf(w, ". Inspect them with: mcpproxy review show %s\n", server)
 }
 
+// approvalCountsSuffix renders the applied approval counts of an approval
+// response (UX-02) as ": N tools approved, ..." for table output, or "" when
+// the response predates the counts.
+func approvalCountsSuffix(value map[string]interface{}) string {
+	approvedCount, ok := value["approved_count"].(float64)
+	if !ok {
+		return ""
+	}
+	blocked, _ := value["blocked_count"].(float64)
+	pending, _ := value["still_pending"].(float64)
+	changed, _ := value["still_changed"].(float64)
+	return fmt.Sprintf(": %d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
+}
+
 var errReviewAllWithTools = fmt.Errorf("--all cannot be combined with --tools")
 
 // reviewDeclined reports a declined confirmation as a clean exit.
@@ -358,14 +372,7 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	if status, _ := value["status"].(string); status != "" {
 		if serverName, _ := value["server_name"].(string); serverName != "" {
-			line := fmt.Sprintf("%s server %s", strings.ToUpper(status[:1])+status[1:], serverName)
-			if approvedCount, ok := value["approved_count"].(float64); ok {
-				blocked, _ := value["blocked_count"].(float64)
-				pending, _ := value["still_pending"].(float64)
-				changed, _ := value["still_changed"].(float64)
-				line += fmt.Sprintf(": %d tools approved, %d blocked, %d still pending, %d changed", int(approvedCount), int(blocked), int(pending), int(changed))
-			}
-			fmt.Println(line)
+			fmt.Printf("%s server %s%s\n", strings.ToUpper(status[:1])+status[1:], serverName, approvalCountsSuffix(value))
 			return nil
 		}
 	}

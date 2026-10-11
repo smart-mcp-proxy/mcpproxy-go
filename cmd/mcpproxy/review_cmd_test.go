@@ -204,6 +204,11 @@ func TestReviewApproveReportsAppliedCountsAndWarnsOnHolds(t *testing.T) {
 	var legacy strings.Builder
 	warnApprovalHolds(&legacy, "lr", []byte(`{"data":{"status":"approved","server_name":"lr"}}`))
 	require.Empty(t, legacy.String(), "an older core without counts prints nothing")
+
+	// security approve's table line reuses the same suffix (nil data = older core).
+	require.Equal(t, ": 165 tools approved, 15 blocked, 0 still pending, 0 changed",
+		approvalCountsSuffix(map[string]interface{}{"approved_count": float64(165), "blocked_count": float64(15), "still_pending": float64(0), "still_changed": float64(0)}))
+	require.Empty(t, approvalCountsSuffix(nil))
 }
 
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
