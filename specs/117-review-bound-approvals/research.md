@@ -219,3 +219,9 @@ See spec.md A1-A10 and O1-O4.
 3. **Medium, T306(2) would deadlock as written**: the approval runs asynchronously and is asserted blocked, then released. A separate main-compatible window test was added (2m).
 4. **Low, stale "in storage" scope line**: fixed to `internal/toolreview`.
 5. **Low, duplicate names are not deduplicated on main**: documented. The bound path deduplicates and is tested.
+
+## Design review round 4 (OpenCode gpt-6.1-sol) resolutions
+
+1. **High, a `changed` record is frozen at its first changed definition**: a bound approval of the stale H1 would pass while H2 is live. FR-017 makes changed records track the live definition (keeping the approved contract in `Previous*`/`ApprovedHash`). T205b fails first.
+2. **Medium, T306(2m) would block on `captureSnapMu`**: rewritten to complete only the approval (which takes the approval lock only), hold the reindex, and assert the decision/index inconsistency.
+3. **Medium, a marker-write failure falls into today's fail-open error path**: FR-027 aborts the destructive half of the apply on marker errors, in PR-1. T104f is a fault-injection test on an older store.

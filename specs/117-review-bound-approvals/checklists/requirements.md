@@ -51,3 +51,4 @@
 - Round 1 (opencode gpt-6.1-sol): FINDINGS, 3 high and 3 medium, all accepted and resolved (research.md "Design review round 1").
 - Round 2 (opencode gpt-6.1-sol): FINDINGS, 3 high, 2 medium and 1 low, all accepted and resolved (research.md "Design review round 2").
 - Round 3 (opencode gpt-6.1-sol): FINDINGS, 1 high, 2 medium and 2 low, all accepted and resolved (research.md "Design review round 3").
+- Round 4 (opencode gpt-6.1-sol): FINDINGS, 1 high and 2 medium, all accepted and resolved (research.md "Design review round 4").

@@ -37,10 +37,16 @@
 
   (a) and (b) fail on main: B becomes approved by `auto-baseline` on the second apply, as the live repro showed. (c) and (e) are marker-inference tests and are kept separate from the failing-first pair.
 - [ ] T104s [P] [PR-1] test: `internal/server/tool_baseline_durable_dispatch_test.go`. An in-process server with a stub upstream whose inventory can be swapped. Flow: baseline `[A]` → swap to `[B]` → `RefreshServerTools` ×2 → `call_tool_destructive server:B` refused, and the stub saw zero `tools/call`. Fails on main (B dispatched). It runs in the internal/server race lane under the CI skip regex.
+- [ ] T104f [P] [PR-1] test: `internal/runtime/tool_baseline_marker_fault_test.go` (FR-027). This is fault injection through a storage wrapper that fails `MarkToolBaselineDecided`, on an older store (approved A, no marker):
+  - Apply `[B]` (wholesale replacement) → A's record is **not** deleted, B is not indexed, and the error is logged. Then heal the storage and apply `[B]` → marker written, A deleted, B pending.
+  - The same with the authoritative empty inventory.
+
+  Fails on main: the swallowed error path deletes A, and the next pass auto-baselines B.
 - [ ] T105 [PR-1] impl: `tool_quarantine.go`.
   - `serverHasBaseline` ORs `ToolBaselineDecided` (read error → true).
   - After the per-tool loop, still under the lock: if any record of the server is approved or changed after the pass (track it in the loop, plus `priorByName`), mark with `discovery`, or `inferred` when only prior records qualified.
   - Log at Info once per server when a marker is first written.
+  - FR-027: a marker read/write error returns a typed `errBaselineMarker`. In `applyDifferentialToolUpdate` (`lifecycle.go:1019-1026`) that error skips absent deletes and hash deletes, keeps the computed blocked set, indexes nothing new and does not advance `lastGoodTools`. Other `checkToolApprovals` errors keep today's handling.
 - [ ] T106 [P] [PR-1] test: `internal/security/scanner/service_test.go` + `internal/runtime/tool_baseline_durable_test.go` (US2 scenario 3).
   - `ApproveServer` and `ApproveServerWithBlocks` on an empty inventory write the marker (`server_approval`, `by: api`) inside the locked commit: the recording locker sees the mark between lock and unlock.
   - After the unquarantine, a pass with `[T]` leaves T pending.
@@ -100,7 +106,13 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - `ApproveAllToolsReviewed` validates pending+changed.
   - Bound request with a duplicate name → validated once, written once, counted once. Unbound duplicates keep today's behaviour (design review r3 #5).
   - The check and write are atomic: `toolApprovalReadHook` mutates the record (simulated capture) after the handler read but before the lock → still stale, because validation re-reads under the lock.
-- [ ] T206 [PR-2] impl: `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
+- [ ] T205b [P] [PR-2] test: `internal/runtime/tool_quarantine_changed_tracking_test.go` (FR-017).
+  - Approved H0 → capture H1 (changed) → capture H2 → the record's current fields describe H2, `Previous*` and `ApprovedHash` are still H0, and the review fingerprint is H2's.
+  - `ApproveToolsReviewed(fp(H1))` → 409.
+  - A revert to H0 still restores approved.
+
+  Fails on main: the record still shows H1.
+- [ ] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash differs from the stored current one, keep `Previous*`); `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
 - [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
   - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
   - **Composition regression** (already green on top of PR-1): bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending.
@@ -184,7 +196,11 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 - [ ] T306 [P] [PR-3] test: `internal/runtime/inventory_capture_order_test.go`, with paused passes via the new hooks `inventoryBeforeApplyLock` / `inventoryAfterDecisions` (US3 scenarios 1-4):
   - (1) C1 paused, C2 applied, C1 resumes → no record write (`SaveToolApproval` spy count), no index op (index spy), `lastGoodTools.seq == C2`, StateView still has C2's hints (dispatch tier destructive).
   - (2) A pass is paused inside the locked phase, after computing `t` blocked. Start the operator approval of `t` **asynchronously**, and assert it is still blocked after 200 ms because the pass holds the lock. Release the pass, then await the approval and its reindex, and assert that `t` is indexed and approved at the end (design review r3 #3).
-  - (2m) **Main-compatible failing-first** for the old decision-to-index window: a pass paused **after** `checkToolApprovals` returns but before its index writes, and the approval and reindex complete while it is paused. On main the resumed pass evicts `t`. After T307 this pause point no longer exists outside the lock, so the hook fires inside the section and the test is rewritten as (2).
+  - (2m) **Main-compatible failing-first** for the old decision-to-index window (design review r4 #2). A full discovery pass holds `captureSnapMu`, so its reindex cannot finish while the pass is paused. The test therefore does **not** await the reindex:
+    1. Pause the pass after `checkToolApprovals` returns and before its index writes.
+    2. Complete `ApproveTools(t)` (it takes only the approval lock, so it finishes).
+    3. Resume the pass and wait for it to finish.
+    4. Assert the state **before** any reindex runs (hold the reindex with the `localReindexAfterSnapshot` hook): `t` is approved in storage. On main `t` has been evicted from the index (decision/index inconsistency); after T307 it is still indexed, or not yet evicted, because the eviction decision was made after the approval.
   - (3) Older-with-x vs newer-without-x → no delete or resurrect of x.
   - (4) A pass paused after eligibility → `QuarantineServer(true)` → resume → shared and profile indexes have no entry for the server, including previously approved tools.
   - (5) seq 0 is applied only while `applied == 0`.

@@ -183,6 +183,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
   - **`--yes` without `--from-review`**: binds to the review fetched at that moment. This is documented as "approve what the server serves now", and it is still protected against changes during the call.
 
   On 409 it MUST exit non-zero (exit code 1) and print the core's message plus `Run 'mcpproxy review show <server>' and approve again.`
+- **FR-017**: A record already in `changed` state MUST track the live definition when a later capture differs from both the approved contract and the stored current one (design review r4 #1). The pass updates `CurrentHash`, description, schemas and annotations, and keeps `Previous*` and `ApprovedHash` as the last approved contract. Today the record stays frozen at the first changed definition (`tool_quarantine.go:950-1039`). A review would therefore show H1 while H2 is live, and a bound approval of H1 would pass. With FR-017 the fingerprint follows H2, so the H1 binding fails as out of date. This also fixes the unbound path, which today approves H1 as `ApprovedHash` until the next pass re-flags it.
 - **FR-016**: `docs/api/rest-api.md`, `docs/cli/review-commands.md`, `docs/features/security-quarantine.md` and `oas/swagger.yaml` MUST describe `current_hash`, `expected_hashes`, the 409 and the unbound fallback.
 
 ### Functional Requirements: durable baseline (#1567, PR-1)
@@ -193,6 +194,7 @@ Several discovery triggers run for the same server: connect, `tools/list_changed
 - **FR-023**: Every security (server) approval commit MUST set the marker (`source: server_approval`, `by: <approver>`) inside the commit's locked section, before the integrity baseline is written. This holds whether the request is bound or unbound and whether the server has tools or not.
 - **FR-024**: The marker MUST be removed only together with the server's approval records, in the same bbolt transaction: `DeleteServerToolApprovals` (server removal) and `PruneToolApprovalsNotIn` (orphan prune).
 - **FR-025**: A trusted server whose first inventory is empty MUST NOT get a marker from discovery. Its first non-empty inventory is still its baseline.
+- **FR-027**: A failed marker write (or a failed marker read, which counts as "has baseline") MUST abort the destructive half of the apply (design review r4 #3). An aborted apply performs no absent-record delete, no tool-hash delete, no unrestricted indexing, no last-good snapshot advance and, with PR-3, no applied-sequence advance. The holds it computed stay in force: blocked tools are evicted, nothing new is indexed. Today an error from `checkToolApprovals` is swallowed into an empty `BlockedTools` result (`lifecycle.go:1019-1026`), and absent approvals are then deleted (`:1171-1183`). PR-1 MUST make that error path fail closed for marker errors, independently of PR-3.
 - **FR-026**: The Web blind-approval dialog and the CLI blind prompt MUST state that tools the server lists later will wait for review.
 
 ### Functional Requirements: capture order (#1565, PR-3)
