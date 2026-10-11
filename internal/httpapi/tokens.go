@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,9 +11,24 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
+
+// liveConfigOrNil is the controller's config, or nil when unavailable.
+func (s *Server) liveConfigOrNil() *config.Config {
+	if s.controller == nil {
+		return nil
+	}
+	cfg, err := s.controller.GetConfig()
+	if err != nil {
+		return nil
+	}
+	return cfg
+}
 
 // TokenStore defines the storage interface for agent token CRUD operations.
 // This interface is satisfied by *storage.Manager.
@@ -48,6 +62,9 @@ type createTokenRequest struct {
 	// profile, and allowed_servers / permissions default to "*" / all three
 	// when it is given and they are omitted (scope comes from the profile).
 	Profile string `json:"profile,omitempty"`
+	// Purpose is the stated, unenforced task brief (Spec 115), at most 500
+	// characters; screened for secrets before anything is stored.
+	Purpose string `json:"purpose,omitempty"`
 }
 
 // createTokenResponse is the JSON response for POST /api/v1/tokens.
@@ -81,6 +98,14 @@ type tokenInfoResponse struct {
 	ClientID    string `json:"client_id,omitempty"`
 	ProfileMode string `json:"profile_mode,omitempty"`
 	LegacyScope bool   `json:"legacy_scope"`
+	// Spec 115 lifecycle fields (additive): when the token was revoked, who
+	// issued it, its stated (unenforced) purpose, whether its lifetime at
+	// issue is a task lease (<= 24h), and whether its profile still exists.
+	RevokedAt    *time.Time             `json:"revoked_at,omitempty"`
+	Issuer       *auth.CredentialIssuer `json:"issuer,omitempty"`
+	Purpose      string                 `json:"purpose,omitempty"`
+	Lease        bool                   `json:"lease"`
+	ProfileState string                 `json:"profile_state"`
 }
 
 // regenerateTokenResponse is the JSON response for POST /api/v1/tokens/{name}/regenerate.
@@ -151,7 +176,12 @@ func (s *Server) requireTokenStore(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
-// handleCreateToken handles POST /api/v1/tokens
+// handleCreateToken handles POST /api/v1/tokens. Since Spec 115 the body goes
+// through runtime.CredentialsService (the path the MCP `credentials` tool and
+// the CLI share): the raw values are screened for secrets first, then the
+// existing validation runs with its existing status codes and texts. The token
+// gets a profile_change{issue} record and a credentials.changed event. The
+// FR-008a guard is NOT enforced here (Spec 115 A9).
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAuth(w, r) {
 		return
@@ -161,150 +191,94 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON body: "+err.Error())
+	if derr := decodeIssuanceBody(r, &req, false); derr != nil {
+		s.writeClientBindingError(w, r, http.StatusBadRequest, "", derr.Field, derr.Error())
 		return
 	}
 
-	// Validate name
-	if err := validateTokenName(req.Name); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// FR-021: the client- prefix is reserved for client credentials. Refused
-	// here, before storage, with the offending field (storage would answer a
-	// generic error that used to surface as a 500).
-	if strings.HasPrefix(req.Name, auth.ClientTokenName("")) {
-		s.writeClientBindingError(w, r, http.StatusBadRequest, "", "name",
-			`token names starting with "client-" are reserved for client credentials`)
-		return
-	}
-
-	// `profile` is the Spec 108 spelling of profile_pin; naming two different
-	// profiles is a 400 on `profile`.
-	if req.Profile != "" {
-		if req.ProfilePin != "" && req.ProfilePin != req.Profile {
-			s.writeClientBindingError(w, r, http.StatusBadRequest, "", "profile",
-				`"profile" and "profile_pin" name different profiles; send one of them`)
-			return
-		}
-		req.ProfilePin = req.Profile
-	}
-
-	// Default permissions: all three when a profile scopes the token (scope
-	// comes from the profile), read otherwise (the pre-108 default).
-	if len(req.Permissions) == 0 {
-		if req.ProfilePin != "" {
-			req.Permissions = []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
-		} else {
-			req.Permissions = []string{auth.PermRead}
-		}
-	}
-
-	// Validate permissions
-	if err := validateTokenPermissions(req.Permissions); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Parse expiry
-	expiresAt, err := parseExpiry(req.ExpiresIn)
+	res, err := s.credentials().IssueToken(r.Context(), actorFromRequest(r), internalRuntime.IssueTokenRequest{
+		Name: req.Name, Profile: req.Profile, ProfilePin: req.ProfilePin, Purpose: req.Purpose,
+		AllowedServers: req.AllowedServers, Permissions: req.Permissions,
+		ExpiresIn: req.ExpiresIn, Expiry: internalRuntime.ExpiryTokenDefault,
+		ValidateServers: func(servers []string) error { return validateAllowedServers(servers, s.controller) },
+	})
 	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		s.writeCredentialIssueError(w, r, err)
 		return
 	}
-
-	// Validate allowed_servers
-	if err := validateAllowedServers(req.AllowedServers, s.controller); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Default allowed_servers to ["*"] if empty
-	if len(req.AllowedServers) == 0 {
-		req.AllowedServers = []string{"*"}
-	}
-
-	// Validate profile_pin (Profiles v2 T3): the slug must name a configured
-	// profile at creation time. Later config changes are warn-skipped at request
-	// time by the resolver, not hard-failed here.
-	if req.ProfilePin != "" {
-		if err := s.validateProfilePin(req.ProfilePin); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-
-	// Generate token
-	rawToken, err := auth.GenerateToken()
-	if err != nil {
-		s.logger.Errorf("Failed to generate agent token: %v", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to generate token")
-		return
-	}
-
-	// Get HMAC key
-	hmacKey, err := auth.GetOrCreateHMACKey(s.dataDir)
-	if err != nil {
-		s.logger.Errorf("Failed to get HMAC key: %v", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to initialize token security")
-		return
-	}
-
-	now := time.Now().UTC()
-	agentToken := auth.AgentToken{
-		Name:           req.Name,
-		AllowedServers: req.AllowedServers,
-		Permissions:    req.Permissions,
-		ExpiresAt:      expiresAt,
-		CreatedAt:      now,
-		ProfilePin:     req.ProfilePin,
-	}
-
-	if err := s.tokenStore.CreateAgentToken(agentToken, rawToken, hmacKey); err != nil {
-		// Check for duplicate name. Classified on a typed sentinel rather than
-		// a substring of the storage message, so the response never echoes
-		// storage internals.
-		if errors.Is(err, storage.ErrAgentTokenNameExists) || strings.Contains(err.Error(), "already exists") {
-			// Revocation is a soft delete: the record keeps its name because
-			// activity.token_name references it, and reusing it would merge two
-			// credentials' history. Say so instead of implying a live holder
-			// (#1437 item 5).
-			if holder, gerr := s.tokenStore.GetAgentTokenByName(req.Name); gerr == nil && holder != nil && holder.Revoked {
-				s.writeError(w, r, http.StatusConflict, fmt.Sprintf("A revoked token named %q still holds this name for activity history; choose another name", req.Name))
-				return
-			}
-			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("A token named %q already exists", req.Name))
-			return
-		}
-		if errors.Is(err, storage.ErrAgentTokenLimitReached) {
-			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
-			return
-		}
-		// Personal-edition tokens are ownerless and cannot reach this condition
-		// today, but classify it so a future owned-token caller does not get a
-		// misleading 500.
-		if errors.Is(err, storage.ErrAgentTokenOwnerLimitReached) {
-			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens for this owner (%d) reached", auth.MaxTokensPerOwner))
-			return
-		}
-		s.logger.Errorf("Failed to create agent token: %v", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to create token")
-		return
-	}
-
+	// Projected from the committed record: no post-commit store read can turn
+	// a minted token into a failure (FR-007).
+	allowed, perms := res.Scope()
 	resp := createTokenResponse{
 		Name:           req.Name,
-		Token:          rawToken,
-		AllowedServers: req.AllowedServers,
-		Permissions:    req.Permissions,
-		ExpiresAt:      expiresAt,
-		CreatedAt:      now,
-		ProfilePin:     req.ProfilePin,
+		Token:          res.Secret,
+		CreatedAt:      res.View.CreatedAt,
+		AllowedServers: allowed,
+		Permissions:    perms,
+		ProfilePin:     res.View.Profile,
+	}
+	if res.View.ExpiresAt != nil {
+		resp.ExpiresAt = *res.View.ExpiresAt
 	}
 
 	s.writeJSON(w, http.StatusCreated, contracts.NewSuccessResponse(resp))
+}
+
+// credentials returns the credential lifecycle service: the runtime's when
+// wired, else one built over the token store (unit tests that wire only
+// SetTokenStore keep working, with no audit sink).
+func (s *Server) credentials() *internalRuntime.CredentialsService {
+	if s.credentialsService != nil {
+		return s.credentialsService
+	}
+	if s.clientsService != nil {
+		var tokens internalRuntime.CredentialTokenStore
+		if s.tokenStore != nil {
+			tokens = s.tokenStore
+		}
+		return s.clientsService.CredentialsServiceOver(tokens)
+	}
+	dataDir := s.dataDir
+	return internalRuntime.NewCredentialsService(internalRuntime.CredentialsServiceDeps{
+		Tokens:  s.tokenStore,
+		Clients: s.clientsService,
+		HMACKey: func() ([]byte, error) { return auth.GetOrCreateHMACKey(dataDir) },
+		Config: func() *config.Config {
+			cfg, err := s.controller.GetConfig()
+			if err != nil {
+				return nil
+			}
+			return cfg
+		},
+	})
+}
+
+// writeCredentialIssueError maps a CredentialsService refusal to the REST
+// route's existing status codes and texts. A secret-shaped value answers 400
+// naming the field, never the value (FR-020b).
+func (s *Server) writeCredentialIssueError(w http.ResponseWriter, r *http.Request, err error) {
+	var screen *internalRuntime.SecretInputError
+	var ce *internalRuntime.CredentialError
+	switch {
+	case errors.As(err, &screen):
+		s.writeClientBindingError(w, r, http.StatusBadRequest, screen.Code(), screen.Field(), screen.Error())
+	case errors.As(err, &ce):
+		status := ce.Status
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
+		if ce.ErrCode == profile.CredentialErrorCodeReservedIdentity || (ce.ErrCode == profile.CredentialErrorCodeInvalidArgument && ce.Field == "profile") {
+			s.writeClientBindingError(w, r, status, "", ce.Field, ce.Msg)
+			return
+		}
+		s.writeError(w, r, status, ce.Msg)
+	default:
+		if s.writeCredentialFailure(w, r, "", err) || s.writeProfilesError(w, r, err) {
+			return
+		}
+		s.logger.Errorw("credential issue failed", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to create token")
+	}
 }
 
 // handleListTokens handles GET /api/v1/tokens
@@ -339,7 +313,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		if tokenFilter != "" && t.Name != tokenFilter {
 			continue
 		}
-		result = append(result, tokenToInfoResponse(t))
+		result = append(result, tokenToInfoResponseCfg(t, s.liveConfigOrNil()))
 	}
 
 	s.writeSuccess(w, map[string]interface{}{"tokens": result})
@@ -371,7 +345,7 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeSuccess(w, tokenToInfoResponse(*token))
+	s.writeSuccess(w, tokenToInfoResponseCfg(*token, s.liveConfigOrNil()))
 }
 
 // handleRevokeToken handles DELETE /api/v1/tokens/{name}
@@ -389,8 +363,12 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.tokenStore.RevokeAgentToken(name); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+	// Spec 115: through CredentialsService, so the revoke writes
+	// profile_change{revoke} and publishes credentials.changed. An already
+	// revoked token still answers 204 (idempotent, as before).
+	if _, err := s.credentials().Revoke(r.Context(), actorFromRequest(r), internalRuntime.CredentialRef{Token: name}, true); err != nil {
+		var ce *internalRuntime.CredentialError
+		if errors.As(err, &ce) && ce.ErrCode == profile.CredentialErrorCodeIdentityNotFound {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 			return
 		}
@@ -518,31 +496,6 @@ func validateTokenName(name string) error {
 	return nil
 }
 
-// validateTokenPermissions validates the permissions list using auth.ValidatePermissions.
-func validateTokenPermissions(perms []string) error {
-	return auth.ValidatePermissions(perms)
-}
-
-// validateProfilePin checks that the given profile slug names a profile in the
-// current configuration (Profiles v2 T3). It errors if profiles are unavailable
-// or the slug is unknown, so a token cannot be pinned to a non-existent profile.
-func (s *Server) validateProfilePin(slug string) error {
-	cfg, err := s.controller.GetConfig()
-	if err != nil || cfg == nil {
-		return fmt.Errorf("cannot validate profile_pin: configuration unavailable")
-	}
-	for i := range cfg.Profiles {
-		if cfg.Profiles[i].Name == slug {
-			return nil
-		}
-	}
-	available := make([]string, 0, len(cfg.Profiles))
-	for i := range cfg.Profiles {
-		available = append(available, cfg.Profiles[i].Name)
-	}
-	return fmt.Errorf("unknown profile_pin %q (available: %s)", slug, strings.Join(available, ", "))
-}
-
 // parseExpiry parses an expiry duration string and returns the absolute expiry
 // time. It is a one-line wrapper over auth.ParseTokenExpiry (Spec 107 FR-011):
 // "30d", "720h" or any Go duration, positive, at most 365 days, 30 days when
@@ -601,6 +554,14 @@ func legacyScope(t auth.AgentToken) bool {
 	return !seen[auth.PermRead] || !seen[auth.PermWrite] || !seen[auth.PermDestructive]
 }
 
+// tokenToInfoResponseCfg is tokenToInfoResponse with the profile state
+// resolved against cfg.
+func tokenToInfoResponseCfg(t auth.AgentToken, cfg *config.Config) tokenInfoResponse {
+	out := tokenToInfoResponse(t)
+	out.ProfileState = internalRuntime.ProfileStateOf(t.ProfilePin, cfg)
+	return out
+}
+
 // tokenToInfoResponse converts an auth.AgentToken to a tokenInfoResponse (without secrets).
 func tokenToInfoResponse(t auth.AgentToken) tokenInfoResponse {
 	kind := t.Kind
@@ -621,5 +582,10 @@ func tokenToInfoResponse(t auth.AgentToken) tokenInfoResponse {
 		LastUsedAt:     t.LastUsedAt,
 		Revoked:        t.Revoked,
 		ProfilePin:     t.ProfilePin,
+		RevokedAt:      t.RevokedAt,
+		Issuer:         t.Issuer,
+		Purpose:        t.Purpose,
+		Lease:          t.IsLease(),
+		ProfileState:   internalRuntime.ProfileStateNone,
 	}
 }

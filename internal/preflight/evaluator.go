@@ -138,6 +138,26 @@ type ConfigPolicy interface {
 	QuarantineEnabled() bool
 }
 
+// ProfileToolDecision is the effective profile tool policy's verdict for one
+// existing tool (issue #1548).
+type ProfileToolDecision struct {
+	// Blocked is true when any profile in effect for the caller refuses the
+	// tool. Every profile in effect must admit it: an explicitly requested
+	// profile can only narrow a credential's pinned or bound one.
+	Blocked bool
+	// Detail is the occurrence-specific operator text — the same refusal text
+	// dispatch returns. It is never shown at the agent-token tier.
+	Detail string
+}
+
+// ToolPolicyReader reads the caller's effective Spec 108 profile tool policy.
+// Implementations MUST make the same decision dispatch makes (the compiled
+// policy's Decide over the same effective annotations), never a parallel
+// re-implementation of it; the glue layer is the only implementation.
+type ToolPolicyReader interface {
+	ProfileToolDecision(serverName, toolName string) ProfileToolDecision
+}
+
 // ---------------------------------------------------------------------------
 // Request / result types
 // ---------------------------------------------------------------------------
@@ -155,6 +175,10 @@ type EvalContext struct {
 	Approvals ApprovalReader
 	State     StateReader
 	Policy    ConfigPolicy
+	// ToolPolicy is the caller's effective profile tool policy (issue #1548).
+	// nil means no profile policy is in effect (an unprofiled operator, or a
+	// pure-unit evaluation); it is never a default-deny.
+	ToolPolicy ToolPolicyReader
 
 	// Tier selects the disclosure rules (FR-013).
 	Tier Tier
@@ -234,6 +258,17 @@ func Evaluate(ctx context.Context, ec EvalContext, refs []ToolRef) ([]Result, er
 // evaluateOne walks the FR-004 precedence chain for a single id. The order of
 // the blocks below IS the normative chain — do not reorder without changing the
 // spec.
+// identityRefusal is the verdict the registration identity gate (step 4b)
+// answers for an Unresolved identity: server_initializing while discovery for
+// the live connection is pending, otherwise the one not_found construction.
+func identityRefusal(corpus *visibleCorpus, id, serverName string, identity ToolIdentity) (Result, error) {
+	if !identity.DiscoveryDone {
+		return unavailable(id, ReasonServerInitializing,
+			fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
+	}
+	return corpus.notFoundResult(id)
+}
+
 func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, error) {
 	id := strings.TrimSpace(ref.ID)
 
@@ -304,13 +339,11 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	//     set leaks through the shape. A server the snapshot does not hold,
 	//     or holds not connected, makes no identity claim here and keeps
 	//     the chain that always owned it (connectionVerdict).
+	var identity ToolIdentity
 	if ec.State != nil {
-		if identity := ec.State.ToolIdentity(serverName, toolName); identity.Unresolved() {
-			if !identity.DiscoveryDone {
-				return unavailable(id, ReasonServerInitializing,
-					fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
-			}
-			return corpus.notFoundResult(id)
+		identity = ec.State.ToolIdentity(serverName, toolName)
+		if identity.Unresolved() {
+			return identityRefusal(corpus, id, serverName, identity)
 		}
 	}
 
@@ -332,7 +365,34 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("preflight: read tool approval for %q: %w", id, err)
 	}
-	if indexed == nil && approval == nil {
+	// The effective profile tool policy (issue #1548) is read once, for a tool
+	// with existence evidence only: an unknown id under a profile stays
+	// not_found (or the connection verdict that owns it).
+	var profileDecision ProfileToolDecision
+	if ec.ToolPolicy != nil && (indexed != nil || approval != nil) {
+		profileDecision = ec.ToolPolicy.ProfileToolDecision(serverName, toolName)
+	}
+	// At the agent-token tier a profile-excluded tool IS an absent tool:
+	// discovery (retrieve_tools, describe_tool and the direct surface's check
+	// mode) already hides it (Spec 108 FR-011), and the check must not confirm
+	// what discovery withholds (FR-013). It therefore takes the absent-tool
+	// branch below verbatim — including the connection verdict a not-Ready
+	// server answers for an absent id — so the index or an approval record can
+	// never make a hidden id answer differently from one that does not exist.
+	hiddenFromAgent := profileDecision.Blocked && ec.Tier == TierAgentToken
+	if hiddenFromAgent {
+		// The identity gate above let this id through because the snapshot
+		// LISTS it. An absent id under the same identity would have been
+		// refused there (Sol r1 finding 1): replay that gate with Found
+		// cleared, so authoritative identity data cannot tell a hidden tool
+		// from an unknown one either.
+		absent := identity
+		absent.Found = false
+		if absent.Unresolved() {
+			return identityRefusal(corpus, id, serverName, absent)
+		}
+	}
+	if (indexed == nil && approval == nil) || hiddenFromAgent {
 		res, notReady, cerr := connectionVerdict(ec, id, serverName)
 		if cerr != nil {
 			return Result{}, cerr
@@ -341,6 +401,20 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 			return res, nil
 		}
 		return corpus.notFoundResult(id)
+	}
+
+	// 5b. tool_blocked_by_profile (issue #1548, operator tier) — the effective
+	//     profile tool policy dispatch enforces (tier cap, deny rules,
+	//     unannotated handling, classification). Evaluated only once the tool
+	//     is known to exist, and ahead of the tool-level gates, matching
+	//     dispatch, where the profile gate precedes server state and tool
+	//     approval.
+	if profileDecision.Blocked {
+		detail := profileDecision.Detail
+		if detail == "" {
+			detail = fmt.Sprintf("Tool %q is excluded by the profile tool policy in effect.", id)
+		}
+		return unavailable(id, ReasonToolBlockedByProfile, detail), nil
 	}
 
 	configDenied, err := ec.Policy.ToolConfigDenied(serverName, toolName)
@@ -739,6 +813,12 @@ func (c *visibleCorpus) candidates() ([]string, error) {
 				name = name[idx+1:]
 			}
 			if name == "" {
+				continue
+			}
+			// A tool the caller's profile policy excludes is hidden from
+			// discovery (Spec 108 FR-011), so a suggestion must not name it
+			// either (issue #1548).
+			if ec.ToolPolicy != nil && ec.ToolPolicy.ProfileToolDecision(server, name).Blocked {
 				continue
 			}
 			c.ids = append(c.ids, server+":"+name)

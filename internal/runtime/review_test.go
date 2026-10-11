@@ -192,6 +192,56 @@ func TestReviewPayload_QueueAndUncapturedDefinitions(t *testing.T) {
 	require.Empty(t, review.Tools)
 }
 
+// UX-04: a disabled quarantined server stays in the queue (it is still owed a
+// review) but is labelled so operators can tell it from an active blocker.
+func TestReviewQueue_ReportsServerEnabledState(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "live", Enabled: true, Quarantined: true},
+		{Name: "parked", Enabled: false, Quarantined: true},
+	})
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 2, queue.Count)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.True(t, byName["live"].Enabled)
+	require.False(t, byName["parked"].Enabled)
+	raw, err := json.Marshal(byName["parked"])
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"enabled":false`)
+}
+
+// UX-04: "Oldest first" must order by when the review was owed, not by the
+// previous approval. A changed tool keeps its old ApprovedAt, so since comes
+// from DefinitionChangedAt; a changed tool with no change stamp reports none.
+func TestReviewQueue_SinceIgnoresPriorApprovalOfChangedTool(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "stamped", Enabled: true},
+		{Name: "unstamped", Enabled: true},
+	})
+	lastYear := time.Now().UTC().AddDate(-1, 0, 0)
+	changedAt := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "stamped", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: lastYear, DefinitionChangedAt: changedAt,
+	}))
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "unstamped", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: lastYear,
+	}))
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.NotNil(t, byName["stamped"].Since)
+	require.True(t, byName["stamped"].Since.After(lastYear.AddDate(0, 6, 0)), "since must not be the old approval time: %v", byName["stamped"].Since)
+	require.Nil(t, byName["unstamped"].Since)
+}
+
 func TestReviewPayload_RedactsServerSecretsUnconditionally(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
 		Name: "private", Enabled: true, Quarantined: true,
@@ -339,4 +389,49 @@ func TestGetServerReview_RedactsWhitespaceFreeShellCommand(t *testing.T) {
 			require.Equal(t, args, sc.Args)
 		}
 	}
+}
+
+// UX-04: an ordinary pending review (filed by discovery, no ApprovedAt) is
+// dated by when it began waiting, so it sorts ahead of a later changed-tool
+// review; a record from before the stamp existed stays undated.
+func TestReviewQueue_PendingSinceFollowsWhenOwed(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "old-pending", Enabled: true},
+		{Name: "new-change", Enabled: true},
+	})
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "old-pending", ToolName: "t", Status: storage.ToolApprovalStatusPending,
+	}))
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "new-change", ToolName: "t", Status: storage.ToolApprovalStatusChanged,
+		ApprovedAt: time.Now().UTC().AddDate(-1, 0, 0), DefinitionChangedAt: time.Now().UTC(),
+	}))
+	// Re-saving the still-pending record must not move its date.
+	first := reviewOwedSinceFor(t, rt, "old-pending")
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "old-pending", ToolName: "t", Status: storage.ToolApprovalStatusPending,
+	}))
+	require.True(t, first.Equal(reviewOwedSinceFor(t, rt, "old-pending")))
+
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	byName := map[string]ReviewQueueRow{}
+	for _, row := range queue.Servers {
+		byName[row.Server] = row
+	}
+	require.NotNil(t, byName["old-pending"].Since)
+	require.NotNil(t, byName["new-change"].Since)
+	require.True(t, byName["old-pending"].Since.Before(*byName["new-change"].Since))
+
+	require.True(t, reviewOwedSince(&storage.ToolApprovalRecord{Status: storage.ToolApprovalStatusPending, ApprovedAt: time.Now()}).IsZero(),
+		"a legacy pending record with unknown age stays undated")
+}
+
+func reviewOwedSinceFor(t *testing.T, rt *Runtime, server string) time.Time {
+	t.Helper()
+	rec, err := rt.storageManager.GetToolApproval(server, "t")
+	require.NoError(t, err)
+	return rec.PendingSince
 }

@@ -135,8 +135,8 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     expect(cap.text()).toContain('Hidden')
     expect(cap.text()).toContain('Above tier cap')
     expect(wrapper.get('[data-test="profile-tool-row-github__other"]').text()).toContain('Unannotated — classify')
-    expect(wrapper.get('[data-test="profile-tool-row-github__search_code"]').text()).toContain('Visible')
-    expect(wrapper.get('[data-test="profile-tool-counts"]').text()).toContain('2 visible')
+    expect(wrapper.get('[data-test="profile-tool-row-github__search_code"]').text()).toContain('Allowed by profile')
+    expect(wrapper.get('[data-test="profile-tool-counts"]').text()).toContain('2 allowed by profile')
   })
 
   it('the Allow and Deny toggles edit the draft tools.allow / tools.deny', async () => {

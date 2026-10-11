@@ -54,3 +54,34 @@ describe('ManualServerForm secret rows', () => {
     expect(inputs()[0].attributes('type')).toBe('password')
   })
 })
+
+describe('ManualServerForm value input accessible names (UX-09)', () => {
+  it('gives every header/env value input a unique row-tied name, also after a removal and in Secret mode', async () => {
+    setActivePinia(createPinia())
+    vi.mocked(api.getConfigSecrets).mockResolvedValue({
+      success: true,
+      data: { secrets: [], environment_vars: [], total_secrets: 0, total_env_vars: 0, keyring_available: true },
+    })
+    const wrapper = mount(ManualServerForm, { global: { plugins: [router] } })
+    await flushPromises()
+    await wrapper.find('[data-test="manual-type-http"]').setValue(true)
+    for (let i = 0; i < 3; i++) await wrapper.find('[data-test="manual-header-add"]').trigger('click')
+    // Duplicate and empty names must still be distinguishable.
+    await wrapper.find('[data-test="manual-header-name-0"]').setValue('X-Dup')
+    await wrapper.find('[data-test="manual-header-name-1"]').setValue('X-Dup')
+    const names = () => wrapper.findAll('[data-test="secret-toggle-value-input"]').map(i => i.attributes('aria-label'))
+    expect(names()).toEqual(['Header 1 value', 'Header 2 value', 'Header 3 value'])
+    await wrapper.findAll('[data-test="secret-toggle-mode-secret"]')[1].trigger('click')
+    expect(names()).toEqual(['Header 1 value', 'Header 2 value', 'Header 3 value'])
+    await wrapper.findAll('[data-test="manual-header-remove"]')[0].trigger('click')
+    await flushPromises()
+    expect(names()).toEqual(['Header 1 value', 'Header 2 value'])
+    const inputs = wrapper.findAll('[data-test="secret-toggle-value-input"]')
+    expect(new Set(inputs.map(i => i.attributes('id'))).size).toBe(2)
+    expect(inputs[0].attributes('placeholder')).toBeTruthy()
+    // env rows
+    await wrapper.find('[data-test="manual-type-stdio"]').setValue(true)
+    for (let i = 0; i < 2; i++) await wrapper.find('[data-test="manual-env-add"]').trigger('click')
+    expect(names()).toEqual(['Environment variable 1 value', 'Environment variable 2 value'])
+  })
+})

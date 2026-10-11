@@ -19,10 +19,13 @@ import (
 const clientCredentialTTL = auth.MaxTokenExpiry
 
 // issueOptions are the parts of an issue a connect never sets: a custom
-// client's expiry and display name (Spec 108-f F21).
+// client's expiry and display name (Spec 108-f F21), and the Spec 115
+// issuance fields (issuer, purpose).
 type issueOptions struct {
 	expiresAt   time.Time
 	displayName string
+	issuer      *auth.CredentialIssuer
+	purpose     string
 }
 
 // pendingBinding is the state a rotating connect carries from Issue to
@@ -137,22 +140,30 @@ func (s *ClientsService) resolveBindingLocked(rec *auth.AgentToken, profilePtr, 
 // over the candidate state, then mint a fresh credential or stage a rotation.
 // allowRotate=false (client add) refuses an already-active credential.
 func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *string, allowRotate bool, opts issueOptions) (*connect.IssuedCredential, error) {
+	issued, _, err := s.issueLockedRecord(clientID, profilePtr, modePtr, allowRotate, opts)
+	return issued, err
+}
+
+// issueLockedRecord is issueLocked that also returns the COMMITTED record of a
+// fresh mint (nil for a staged rotation), so the issue path projects its view
+// from it with no further store read (Spec 115 FR-007, research D6).
+func (s *ClientsService) issueLockedRecord(clientID string, profilePtr, modePtr *string, allowRotate bool, opts issueOptions) (*connect.IssuedCredential, *auth.AgentToken, error) {
 	all, err := s.records()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rec := clientRecord(all, clientID)
 	if rec != nil && rec.Kind != auth.KindClient {
-		return nil, storage.ErrClientCredentialConflict
+		return nil, nil, storage.ErrClientCredentialConflict
 	}
 	active := s.stateOf(rec) == profile.CredentialStateClient
 	if active && !allowRotate {
-		return nil, &ValidationError{Field: "id", Message: fmt.Sprintf("client %s already has an active credential; rotate it instead", clientID)}
+		return nil, nil, &ValidationError{Field: "id", Message: fmt.Sprintf("client %s already has an active credential; rotate it instead", clientID)}
 	}
 
 	pin, mode, err := s.resolveBindingLocked(rec, profilePtr, modePtr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	now := s.now().UTC()
@@ -169,31 +180,34 @@ func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *strin
 		next.ProfilePin, next.ProfileMode = pin, mode
 	}
 	if err := s.checkGuard(all, clientID, &next); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	key, err := s.hmacKey()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	raw, err := auth.GenerateClientToken()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if active {
 		if _, err := s.store.StageClientCredentialRotation(clientID, raw, key); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		return &connect.IssuedCredential{
 			Secret: raw, TokenName: rec.Name, Profile: pin, Mode: mode, Rotating: true,
 			Pending: pendingBinding{pin: pin, mode: mode},
-		}, nil
+		}, nil, nil
 	}
-	tok, err := s.store.MintClientCredentialNamed(clientID, raw, key, mode, pin, expiresAt, opts.displayName)
+	tok, err := s.store.MintClientCredentialWith(clientID, raw, key, storage.ClientMintOptions{
+		Mode: mode, Pin: pin, ExpiresAt: expiresAt, DisplayName: opts.displayName,
+		Issuer: opts.issuer, Purpose: opts.purpose,
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &connect.IssuedCredential{Secret: raw, TokenName: tok.Name, Profile: pin, Mode: mode}, nil
+	return &connect.IssuedCredential{Secret: raw, TokenName: tok.Name, Profile: pin, Mode: mode}, tok, nil
 }
 
 // Issue implements connect.CredentialMinter.

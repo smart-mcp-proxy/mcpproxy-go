@@ -283,3 +283,30 @@ describe('ReviewScreen default selection (D43)', () => {
     expect(checked(wrapper, 'read_file')).toBe(true)
   })
 })
+
+describe('ReviewScreen late load responses', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(api.securityApprove as any).mockResolvedValue({ success: true })
+    ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+    ;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } })
+  })
+
+  it('drops server A response that resolves after B and still blocks B unchecked tool', async () => {
+    const deferred = () => { let resolve!: (v: unknown) => void; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+    const a = deferred(); const b = deferred()
+    const pending: Record<string, ReturnType<typeof deferred>> = { A: a, B: b }
+    ;(api.getServerReview as any).mockImplementation((name: string) => pending[name].promise)
+    const wrapper = mount(ReviewScreen, { props: { serverName: 'A' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+    await wrapper.setProps({ serverName: 'B' })
+    const view = (name: string, t: ReviewTool) => ({ success: true, data: { server: { name, transport: 'stdio', quarantined: true, definitions_captured: true }, tools: [t] } })
+    b.resolve(view('B', tool('execute', { tier: 'destructive', default_allowed: false })))
+    await flushPromises()
+    a.resolve(view('A', tool('execute', { default_allowed: true })))
+    await flushPromises()
+    expect(checked(wrapper, 'execute')).toBe(false)
+    await wrapper.get('[data-test="review-approve-server"]').trigger('click')
+    await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledWith('B', false, ['execute'])
+  })
+})

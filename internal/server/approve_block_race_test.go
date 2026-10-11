@@ -83,7 +83,7 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	var postApprovalCalls atomic.Int64
 	var approvalReturned atomic.Bool
 	quarantineResponse := func(result *mcp.CallToolResult) bool {
-		if result == nil || result.IsError || len(result.Content) == 0 {
+		if result == nil || !result.IsError || len(result.Content) == 0 {
 			return false
 		}
 		text, ok := result.Content[0].(mcp.TextContent)

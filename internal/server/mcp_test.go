@@ -881,7 +881,7 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 
 	toolCallResult, err := mcpClient.CallTool(ctx, toolCallRequest)
 	require.NoError(t, err)
-	assert.False(t, toolCallResult.IsError)
+	assert.True(t, toolCallResult.IsError, "a quarantine block is a refusal flagged isError (UX-05)")
 
 	// Check that the response indicates the server is quarantined
 	require.Greater(t, len(toolCallResult.Content), 0)

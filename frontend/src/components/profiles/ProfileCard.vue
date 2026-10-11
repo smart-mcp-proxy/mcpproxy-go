@@ -11,7 +11,7 @@
 
       <p class="text-sm" data-test="profile-tier">
         <span class="opacity-70">Max tier</span>
-        {{ tierPhrase(profile.max_tier) || 'No cap' }}
+        {{ tierPhrase(profile.max_tier, profile.tool_counts) || 'No cap' }}
       </p>
       <dl class="flex flex-wrap gap-x-4 gap-y-1 text-sm" data-test="profile-counts">
         <div class="flex gap-1"><dt class="opacity-70">Read</dt><dd>{{ profile.tool_counts.read }}</dd></div>

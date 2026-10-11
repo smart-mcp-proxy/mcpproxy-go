@@ -305,6 +305,9 @@ type Server struct {
 	feedbackSubmitter FeedbackSubmitter               // Feedback submission (Spec 036)
 	connectService    *connect.Service                // Client connect/disconnect operations
 	clientsService    *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	// credentialsService is the Spec 115 issue/revoke path shared with the
+	// MCP `credentials` tool (tokens and custom clients).
+	credentialsService *internalRuntime.CredentialsService
 	// forgetClientCredential overrides clientsService.Forget in tests only
 	// (to inject a revoke failure after a completed disconnect).
 	forgetClientCredential func(ctx context.Context, a internalRuntime.Actor, clientID string, disconnected bool) (*internalRuntime.ClientCredentialView, error)
@@ -468,6 +471,12 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
 	s.wireClientsService()
+}
+
+// SetCredentialsService configures the Spec 115 credential lifecycle service
+// behind POST/DELETE /api/v1/tokens and POST /api/v1/clients.
+func (s *Server) SetCredentialsService(svc *internalRuntime.CredentialsService) {
+	s.credentialsService = svc
 }
 
 // SetClientsService configures the clients service behind the client

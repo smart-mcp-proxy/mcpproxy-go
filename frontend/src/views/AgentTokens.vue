@@ -119,7 +119,7 @@
       <table class="table table-zebra w-full">
         <thead>
           <tr>
-            <th>Name</th>
+            <th class="min-w-[14rem]">Name</th>
             <th>Kind</th>
             <th class="min-w-[10rem]">Profile</th>
             <th>Mode</th>
@@ -142,6 +142,24 @@
                 @click="expandedToken = expandedToken === token.name ? '' : token.name"
               >{{ token.name }}</button>
               <span v-if="token.legacy_scope" class="badge badge-warning badge-xs ml-2" :data-test="`token-legacy-badge-${token.name}`">Legacy scope</span>
+              <CredentialLifecycle
+                v-if="token.issuer || token.purpose || token.profile_state === 'dangling'"
+                class="mt-1"
+                :id="token.name"
+                :kind="isClientCredential(token) ? 'client' : 'token'"
+                :profile="token.profile_pin"
+                :mode="token.profile_mode"
+                :issuer="token.issuer"
+                :lease="token.lease"
+                :expires-at="token.expires_at"
+                :created-at="token.created_at"
+                :revoked="token.revoked"
+                :revoked-at="token.revoked_at"
+                :purpose="token.purpose"
+                :profile-state="token.profile_state"
+                :hide-lease="true"
+                :now="now"
+              />
               <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
                    a client credential is filtered as a client, from Clients). -->
               <div v-if="tokenLinksAvailable && !isClientCredential(token)" class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs font-normal">
@@ -162,8 +180,8 @@
               <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code>
             </td>
             <td>
-              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) }">
-                {{ formatDate(token.expires_at) }}
+              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
+                {{ expiryText(token) }}
               </span>
             </td>
             <td>
@@ -173,7 +191,11 @@
               <span v-else class="text-base-content/40 text-sm">Never</span>
             </td>
             <td>
-              <span v-if="token.revoked" class="badge badge-error badge-sm">Revoked</span>
+              <span v-if="token.revoked" class="flex flex-col items-start gap-0.5" :data-test="`token-state-${token.name}`">
+                <span class="badge badge-error badge-sm">Revoked</span>
+                <span v-if="token.revoked_at" class="text-xs opacity-70 whitespace-nowrap">{{ formatDate(token.revoked_at) }}</span>
+              </span>
+              <span v-else-if="isExpired(token) && token.lease" class="badge badge-ghost badge-sm" :data-test="`token-state-${token.name}`">Lease ended</span>
               <span v-else-if="isExpired(token)" class="badge badge-warning badge-sm">Expired</span>
               <span v-else class="badge badge-success badge-sm">Active</span>
             </td>
@@ -438,7 +460,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import apiClient from '@/services/api'
 import { formatDateTimeShort } from '@/utils/datetime'
@@ -447,6 +469,11 @@ import { useServersStore } from '@/stores/servers'
 import { useProfilesStore } from '@/stores/profiles'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { describeError, modeLabel } from '@/utils/profiles'
+import { expiringSoon, leaseText } from '@/utils/credentials'
+import { CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
+import { PROFILES_CHANGED_EVENT } from '@/stores/profiles'
+import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
+import { useNow } from '@/composables/useNow'
 import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
 
@@ -532,16 +559,21 @@ const filteredTokens = computed(() => {
 })
 
 // Helper functions
+// A reactive clock: an open page advances lease countdowns and expiry states.
+const now = useNow()
+
 function isExpired(token: AgentTokenInfo): boolean {
-  return new Date(token.expires_at) < new Date()
+  return new Date(token.expires_at).getTime() < now.value
 }
 
+// A lease (<= 24 h at issue) running out is the plan, not a warning (UI-005).
 function isExpiringSoon(token: AgentTokenInfo): boolean {
-  if (token.revoked || isExpired(token)) return false
-  const expiresAt = new Date(token.expires_at)
-  const now = new Date()
-  const hoursLeft = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60)
-  return hoursLeft < 72
+  if (isExpired(token)) return false
+  return expiringSoon(token, now.value)
+}
+
+function expiryText(token: AgentTokenInfo): string {
+  return token.revoked ? formatDate(token.expires_at) : (leaseText(token, now.value) || formatDate(token.expires_at))
 }
 
 function formatDate(dateStr: string): string {
@@ -559,9 +591,11 @@ function permissionBadgeClass(perm: string): string {
 
 // Data loading
 let tokensTicket = 0
-async function loadTokens() {
+async function loadTokens(silent = false) {
   const ticket = ++tokensTicket
-  loading.value = true
+  // A live invalidation (credentials.changed and friends) refetches without
+  // the spinner, so an open table updates in place (Spec 115 UI-004).
+  if (!silent) loading.value = true
   error.value = null
 
   try {
@@ -583,7 +617,8 @@ async function loadTokens() {
   }
 }
 
-const refreshTokens = loadTokens
+const refreshTokens = () => loadTokens()
+const refreshTokensSilently = () => { void loadTokens(true) }
 
 // Create token
 function openCreateDialog() { openCreateDialogWith({}) }
@@ -831,10 +866,18 @@ function consumeCreateParam() {
   void router.replace({ query: rest })
 }
 
+// Spec 115 UI-004: an issue, revoke or binding change made anywhere (MCP
+// included) refreshes the open table.
+const LIVE_EVENTS = [CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT, PROFILES_CHANGED_EVENT]
+onBeforeUnmount(() => {
+  for (const name of LIVE_EVENTS) window.removeEventListener(name, refreshTokensSilently)
+})
+
 watch(() => route?.query.create, consumeCreateParam)
 watch(() => [scopeQuery?.state.profile, scopeQuery?.state.token], () => { void loadTokens() })
 
 onMounted(async () => {
+  for (const name of LIVE_EVENTS) window.addEventListener(name, refreshTokensSilently)
   // The list shows each token's profile by title.
   if (!profilesStore.loaded) void profilesStore.fetchProfiles()
   consumeCreateParam()

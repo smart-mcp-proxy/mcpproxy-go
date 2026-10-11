@@ -38,10 +38,11 @@ func (r *Runtime) LockBindingWrites() (unlock func()) {
 // (Spec 108, FR-026).
 func (r *Runtime) ClientsService() *ClientsService { return r.clientsService }
 
-// clientCredentialSnapshot returns the stored client credential records
-// (kind=client). A store error is returned, never swallowed: the guard fails
-// closed.
-func (r *Runtime) clientCredentialSnapshot() ([]auth.AgentToken, error) {
+// guardedBindingSnapshot returns the stored records every FR-008a path
+// evaluates: client credentials (kind=client) and guard-bound agent tokens
+// (Spec 115 FR-012a, data-model §5). A store error is returned, never
+// swallowed: the guard fails closed.
+func (r *Runtime) guardedBindingSnapshot() ([]auth.AgentToken, error) {
 	sm := r.StorageManager()
 	if sm == nil {
 		return nil, nil
@@ -50,11 +51,5 @@ func (r *Runtime) clientCredentialSnapshot() ([]auth.AgentToken, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]auth.AgentToken, 0, len(all))
-	for i := range all {
-		if all[i].Kind == auth.KindClient {
-			out = append(out, all[i])
-		}
-	}
-	return out, nil
+	return guardedOnly(all), nil
 }

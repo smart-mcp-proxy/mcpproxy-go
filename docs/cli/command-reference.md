@@ -172,6 +172,7 @@ Review quarantined servers and new or changed tools through the scan gate. See [
 ```bash
 mcpproxy review list
 mcpproxy review show <server> [--full]
+mcpproxy review fetch <server> [--wait 30s]
 mcpproxy review approve <server> [--all | --tools a,b] [--except a,b] [--force] [--yes]
 mcpproxy review reject <server> [--tools a,b] [--yes]
 ```

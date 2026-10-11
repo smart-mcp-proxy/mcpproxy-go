@@ -3113,6 +3113,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		httpAPIServer.SetTokenStore(sm, dataDir)
 	}
+	// Spec 115: POST/DELETE /api/v1/tokens and POST /api/v1/clients go
+	// through the same credential lifecycle service as the MCP `credentials`
+	// tool (one screen, one audit record kind, one live event).
+	if cs := s.runtime.CredentialsService(); cs != nil {
+		httpAPIServer.SetCredentialsService(cs)
+	}
 	// Wire the sensitive-data masker so an activity record the detector flagged
 	// never serves the credential it flagged (Spec 026). Same config as the
 	// detector the activity service scans with, so the two can never disagree

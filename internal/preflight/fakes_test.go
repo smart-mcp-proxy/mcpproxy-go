@@ -94,6 +94,22 @@ func (f *fakePolicy) ToolConfigDenied(serverName, toolName string) (bool, error)
 
 func (f *fakePolicy) QuarantineEnabled() bool { return f.quarantine }
 
+// fakeToolPolicy is a profile tool policy keyed by "server:tool". It records
+// every id it was asked about so a test can prove the evaluator consulted it.
+type fakeToolPolicy struct {
+	blocked map[string]string // id -> operator detail
+	asked   []string
+}
+
+func (f *fakeToolPolicy) ProfileToolDecision(serverName, toolName string) ProfileToolDecision {
+	key := serverName + ":" + toolName
+	f.asked = append(f.asked, key)
+	if detail, ok := f.blocked[key]; ok {
+		return ProfileToolDecision{Blocked: true, Detail: detail}
+	}
+	return ProfileToolDecision{}
+}
+
 var errBoom = errors.New("boom")
 
 // --- world builder ----------------------------------------------------------
@@ -111,6 +127,8 @@ type world struct {
 	scope     *Scope
 	filters   filterSet
 	pins      map[string]string
+	// toolPolicy is nil unless a test puts a profile tool policy in effect.
+	toolPolicy *fakeToolPolicy
 }
 
 // filterSet is an alias-free local mirror of the annotation filters so tests
@@ -167,6 +185,9 @@ func (w *world) ctx() EvalContext {
 	if w.state != nil {
 		ec.State = w.state
 	}
+	if w.toolPolicy != nil {
+		ec.ToolPolicy = w.toolPolicy
+	}
 	ec.Filters.ReadOnlyOnly = w.filters.readOnlyOnly
 	ec.Filters.ExcludeDestructive = w.filters.excludeDestructive
 	ec.Filters.ExcludeOpenWorld = w.filters.excludeOpenWorld
@@ -206,6 +227,13 @@ func (w *world) runtime(state ServerRuntimeState) *world {
 func (w *world) unindex() *world      { w.index.tools[srv] = nil; return w }
 func (w *world) forget() *world       { delete(w.approvals.records, id); return w }
 func (w *world) denyByConfig() *world { w.policy.denied[id] = true; return w }
+func (w *world) blockByProfile() *world {
+	if w.toolPolicy == nil {
+		w.toolPolicy = &fakeToolPolicy{blocked: map[string]string{}}
+	}
+	w.toolPolicy.blocked[id] = "blocked by profile: gh:sync is a write tool; profile \"research\" allows read tools only"
+	return w
+}
 func (w *world) approval(mut func(*ApprovalState)) *world {
 	rec := w.approvals.records[id]
 	if rec == nil {

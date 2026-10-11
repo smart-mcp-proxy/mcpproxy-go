@@ -39,10 +39,11 @@ func TestClientsService_CustomAddCarriesDisplayNameAndExpiry(t *testing.T) {
 	require.Len(t, recs, 1)
 	assert.Equal(t, "Dev laptop", recs[0].DisplayName)
 
-	// One assign record with an empty previous_profile, never a secret.
+	// One issue record (Spec 115 FR-010, deliberate update from `assign`) with
+	// an empty previous_profile, never a secret.
 	ch := h.changes()
 	require.Len(t, ch, 1)
-	assert.Equal(t, "assign", ch[0]["change"])
+	assert.Equal(t, "issue", ch[0]["change"])
 	assert.Equal(t, "", ch[0]["previous_profile"])
 	assert.NotContains(t, fmt.Sprint(ch[0]), secret)
 

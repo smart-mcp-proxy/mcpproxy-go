@@ -153,20 +153,20 @@ describe('ProfileEditor counts under unsaved edits', () => {
 
   it('labels the counts as the saved profile while the draft differs, and clears on Discard', async () => {
     const wrapper = await mountEditor()
-    expect(counts(wrapper)).toBe('3 visible · 6 hidden')
+    expect(counts(wrapper)).toBe('3 allowed by profile · 6 hidden')
     expect(wrapper.find('[data-test="profile-tool-unsaved-note"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="profile-try-source"]').text()).toBe('Uses the saved profile')
 
     await wrapper.get('[data-test="profile-server-memory"]').setValue(false)
     await flushPromises()
-    expect(counts(wrapper)).toBe('Saved profile: 3 visible · 6 hidden')
+    expect(counts(wrapper)).toBe('Saved profile: 3 allowed by profile · 6 hidden')
     const note = wrapper.get('[data-test="profile-tool-unsaved-note"]')
     expect(note.text()).toContain('Counts and access show the saved profile. Save to update them, or use Try it below to test your unsaved edits.')
     expect(wrapper.get('[data-test="profile-try-source"]').text()).toBe('Uses your unsaved edits')
 
     await wrapper.get('[data-test="profile-editor-discard"]').trigger('click')
     await flushPromises()
-    expect(counts(wrapper)).toBe('3 visible · 6 hidden')
+    expect(counts(wrapper)).toBe('3 allowed by profile · 6 hidden')
     expect(wrapper.find('[data-test="profile-tool-unsaved-note"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="profile-try-source"]').text()).toBe('Uses the saved profile')
     expect(api.updateProfile).not.toHaveBeenCalled()

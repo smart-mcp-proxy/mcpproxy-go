@@ -434,17 +434,70 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 		return cliError("failed to get global tools from daemon", err)
 	}
 
+	// An administrator's response carries every row with its verdict and no
+	// counts (only restricted callers get counts, which must not grow); derive
+	// the summary from the rows, before the client-side filters narrow them.
+	if counts == nil && toolsProfileView != "" {
+		counts = viewAsRowCounts(tools)
+	}
+
 	// Apply client-side filters
 	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
-	if err := outputGlobalTools(tools); err != nil {
+	if err := outputGlobalToolsView(tools, viewAsPolicyOnly(counts)); err != nil {
 		return err
 	}
 	if counts != nil && ResolveOutputFormat() == "table" {
-		fmt.Fprintf(os.Stderr, "\n%d visible, %d hidden under profile %s (hidden tools are administrator-only)\n",
-			getIntField(counts, "visible"), getIntField(counts, "hidden"), toolsProfileView)
+		fmt.Fprint(os.Stderr, "\n"+viewAsCountsSummary(counts, toolsProfileView))
 	}
 	return nil
+}
+
+// viewAsRowCounts derives {visible, hidden, callable} from the per-row `access`
+// verdicts an administrator's view-as response carries. It returns nil when no
+// row has a verdict (nothing to summarize).
+func viewAsRowCounts(tools []map[string]interface{}) map[string]interface{} {
+	visible, hidden, callable, seen := 0, 0, 0, false
+	for _, t := range tools {
+		access, ok := t["access"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		seen = true
+		if v, _ := access["visible"].(bool); v {
+			visible++
+		} else {
+			hidden++
+		}
+		if c, _ := access["callable"].(bool); c {
+			callable++
+		}
+	}
+	if !seen {
+		return nil
+	}
+	return map[string]interface{}{"visible": float64(visible), "hidden": float64(hidden), "callable": float64(callable)}
+}
+
+// viewAsCountsSummary is the footer of `tools --profile`: tools allowed by the
+// profile are kept apart from the ones callable right now. The callable and
+// held counts, and the explain hint, appear only when the daemon sent
+// counts.callable (administrator callers); `access` rows carry the verdict.
+func viewAsCountsSummary(counts map[string]interface{}, profile string) string {
+	line := fmt.Sprintf("%d allowed by profile %s, %d hidden", getIntField(counts, "visible"), profile, getIntField(counts, "hidden"))
+	if _, admin := counts["callable"]; !admin {
+		return line + " (hidden tools are administrator-only)\n"
+	}
+	callable := getIntField(counts, "callable")
+	held := getIntField(counts, "visible") - callable
+	if held < 0 {
+		held = 0
+	}
+	line += fmt.Sprintf(", %d callable now, %d held\n", callable, held)
+	if held > 0 {
+		line += "Held tools are allowed by the profile but not callable yet (for example awaiting approval). Run: mcpproxy access explain --profile " + profile + " --tool <server:tool>\n"
+	}
+	return line
 }
 
 // toolsViewAsQuery is the REST query of the view-as flags (Spec 108 FR-032):
@@ -463,19 +516,37 @@ func toolsViewAsQuery() (url.Values, error) {
 	return q, nil
 }
 
+// viewAsPolicyOnly reports whether a view-as response is policy-only: the
+// daemon sent counts without counts.callable (non-administrator callers), so
+// rows must not claim a callable or held verdict beyond the profile policy.
+func viewAsPolicyOnly(counts map[string]interface{}) bool {
+	if counts == nil {
+		return false
+	}
+	_, admin := counts["callable"]
+	return !admin
+}
+
 // viewAsAccessCell renders the ACCESS column of a view-as row: callable (a real
-// call would succeed), visible (listed by discovery but a later gate refuses it
-// or it awaits approval), hidden (not visible at all).
-func viewAsAccessCell(t map[string]interface{}) string {
+// call would succeed), held (allowed by the profile but a later gate refuses it
+// or it awaits approval), hidden (not visible at all). For policy-only
+// responses a visible row is just "allowed" (by the profile).
+func viewAsAccessCell(t map[string]interface{}, policyOnly bool) string {
 	access, ok := t["access"].(map[string]interface{})
 	if !ok {
 		return "-"
+	}
+	if policyOnly {
+		if getBoolField(access, "visible") {
+			return "allowed"
+		}
+		return "hidden"
 	}
 	switch {
 	case getBoolField(access, "callable"):
 		return "callable"
 	case getBoolField(access, "visible"):
-		return "visible"
+		return "held"
 	default:
 		return "hidden"
 	}
@@ -640,6 +711,12 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 // of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
 // testable.
 func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	return globalToolRowsView(tools, false)
+}
+
+// globalToolRowsView is globalToolRows with the view-as policyOnly mode: rows
+// of a non-administrator response show "allowed" and no gate reason.
+func globalToolRowsView(tools []map[string]interface{}, policyOnly bool) (headers []string, rows [][]string) {
 	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
 	// Spec 108 FR-032: a view-as listing adds ACCESS and REASON after TIER
 	// (the intrinsic tier stays the TIER column).
@@ -684,11 +761,11 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 		if viewAs {
 			reason := "-"
 			if access, ok := t["access"].(map[string]interface{}); ok {
-				if r := getStringField(access, "reason"); r != "" {
+				if r := getStringField(access, "reason"); r != "" && (!policyOnly || !getBoolField(access, "visible")) {
 					reason = r
 				}
 			}
-			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t), reason, approval, formatToolHold(t), usage, lastUsed, desc})
+			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t, policyOnly), reason, approval, formatToolHold(t), usage, lastUsed, desc})
 			continue
 		}
 		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
@@ -698,6 +775,12 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 
 // outputGlobalTools renders the global tool list with extended columns.
 func outputGlobalTools(tools []map[string]interface{}) error {
+	return outputGlobalToolsView(tools, false)
+}
+
+// outputGlobalToolsView renders the list; policyOnly marks a non-administrator
+// view-as response whose rows carry no callable/held claim.
+func outputGlobalToolsView(tools []map[string]interface{}, policyOnly bool) error {
 	outputFormat := ResolveOutputFormat()
 	formatter, err := GetOutputFormatter()
 	if err != nil {
@@ -715,7 +798,7 @@ func outputGlobalTools(tools []map[string]interface{}) error {
 		return nil
 	}
 
-	headers, rows := globalToolRows(tools)
+	headers, rows := globalToolRowsView(tools, policyOnly)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
@@ -1144,7 +1227,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&profile, "profile", "", "Evaluate under a named profile's server scope")
+	cmd.Flags().StringVar(&profile, "profile", "", "Evaluate under a named profile's server scope and tool policy")
 	cmd.Flags().StringArrayVar(&pins, "pin", nil, "Pin a tool to a schema hash: --pin <server:tool>=sha256/v<N>:<hex> (repeatable)")
 	cmd.Flags().BoolVar(&readOnlyOnly, "read-only-only", false, "Require tools to be annotated read-only")
 	cmd.Flags().BoolVar(&excludeDestructive, "exclude-destructive", false, "Require tools to be annotated non-destructive")

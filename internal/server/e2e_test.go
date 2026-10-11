@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +44,22 @@ type MockUpstreamServer struct {
 	addr       string
 	httpServer *http.Server
 	stopFunc   func() error
+	// dispatches counts tools/call per tool (Spec 115 T050), so a refusal can
+	// be proven to have reached no upstream.
+	dispatches sync.Map // tool name -> *atomic.Int64
+}
+
+// Dispatches returns how many tools/call the mock received for tool.
+func (m *MockUpstreamServer) Dispatches(tool string) int64 {
+	if v, ok := m.dispatches.Load(tool); ok {
+		return v.(*atomic.Int64).Load()
+	}
+	return 0
+}
+
+func (m *MockUpstreamServer) countDispatch(tool string) {
+	v, _ := m.dispatches.LoadOrStore(tool, &atomic.Int64{})
+	v.(*atomic.Int64).Add(1)
 }
 
 // NewTestEnvironment creates a complete test environment
@@ -231,6 +249,7 @@ func (env *TestEnvironment) CreateMockUpstreamServer(name string, tools []mcp.To
 	for i := range tools {
 		toolCopy := tools[i] // Capture for closure
 		mcpServer.AddTool(toolCopy, func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			mockServer.countDispatch(toolCopy.Name)
 			// Mock tool implementation
 			result := map[string]interface{}{
 				"tool":    toolCopy.Name,

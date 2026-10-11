@@ -433,13 +433,22 @@ func (b *BoltDB) DeleteToolHash(toolName string) error {
 // It stamps DefinitionChangedAt: when a prior record exists and its current
 // definition content differs from the incoming one the stamp is set to now,
 // otherwise the prior value is carried over. The stamp is also written back to
-// the caller's record.
+// the caller's record. PendingSince is stamped the same way (see its field doc).
 func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		now := time.Now().UTC()
+		if record.Status != ToolApprovalStatusPending {
+			record.PendingSince = time.Time{}
+		} else {
+			record.PendingSince = now
+		}
 		if encoded := bucket.Get([]byte(record.Key())); encoded != nil {
 			prior := &ToolApprovalRecord{}
 			if err := prior.UnmarshalBinary(encoded); err == nil {
+				if record.Status == ToolApprovalStatusPending && prior.Status == ToolApprovalStatusPending {
+					record.PendingSince = prior.PendingSince
+				}
 				if toolDefinitionContentChanged(prior, record) {
 					record.DefinitionChangedAt = time.Now().UTC()
 				} else {
@@ -599,6 +608,31 @@ func (b *BoltDB) DeleteToolApproval(serverName, toolName string) error {
 		key := ToolApprovalKey(serverName, toolName)
 		return bucket.Delete([]byte(key))
 	})
+}
+
+// DeleteToolApprovalIf deletes the record only when it still exists and
+// eligible returns true for its CURRENT stored value, evaluated in the same
+// write transaction as the delete. It reports whether a record was removed.
+func (b *BoltDB) DeleteToolApprovalIf(serverName, toolName string, eligible func(*ToolApprovalRecord) bool) (bool, error) {
+	deleted := false
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		key := []byte(ToolApprovalKey(serverName, toolName))
+		raw := bucket.Get(key)
+		if raw == nil {
+			return nil
+		}
+		record := &ToolApprovalRecord{}
+		if err := record.UnmarshalBinary(raw); err != nil {
+			return err
+		}
+		if !eligible(record) {
+			return nil
+		}
+		deleted = true
+		return bucket.Delete(key)
+	})
+	return deleted, err
 }
 
 // DeleteServerToolApprovals deletes all tool approval records for a server

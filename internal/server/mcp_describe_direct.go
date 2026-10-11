@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
@@ -86,6 +87,19 @@ func (p *MCPProxyServer) resolveDirectDescribeID(ctx context.Context, id string)
 // different catalogs — and the check-mode planner and its evaluator corpus from
 // different ones again.
 func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *directCatalog, id string) (*directCatalogEntry, bool) {
+	return p.resolveDirectDescribeIDWith(ctx, cat, id, func(e *directCatalogEntry) bool {
+		return p.directEntryVisibleToSession(ctx, e)
+	})
+}
+
+// resolveDirectDescribeIDWith is resolveDirectDescribeIDIn with the visibility
+// predicate supplied by the caller. Check mode passes membership in its
+// corpus narrowed by the effective session view (issue #1548), so an entry
+// that view hides takes no part in resolution at all — it can neither win a
+// display lookup nor shadow an authorized canonical owner — exactly as if it
+// were absent from the catalog. visible must never admit an entry
+// directEntryVisibleToSession refuses.
+func (p *MCPProxyServer) resolveDirectDescribeIDWith(ctx context.Context, cat *directCatalog, id string, visible func(*directCatalogEntry) bool) (*directCatalogEntry, bool) {
 	if cat == nil {
 		// Nothing published yet. Unlike the discovery filters — which fall back
 		// to permissive so a proxy still coming up does not serve an empty
@@ -127,7 +141,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 		if !ok || entry == nil {
 			return nil, false
 		}
-		if !p.directEntryVisibleToSession(ctx, entry) {
+		if !visible(entry) {
 			return nil, false
 		}
 		return entry, true
@@ -146,9 +160,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	// below and throughout this file); reusing it here rather than
 	// re-deriving scope alone is what keeps the two checks from drifting
 	// apart again.
-	authorized := func(e *directCatalogEntry) bool {
-		return p.directEntryVisibleToSession(ctx, e)
-	}
+	authorized := visible
 
 	// The display form is tried first, as always. A match this AGENT
 	// session cannot see does NOT end resolution here (Spec 105 FR010-G3):
@@ -156,7 +168,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	// id — one server's tool "y:z" displays as "x__y:z", which is exactly
 	// server "x__y" tool "z"'s canonical form — and the hidden display owner
 	// must never suppress the authorized canonical owner merely by existing.
-	if entry, ok := cat.Lookup(id); ok && p.directEntryVisibleToSession(ctx, entry) {
+	if entry, ok := cat.Lookup(id); ok && visible(entry) {
 		return entry, true
 	}
 
@@ -177,7 +189,7 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 	if !ok || entry == nil {
 		return nil, false
 	}
-	if !p.directEntryVisibleToSession(ctx, entry) {
+	if !visible(entry) {
 		return nil, false
 	}
 	return entry, true
@@ -358,7 +370,13 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 	// Built once per call from the catalog, filtered by this session's own
 	// visibility predicate — the same snapshot the evaluator's index reader
 	// gets, so a gated id and an evaluated one suggest from one corpus.
+	listed := make(map[*directCatalogEntry]struct{}, len(visible))
+	isListed := func(e *directCatalogEntry) bool {
+		_, ok := listed[e]
+		return ok
+	}
 	for _, entry := range visible {
+		listed[entry] = struct{}{}
 		plan.suggestions = append(plan.suggestions,
 			entry.DisplayName,
 			entry.ServerName+":"+entry.ToolName)
@@ -376,7 +394,13 @@ func (p *MCPProxyServer) planDirectCheck(ctx context.Context, cat *directCatalog
 		seen[id] = struct{}{}
 		plan.order = append(plan.order, id)
 
-		entry, ok := p.resolveDirectDescribeIDIn(ctx, cat, id)
+		// Resolution runs against the visible set itself (issue #1548: the
+		// corpus runDirectCheck narrows by the v3 session view), so an entry
+		// that view hides is treated exactly like an absent one, BEFORE
+		// evaluation: it neither answers the evaluator's connection verdict
+		// where an absent id answers not_found, nor shadows an authorized
+		// canonical owner in a display/canonical collision.
+		entry, ok := p.resolveDirectDescribeIDWith(ctx, cat, id, isListed)
 		if !ok {
 			plan.gated[id] = struct{}{}
 			continue
@@ -452,6 +476,32 @@ func (plan directCheckPlan) restore(outcome preflight.Outcome) preflight.Outcome
 	}
 }
 
+// narrowDirectEntries keeps only the entries the session's effective preflight
+// view admits: the server is in scope and every profile policy in effect admits
+// the tool (issue #1548). It only ever removes entries.
+func narrowDirectEntries(
+	entries []*directCatalogEntry,
+	scope *preflight.Scope,
+	policies []preflightProfilePolicy,
+	annotations func(serverName, toolName string) (*config.ToolAnnotations, bool),
+) []*directCatalogEntry {
+	if scope == nil && len(policies) == 0 {
+		return entries
+	}
+	reader := &preflightToolPolicyReader{policies: policies, annotations: annotations}
+	out := make([]*directCatalogEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !scope.Allows(entry.ServerName) {
+			continue
+		}
+		if reader.ProfileToolDecision(entry.ServerName, entry.ToolName).Blocked {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // visibleDirectEntries snapshots the catalog entries this session can list, in
 // the catalog's own order.
 func (p *MCPProxyServer) visibleDirectEntriesIn(ctx context.Context, cat *directCatalog) []*directCatalogEntry {
@@ -479,18 +529,25 @@ func (p *MCPProxyServer) runDirectCheck(
 	// evaluator's index reader all resolve against the same generation, so a
 	// rebuild mid-request cannot make them disagree about what exists.
 	cat := p.loadDirectCatalog()
-	visible := p.visibleDirectEntriesIn(ctx, cat)
+
+	// The session's effective view (issue #1548) is resolved FIRST: the
+	// direct listing's own predicate decides profiles through the legacy
+	// resolver, which can name a different profile than the v3 resolution
+	// dispatch decides against (a switchable client's binding vs. its
+	// selected profile). Narrowing the visible corpus by the v3 scope and every
+	// policy in effect makes the id gate AND the did_you_mean corpus agree with
+	// dispatch, including when every id is gated below.
+	scope, policies, err := p.sessionPreflightView(ctx)
+	if err != nil {
+		return preflight.Outcome{}, err
+	}
+	visible := narrowDirectEntries(p.visibleDirectEntriesIn(ctx, cat), scope, policies, p.EffectiveAnnotations)
 	plan := p.planDirectCheck(ctx, cat, visible, rawIDs)
 
 	// Every id was gated: there is nothing to evaluate, and calling the
 	// evaluator with an empty ref set would still cost a state snapshot.
 	if len(plan.refs) == 0 {
 		return plan.restore(preflight.Outcome{}), nil
-	}
-
-	scope, err := p.sessionPreflightScope(ctx)
-	if err != nil {
-		return preflight.Outcome{}, err
 	}
 
 	// The visible corpus is resolved ONCE, here, and handed to the reader as a
@@ -500,7 +557,10 @@ func (p *MCPProxyServer) runDirectCheck(
 	// IndexedServerNames and ToolsByServer disagree about the same tool.
 	reader := &directCatalogIndexReader{entries: visible}
 
-	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader)
+	// The visible corpus already hides profile-excluded tools; the session's
+	// policies are passed too so the evaluator applies the same decision as
+	// the retrieve-mode check, which can only narrow (issue #1548).
+	outcome, err := p.evaluatePreflight(ctx, plan.refs, preflight.TierAgentToken, scope, filters, reader, policies)
 	if err != nil {
 		return preflight.Outcome{}, err
 	}

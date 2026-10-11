@@ -1,4 +1,4 @@
-Profile: work-ro2 (visible 1, hidden 2)
+Profile: work-ro2 (allowed by profile 1, hidden 2, callable 1, held 0)
 SERVER  TOOL          TIER         PROFILE TIER  ACCESS    REASON              NOTE
 github  list_issues   read         read          callable  -                   classification ignored — tool is now annotated
 github  create_issue  write        write         hidden    above_tier_cap      -

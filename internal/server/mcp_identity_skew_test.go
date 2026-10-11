@@ -495,7 +495,7 @@ func TestCallTool_PersistedServerVerdictOutranksLaggingStateView(t *testing.T) {
 			name:          "quarantined after discovery",
 			flip:          func(c *config.ServerConfig) { c.Quarantined = true },
 			directBody:    "QUARANTINED_SERVER_BLOCKED",
-			directIsError: false,
+			directIsError: true,
 			nestedBody:    "is quarantined for security review",
 		},
 		{

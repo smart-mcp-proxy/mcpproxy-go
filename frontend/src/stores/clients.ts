@@ -6,6 +6,9 @@ import type { ClientPresence, ClientWarning, RoutingInfo } from '@/types/api'
 // Spec 108-f: a binding changed (any surface). Like profiles.changed it is an
 // invalidation; the rows and warnings are refetched, never patched from it.
 export const CLIENT_BINDING_CHANGED_EVENT = 'mcpproxy:client.binding_changed'
+// Spec 115 FR-024: a credential was issued, revoked or forgotten (any surface,
+// MCP included). An invalidation: the rows are refetched.
+export const CREDENTIALS_CHANGED_EVENT = 'mcpproxy:credentials.changed'
 
 export const useClientsStore = defineStore('clients', () => {
   const clients = ref<ClientPresence[]>([])
@@ -20,6 +23,17 @@ export const useClientsStore = defineStore('clients', () => {
   const error = ref<string | null>(null)
   // Client ids whose detail-resolved fields must survive a metadata-only refresh.
   const detailLoaded = new Set<string>()
+  // The credential_state each client had in the last applied roster. A change
+  // between two rosters (revoked, lease ended, reissued) invalidates the
+  // detail-derived presence fields even when active_sessions and last_seen are
+  // unchanged (Spec 115 review code-r2). It is compared roster to roster, never
+  // to the detail's own on-demand classification, so a supported client whose
+  // detail resolves a different state is not refetched on every poll.
+  const rosterCredential = new Map<string, string | undefined>()
+  function rememberRosterCredentials(rows: ClientPresence[]) {
+    rosterCredential.clear()
+    for (const row of rows) rosterCredential.set(row.id, row.credential_state)
+  }
 
   // A response is applied only while it is still the latest of its kind and the
   // scope it was asked for is still the active one: changing ?profile= / ?client=
@@ -28,6 +42,27 @@ export const useClientsStore = defineStore('clients', () => {
   // response can never overwrite a newer one. loadTicket only owns the loading
   // flag, so a load superseded by a presence poll still clears it.
   let fetchTicket = 0
+  // Bumped by every roster fetch; a client detail answered after a newer
+  // roster fetch started is discarded whole (its presence and credential
+  // fields predate that roster) and re-requested once the newest roster fetch
+  // has settled, so the retry is never older than the rows it lands on.
+  let rosterGeneration = 0
+  let settledGeneration = 0
+  // Bumped whenever roster rows are applied. A detail started while a roster
+  // fetch was already in flight shares that fetch's generation, so the
+  // generation alone cannot tell whether the detail predates the rows applied
+  // under it (Spec 115 review code-r3): the detail also checks this counter.
+  let rosterApplied = 0
+  const deferredDetails = new Set<string>()
+  function rosterSettled(generation: number) {
+    if (generation !== rosterGeneration) return
+    settledGeneration = generation
+    const ids = [...deferredDetails]
+    deferredDetails.clear()
+    for (const id of ids) {
+      if (clients.value.some(client => client.id === id)) void loadDetail(id)
+    }
+  }
   let loadTicket = 0
   const scopeKey = () => JSON.stringify(scope)
   const isUnscoped = () => !scope.profile && !scope.client
@@ -53,6 +88,15 @@ export const useClientsStore = defineStore('clients', () => {
   }
 
   async function load(nextScope?: { profile?: string; client?: string }) {
+    const generation = ++rosterGeneration
+    try {
+      await loadRoster(nextScope)
+    } finally {
+      rosterSettled(generation)
+    }
+  }
+
+  async function loadRoster(nextScope?: { profile?: string; client?: string }) {
     if (nextScope) scope = nextScope
     const ticket = ++fetchTicket
     const mine = ++loadTicket
@@ -72,6 +116,8 @@ export const useClientsStore = defineStore('clients', () => {
     applyAll(allResponse)
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
+      rosterApplied++
+      rememberRosterCredentials(clientResponse.data.clients)
       warnings.value = clientResponse.data.warnings ?? []
       detailLoaded.clear()
     } else error.value = clientResponse.error || 'Unable to load clients'
@@ -85,6 +131,15 @@ export const useClientsStore = defineStore('clients', () => {
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
+    const generation = ++rosterGeneration
+    try {
+      await refreshRoster()
+    } finally {
+      rosterSettled(generation)
+    }
+  }
+
+  async function refreshRoster() {
     const ticket = ++fetchTicket
     const asked = scopeKey()
     try {
@@ -109,7 +164,8 @@ export const useClientsStore = defineStore('clients', () => {
           if (!existing || !detailLoaded.has(incoming.id)) return incoming
           const presenceChanged =
             (incoming.active_sessions ?? 0) !== (existing.active_sessions ?? 0) ||
-            (incoming.last_seen ?? null) !== (existing.last_seen ?? null)
+            (incoming.last_seen ?? null) !== (existing.last_seen ?? null) ||
+            (rosterCredential.has(incoming.id) && rosterCredential.get(incoming.id) !== incoming.credential_state)
           if (presenceChanged) {
             detailLoaded.delete(incoming.id)
             stale.push(incoming.id)
@@ -131,6 +187,8 @@ export const useClientsStore = defineStore('clients', () => {
             sessions: existing.sessions,
           }
         })
+        rosterApplied++
+        rememberRosterCredentials(response.data.clients)
         for (const id of stale) void loadDetail(id)
         for (const id of [...detailLoaded]) {
           if (!clients.value.some(client => client.id === id)) detailLoaded.delete(id)
@@ -156,22 +214,36 @@ export const useClientsStore = defineStore('clients', () => {
     stale.value = true
   }
 
-  async function loadDetail(id: string) {
+  async function loadDetail(id: string): Promise<void> {
+    const generation = rosterGeneration
+    const applied = rosterApplied
     const response = await api.getClient(id)
     if (!response.success || !response.data) return
     const index = clients.value.findIndex(client => client.id === id)
-    if (index >= 0) {
-      clients.value[index] = response.data
-      detailLoaded.add(id)
+    if (index < 0) return
+    if (generation !== rosterGeneration || applied !== rosterApplied) {
+      // A roster refresh started (or one already in flight was applied) while this detail was in flight (an SSE
+      // invalidation such as credentials.changed). Every field of this
+      // response may predate it, presence included (a revoked worker would
+      // read connected again), so none is applied (Spec 115 UI-004). The
+      // detail is re-requested once the newest roster fetch has settled, so
+      // the row still gets its sessions from a response at least as new.
+      if (settledGeneration === rosterGeneration) void loadDetail(id)
+      else deferredDetails.add(id)
+      return
     }
+    clients.value[index] = response.data
+    detailLoaded.add(id)
   }
 
   if (typeof window !== 'undefined') {
     const refresh = () => { void refreshPresence() }
     window.addEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+    window.addEventListener(CREDENTIALS_CHANGED_EVENT, refresh)
     window.addEventListener('mcpproxy:profiles.changed', refresh)
     onScopeDispose(() => {
       window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, refresh)
+      window.removeEventListener(CREDENTIALS_CHANGED_EVENT, refresh)
       window.removeEventListener('mcpproxy:profiles.changed', refresh)
     })
   }

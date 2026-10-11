@@ -321,7 +321,8 @@ func TestClientsService_AddIDRules(t *testing.T) {
 	require.Equal(t, "acme-bot", view.ID)
 	require.Equal(t, "locked", view.Mode)
 	require.True(t, h.authenticates(secret))
-	require.Equal(t, "assign", h.changes()[0]["change"])
+	// Spec 115 FR-010 (deliberate update): custom client add records `issue`.
+	require.Equal(t, "issue", h.changes()[0]["change"])
 
 	_, _, err = h.svc.Add(ctx, h.actor(), AddRequest{ID: "acme-bot", Profile: "ro"})
 	require.Error(t, err, "an active credential is never replaced by add")

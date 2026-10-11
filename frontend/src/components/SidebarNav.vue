@@ -196,6 +196,7 @@
                     class="badge badge-sm tabular-nums"
                     :class="item.badge === 'review' ? 'badge-warning' : 'badge-ghost'"
                     :data-test="`sidebar-${item.id}-badge`"
+                    :title="item.badge === 'review' ? reviewBadgeTitle : undefined"
                   >{{ badgeValue(item) }}</span>
                 </router-link>
               </li>
@@ -377,6 +378,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useAttentionStore } from '@/stores/attention'
 import { useClientsStore } from '@/stores/clients'
 import api from '@/services/api'
+import { reviewQueueScopeText, summarizeReviewQueue } from '@/utils/reviewQueue'
 import {
   SIDEBAR_FOOTER,
   SIDEBAR_GROUPS,
@@ -643,10 +645,15 @@ const visibleGroups = computed(() =>
 // Spec 050: live tool count for the sidebar badge.
 const toolCount = ref(0)
 const reviewCount = ref(0)
+const reviewActiveCount = ref(0)
 async function fetchReviewCount() {
   try {
     const resp = await api.getReviewQueue()
-    if (resp.success) reviewCount.value = resp.data?.count ?? 0
+    if (resp.success) {
+      reviewCount.value = resp.data?.count ?? 0
+      // Rows from an older core carry no `enabled`; they count as active.
+      reviewActiveCount.value = resp.data?.servers?.length ? summarizeReviewQueue(resp.data.servers).active : reviewCount.value
+    }
   } catch {
     // A badge must not make the sidebar fail when a core is older or offline.
   }
@@ -668,6 +675,11 @@ async function fetchToolCount() {
 // the status SSE; secrets need a one-shot fetch on mount.
 const serverCount = computed(() => systemStore.upstreamStats.total_servers ?? 0)
 const secretCount = ref(0)
+
+// The Review badge is the whole queue; say how much of it is blocking agents.
+const reviewBadgeTitle = computed(() => reviewQueueScopeText({
+  total: reviewCount.value, active: reviewActiveCount.value, deferred: reviewCount.value - reviewActiveCount.value,
+}))
 
 // Per-item badge value (0 hides it). Home keeps its own template because it
 // also renders a collapsed-mode dot.

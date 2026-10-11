@@ -49,6 +49,7 @@ const TS_FAMILIES: Record<string, { prefix: string; exclude?: string[] }> = {
   surface: { prefix: 'ProfileSurface' },
   warning_code: { prefix: 'Warning', exclude: ['WarningSeverity', 'WarningAction'] },
   error_code: { prefix: 'ErrorCode' },
+  credential_error_code: { prefix: 'CredentialErrorCode' },
   guard_fix: { prefix: 'GuardFix' },
 }
 
