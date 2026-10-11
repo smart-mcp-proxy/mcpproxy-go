@@ -400,7 +400,8 @@ for (const [id, landing, rest] of STRIP) {
     // for either and pin that empty state rather than timing out on the strip.
     await goto(page, '/', `[data-test="${id}"], [data-test="home-getting-started"]`)
     if (await page.locator('[data-test="home-getting-started"]').isVisible()) {
-      await expect(page.locator('[data-test="usage-summary-strip"]')).toHaveCount(0)
+      // Not the strip root: Home's data-test falls through and replaces it.
+      await expect(page.locator('[data-test^="usage-strip-"]')).toHaveCount(0)
       test.skip(true, 'no fixture servers: Home shows Get started instead of the usage strip')
     }
     const seen = collect(page, /^\/api\/v1\/activity$/)
