@@ -61,6 +61,17 @@ func NewMockUpstreamAdapter() *MockUpstreamAdapter {
 func (m *MockUpstreamAdapter) AddServer(name string, cfg *config.ServerConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Model Manager.AddServerConfigAt: a registered instance whose connection
+	// config differs is replaced and disconnected; an equivalent one is kept.
+	if prev, ok := m.states[name]; ok {
+		if config.ConnectionEquivalent(prev.Config, cfg) {
+			prev.Config = cfg
+			m.addedServers[name] = cfg
+			return nil
+		}
+		m.disconnected = append(m.disconnected, name)
+		m.setConnected(name, false)
+	}
 	m.addedServers[name] = cfg
 	m.states[name] = &ServerState{
 		Name:      name,

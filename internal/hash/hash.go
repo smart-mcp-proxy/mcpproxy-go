@@ -252,6 +252,30 @@ func ComputeToolHashWithOutputSchema(serverName, toolName, description string, i
 	return hash
 }
 
+// ToolContractDigest is the output-aware successor of ToolDefinitionDigest:
+// a stable digest of every part of a tool contract a security scan reads —
+// description, input schema AND output schema (scanners analyse output
+// schemas since RT-06). It is versioned so it can never equal a
+// ToolDefinitionDigest, and an absent or null output schema counts as "".
+func ToolContractDigest(description, schemaJSON, outputSchemaJSON string) string {
+	switch schemaJSON {
+	case "", "null":
+		schemaJSON = "{}"
+	}
+	outputSchemaJSON = NormalizeJSON(outputSchemaJSON)
+	if outputSchemaJSON == "null" {
+		outputSchemaJSON = ""
+	}
+	h := sha256.New()
+	h.Write([]byte("tool-contract-v2|"))
+	h.Write([]byte(description))
+	h.Write([]byte("|"))
+	h.Write([]byte(NormalizeJSON(schemaJSON)))
+	h.Write([]byte("|"))
+	h.Write([]byte(outputSchemaJSON))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // ToolDefinitionDigest returns a stable digest of the parts of a tool
 // definition a security scan reads: its description and input schema. The
 // tool name is the lookup key on both sides, and the output schema is not

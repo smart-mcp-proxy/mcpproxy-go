@@ -233,6 +233,25 @@ type Runtime struct {
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
+	// discoveryRerunPending records a discovery trigger (connect or
+	// tools/list_changed) that arrived while a discovery for the same server
+	// was in flight; the in-flight owner runs one follow-up for it instead of
+	// the trigger being dropped (Sol r3 P2). Key: serverName.
+	discoveryRerunPending sync.Map
+	// coalescedDiscoveryContinuationDelay overrides the delay before a
+	// deferred coalesced-discovery continuation runs (tests only; zero means
+	// defaultCoalescedDiscoveryContinuationDelay). Set before any discovery.
+	coalescedDiscoveryContinuationDelay time.Duration
+	// coalescedDiscoveryContinuationGate, when non-nil, replaces the delay:
+	// a deferred continuation waits until the channel is closed (tests only,
+	// so assertions about the capped owner cannot race the continuation).
+	coalescedDiscoveryContinuationGate chan struct{}
+	// notificationDiscoverHook replaces DiscoverAndIndexToolsForServer for
+	// notification-triggered discovery runs (tests only).
+	notificationDiscoverHook func(ctx context.Context, serverName string) error
+	// connectDiscoverHook replaces DiscoverAndIndexToolsForServer for
+	// connect-owned discovery runs (onServerConnectedDiscovery). Tests only.
+	connectDiscoverHook func(ctx context.Context, serverName string) error
 
 	// toolApprovalLocks serializes every read-modify-write of one server's
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
@@ -296,6 +315,12 @@ type Runtime struct {
 	// linearization region immediately before review records are stored. It is
 	// test-only and nil in production.
 	quarantinedCaptureDuringPersist func()
+	// skipQuarantinedContractVerify turns off the connect/list_changed-time
+	// contract verification of quarantined servers (RT-05). Test-only, for
+	// suites that count a quarantined upstream's tools/list calls and must
+	// see only the explicit inspection capture's. Set before
+	// StartBackgroundInitialization; false in production.
+	skipQuarantinedContractVerify bool
 
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between
@@ -347,6 +372,11 @@ type Runtime struct {
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
+	// lifetimeCtx is the runtime's original application context. Close
+	// cancels it and, unlike appCtx (which Close replaces with
+	// context.Background()), it is never replaced, so work scheduled or
+	// started after shutdown still observes the cancellation (Sol r5 P2).
+	lifetimeCtx context.Context
 }
 
 // New creates a runtime helper for the given config and prepares core managers.
@@ -532,6 +562,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		previousShutdown:   previousShutdown,
 		appCtx:             appCtx,
 		appCancel:          appCancel,
+		lifetimeCtx:        appCtx,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -961,6 +992,17 @@ func (r *Runtime) ActivityService() *ActivityService {
 func (r *Runtime) AppContext() context.Context {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.appCtx
+}
+
+// lifetimeContext returns the runtime context that Close cancels and never
+// replaces. A Runtime built without New falls back to AppContext.
+func (r *Runtime) lifetimeContext() context.Context {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.lifetimeCtx != nil {
+		return r.lifetimeCtx
+	}
 	return r.appCtx
 }
 

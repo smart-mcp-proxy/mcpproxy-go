@@ -678,7 +678,9 @@ func (b *BoltDB) DeleteServerToolApprovals(serverName string) error {
 				return err
 			}
 		}
-		return nil
+		// Spec 117 FR-024: the baseline marker goes with the records, in the
+		// same transaction, so a removed and re-added server starts fresh.
+		return deleteToolBaselineDecisionsTx(tx, []string{serverName}, nil)
 	})
 }
 
@@ -693,7 +695,7 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
 		if bucket == nil {
-			return nil
+			return deleteToolBaselineDecisionsTx(tx, nil, keep)
 		}
 		var keysToDelete [][]byte
 		scanErr := bucket.ForEach(func(k, v []byte) error {
@@ -716,7 +718,10 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 			}
 			removed++
 		}
-		return nil
+		// Spec 117 FR-024: orphaned baseline markers are pruned in the same
+		// transaction (including a server approved with an empty review,
+		// which has a marker and no records).
+		return deleteToolBaselineDecisionsTx(tx, nil, keep)
 	})
 	return removed, err
 }

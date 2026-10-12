@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -105,6 +106,18 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// ingestedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// may also implement (RT-06, red-team 2026-10-11): return the tool contracts
+// discovery actually ingested for a server — the definitions recorded on its
+// tool-approval records (current, plus the approved one of a changed record) —
+// in the same tools/list shape as GetServerTools. The scan export is a fresh
+// tools/list that a malicious server can answer differently from the list
+// discovery ingested (TOCTOU); scanning the ingested contracts too makes the
+// verdict reflect what the proxy actually trusted.
+type ingestedToolContractsProvider interface {
+	GetIngestedToolContracts(serverName string) ([]map[string]interface{}, error)
+}
+
 // allServerToolsProvider is an OPTIONAL capability a ServerInfoProvider may also
 // implement: enumerate every known server's current tool definitions, keyed by
 // server name. The Service uses it to build the cross-server snapshot that lets
@@ -172,6 +185,28 @@ type ToolBlockRecorder interface {
 // promote to approved+enabled. fn must not unquarantine the server.
 type ToolApprovalLocker interface {
 	WithToolApprovalLock(serverName string, fn func() error) error
+}
+
+// ServerApprovalCommitter is an OPTIONAL capability of the
+// ServerUnquarantiner (Spec 117 PR-1, #1567): run the approval's storage
+// commit under the runtime's per-server tool-approval lock, after recording
+// the server's durable tool baseline decision (source server_approval, by).
+// It lets the scanner reach the baseline marker without importing storage or
+// the runtime (storage imports this package). expected is the Spec 117 PR-2
+// review binding and is nil in this release; the returned count is the
+// number of tools the commit section promoted (0 in this release).
+type ServerApprovalCommitter interface {
+	CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
+// IncarnationServerApprovalCommitter extends ServerApprovalCommitter with the
+// Spec 116 incarnation binding: CommitServerApprovalAt runs the same locked
+// section but first checks (under the approval lock) that the stored row
+// still carries incarnation inc, returning ErrServerReplaced otherwise
+// without recording the marker or running commit.
+type IncarnationServerApprovalCommitter interface {
+	ServerApprovalCommitter
+	CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -1276,6 +1311,20 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		}
 
 		if req.SourceDir != "" {
+			// exportInto applies a usable export to the scan context, or
+			// reports why nothing may be scanned.
+			var liveErr error
+			exportInto := func(sc *ScanContext) error {
+				e := s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+				if e.Err != nil {
+					return e.Err
+				}
+				liveErr = e.LiveErr
+				e.applyTo(sc)
+				// The scan analyses exactly what was exported (Sol r4 P1).
+				req.ToolDefinitions = e.Data
+				return nil
+			}
 			if !s.serverInfo.IsConnected(serverName) {
 				s.logger.Info("Server is disconnected, attempting to connect for scan",
 					zap.String("server", serverName))
@@ -1287,7 +1336,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+			exportErr := exportInto(scanCtx)
 
 			// If export failed, retry once. Reconnect ONLY when the server is
 			// actually disconnected (that path handles quarantined servers
@@ -1296,11 +1345,11 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			// healthy connection mid-export and turned a recoverable "0 tools"
 			// into a misleading "server is disconnected" — the retry churn seen
 			// on spec-086 admission scans. A connected server just re-exports.
-			if scanCtx.ToolsExported == 0 {
+			if exportErr == nil && scanCtx.ToolsExported == 0 {
 				if s.serverInfo.IsConnected(serverName) {
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
-					s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+					exportErr = exportInto(scanCtx)
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))
@@ -1309,9 +1358,24 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 							zap.String("server", serverName), zap.Error(err))
 					} else {
 						s.waitForConnection(serverName, 30*time.Second)
-						s.exportToolDefinitionsStamped(serverName, req.SourceDir).applyTo(scanCtx)
+						exportErr = exportInto(scanCtx)
 					}
 				}
+			}
+			if exportErr == nil && liveErr != nil {
+				// Fail closed (Sol r3 P1): the live export failed even on the
+				// retry and there was no ingested contract to scan, so this
+				// pass wrote no tools.json — whatever the source dir holds
+				// must not be scanned in its place.
+				exportErr = fmt.Errorf("export tool definitions: %w", liveErr)
+			}
+			if exportErr != nil {
+				// Fail closed (RT-06, Sol r2 P1): never scan a source dir
+				// whose tools.json this pass did not write.
+				if resolvedCleanup != nil {
+					resolvedCleanup()
+				}
+				return nil, fmt.Errorf("cannot scan server %s: %w", serverName, exportErr)
 			}
 		}
 	}
@@ -1441,7 +1505,22 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int6
 		// Export tool definitions for Cisco scanner (only when there is a real
 		// source dir to write tools.json into — image-only servers have none).
 		if s.serverInfo != nil && req.SourceDir != "" {
-			_, _ = s.exportToolDefinitions(serverName, req.SourceDir)
+			e := s.exportToolDefinitionsFull(serverName, req.SourceDir)
+			if e.Err == nil && e.LiveErr != nil {
+				e.Err = fmt.Errorf("export tool definitions: %w", e.LiveErr)
+			}
+			if e.Err != nil {
+				// The source dir may hold a tools.json this pass did not
+				// write, so every scanner that may analyse tool metadata is
+				// failed (RT-06). Pass 2's purpose — dependency / image CVE
+				// analysis — does not depend on the definitions, so those
+				// scanners still run (Sol r4 P2).
+				s.logger.Warn("Pass 2: tool definitions could not be exported; running only scanners independent of tool metadata",
+					zap.String("server", serverName), zap.Error(e.Err))
+				req.ToolDefinitionsUnavailable = true
+			} else {
+				req.ToolDefinitions = e.Data
+			}
 		}
 	} else {
 		s.logger.Warn("No server info available for Pass 2, skipping",
@@ -2044,27 +2123,39 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	var saveErr error
 	save := func() error { return s.storage.SaveIntegrityBaseline(baseline) }
 	if len(blocks) > 0 {
 		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
 	}
-	switch locker := s.unquarantiner.(type) {
-	case ApprovalIncarnationBinder:
-		// Under the server's approval lock, and only while the stored row
-		// still carries the incarnation captured above (Spec 116 FR-014):
-		// the removal commit purges the baseline and blocks under the same
-		// lock, so either this save ran first (and was purged) or it sees
-		// the replacement and saves nothing.
-		saveErr = locker.WithServerApprovalLockAt(serverName, inc, save)
-	case ToolApprovalLocker:
-		if len(blocks) > 0 {
+	var saveErr error
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	switch committer := s.unquarantiner.(type) {
+	case IncarnationServerApprovalCommitter:
+		// Spec 117 PR-1 (FR-023) + Spec 116 FR-014: record the tool baseline
+		// decision and commit the baseline (+ blocks) in the runtime's locked
+		// section, only while the stored row still carries the reviewed
+		// incarnation. A removal purges the baseline, blocks and the marker
+		// under the same lock, so either this commit ran first (and was
+		// purged) or it sees the replacement and records nothing.
+		if bound {
+			_, saveErr = committer.CommitServerApprovalAt(serverName, inc, blockNames, nil, approvedBy, save)
+		} else {
+			_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+		}
+	case ServerApprovalCommitter:
+		// Spec 117 PR-1 (FR-023): both branches commit inside the runtime's
+		// locked section, which first records the server's tool baseline
+		// decision, also for an empty or blind review.
+		_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+	default:
+		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok && len(blocks) > 0 {
 			saveErr = locker.WithToolApprovalLock(serverName, save)
 		} else {
 			saveErr = save()
 		}
-	default:
-		saveErr = save()
 	}
 	if saveErr != nil {
 		if errors.Is(saveErr, commitview.ErrServerReplaced) {
@@ -2688,12 +2779,32 @@ type toolExport struct {
 	Count  int
 	Names  []string
 	Hashes map[string]string
-	At     time.Time
+	// Contracts holds the output-aware digest of every analysed contract
+	// per tool name (live and divergent ingested), see
+	// ScanContext.ToolContractDigests.
+	Contracts map[string][]string
+	At        time.Time
+	// Err is set when the export must not be scanned at all: the tool
+	// contracts discovery ingested could not be read (RT-06). A source-backed
+	// scan would otherwise read whatever tools.json the source dir already
+	// held — a stale or planted clean file — and return a clean verdict, so
+	// the caller must abort the scan rather than continue without an export
+	// (Sol r2 P1). A tools.json serialization or write failure is reported
+	// the same way (Sol r3 P1).
+	Err error
+	// LiveErr is set when the live tools/list export failed and no ingested
+	// contract was available to scan instead; nothing was written. The caller
+	// may retry, but must not scan the source dir if it persists (Sol r3 P1).
+	LiveErr error
+	// Data is the exact tools.json document written, handed to the scan as
+	// its immutable snapshot (ScanRequest.ToolDefinitions, Sol r4 P1).
+	Data []byte
 }
 
 // applyTo records the export on the scan context.
 func (e toolExport) applyTo(sc *ScanContext) {
 	sc.ToolsExported, sc.ToolNames, sc.ToolHashes, sc.ToolsExportedAt = e.Count, e.Names, e.Hashes, e.At
+	sc.ToolContractDigests = e.Contracts
 }
 
 // exportToolDefinitionsStamped runs exportToolDefinitions and also records the
@@ -2719,36 +2830,177 @@ func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []st
 // definition digests of what was written, so a scan can later be matched to
 // the exact definitions it analysed.
 func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolExport {
-	tools, err := s.serverInfo.GetServerTools(serverName)
-	if err != nil {
-		s.logger.Warn("Could not export tool definitions for scanning",
-			zap.String("server", serverName), zap.Error(err))
-		return toolExport{}
-	}
-	if len(tools) == 0 {
-		return toolExport{}
+	live, liveErr := s.serverInfo.GetServerTools(serverName)
+	if liveErr != nil {
+		s.logger.Warn("Could not export live tool definitions for scanning",
+			zap.String("server", serverName), zap.Error(liveErr))
+		live = nil
 	}
 
-	// Format as MCP tools/list output
+	// The contracts discovery ingested are read independently of the live
+	// export (Sol r3 P1): an empty or failed live tools/list must not hide a
+	// stored contract from the scan. Names/hashes describe the LIVE export
+	// (what the scan coverage is matched against) when there is one;
+	// diverging ingested contracts are scanned in addition.
+	scanned, err := s.withDivergentIngestedContracts(serverName, live)
+	if err != nil {
+		// Fail closed (Sol r1 P2): without the ingested contracts the scan
+		// would see only what the server chose to answer this time — the
+		// RT-06 bypass. Export nothing so the scan errors out instead of
+		// producing a verdict that could support admission.
+		s.logger.Warn("Could not read the tool contracts discovery ingested; refusing to export a live-only tool list for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{Err: fmt.Errorf("read the tool contracts discovery ingested for %s: %w", serverName, err)}
+	}
+	if liveErr != nil && len(scanned) == 0 {
+		// Nothing to scan and the live export failed: leave the source dir
+		// alone and let the caller retry or fail closed (Sol r3 P1).
+		return toolExport{LiveErr: liveErr}
+	}
+
+	covered := live
+	if len(covered) == 0 {
+		// The live export is empty or failed but discovery ingested
+		// contracts: those are what this scan analyses, so they are what it
+		// covers (never an empty name list with a non-zero count, which would
+		// read as a legacy whole-server coverage claim).
+		covered = scanned
+	}
+
+	// Always (re)write tools.json — also for an empty list — so a stale or
+	// planted file already in a source dir is never what gets scanned
+	// (Sol r3 P1). A write failure is fatal for the same reason.
 	toolsData := map[string]interface{}{
-		"tools": tools,
+		"tools": scanned,
+	}
+	if scanned == nil {
+		toolsData["tools"] = []map[string]interface{}{}
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return toolExport{}
+		return toolExport{Err: fmt.Errorf("serialize tool definitions for %s: %w", serverName, err)}
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
-		s.logger.Debug("Failed to write tools.json", zap.Error(err))
-		return toolExport{}
+		s.logger.Warn("Failed to write tools.json for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{Err: fmt.Errorf("write tool definitions for %s: %w", serverName, err)}
+	}
+	if len(covered) == 0 {
+		return toolExport{Data: data}
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
-		zap.Int("tools", len(tools)),
+		zap.Int("tools", len(covered)),
+		zap.Int("scanned_contracts", len(scanned)),
 		zap.String("path", toolsPath),
 	)
-	return toolExport{Count: len(tools), Names: toolDefinitionNames(tools), Hashes: toolDefinitionHashes(tools)}
+	return toolExport{
+		Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered),
+		// Every analysed contract — not only the live list — is covered
+		// (Sol r7 P2): an ingested contract the live response omitted or
+		// answered differently was scanned too, so its findings apply.
+		Contracts: ToolContractDigests(scanned),
+		Data:      data,
+	}
+}
+
+// ToolContractDigests maps each exported tool name to the sorted,
+// de-duplicated hash.ToolContractDigest of every definition exported under
+// that name.
+func ToolContractDigests(tools []map[string]interface{}) map[string][]string {
+	digests := make(map[string][]string, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		digest := hash.ToolContractDigest(description, normalizedScanJSON(tool["inputSchema"]), normalizedScanJSON(tool["outputSchema"]))
+		if !slices.Contains(digests[name], digest) {
+			digests[name] = append(digests[name], digest)
+		}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	for name := range digests {
+		sort.Strings(digests[name])
+	}
+	return digests
+}
+
+// withDivergentIngestedContracts returns the live export plus every contract
+// discovery ingested for the server that the live export does not reproduce
+// (same name, description and normalized input schema) — RT-06. Divergence
+// means the server answered the scan's tools/list differently from the list
+// the proxy approved or recorded, so the ingested contract is scanned too and
+// the divergence is logged. A provider without the capability leaves the
+// export unchanged; a lookup error is returned so the caller fails closed.
+func (s *Service) withDivergentIngestedContracts(serverName string, live []map[string]interface{}) ([]map[string]interface{}, error) {
+	provider, ok := s.serverInfo.(ingestedToolContractsProvider)
+	if !ok {
+		return live, nil
+	}
+	ingested, err := provider.GetIngestedToolContracts(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("read ingested tool contracts for %s: %w", serverName, err)
+	}
+	if len(ingested) == 0 {
+		return live, nil
+	}
+	seen := make(map[string]struct{}, len(live)+len(ingested))
+	for _, tool := range live {
+		seen[scanContractKey(tool)] = struct{}{}
+	}
+	out := live
+	var divergent []string
+	for _, tool := range ingested {
+		key := scanContractKey(tool)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(out) == len(live) {
+			out = append(make([]map[string]interface{}, 0, len(live)+len(ingested)), live...)
+		}
+		out = append(out, tool)
+		name, _ := tool["name"].(string)
+		divergent = append(divergent, name)
+	}
+	if len(divergent) > 0 {
+		sort.Strings(divergent)
+		s.logger.Warn("Scan export diverges from the tool contracts discovery ingested; scanning the ingested contracts too",
+			zap.String("server", serverName),
+			zap.Strings("tools", divergent))
+	}
+	return out, nil
+}
+
+// scanContractKey identifies a tool contract by name, description and
+// normalized input and output schemas — an output-schema-only divergence is
+// a divergence too (Sol r1 P1), since the detector scans output schemas.
+func scanContractKey(tool map[string]interface{}) string {
+	name, _ := tool["name"].(string)
+	description, _ := tool["description"].(string)
+	return name + "\x00" + hash.ToolDefinitionDigest(description, normalizedScanJSON(tool["inputSchema"])) +
+		"\x00" + normalizedScanJSON(tool["outputSchema"])
+}
+
+// normalizedScanJSON renders an exported schema value as normalized JSON ("" when absent).
+func normalizedScanJSON(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return hash.NormalizeJSON(v)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return hash.NormalizeJSON(string(raw))
 }
 
 // toolDefinitionHashes maps each exported tool name to the digest of its

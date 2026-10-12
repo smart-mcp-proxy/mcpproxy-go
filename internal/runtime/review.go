@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -432,10 +433,32 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(analysedAt) {
 		return false
 	}
+	if len(job.ScanContext.ToolContractDigests) > 0 {
+		// Output-aware scan: covered when ANY contract the scan analysed
+		// under this name — the live export or a divergent ingested
+		// contract (RT-06) — is the record's CURRENT contract, output
+		// schema included (Sol r7 P2).
+		digests, ok := job.ScanContext.ToolContractDigests[record.ToolName]
+		if !ok {
+			digests, ok = job.ScanContext.ToolContractDigests[serverName+":"+record.ToolName]
+		}
+		if !ok || (record.CurrentDescription == "" && record.CurrentSchema == "") {
+			return false
+		}
+		return slices.Contains(digests, hash.ToolContractDigest(record.CurrentDescription, record.CurrentSchema, record.CurrentOutputSchema))
+	}
+	// Every scan below predates output-aware coverage: hash-bound (ToolHashes,
+	// a description/input-only digest), name-only and count-only legacy jobs
+	// never exported an output schema, so none of them analysed one. A record
+	// whose current contract has one is not covered by any of them
+	// (Sol r7/r8 P2).
+	if reviewHasOutputSchema(record.CurrentOutputSchema) {
+		return false
+	}
 	if len(job.ScanContext.ToolHashes) > 0 {
 		// Hash-bound scan: the analysed definition must be the record's
-		// CURRENT one. A record with no stored definition cannot be compared,
-		// so it is not covered.
+		// CURRENT one. A record with no stored definition cannot be
+		// compared, so it is not covered.
 		scanned, ok := job.ScanContext.ToolHashes[record.ToolName]
 		if !ok {
 			scanned, ok = job.ScanContext.ToolHashes[serverName+":"+record.ToolName]
@@ -462,6 +485,16 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 		return !record.DefinitionChangedAt.IsZero()
 	}
 	return false
+}
+
+// reviewHasOutputSchema reports whether a stored output schema is present
+// (absent, empty and JSON null all mean none).
+func reviewHasOutputSchema(outputSchemaJSON string) bool {
+	switch strings.TrimSpace(outputSchemaJSON) {
+	case "", "null":
+		return false
+	}
+	return true
 }
 
 // reviewScanAndFindings returns the newest baseline scan, its findings, and

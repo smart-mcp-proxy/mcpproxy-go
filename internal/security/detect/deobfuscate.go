@@ -60,7 +60,7 @@ func NormalizeForPhraseIn(s string, latinMajority bool) string {
 	}
 	s = norm.NFKC.String(s)
 	s = stripFormatRunes(s)
-	s = foldConfusables(s, latinMajority)
+	s = foldConfusables(s, latinMajority, false)
 	s = foldLeetTokens(s)
 	s = joinSeparatedLetters(s)
 	s = joinSpacedLetters(s)
@@ -78,7 +78,29 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 	if s == "" {
 		return ""
 	}
-	return foldConfusables(stripFormatRunes(norm.NFKC.String(s)), latinMajority)
+	return foldConfusables(stripFormatRunes(norm.NFKC.String(s)), latinMajority, false)
+}
+
+// NormalizeMixedScript is Normalize preceded by homoglyph folding of MIXED-script
+// words only (RT-04): a word that combines Latin letters with Cyrillic, Greek or
+// Armenian look-alikes ("іgnоrе", "рrеvіоuѕ") is folded to one script, while a
+// word written entirely in one script keeps its spelling, whatever its
+// neighbours. Unlike NormalizeForPhrase it does not join spaced or separated
+// letters and does not rewrite leet digits, so word boundaries, punctuation,
+// negations and quotes are exactly those of the plain text and position
+// classification stays truthful. A single word that mixes scripts is not
+// ordinary writing; it is the homoglyph trick itself. changed reports whether
+// any word was folded.
+func NormalizeMixedScript(s string) (normalized string, changed bool) {
+	if s == "" {
+		return "", false
+	}
+	pre := stripFormatRunes(norm.NFKC.String(s))
+	folded := foldConfusables(pre, LatinMajority(s), true)
+	if folded == pre {
+		return Normalize(s), false
+	}
+	return Normalize(folded), true
 }
 
 // Squash reduces text to its letters only. Phrase checks use it as a last,
@@ -185,7 +207,12 @@ type confusableToken struct {
 //
 // latinMajority is the script census of the whole text the fragment s belongs
 // to (see NormalizeForPhraseIn); for a whole text it is LatinMajority(s).
-func foldConfusables(s string, latinMajority bool) string {
+//
+// mixedOnly restricts folding to words that themselves mix scripts: whole
+// look-alike words are kept, and so are the Latin look-alike letters (dotless
+// ı and friends), which can be ordinary Turkish or IPA text (see
+// NormalizeMixedScript).
+func foldConfusables(s string, latinMajority, mixedOnly bool) string {
 	runes := []rune(s)
 
 	var toks []confusableToken
@@ -251,7 +278,7 @@ func foldConfusables(s string, latinMajority bool) string {
 			dir[ti] = foldLatin
 		case mixed && t.canCyr:
 			dir[ti] = foldCyr
-		case t.counts.latin == 0 && nonLatin > 0 && t.canLatin && latinMajority:
+		case t.counts.latin == 0 && nonLatin > 0 && t.canLatin && latinMajority && !mixedOnly:
 			dir[ti] = undecided
 		}
 	}
@@ -299,7 +326,7 @@ func foldConfusables(s string, latinMajority bool) string {
 					changed = true
 				}
 			}
-			if l, ok := latinLookalikes[runes[k]]; ok {
+			if l, ok := latinLookalikes[runes[k]]; ok && !mixedOnly {
 				runes[k] = l
 				changed = true
 			}

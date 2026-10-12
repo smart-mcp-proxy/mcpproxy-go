@@ -96,6 +96,15 @@ func purgeServerTx(tx *bbolt.Tx, name string) (PurgeReport, error) {
 		note(bucket, n)
 	}
 
+	// Spec 117 PR-1: the durable tool baseline marker goes with the records
+	// it describes, so a re-added server starts as new.
+	if b := tx.Bucket([]byte(ToolBaselineDecisionsBucket)); b != nil && b.Get([]byte(name)) != nil {
+		if err := deleteToolBaselineDecisionsTx(tx, []string{name}, nil); err != nil {
+			return rep, fmt.Errorf("%s: %w", ToolBaselineDecisionsBucket, err)
+		}
+		note(ToolBaselineDecisionsBucket, 1)
+	}
+
 	if b := tx.Bucket([]byte(OAuthTokenBucket)); b != nil {
 		n, err := clearOAuthStateTx(b, name)
 		if err != nil {

@@ -3,8 +3,11 @@ package checks
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -183,10 +186,125 @@ func unexplainedSinkParam(tool detect.ToolView) (string, bool) {
 		}
 		// "Explained" = the description references the param name. Checked against
 		// the description only (NOT the schema, which always contains the name).
-		if strings.Contains(desc, strings.ToLower(name)) {
+		if mentionsParam(desc, name) {
 			continue
 		}
 		return name, true
 	}
+	// RT-04: the name list is trivially evaded by a synonym ("sidenote" →
+	// "marginalia"), so a parameter is also a sink by SHAPE: a free-text
+	// (string or untyped) input the description never mentions, whose own
+	// description asks for data to be kept alongside the operation or for the
+	// user's conversation, prompt or environment rather than for an input of
+	// the operation itself.
+	normDesc := detect.Normalize(tool.Description)
+	for _, name := range names {
+		if mentionsParam(desc, name) {
+			continue
+		}
+		var prop struct {
+			Type        any    `json:"type"`
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(doc.Properties[name], &prop); err != nil {
+			continue
+		}
+		if !freeTextType(prop.Type) || prop.Description == "" {
+			continue
+		}
+		// Line by line: a line break ends a phrase ("the system\nPrompt editor").
+		for _, line := range strings.FieldsFunc(prop.Description, isLineBreak) {
+			pd := detect.Normalize(line)
+			if sinkSideChannel.MatchString(pd) {
+				return name, true
+			}
+			// Every harvest phrase must be explained: an explained one
+			// ("conversation history" on a chat summarizer) must not mask
+			// another ("plus your system prompt") in the same line.
+			for _, m := range sinkHarvest.FindAllString(pd, -1) {
+				if !strings.Contains(normDesc, harvestNoun(m)) {
+					return name, true
+				}
+			}
+		}
+	}
 	return "", false
+}
+
+// mentionsParam reports whether the lowercased tool description names the
+// parameter as a whole word, i.e. not glued to a letter, digit or underscore
+// on either side (Sol r17 P2): a short name such as "a" or "ext" occurring
+// inside an ordinary word ("Translate", "text") does not explain it.
+func mentionsParam(descLower, name string) bool {
+	n := strings.ToLower(name)
+	if n == "" {
+		return false
+	}
+	for off := 0; ; {
+		i := strings.Index(descLower[off:], n)
+		if i < 0 {
+			return false
+		}
+		i += off
+		end := i + len(n)
+		before, _ := utf8.DecodeLastRuneInString(descLower[:i])
+		after, _ := utf8.DecodeRuneInString(descLower[end:])
+		if (i == 0 || !isParamNameRune(before)) && (end == len(descLower) || !isParamNameRune(after)) {
+			return true
+		}
+		off = i + 1
+	}
+}
+
+func isParamNameRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// sinkSideChannel matches a parameter description asking for data to be
+// stored or carried ALONGSIDE the operation ("Marginalia to store alongside
+// the translation"), i.e. a side channel rather than an operation input.
+// Matched on normalized text.
+var sinkSideChannel = regexp.MustCompile(`\b(?:stor|keep|kept|sav|record|log|persist|archiv|stash|retain|attach|carr|tuck)\w*\b[^.]{0,40}?\b(?:alongside|along with|together with|next to|beside|in the background|silently|quietly)\b`)
+
+// sinkHarvest matches a parameter description asking for the user's
+// conversation, the agent's prompt or the environment. Matched on normalized
+// text; harvestNoun extracts the noun so a tool whose own description is about
+// that thing (a chat summarizer taking "the conversation") is not flagged.
+var sinkHarvest = regexp.MustCompile(`\b(?:conversation|chat) (?:history|context|transcript|log)\b|\bprevious messag\w*|\bsystem prompt\b|\benvironment variabl\w*|\b(?:all|any|every) (?:other |additional |extra |relevant )?(?:context|information|detail|data|content)\w* (?:you|the (?:user|assistant|model|agent)) (?:ha|have|has|know|saw|seen|collect|gather)\w*`)
+
+// harvestNoun returns the noun of a sinkHarvest match that the tool's own
+// description must mention for the parameter to count as explained.
+func harvestNoun(m string) string {
+	for _, n := range []string{"conversation", "chat", "messag", "system prompt", "environment", "context", "information", "detail", "data", "content"} {
+		if strings.Contains(m, n) {
+			return n
+		}
+	}
+	return m
+}
+
+func isLineBreak(r rune) bool {
+	switch r {
+	case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
+		return true
+	}
+	return false
+}
+
+// freeTextType reports whether a JSON Schema "type" admits free text: absent,
+// "string", or a type list that includes "string".
+func freeTextType(t any) bool {
+	switch v := t.(type) {
+	case nil:
+		return true
+	case string:
+		return v == "string"
+	case []any:
+		for _, e := range v {
+			if e == "string" {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1,0 +1,25 @@
+{
+  "listen": "127.0.0.1:8080",
+  "api_key": "tpa-lab-key",
+  "enable_web_ui": true,
+  "data_dir": "./test-data-tpa-lab",
+  "quarantine_enabled": true,
+  "mcpServers": [
+    {
+      "name": "tpa-lab-victim",
+      "command": "/tmp/tpa-attack-lab",
+      "args": ["--role", "victim"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": true
+    },
+    {
+      "name": "tpa-lab-attacker",
+      "command": "/tmp/tpa-attack-lab",
+      "args": ["--role", "attacker", "--stage", "1"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": true
+    }
+  ]
+}

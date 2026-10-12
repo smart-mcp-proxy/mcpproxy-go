@@ -609,3 +609,20 @@ func TestReviewFetchWaitBoundsWholeCommand(t *testing.T) {
 		})
 	}
 }
+
+// Spec 117 PR-1 (FR-026, T108): a blind or empty-review approval records the
+// server's tool baseline, so the prompt says that tools the server lists
+// later wait for review.
+func TestReviewApproveBlindPromptSaysLaterToolsWaitForReview(t *testing.T) {
+	recorder := &reviewRecorder{}
+	newMemoryReviewDaemon(t, recorder)
+	var prompt string
+	_, err := runReviewApprove(t, "table", func(message string) (bool, error) {
+		prompt = message
+		return false, nil
+	}, "bare")
+	require.NoError(t, err)
+	require.Contains(t, prompt, "without seeing tools")
+	require.Contains(t, prompt, "wait for review")
+	require.Empty(t, recorder.writes(), "declining sends no write")
+}

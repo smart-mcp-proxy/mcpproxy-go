@@ -105,6 +105,10 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// This test blocks the FIRST tools/list it sees and expects it to be the
+	// explicit capture's; the RT-05 connect-time verification would list A
+	// first, so it is turned off here (covered by lifecycle_quarantine_verify_test.go).
+	rt.skipQuarantinedContractVerify = true
 	// Registered after rt.Close so LIFO cleanup releases the blocked handler
 	// before closing the runtime or either httptest server.
 	t.Cleanup(unblockFirst)
@@ -190,6 +194,9 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
@@ -233,6 +240,9 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 

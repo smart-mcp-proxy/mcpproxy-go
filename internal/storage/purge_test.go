@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage/purgetest"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // Spec 116 PR2 storage tests (quickstart.md §T2).
@@ -142,4 +143,24 @@ func TestPurge_RowOnlyRemovesKeepsTrustState(t *testing.T) {
 	assert.Zero(t, c[purgetest.ToolCalls])
 	assert.Equal(t, 1, c[purgetest.ToolApprovals], "approvals survive an empty startup config")
 	assert.Equal(t, 1, c[purgetest.OAuthTokens], "credentials survive an empty startup config")
+}
+
+// Spec 117 PR-1 x Spec 116 PR2: the durable tool baseline marker is part of
+// the removal purge set, so a re-added server starts as new; a neighbour whose
+// name shares the prefix keeps its marker.
+func TestPurge_RemoveClearsToolBaselineMarker(t *testing.T) {
+	m := newPurgeTestManager(t)
+	seedRows(t, m, 1, "acme", "acme_x")
+	d := toolreview.BaselineDecision{Source: toolreview.BaselineSourceServerApproval, By: "t"}
+	require.NoError(t, m.MarkToolBaselineDecided("acme", d))
+	require.NoError(t, m.MarkToolBaselineDecided("acme_x", d))
+
+	require.NoError(t, m.ApplyServerCommit(&storage.ServerCommitBatch{Generation: 2, Removes: []string{"acme"}}))
+
+	_, ok, err := m.GetToolBaselineDecision("acme")
+	require.NoError(t, err)
+	assert.False(t, ok, "removal clears the baseline marker")
+	_, ok, err = m.GetToolBaselineDecision("acme_x")
+	require.NoError(t, err)
+	assert.True(t, ok, "the neighbour keeps its marker")
 }

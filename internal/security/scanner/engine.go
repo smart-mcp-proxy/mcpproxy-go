@@ -1,9 +1,11 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +33,11 @@ type Engine struct {
 	// Service.SetScannerDisableNoNewPrivileges on hosts where the snap
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
+
+	// runScannerContainer runs a scanner container. Nil means
+	// docker.RunScanner; tests replace it to observe the run config and to
+	// act while the container "runs".
+	runScannerContainer func(ctx context.Context, cfg ScannerRunConfig) (stdout, stderr string, exitCode int, err error)
 
 	// isolationMode is the engine-wide DEFAULT isolation mode ("docker",
 	// "sandbox", "none", or "" == docker for back-compat), used only when a
@@ -146,6 +153,145 @@ type ScanRequest struct {
 	// shadowing.cross_server check can detect impersonation/collisions across
 	// servers. Populated by the Service; nil for callers that don't supply it.
 	PeerTools map[string][]map[string]interface{}
+	// ToolDefinitions is the exact tools.json document the Service exported
+	// for this scan (RT-06, Sol r4 P1): an immutable in-memory snapshot of the
+	// live + ingested contracts. The in-process baseline scanner analyses it
+	// instead of re-reading SourceDir/tools.json, which an upstream that can
+	// write its own source dir could swap for clean metadata between export
+	// and the asynchronous scanner read. Docker scanners still read the file
+	// from the mounted source dir; their result is discarded when the file no
+	// longer matches this snapshot. Nil for callers that export nothing.
+	ToolDefinitions []byte
+	// ToolDefinitionsUnavailable marks a scan whose tool definitions could not
+	// be exported (Pass 2 only, Sol r4 P2): the source dir may hold a
+	// tools.json this pass did not write, so every scanner that may analyse
+	// it is failed, while scanners independent of tool metadata (supply-chain
+	// / CVE analysis) still run.
+	ToolDefinitionsUnavailable bool
+}
+
+// toolMetadataIndependentScanners are the scanners whose analysis never uses
+// the exported tool definitions (tools.json): they audit dependencies and
+// images only, so they may run when the definitions could not be exported.
+var toolMetadataIndependentScanners = map[string]bool{
+	"trivy-mcp": true,
+}
+
+// toolDefinitionsGate decides, before a Docker scanner runs, whether the
+// tools.json it would read may be analysed: not at all when the definitions
+// could not be exported (only metadata-independent scanners run, Sol r4 P2),
+// and only while it still holds the exported snapshot (Sol r4 P1). A scanner
+// independent of tool metadata never reads tools.json, so a later change to
+// the file must not fail or discard its CVE audit (Sol r5 P2).
+func toolDefinitionsGate(s *ScannerPlugin, req ScanRequest) error {
+	_, err := pinToolDefinitions(s, req)
+	return err
+}
+
+// pinToolDefinitions is toolDefinitionsGate that also returns the identity of
+// the tools.json it checked (nil when there is nothing to pin), so a caller
+// can tell whether the file was replaced later (Sol r20 P2).
+func pinToolDefinitions(s *ScannerPlugin, req ScanRequest) (os.FileInfo, error) {
+	if toolMetadataIndependentScanners[s.ID] {
+		return nil, nil
+	}
+	if req.ToolDefinitionsUnavailable {
+		return nil, fmt.Errorf("scanner %s skipped: the tool definitions could not be exported for this scan, and the source dir may hold a tools.json this scan did not write", s.ID)
+	}
+	info, err := checkToolDefinitionsIntact(req)
+	if err != nil {
+		return nil, fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	return info, nil
+}
+
+// toolDefinitionsReplaced reports why the tools.json in the source dir is no
+// longer the pinned file (a symlink, another file, or gone), or "" when it
+// still is. The scanner reads a staged copy, so a swap cannot reach it, but a
+// symlink retargeted or another file swapped in (even with the bytes restored
+// before the post-run check) is tampering, and the result is discarded
+// (Sol r20 P2).
+func toolDefinitionsReplaced(req ScanRequest, pinned os.FileInfo) string {
+	if pinned == nil {
+		return ""
+	}
+	cur, err := os.Lstat(filepath.Join(req.SourceDir, "tools.json"))
+	switch {
+	case err != nil:
+		return "tools.json was removed during the scan"
+	case !cur.Mode().IsRegular():
+		return "tools.json became a symlink or special file during the scan"
+	case !os.SameFile(pinned, cur):
+		return "tools.json was replaced by another file during the scan"
+	}
+	return ""
+}
+
+// toolDefinitionsWatchInterval is how often the source dir's tools.json is
+// checked against the pinned file while a Docker scanner runs.
+const toolDefinitionsWatchInterval = 20 * time.Millisecond
+
+// watchToolDefinitions checks, until stop is closed, that tools.json stays the
+// pinned regular file, and returns the first violation seen ("" if none). The
+// post-run check alone cannot see a swap that is undone before the run ends.
+func watchToolDefinitions(req ScanRequest, pinned os.FileInfo, stop <-chan struct{}) <-chan string {
+	out := make(chan string, 1)
+	if pinned == nil {
+		out <- ""
+		return out
+	}
+	go func() {
+		ticker := time.NewTicker(toolDefinitionsWatchInterval)
+		defer ticker.Stop()
+		for {
+			if why := toolDefinitionsReplaced(req, pinned); why != "" {
+				out <- why
+				return
+			}
+			select {
+			case <-stop:
+				out <- toolDefinitionsReplaced(req, pinned)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out
+}
+
+// checkToolDefinitionsIntact reports an error when the tools.json in the
+// scanned source dir no longer holds the exported snapshot (RT-06, Sol r4 P1),
+// or is not a regular file (Sol r20 P2): a symlinked tools.json in the
+// upstream's source dir is refused outright. It returns the identity of the checked file (nil when nothing is checked).
+func checkToolDefinitionsIntact(req ScanRequest) (os.FileInfo, error) {
+	if len(req.ToolDefinitions) == 0 || req.SourceDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(req.SourceDir, "tools.json")
+	linfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	if !linfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) are not a regular file (a symlink or special file); the result is discarded")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	defer f.Close()
+	finfo, err := f.Stat()
+	if err != nil || !os.SameFile(linfo, finfo) {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) were replaced while being checked; the result is discarded")
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	if !bytes.Equal(data, req.ToolDefinitions) {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) were modified after export; the result is discarded")
+	}
+	return finfo, nil
 }
 
 // ScanCallback receives scan lifecycle events
@@ -627,6 +773,10 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	if s.InProcess {
 		return e.runInProcessScanner(s, req)
 	}
+	pinned, err := pinToolDefinitions(s, req)
+	if err != nil {
+		return nil, scannerLogs{}, err
+	}
 
 	// Parse timeout
 	timeout := 120 * time.Second
@@ -721,6 +871,15 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
+	// A scanner that reads tool metadata mounts a proxy-owned copy of the
+	// source dir holding the exported snapshot as tools.json, never a path
+	// inside the upstream-writable source dir (RT-06, Sol r20 P2).
+	sourceDir, cleanupSource, err := e.stageScannerSource(ctx, s, req)
+	if err != nil {
+		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	defer cleanupSource()
+
 	// Log which env keys are being passed (redact values for security)
 	envKeys := make([]string, 0, len(env))
 	for k := range env {
@@ -738,7 +897,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		Image:                  s.EffectiveImage(),
 		Command:                effectiveScannerCommand(s, req),
 		Env:                    env,
-		SourceDir:              req.SourceDir,
+		SourceDir:              sourceDir,
 		ReportDir:              reportDir,
 		CacheDir:               cacheDir,
 		NetworkMode:            networkMode,
@@ -749,10 +908,32 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		DisableNoNewPrivileges: e.disableNoNewPrivileges,
 	}
 
-	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)
+	run := e.runScannerContainer
+	if run == nil {
+		run = e.docker.RunScanner
+	}
+	// The scanner reads the staged snapshot, so the upstream's tools.json
+	// cannot reach it. It must still stay the pinned regular file for the
+	// whole run: a symlink retargeted or a file swapped in mid-run (and
+	// restored before the end) is evidence of tampering, and the result is
+	// discarded (Sol r20 P2).
+	stopWatch := make(chan struct{})
+	watch := watchToolDefinitions(req, pinned, stopWatch)
+	stdout, stderr, exitCode, err := run(ctx, cfg)
+	close(stopWatch)
+	replaced := <-watch
 	logs := scannerLogs{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if err != nil {
 		return nil, logs, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
+	}
+	if replaced != "" {
+		return nil, logs, fmt.Errorf("scanner %s: exported tool definitions: %s; the result is discarded", s.ID, replaced)
+	}
+	// The scanner read the proxy-owned snapshot; a tools.json that no longer
+	// holds it is still evidence of tampering, so the result is discarded
+	// (RT-06, Sol r4 P1). Metadata-independent scanners are exempt.
+	if err := toolDefinitionsGate(s, req); err != nil {
+		return nil, logs, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
 
 	e.logger.Debug("Scanner finished",
