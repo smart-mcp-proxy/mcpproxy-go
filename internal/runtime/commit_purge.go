@@ -31,11 +31,35 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 	r.lastGoodToolsMu.Unlock()
 }
 
-// afterServerPurge runs after the commit lock is released: it cancels the
-// OAuth refresh schedule, revokes an inspection exemption, evicts signature
+// commitDropPurgedSchedules runs in commit step 6, after the approval locks
+// are released and still under configCommitMu (review round 2): it cancels
+// the OAuth refresh schedule and drops the inspection exemption of every
+// purged server. Doing it inside the commit, not after the commit lock is
+// released, means no later commit can have re-added the name and given the
+// replacement a fresh schedule or exemption that a name-keyed clear would
+// destroy. Both are leaf locks (RefreshManager.mu, the supervisor's
+// exemption mutex) that never call back into the runtime, so this adds only
+// L0 → leaf edges. It reports whether an exemption was dropped; the
+// supervisor's reconcile for it runs after the commit lock is released.
+func (r *Runtime) commitDropPurgedSchedules(reports map[string]storage.PurgeReport) (exemptionsDropped bool) {
+	for name := range reports {
+		if r.refreshManager != nil {
+			r.refreshManager.OnTokenCleared(name)
+		}
+		if r.supervisor != nil && r.supervisor.DropInspectionExemption(name) {
+			exemptionsDropped = true
+		}
+	}
+	return exemptionsDropped
+}
+
+// afterServerPurge runs after the commit lock is released: it reconciles the
+// supervisor when the commit dropped an inspection exemption, evicts signature
 // cache entries no indexed tool backs any more, and notifies the purge
-// observers (the scanner's verdict cache). Each step is idempotent.
-func (r *Runtime) afterServerPurge(reports map[string]storage.PurgeReport) {
+// observers (the scanner's verdict cache, which is incarnation-aware). It
+// clears no per-server state by name: a later commit may already have
+// re-added the name (review round 2). Each step is idempotent.
+func (r *Runtime) afterServerPurge(reports map[string]storage.PurgeReport, exemptionsDropped bool) {
 	if len(reports) == 0 {
 		return
 	}
@@ -45,14 +69,11 @@ func (r *Runtime) afterServerPurge(reports map[string]storage.PurgeReport) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if r.refreshManager != nil {
-			r.refreshManager.OnTokenCleared(name)
-		}
-		if r.supervisor != nil {
-			r.supervisor.RevokeInspectionExemption(name)
-		}
 		r.logger.Info("Removed server state purged",
 			zap.String("server", name), zap.Any("deleted", reports[name].Deleted))
+	}
+	if exemptionsDropped && r.supervisor != nil {
+		r.supervisor.ReconcileAfterExemptionChange()
 	}
 	r.reconcileSignatureCache()
 	r.purgeObserversMu.RLock()

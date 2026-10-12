@@ -243,6 +243,9 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 	}
 	var noop EventEmitter = &NoopEmitter{}
 	svc.emitter.Store(&noop)
+	// A job prepared for an incarnation that is no longer current never takes
+	// the active slot (Spec 116 FR-014a, review round 2).
+	engine.registrationCheck = svc.incarnationIsCurrent
 	svc.pulls = newPullManager(docker, storage, registry, logger, svc.emit)
 	// Restore installed scanner state from storage (survives restart)
 	svc.syncRegistryFromStorage()
@@ -1602,6 +1605,29 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 // CleanupStaleJobs marks any running/pending scan jobs as failed.
 // Called on startup to clean up jobs that were interrupted by a process crash.
 func (s *Service) CleanupStaleJobs() {
+	// Spec 116 FR-014a (review round 2): the config watcher can remove a
+	// server while this runs, so every save goes through the
+	// incarnation-conditional writer (saveJob) and a purge between the list
+	// and the save is never undone. A legacy job with no incarnation is bound
+	// to the server's incarnation read BEFORE the list: if a remove and re-add
+	// happened after that read, the conditional write refuses it; if it
+	// happened before, the list no longer holds the purged job.
+	_, conditional := s.storage.(IncarnationStorage)
+	type incView struct {
+		inc        int64
+		configured bool
+	}
+	incarnations := map[string]incView{}
+	if conditional {
+		if names, err := s.storage.ListScanJobs(""); err == nil {
+			for _, job := range names {
+				if _, seen := incarnations[job.ServerName]; !seen {
+					inc, configured := s.currentIncarnation(job.ServerName)
+					incarnations[job.ServerName] = incView{inc, configured}
+				}
+			}
+		}
+	}
 	jobs, err := s.storage.ListScanJobs("")
 	if err != nil {
 		s.logger.Warn("failed to list scan jobs for stale cleanup", zap.Error(err))
@@ -1610,10 +1636,13 @@ func (s *Service) CleanupStaleJobs() {
 
 	cleaned := 0
 	for _, job := range jobs {
-		if job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending {
-			job.Status = ScanJobStatusFailed
-			job.Error = "interrupted by server restart"
-			job.CompletedAt = time.Now()
+		if job.Status != ScanJobStatusRunning && job.Status != ScanJobStatusPending {
+			continue
+		}
+		job.Status = ScanJobStatusFailed
+		job.Error = "interrupted by server restart"
+		job.CompletedAt = time.Now()
+		if !conditional {
 			if err := s.storage.SaveScanJob(job); err != nil {
 				s.logger.Warn("failed to clean up stale scan job",
 					zap.String("job_id", job.ID),
@@ -1622,6 +1651,24 @@ func (s *Service) CleanupStaleJobs() {
 			} else {
 				cleaned++
 			}
+			continue
+		}
+		if job.Incarnation == 0 {
+			v, ok := incarnations[job.ServerName]
+			if !ok || !v.configured {
+				continue // not configured (or appeared after the read): leave it to the purge
+			}
+			job.Incarnation = v.inc
+		}
+		written, err := s.storage.(IncarnationStorage).SaveScanJobIfIncarnation(job, job.Incarnation)
+		switch {
+		case err != nil:
+			s.logger.Warn("failed to clean up stale scan job",
+				zap.String("job_id", job.ID),
+				zap.Error(err),
+			)
+		case written:
+			cleaned++
 		}
 	}
 

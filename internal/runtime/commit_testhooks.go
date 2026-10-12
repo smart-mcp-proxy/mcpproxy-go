@@ -32,6 +32,9 @@ type commitTestHooks struct {
 	afterDisk    func(reason string)
 	afterStorage func(reason string)
 	afterAdvance func(reason string)
+	// beforeAfterCommit runs in Commit after configCommitMu is released and
+	// before the commit's after-commit work (review round 2).
+	beforeAfterCommit func(reason string)
 	// diskWriteFault / storageFault inject a failure into commit step 5 or
 	// into the storage transaction of step 6.
 	diskWriteFault func(reason string) error

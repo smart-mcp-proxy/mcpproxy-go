@@ -60,6 +60,15 @@ type Engine struct {
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
+
+	// registrationCheck, when set, reports whether a job bound to
+	// incarnation inc may still register for serverName (Spec 116 FR-014a,
+	// review round 2). It runs under mu, so it is ordered against
+	// DetachObsoleteJob: the purge observer runs after the removal published,
+	// so a job registered before the observer is detached by it, and one
+	// registering after it sees the new incarnation and is refused. It must
+	// not take a lock that is held while calling into the engine.
+	registrationCheck func(serverName string, inc int64) bool
 }
 
 // deepScanAllowed reports whether a scanner is eligible to run given the
@@ -173,6 +182,10 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		snapshot := existing.clone()
 		e.mu.Unlock()
 		return snapshot, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, snapshot.ID)
+	}
+	if check := e.registrationCheck; check != nil && !check(req.ServerName, req.Incarnation) {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("scan for server %s refused: the server was removed or replaced since the scan was prepared", req.ServerName)
 	}
 
 	// Determine which scanners to use. The Docker-scanner skip (MCP-34.4)

@@ -161,10 +161,24 @@ instead of the per-task file names below), with the shared fixture
 - [x] T058 [US2] Test-only `mcpproxy debug purge-report` (build tag `qa_hooks`) for live L2 inspection
 - [ ] T059 [US2] (race/lint/e2e matrix, live L2, evidence and docs done in the PR; the cross-model review is run by the lead) The race/lint/e2e matrix (as T031); live L2; evidence `s116-pr2`; Sol review; docs (`docs/features/security-quarantine.md` "Removal purges")
 
-**Checkpoint**: removal is final, and a re-add starts clean. #1559 and #1562
-are closed.
+**Checkpoint (PR2)**: the at-rest half is done — a removal purges the whole
+stored and in-memory purge set in its commit, and a re-add starts clean of
+every record that existed when the removal committed. #1559 is closed. #1562
+stays OPEN until PR2b: an in-flight write of the old instance (a `SaveToken`
+or DCR persistence parked across the removal, T2.9, T2.13-T2.16) can still
+recreate credentials after the purge, and only the PR2b credential binding
+refuses it. Approval, history and scan writers are already incarnation-bound
+in PR2.
 
 ---
+
+### Review round 2 (Sol) design notes
+
+- The removal purge set is built from the committed removals as well as the stored rows: a configured server whose projection row is missing still has its approvals, credentials, scan evidence and last-good snapshot purged.
+- The OAuth refresh-schedule cancel and the inspection-exemption drop of a purged server run inside the commit section (under L0, after L1 is released; both are leaf locks), not after the commit lock is released, so a later commit's same-name re-add can never have its fresh schedule or exemption cleared by name. The supervisor's reconcile for a dropped exemption still runs after unlock.
+- A tool-call history write ensures, in its own transaction, that a server identity names its hash-keyed bucket, so the purge, `PurgeSetCounts` and the orphan sweep find history recorded before the connect worker registered the identity.
+- Scanner: engine registration re-checks the job's incarnation under the engine mutex (ordered against `DetachObsoleteJob`, which runs after the removal published); startup `CleanupStaleJobs` saves through the conditional writer, binding a legacy unbound job to the incarnation read before its list.
+- Web UI: the review screen drops explicit choices and the Tools view drops batch selections when the incarnation on screen changes (selection keys carry the row incarnation).
 
 ### Review round 1 (Sol) design notes
 

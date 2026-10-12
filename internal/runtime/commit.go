@@ -71,6 +71,9 @@ type CommitResult struct {
 	// Purged reports, per removed or replaced server, what the storage step
 	// deleted from the purge set (Spec 116 PR2, data-model §PurgeSet).
 	Purged map[string]storage.PurgeReport
+	// exemptionsDropped reports whether the commit revoked an inspection
+	// exemption of a purged server (the supervisor reconciles after unlock).
+	exemptionsDropped bool
 }
 
 // ServerNotFoundError reports a server that is not in the live configuration.
@@ -459,6 +462,9 @@ func (r *Runtime) Commit(reason string, fn func(tx *CommitTx) error) (*CommitRes
 		return nil, err
 	}
 	if after != nil {
+		if h := r.testHooks.beforeAfterCommit; h != nil {
+			h(reason)
+		}
 		after()
 	}
 	return res, nil
@@ -689,10 +695,23 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			}
 		}
 		next := serverNameSet(tx.next)
+		removes := map[string]bool{}
 		for name := range stored {
 			if !next[name] {
-				batch.Removes = append(batch.Removes, name)
+				removes[name] = true
 			}
+		}
+		// A committed removal purges even when its projection row is missing
+		// (review round 2): the purge set (approvals, credentials, scan
+		// evidence) is keyed by name and outlives a lost row, and a same-name
+		// re-add would inherit it.
+		for name, ch := range changes {
+			if ch.Kind == configsvc.ChangeRemoved && !next[name] {
+				removes[name] = true
+			}
+		}
+		for name := range removes {
+			batch.Removes = append(batch.Removes, name)
 		}
 		for name := range replaced {
 			batch.Replaces = append(batch.Replaces, name)
@@ -880,6 +899,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		r.commitOrphanGC(tx)
 	}
 	releaseLocks()
+	exemptionsDropped := r.commitDropPurgedSchedules(purgeReports)
 	if tx.reconcile {
 		if h := hooks.reconcileExit; h != nil {
 			h()
@@ -897,7 +917,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			r.desiredCfg = tx.desired
 			r.mu.Unlock()
 		}
-		res := &CommitResult{Changes: changes, DiskWritten: diskWritten, Purged: purgeReports}
+		res := &CommitResult{Changes: changes, DiskWritten: diskWritten, Purged: purgeReports, exemptionsDropped: exemptionsDropped}
 		return res, r.afterCommitFunc(tx, res, nil, purged), nil
 	}
 
@@ -957,6 +977,8 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		DiskWritten: diskWritten,
 		Restamped:   restamped,
 		Purged:      purgeReports,
+
+		exemptionsDropped: exemptionsDropped,
 	}
 	return res, r.afterCommitFunc(tx, res, snap, purged), nil
 }
@@ -1180,7 +1202,7 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		for _, name := range purged {
 			r.reindexAffectedProfiles(name)
 		}
-		r.afterServerPurge(res.Purged)
+		r.afterServerPurge(res.Purged, res.exemptionsDropped)
 		if res.Published {
 			r.runCommitWorkers(tx, res, snap)
 			r.notifyTelemetryInOrder(res.Generation, tx.next)

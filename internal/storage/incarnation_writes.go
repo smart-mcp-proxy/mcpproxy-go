@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.etcd.io/bbolt"
 
@@ -132,6 +133,14 @@ func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64)
 		if err != nil || !ok {
 			return err
 		}
+		// The history bucket is keyed by the server identity hash, and the
+		// removal purge finds such buckets through server_identities. A call
+		// can finish before the connect worker registered the identity
+		// (review round 2), so the identity is ensured in this transaction:
+		// no history bucket ever exists without an identity naming its server.
+		if err := ensureCallIdentityTx(tx, record.ServerName, record.ServerID); err != nil {
+			return err
+		}
 		bucket, err := tx.CreateBucketIfNotExists([]byte(toolCallsBucketName(record.ServerID)))
 		if err != nil {
 			return err
@@ -147,6 +156,50 @@ func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64)
 		return pruneToolCallBucket(bucket, maxRecords)
 	})
 	return written && err == nil, err
+}
+
+// ensureCallIdentityTx writes a server identity for serverID naming
+// serverName unless one exists. Its attributes come from the stored row when
+// the row's configuration hashes to serverID; otherwise it carries only the
+// id and the name (enough for the purge and the orphan sweep).
+func ensureCallIdentityTx(tx *bbolt.Tx, serverName, serverID string) error {
+	if serverID == "" {
+		return nil
+	}
+	ids, err := tx.CreateBucketIfNotExists([]byte(serverIdentitiesBucket))
+	if err != nil {
+		return err
+	}
+	if ids.Get([]byte(serverID)) != nil {
+		return nil
+	}
+	var identity *ServerIdentity
+	if b := tx.Bucket([]byte(UpstreamsBucket)); b != nil {
+		if data := b.Get([]byte(serverName)); data != nil {
+			rec := &UpstreamRecord{}
+			if rec.UnmarshalBinary(data) == nil {
+				if cfg := serverConfigFromRecord(rec); cfg != nil && GenerateServerID(cfg) == serverID {
+					identity = NewServerIdentity(cfg, "")
+					identity.ConfigPaths = nil
+				}
+			}
+		}
+	}
+	if identity == nil {
+		now := time.Now()
+		fp := serverID
+		if len(fp) > 12 {
+			fp = fp[:12]
+		}
+		identity = &ServerIdentity{ID: serverID, ServerName: serverName, Fingerprint: fp,
+			Attributes: ServerAttributes{Name: serverName}, FirstSeen: now, LastSeen: now,
+			Metadata: map[string]string{}}
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	return ids.Put([]byte(serverID), data)
 }
 
 // SaveScanJobIfIncarnation saves job only while the scanned server's row

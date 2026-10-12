@@ -985,8 +985,22 @@ const pageSize = ref(25)
 // ---- Selection ----
 const selectedKeys = ref(new Set<string>())
 
+// A selection is bound to the incarnation its row was listed for (Spec 116
+// FR-017, review round 2): after a remove and re-add, a same-named row of the
+// replacement has a different key, so a refresh never carries the old
+// server's selection over to it.
 function toolKey(tool: GlobalTool): string {
-  return `${tool.server_name}\x00${tool.name}`
+  const base = `${tool.server_name}\x00${tool.name}`
+  return tool.server_incarnation ? `${base}\x00${tool.server_incarnation}` : base
+}
+
+// After a reload, keep only the selections whose row (same incarnation) is
+// still listed.
+function pruneSelection() {
+  const present = new Set(allTools.value.map(toolKey))
+  for (const k of [...selectedKeys.value]) {
+    if (!present.has(k)) selectedKeys.value.delete(k)
+  }
 }
 
 const allPageSelected = computed(() =>
@@ -1444,6 +1458,7 @@ async function loadTools() {
     if (seq !== loadSeq) return
     if (resp.success && resp.data) {
       allTools.value = resp.data.tools || []
+      pruneSelection()
       stats.value = resp.data.stats
       partial.value = resp.data.partial || false
       failedServers.value = resp.data.failed_servers || []

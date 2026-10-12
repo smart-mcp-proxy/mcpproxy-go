@@ -523,9 +523,11 @@ The displayed configuration and these identifiers always come from the same
 committed state, so a payload never shows one server's command or URL with
 another server's `incarnation`. The tool listings carry the identity of the
 server their rows were read for: `GET /api/v1/servers/{id}/tools` and
-`GET /api/v1/servers/{id}/tools/export` add `incarnation`, and every tool row
-(including the rows of `GET /api/v1/tools`) adds `server_incarnation`. Echo
-the value of the rows you acted on as `expected_incarnation`.
+`GET /api/v1/servers/{id}/tools/export` add `incarnation` at the top level,
+and the tool rows of `GET /api/v1/servers/{id}/tools` and `GET /api/v1/tools`
+add `server_incarnation` (export rows carry none: they all belong to the one
+exported server). Echo the value of the rows you acted on as
+`expected_incarnation`.
 
 The approval writes — `tools/approve`, `tools/block`, `tools/{tool}/enabled`,
 `tools/enable_all`, `tools/disable_all`, `unquarantine` and
