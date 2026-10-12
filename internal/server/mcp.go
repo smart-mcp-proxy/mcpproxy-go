@@ -6092,15 +6092,16 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 // against a copy of the LIVE entry read inside the commit lock, so the merge
 // keeps config-only fields (Shared, AuthBroker) and a newer concurrent write
 // is never reverted by values read earlier (#1560). It returns the merged
-// entry and the resolved diff, or a tool error result to return as-is.
-func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolRequest) (*config.ServerConfig, *config.ConfigDiff, *mcp.CallToolResult) {
+// entry, the resolved diff and the server's committed generation (0 when the
+// commit left the server unchanged), or a tool error result to return as-is.
+func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolRequest) (*config.ServerConfig, *config.ConfigDiff, int64, *mcp.CallToolResult) {
 	w := p.writer()
 	if w == nil {
-		return nil, nil, mcp.NewToolResultError(errNoUpstreamWriter.Error())
+		return nil, nil, 0, mcp.NewToolResultError(errNoUpstreamWriter.Error())
 	}
 	var merged *config.ServerConfig
 	var configDiff *config.ConfigDiff
-	err := w.updateServer(name, func(cur *config.ServerConfig) error {
+	gen, err := w.updateServer(name, func(cur *config.ServerConfig) error {
 		// Build patch config from request parameters
 		patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, cur)
 		if err != nil {
@@ -6129,14 +6130,14 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 		var userErr *mcpUserError
 		switch {
 		case errors.As(err, &userErr):
-			return nil, nil, mcp.NewToolResultError(userErr.msg)
+			return nil, nil, 0, mcp.NewToolResultError(userErr.msg)
 		case errors.Is(err, errUpstreamNotFound):
-			return nil, nil, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+			return nil, nil, 0, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
 		default:
-			return nil, nil, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
+			return nil, nil, 0, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
 		}
 	}
-	return merged, configDiff, nil
+	return merged, configDiff, gen, nil
 }
 
 // handleUpdateUpstream returns the resolved config diff alongside the result so
@@ -6149,7 +6150,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	mergedServer, configDiff, errResult := p.mergeUpstreamPatch(name, request)
+	mergedServer, configDiff, committedGen, errResult := p.mergeUpstreamPatch(name, request)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
@@ -6168,10 +6169,13 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 
 	// The commit reconnects the server when its connection settings changed
 	// and updates the running instance in place otherwise (Spec 116); report
-	// the connection the way the update left it.
+	// the connection the way the update left it. The reconnect runs after the
+	// commit returns, so the status must come from an instance stamped with
+	// this commit's generation or a later one (tasks.md T029, review round 6):
+	// the previous instance's ready or error state describes the old settings.
 	var connectionStatus, connectionMessage string
 	if mergedServer.Enabled {
-		connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
+		connectionStatus, connectionMessage = p.monitorConnectionStatusAt(ctx, name, 1*time.Minute, committedGen)
 		// Issue #1148: the connection message can carry the upstream URL.
 		connectionMessage = scrubUpstreamText(connectionMessage)
 	} else {
@@ -6221,7 +6225,7 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	mergedServer, configDiff, errResult := p.mergeUpstreamPatch(name, request)
+	mergedServer, configDiff, _, errResult := p.mergeUpstreamPatch(name, request)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
@@ -7084,6 +7088,14 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 
 // monitorConnectionStatus waits for a server to connect with a timeout
 func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName string, timeout time.Duration) (status, message string) {
+	return p.monitorConnectionStatusAt(ctx, serverName, timeout, 0)
+}
+
+// monitorConnectionStatusAt is monitorConnectionStatus for a config committed
+// at Spec 116 server generation minGen: an instance stamped with an older
+// generation is the one the commit is replacing, so its state is skipped as
+// if no client were registered yet. minGen 0 accepts any instance.
+func (p *MCPProxyServer) monitorConnectionStatusAt(ctx context.Context, serverName string, timeout time.Duration, minGen int64) (status, message string) {
 	monitorCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -7118,7 +7130,12 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 			}
 
 			// Check connection status from upstream manager
-			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists {
+			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists && minGen > 0 && clientInfo.Generation() < minGen {
+				p.logger.Debug("Previous instance still registered, waiting for the committed one",
+					zap.String("server", serverName),
+					zap.Int64("instance_generation", clientInfo.Generation()),
+					zap.Int64("committed_generation", minGen))
+			} else if exists {
 				connectionInfo := clientInfo.GetConnectionInfo()
 				switch connectionInfo.State {
 				case types.StateReady:

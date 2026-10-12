@@ -1856,10 +1856,17 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 // funnel that read the desired config before the lock and applied a copy of
 // it would revert every commit that landed in between — a removed server would
 // come back, a quarantine would be lowered (#1558, #1559).
-func (r *Runtime) applyConfigWith(cfgPath string, build func(desired *config.Config) (*config.Config, error)) (*ConfigApplyResult, error) {
+//
+// The destination is resolved the same way, inside the lock (review round 6):
+// the funnel saves to whatever file the committed config currently lives in.
+// A path read before the lock and handed in as an explicit destination would,
+// after a concurrent ApplyConfig moved the file from A to B, write and
+// republish A — silently reverting the move.
+func (r *Runtime) applyConfigWith(build func(desired *config.Config) (*config.Config, error)) (*ConfigApplyResult, error) {
 	var result *ConfigApplyResult
 	var fnErr error
 	_, err := r.Commit("api_apply_config", func(tx *CommitTx) error {
+		cfgPath := r.funnelConfigPath()
 		desired, derr := r.GetDesiredConfig()
 		if derr != nil {
 			fnErr = derr

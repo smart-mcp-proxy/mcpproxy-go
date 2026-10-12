@@ -262,11 +262,21 @@ Inside `configCommitMu`:
    decision, which is the same predicate as `SaveUpstreamKeepingQuarantine`.
    The storage write in step 6 then never silently diverges from what is
    published.
-3. **Prepare**: `configsvc.Prepare(next)` runs the pre-publish hook, assigns
-   generation `G = version+1`, and computes per-server generations and
-   incarnations (D6). Nothing is visible yet.
-4. **Lock and hooks**: take the approval lock of every server whose
-   generation changes, sorted by name. Run the approval hooks registered with
+3. **Prepare**: `configsvc.Prepare(next)` assigns generation `G = version+1`
+   and computes per-server generations and incarnations (D6). Nothing is
+   visible yet. Prepare runs no hook and reads no storage: admission already
+   ran once in step 2, on captured inputs, before Prepare (the pre-publish
+   hook is removed, review R1.7, so nothing touches storage under
+   `configsvc.updateMu`).
+4. **Lock and hooks**: take the approval lock of every name step 6 writes,
+   sorted by name: servers whose generation changes, names with an
+   `UnderApprovalLock` hook (a hook name counts as changed), removes,
+   replacements, OAuth clears, and projection-repair saves of a server the
+   commit did not otherwise change (a repair can rewrite the stored
+   trust/quarantine policy that discovery reads under L1 and purge its index,
+   #1571; PR1 review round 4). A global approval-policy change takes every
+   configured server's lock. This matches plan.md §Commit pipeline step 4 and
+   tasks.md T023. Then run the approval hooks registered with
    `tx.UnderApprovalLock(name, fn)`. These are the review-bound server
    approval steps from Spec 117 (validate, record the decision, baseline and
    blocks, promote). A hook error aborts the commit. Hooks may write only in

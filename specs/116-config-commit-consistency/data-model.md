@@ -129,7 +129,7 @@ func (s *Snapshot) ServerGeneration(name string) (ServerGen, bool)
 
 type PreparedSnapshot struct {
     base   int64            // Version this was prepared against
-    snap   *Snapshot        // pre-publish hook applied; observers not yet run
+    snap   *Snapshot        // admission applied in commit step 2 (no pre-publish hook, R1.7); observers not yet run
 }
 
 // Prepare takes the transaction's replacement set explicitly (review R8.2):

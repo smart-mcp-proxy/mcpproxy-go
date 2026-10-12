@@ -15,8 +15,10 @@ import (
 type upstreamWriter interface {
 	createServer(sc *config.ServerConfig) error
 	// updateServer runs fn on a copy of the live entry inside the commit;
-	// an error from fn aborts with nothing written.
-	updateServer(name string, fn func(cur *config.ServerConfig) error) error
+	// an error from fn aborts with nothing written. It returns the server's
+	// committed generation, or 0 when the commit changed nothing for it (the
+	// running instance already is the right one) or the writer has none.
+	updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error)
 	removeServer(name string) error
 	quarantineServer(name string) error
 }
@@ -49,11 +51,17 @@ func (w commitUpstreamWriter) createServer(sc *config.ServerConfig) error {
 	return w.s.createServer(sc)
 }
 
-func (w commitUpstreamWriter) updateServer(name string, fn func(cur *config.ServerConfig) error) error {
-	_, err := w.s.runtime.Commit("mcp_update_server", func(tx *runtime.CommitTx) error {
+func (w commitUpstreamWriter) updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error) {
+	res, err := w.s.runtime.Commit("mcp_update_server", func(tx *runtime.CommitTx) error {
 		return tx.UpdateServer(name, fn)
 	})
-	return err
+	if err != nil || res == nil {
+		return 0, err
+	}
+	if ch, ok := res.Changes[name]; ok {
+		return ch.New.Gen, nil
+	}
+	return 0, nil
 }
 
 func (w commitUpstreamWriter) removeServer(name string) error {

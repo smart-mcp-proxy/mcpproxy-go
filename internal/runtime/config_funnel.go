@@ -84,7 +84,7 @@ func (r *Runtime) MutateConfig(
 		mutateErr = err
 		return nil, err
 	}
-	result, applyErr := r.applyConfigWith(r.funnelConfigPath(), func(base *config.Config) (*config.Config, error) {
+	result, applyErr := r.applyConfigWith(func(base *config.Config) (*config.Config, error) {
 		var err error
 		before, err = r.GetDesiredConfig()
 		if err != nil {
@@ -167,6 +167,8 @@ func (e *configValidationFailure) Error() string { return e.errs[0].Error() }
 
 // funnelConfigPath is the file a funnel write saves to: the runtime's config
 // path, else the data dir's default (the path Server.GetConfigPath reports).
+// The funnel reads it inside its commit (applyConfigWith), never before the
+// commit lock: a pre-lock read goes stale when a queued commit moves the file.
 func (r *Runtime) funnelConfigPath() string {
 	if path := r.ConfigPath(); path != "" {
 		return path

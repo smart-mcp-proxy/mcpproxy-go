@@ -37,22 +37,22 @@ func (w bareStorageWriter) createServer(sc *config.ServerConfig) error {
 	return nil
 }
 
-func (w bareStorageWriter) updateServer(name string, fn func(cur *config.ServerConfig) error) error {
+func (w bareStorageWriter) updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error) {
 	cur, err := w.find(name)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := fn(cur); err != nil {
-		return err
+		return 0, err
 	}
 	if err := w.p.storage.UpdateUpstream(name, cur); err != nil {
-		return err
+		return 0, err
 	}
 	w.p.upstreamManager.RemoveServer(name)
 	if cur.Enabled {
 		_ = w.p.upstreamManager.AddServer(name, cur)
 	}
-	return nil
+	return 0, nil
 }
 
 func (w bareStorageWriter) removeServer(name string) error {
