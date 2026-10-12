@@ -251,3 +251,52 @@ func TestConnect_AttemptAdmittedAfterReconnectTeardownOwnsTheClient(t *testing.T
 	_, err = mc.ListTools(ctx)
 	require.NoError(t, err, "the client must be usable, not Ready over the closed transport")
 }
+
+// TestReconnectTeardown_ExcludesConnectAdmission pins the round-3 fix: from
+// the sequence bump through the transport close to the state reset, the
+// reconnect teardown holds mc.mu, the lock Connect's admission (phase 1)
+// takes, so no attempt can be admitted inside that window and capture a
+// sequence that the teardown will not supersede. Checked at the point
+// between the close and the reset, for both helpers.
+func TestReconnectTeardown_ExcludesConnectAdmission(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
+	ts := servertest.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(ts.Close)
+
+	for _, helper := range []string{"TryReconnectSync", "tryReconnect"} {
+		t.Run(helper, func(t *testing.T) {
+			cfg := &config.ServerConfig{Name: "race-window", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
+			mc, err := NewClient("race-window", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = mc.Disconnect() })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, mc.Connect(ctx))
+			mc.StateManager.SetError(errors.New("simulated health-check failure"))
+
+			ran, admissionOpen := false, false
+			mid := func() {
+				ran = true
+				if mc.mu.TryLock() {
+					admissionOpen = true
+					mc.mu.Unlock()
+				}
+			}
+			mc.reconnectMidTeardown.Store(&mid)
+			t.Cleanup(func() { mc.reconnectMidTeardown.Store(nil) })
+
+			if helper == "TryReconnectSync" {
+				require.NoError(t, mc.TryReconnectSync(ctx))
+			} else {
+				mc.tryReconnect()
+			}
+			require.True(t, ran, "teardown seam did not run")
+			require.False(t, admissionOpen,
+				"Connect admission (mc.mu) must be closed between the transport close and the state reset")
+			require.True(t, mc.IsConnected())
+		})
+	}
+}

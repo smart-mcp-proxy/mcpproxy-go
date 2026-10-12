@@ -96,6 +96,9 @@ type Client struct {
 	// TryReconnectSync after they tore the connection down and before their
 	// replacement Connect starts. Nil in production.
 	reconnectAfterTeardown atomic.Pointer[func()]
+	// reconnectMidTeardown is a test seam run inside teardownForReconnect
+	// between the transport close and the state reset. Nil in production.
+	reconnectMidTeardown atomic.Pointer[func()]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -1737,6 +1740,9 @@ func (mc *Client) teardownForReconnect(reset func()) error {
 	var err error
 	if mc.coreClient != nil {
 		err = mc.coreClient.Disconnect()
+	}
+	if hook := mc.reconnectMidTeardown.Load(); hook != nil {
+		(*hook)()
 	}
 	reset()
 	return err
