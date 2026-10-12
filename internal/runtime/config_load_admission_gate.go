@@ -400,7 +400,7 @@ func (r *Runtime) gateInitialConfig() {
 		return
 	}
 	r.seedCommitGeneration()
-	if _, err := r.Commit("config_load_admission_gate", func(tx *CommitTx) error {
+	if _, err := r.Commit(commitReasonAdmissionGate, func(tx *CommitTx) error {
 		tx.ReconcileLive()
 		tx.noDisk()
 		tx.noWorkers()

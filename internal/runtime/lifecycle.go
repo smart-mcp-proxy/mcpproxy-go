@@ -1794,6 +1794,12 @@ func (r *Runtime) ReloadConfiguration() error {
 		// cadence must follow disk reloads too.
 		tx.publishHook(func(o, n *config.Config) {
 			r.applyComponentConfigLocked(o, n)
+			// Spec 079 FR-012: re-gate the update checker on the disk-reload
+			// path too (ApplyConfig covers the API path). Applied here, under
+			// the commit lock, so checker state follows commit order: run
+			// after the commit, a reload paused past publication could apply
+			// its older update_check over a newer commit's (review round 8).
+			r.applyUpdateCheckConfig(n)
 		})
 		return nil
 	})
@@ -1820,11 +1826,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	}
 
 	// MCP-2482 (telemetry opt-out beacon) is covered by the commit's telemetry
-	// notification. Spec 079 FR-012: re-gate the update checker on the
-	// disk-reload path too (ApplyConfig covers the API path).
-	if running != nil {
-		r.applyUpdateCheckConfig(running)
-	}
+	// notification; the update checker is re-gated in the publish hook above.
 
 	go r.postConfigReload()
 

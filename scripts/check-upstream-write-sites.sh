@@ -12,7 +12,8 @@
 # including the exported alias AddUpstream (it calls SaveUpstreamServer) and
 # the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
 # EnableServerAsync, QuarantineServerAsync), which write rows from a worker.
-# Whole-line comments are ignored.
+# A selector split across lines (`st.` then `SaveUpstreamServer(sc)`) is
+# matched too. Whole-line comments are ignored.
 #
 # Usage: scripts/check-upstream-write-sites.sh [ROOT]
 # ROOT defaults to the repository root. Exit 0 = clean, 1 = a hit (printed).
@@ -40,6 +41,31 @@ hits="$(grep -rnE "\.(${methods})([^A-Za-z0-9_]|$)" "${dirs[@]}" --include='*.go
   | grep -vE '^internal/storage/' \
   | grep -vE '^internal/runtime/commit[^/]*\.go:' \
   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)' || true)"
+
+# A selector split across lines is valid Go and gofmt keeps it split:
+# `return st.` then `SaveUpstreamServer(sc)` (review round 8). Join each code
+# line ending in `.` with the next code line (blank lines, line comments and
+# whole-line block-comment lines in between are skipped) and apply the same
+# match to the method name that starts it.
+files="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go' 2>/dev/null \
+  | grep -vE '^internal/storage/' \
+  | grep -vE '^internal/runtime/commit[^/]*\.go$' || true)"
+if [[ -n "$files" ]]; then
+  split_hits="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk -v re="^(${methods})([^A-Za-z0-9_]|$)" '
+    FNR == 1 { prev = "" }
+    {
+      code = $0
+      sub(/\/\/.*$/, "", code)
+      gsub(/^[ \t]+|[ \t]+$/, "", code)
+      if (code == "" || code ~ /^(\*|\/\*)/) next
+      if (prev ~ /\.$/ && code ~ re) print FILENAME ":" FNR ":" $0
+      prev = code
+    }' 2>/dev/null || true)"
+  if [[ -n "$split_hits" ]]; then
+    hits="${hits:+$hits
+}$split_hits"
+  fi
+fi
 
 if [[ -n "$hits" ]]; then
   echo "Spec 116 FR-009: upstreams rows written outside the config commit (use runtime.Commit):"

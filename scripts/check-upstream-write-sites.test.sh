@@ -6,8 +6,8 @@
 # (must exit 1), each AsyncManager queue writer (SaveServerAsync,
 # DeleteServerAsync, EnableServerAsync, QuarantineServerAsync; must exit 1), the same call in a test file, in internal/storage and in
 # internal/runtime/commit.go (must exit 0), the AddUpstream alias (exit 1), a
-# method value such as `save := st.SaveUpstreamServer` (exit 1), and a whole-line comment (must
-# exit 0). Then runs the real script on the repository (must exit 0).
+# method value such as `save := st.SaveUpstreamServer` (exit 1), a selector
+# split across lines (exit 1), and a whole-line comment (must exit 0). Then runs the real script on the repository (must exit 0).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +68,20 @@ methodarg="$(mkroot planted-method-arg)"
 echo '	run(st.QuarantineServerAsync, name)' > "$methodarg/internal/server/a.go"
 expect "planted QuarantineServerAsync method value passed as an argument" 1 "$methodarg"
 
+# A selector split across lines (valid Go, kept split by gofmt) is the same
+# call or method value (review round 8): `return st.` then
+# `SaveUpstreamServer(sc)`, a blank line or a comment in between, or
+# `(*BoltDB).` then the method value.
+multicall="$(mkroot planted-multiline-call)"
+printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$multicall/internal/server/a.go"
+expect "planted multiline SaveUpstreamServer call in internal/server" 1 "$multicall"
+multigap="$(mkroot planted-multiline-gap)"
+printf '\treturn st. // the store\n\n\t\t// still the store\n\t\tQuarantineServerAsync(name, true)\n' > "$multigap/internal/server/a.go"
+expect "planted multiline call across a blank line and comments" 1 "$multigap"
+multival="$(mkroot planted-multiline-value)"
+printf '\tsave := (*BoltDB).\n\t\tSaveUpstreamServer\n' > "$multival/internal/server/a.go"
+expect "planted multiline SaveUpstreamServer method value in internal/server" 1 "$multival"
+
 allowed="$(mkroot allowed)"
 echo '	_ = m.SaveUpstreamServer(sc)' > "$allowed/internal/storage/manager.go"
 echo '	save := m.SaveUpstreamServer' > "$allowed/internal/storage/value.go"
@@ -79,6 +93,10 @@ echo '	_, _ = st.AddUpstream(sc)' > "$allowed/internal/server/c_test.go"
 echo '	err := r.storageManager.ApplyServerCommit(batch)' > "$allowed/internal/runtime/commit.go"
 echo '	require.NoError(t, st.SaveUpstreamServer(sc))' > "$allowed/internal/server/a_test.go"
 echo '	// a direct SaveUpstreamServer( here would be a second source' > "$allowed/internal/server/b.go"
+printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/storage/multi.go"
+printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/server/multi_test.go"
+printf '\tx := st.\n\t\tSaveUpstreamServerCount\n' > "$allowed/internal/server/multi_longer.go"
+printf '\t// ends with a dot.\n\tSaveUpstreamServer := 1\n' > "$allowed/internal/server/not_selector.go"
 expect "storage, commit.go, tests and comments are allowed" 0 "$allowed"
 
 if bash "$CHECK" >/dev/null 2>&1; then

@@ -394,8 +394,11 @@ func (tx *CommitTx) EventExtra(extra map[string]any) {
 }
 
 const (
-	commitReasonBoot       = "boot"
-	commitReasonFileReload = "file_reload"
+	commitReasonBoot = "boot"
+	// commitReasonAdmissionGate is the startup admission commit
+	// (gateInitialConfig), which runs before the boot commit.
+	commitReasonAdmissionGate = "config_load_admission_gate"
+	commitReasonFileReload    = "file_reload"
 )
 
 // commitState is the runtime's commit bookkeeping (embedded in Runtime).
@@ -1073,8 +1076,10 @@ func (r *Runtime) commitOAuthClears(tx *CommitTx, changes map[string]ServerChang
 
 // commitOrphanGC drops tool-approval records and call history of servers that
 // are not in the new configuration (MCP-1002, #1176), using the commit's
-// working copy (FR-005). The empty-set guard applies only to the boot
-// reconcile.
+// working copy (FR-005). The empty-set guard applies only at startup: the
+// admission commit and the boot reconcile (review round 8: the admission
+// commit runs first, so guarding only the boot commit pruned every approval
+// before the guard was reached).
 func (r *Runtime) commitOrphanGC(tx *CommitTx) {
 	if r.storageManager == nil {
 		return
@@ -1083,7 +1088,7 @@ func (r *Runtime) commitOrphanGC(tx *CommitTx) {
 	for _, sc := range tx.next.Servers {
 		names = append(names, sc.Name)
 	}
-	if len(names) == 0 && tx.reason == commitReasonBoot {
+	if len(names) == 0 && (tx.reason == commitReasonBoot || tx.reason == commitReasonAdmissionGate) {
 		return
 	}
 	if pruned, err := r.storageManager.PruneOrphanToolApprovals(names); err != nil {
