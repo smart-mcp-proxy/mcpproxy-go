@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	gruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -2109,16 +2110,29 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		return fmt.Errorf("failed to save server: %w", err)
 	}
 
+	// Security (#1561, class of #1061): a PATCH that quarantines the server must
+	// take its tool descriptions out of the search index exactly as the dedicated
+	// quarantine path does. Reconcile cannot do it later: storage already says
+	// quarantined, so it never sees the transition. Done right after the
+	// quarantined flag is durable and before the change notification, which may
+	// kick off discovery.
+	if updates.QuarantineExplicitlySet() && existing.Quarantined {
+		s.runtime.PurgeQuarantinedServerFromIndex(serverName)
+	}
+
 	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
+	// Copy-on-write: the published config (and its Servers slice) is read
+	// lock-free by the supervisor and others, so never mutate it in place.
+	if published := s.runtime.Config(); published != nil {
+		currentConfig := *published
+		currentConfig.Servers = slices.Clone(published.Servers)
 		for i, sc := range currentConfig.Servers {
 			if sc.Name == serverName {
 				currentConfig.Servers[i] = existing
 				break
 			}
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
+		s.runtime.UpdateConfig(&currentConfig, "")
 	}
 
 	// Save configuration to file

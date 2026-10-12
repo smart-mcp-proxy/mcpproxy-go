@@ -26,6 +26,7 @@ var callRecorderKey callRecorderKeyType
 type CallRecorder struct {
 	mu         sync.Mutex
 	dispatched bool
+	dispatches int
 	requests   int
 	responses  int
 	lastStatus int
@@ -36,6 +37,11 @@ type CallRecorderSnapshot struct {
 	// Dispatched is true once the call was handed to the mcp-go client
 	// (MarkDispatched), for every transport, including stdio.
 	Dispatched bool
+	// Dispatches is how many times the call was handed to the mcp-go client.
+	// It is 1 for an ordinary call and 2 when session recovery repeated the
+	// request on a re-initialized session; 0 when a core-level check (not
+	// connected, ...) refused it before the hand-off.
+	Dispatches int
 	// Requests is the number of HTTP requests that carried the recorder.
 	Requests int
 	// Responses is how many of them produced an HTTP response.
@@ -65,6 +71,7 @@ func MarkDispatched(ctx context.Context) {
 	if rec := CallRecorderFrom(ctx); rec != nil {
 		rec.mu.Lock()
 		rec.dispatched = true
+		rec.dispatches++
 		rec.mu.Unlock()
 	}
 }
@@ -79,6 +86,7 @@ func (r *CallRecorder) Snapshot() CallRecorderSnapshot {
 	defer r.mu.Unlock()
 	return CallRecorderSnapshot{
 		Dispatched: r.dispatched,
+		Dispatches: r.dispatches,
 		Requests:   r.requests,
 		Responses:  r.responses,
 		LastStatus: r.lastStatus,

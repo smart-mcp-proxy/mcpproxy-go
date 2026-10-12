@@ -334,6 +334,9 @@ func (p *MCPProxyServer) runProfilesOperation(ctx context.Context, args map[stri
 		if !present {
 			return nil, missingArg(op, "tier")
 		}
+		if tier == profilesTierNone {
+			tier = "" // advertised sentinel -> internal reset (#1576)
+		}
 		return rt.ProfilesService().Classify(ctx, profilesActor(ctx), name, tool, tier)
 	case "assign":
 		return p.profilesAssign(ctx, rt, views, args)

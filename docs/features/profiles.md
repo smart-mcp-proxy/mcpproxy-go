@@ -129,6 +129,8 @@ Set `anonymous_profile` to confine every caller that presents no credential (or 
 
 ### The binding guard
 
+On MCP, the `profiles` tool's `classify` operation takes `tier` of `read`, `write`, `destructive` or `none`; `none` removes the classification (the schema advertises no empty-string enum member because Google Gemini rejects one; a legacy `""` is still accepted).
+
 While `require_mcp_auth` is **off**, a client bound to a named profile could escape it by simply omitting its credential. MCPProxy refuses any change that would leave such a binding bypassable: connecting, rebinding, bulk moves, and also profile edits, classification changes, deletes and `reassign_to` that narrow what a binding reaches or widen what anonymous callers reach. The refusal is `409` with code `binding_bypassable_without_auth`:
 
 ```
@@ -153,7 +155,7 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 | Try a draft | Try it | Try it | `profile try` | not offered | `POST /profiles/try` |
 | Explain access | Explain access | Explain access | `access explain` | `profiles explain` | `GET /access/explain` |
 
-**Try it** runs a real `retrieve_tools` under the unsaved draft and shows what is returned and what is hidden with reasons, without saving anything. The tool table and its counts show the saved profile: *allowed by profile* is the profile's policy only; for administrators each row is also marked *Callable now* or *Held* (allowed here but waiting on a later gate such as tool approval, with the reason and an **Explain access** button), and the header counts callable and held tools. A caller who is not an administrator sees only *allowed by profile* and *hidden*. The same words are used by `mcpproxy profile show --effective` and `mcpproxy tools --profile`; while you have unsaved edits they are labelled "Saved profile". Try it says whether it used your unsaved edits.
+**Try it** runs a real `retrieve_tools` under the unsaved draft and shows what is returned and what is hidden with reasons, without saving anything. The tool table and its counts show the saved profile: *allowed by profile* is the profile's policy only; for administrators each row is also marked *Callable now* or *Held* (allowed here but waiting on a later gate such as tool approval, with the reason and an **Explain access** button), and the header counts callable and held tools. A caller who is not an administrator sees only *allowed by profile* and *hidden*. The same words are used by `mcpproxy profile show --effective` and `mcpproxy tools list --profile`; while you have unsaved edits they are labelled "Saved profile". Try it says whether it used your unsaved edits.
 
 **Deleting a profile** that clients, tokens or `anonymous_profile` still use is refused with `409 profile_in_use` (listing who) until you give `reassign_to`; `force` leaves the references dangling, which denies everything and never widens. A profile that is the `anonymous_profile` is refused even with `force`. **Renaming** moves every pin, binding, `switchable_to` and `anonymous_profile` reference to the new name.
 

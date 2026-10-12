@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -95,7 +96,15 @@ For stdio-based servers (use -- to separate command):
   mcpproxy upstream add fs -- npx -y @anthropic/mcp-server-filesystem /path/to/dir
   mcpproxy upstream add sqlite -- uvx mcp-server-sqlite --db mydb.db
 
-New servers are quarantined by default for security. Use the web UI to approve them.`,
+New servers are quarantined by default for security. Review and admit one
+without leaving the CLI:
+  mcpproxy review fetch <name>       # capture its tool definitions (if none yet)
+  mcpproxy review show <name>        # inspect the tools and scan verdicts
+  mcpproxy security scan <name>      # scan it (approval needs a scan result)
+  mcpproxy security report <name>    # read the scan report
+  mcpproxy review approve <name> --yes   # admit it ('mcpproxy security approve <name>' is an alias)
+
+The Web UI and macOS app offer the same review screen.`,
 		RunE: runUpstreamAdd,
 	}
 
@@ -1666,12 +1675,80 @@ func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req
 		fmt.Println(output)
 	} else {
 		fmt.Printf("✅ Added server '%s'\n", req.Name)
-		if result != nil && result.Quarantined {
-			fmt.Println("   ⚠️  New servers are quarantined by default. Approve in the web UI.")
+		switch needs, known := daemonServerNeedsReview(ctx, client, req.Name, result); {
+		case needs:
+			printQuarantineNextSteps(os.Stdout, req.Name, true)
+		case !known:
+			// The state could not be read back; do not claim it is quarantined
+			// or admitted, only say what to run if it is waiting for review.
+			printConditionalNextSteps(os.Stdout, req.Name, true)
 		}
 	}
 
 	return true, nil
+}
+
+// daemonServerNeedsReview reports whether the just-added server is waiting for
+// review. POST /api/v1/servers answers with a ServerActionResponse that carries
+// no quarantine state, so the real state is read back from the server list;
+// the add result's own flag is only the fallback when that read fails.
+func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name string, result *cliclient.AddServerResult) (needs, known bool) {
+	servers, err := client.GetServers(ctx)
+	if err == nil {
+		for _, srv := range servers {
+			if n, _ := srv["name"].(string); n != name {
+				continue
+			}
+			if q, _ := srv["quarantined"].(bool); q {
+				return true, true
+			}
+			if h, ok := srv["health"].(map[string]interface{}); ok {
+				if st, _ := h["admin_state"].(string); st == "quarantined" {
+					return true, true
+				}
+				if st, _ := h["status"].(string); st == "needs_review" {
+					return true, true
+				}
+			}
+			return false, true
+		}
+	}
+	// Readback failed or the server is not listed: only the add result's own
+	// flag (normally absent) says anything.
+	if result != nil && result.Quarantined {
+		return true, true
+	}
+	return false, false
+}
+
+// printQuarantineNextSteps tells a terminal user how to review and admit a
+// freshly added (quarantined) server using only CLI commands (ACT-02).
+func printQuarantineNextSteps(w io.Writer, name string, daemonRunning bool) {
+	fmt.Fprintf(w, "   ⚠️  '%s' is quarantined: its tools stay hidden and uncallable until you approve it.\n", name)
+	fmt.Fprintln(w, "   Next steps:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+// printConditionalNextSteps is the guidance for when the server's admission
+// state could not be read back after the add: it asserts neither quarantine
+// nor admission.
+func printConditionalNextSteps(w io.Writer, name string, daemonRunning bool) {
+	fmt.Fprintf(w, "   Could not confirm whether '%s' needs review. New servers are usually quarantined.\n", name)
+	fmt.Fprintln(w, "   If it is waiting for review:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+func printReviewSteps(w io.Writer, name string, daemonRunning bool) {
+	step := func(cmd, why string) { fmt.Fprintf(w, "     %-*s # %s\n", 36+len(name), cmd, why) }
+	if !daemonRunning {
+		step("mcpproxy serve", "start the daemon (review commands talk to it)")
+	}
+	step("mcpproxy review fetch "+name, "capture its tool definitions (if none yet)")
+	step("mcpproxy review show "+name, "inspect the tools and scan verdicts")
+	step("mcpproxy security scan "+name, "scan it (approval needs a scan result)")
+	step("mcpproxy security report "+name, "read the scan report")
+	step("mcpproxy review approve "+name+" --yes", "admit it (alias: mcpproxy security approve "+name+")")
+	fmt.Fprintln(w, "   Or review it in the Web UI / macOS app.")
 }
 
 // runUpstreamAddConfigMode returns (added, err) — see runUpstreamAddDaemonMode.
@@ -1736,7 +1813,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	// Output success
 	fmt.Printf("✅ Added server '%s' to config\n", req.Name)
 	if quarantined {
-		fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
+		printQuarantineNextSteps(os.Stdout, req.Name, false)
 	}
 
 	return true, nil

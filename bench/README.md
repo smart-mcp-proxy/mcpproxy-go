@@ -53,14 +53,24 @@ only** (schemas excluded uniformly — see limitations), `cl100k_base`:
 | Mode | Context tools | Tokens | Savings vs. baseline |
 |------|---------------|--------|----------------------|
 | `baseline` | 45 | 1730 | — |
-| `retrieve_tools` | 10 | 1431 | **~17%** |
-| `code_execution` | 6 | 986 | **~43%** |
+| `retrieve_tools` | 14 | 2625 | **-52%** (menu is larger than the baseline) |
+| `code_execution` | 9 | 1874 | **-8%** (menu is larger than the baseline) |
 
-These are deliberately modest: the proxy context here is the *full* per-mode
-tool set (discovery + call-tool variants + management tools), and the corpus is
-small. Savings grow toward the asymptote as the upstream tool count rises (the
-baseline grows linearly while the proxy context stays fixed) — always quote the
-corpus size alongside a percentage. Reproduce with `go run ./bench/cmd/bench`.
+Result as of main at c9c1ad2d1, October 2026 (re-run `go run ./bench/cmd/bench`; the
+tool counts and token totals move whenever a built-in tool is added or
+reworded). Earlier revisions of this page listed about 17% and 43% savings
+for a smaller built-in tool set; those figures no longer reproduce.
+
+What this measures: the **size of the initial tool menu**, not total workflow
+tokens, latency or task success. The proxy context is the *full* per-mode tool
+set (discovery + call-tool variants + management tools), and the corpus is
+small, so on 45 tools the proxy menu is **larger** than listing every upstream
+tool. The baseline grows linearly with the number of upstream tools (about 38
+tokens per tool here, name and description only) while the proxy menu stays
+roughly fixed, so a saving appears only above a break-even tool count
+(roughly 68 tools of this size for `retrieve_tools`, derived from the table).
+Always quote the corpus size, routing mode and what is counted alongside any
+percentage. Reproduce with `go run ./bench/cmd/bench`.
 
 ### Scoring rubric — token reduction
 

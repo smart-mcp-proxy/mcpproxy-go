@@ -1,0 +1,31 @@
+######## instance=block listen=127.0.0.1:18455
+## effective output_sanitisation / routing:
+{'output_sanitisation': {'response_action': 'block', 'strip_classes': ['ansi', 'c0c1', 'bidi', 'zero_width'], 'max_redactions': 100}, 'routing_mode': 'retrieve_tools'}
+## approve: Approved server fx: 3 tools approved, 0 blocked, 0 still pending, 0 changed
+## tools/list
+12 tools: call_tool_destructive, call_tool_read, call_tool_write, code_execution, describe_tool, list_registries, quarantine_security, read_cache, retrieve_tools, search_servers, set_profile, upstream_servers
+## call leak_read
+🚀 Intent-Based Tool Call
+   Tool: fx:leak_read
+   Variant: call_tool_read (operation_type=read)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-12T07:52:21.324+0300	INFO	mcpproxy/call_cmd.go:385	Detected running daemon, using client mode
+ℹ️  Using daemon mode - fast execution
+🔗 Calling call_tool_read via daemon socket...
+  mcpproxy call tool-read [flags]
+Flags:
+  -c, --config string        Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)
+  -h, --help                 help for tool-read
+  -j, --json_args string     JSON arguments for the tool (default: {}) (default "{}")
+  -l, --log-level string     Log level (trace, debug, info, warn, error) (default "info")
+  -o, --output string        Output format (pretty, json) (default "pretty")
+      --reason string        Human-readable explanation for the operation (max 1000 chars)
+      --sensitivity string   Data sensitivity classification: public, internal, private, unknown
+      --timeout duration     Tool call timeout (default 30s)
+  -t, --tool-name string     Tool name in format server:tool_name (required)
+Global Flags:
+  -d, --data-dir string   Data directory path (default: ~/.mcpproxy)
+      --help-json         Output help information as JSON
+      --json              Shorthand for -o json
+## activity (last tool_call)
+No activities found

@@ -81,6 +81,22 @@ mcpproxy upstream add weather --secret-env WEATHER_API_KEY=abc123 -- npx -y weat
 
 `--secret-env KEY=VALUE` and `--secret-header "Name: value"` (both repeatable) write the value to the OS keyring and store `${keyring:<server>-env-<name>}` in the config instead of the value. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
 
+A successful add prints the next commands, so you can review and admit the server without leaving the terminal:
+
+```text
+✅ Added server 'fs'
+   ⚠️  'fs' is quarantined: its tools stay hidden and uncallable until you approve it.
+   Next steps:
+     mcpproxy review fetch fs           # capture its tool definitions (if none yet)
+     mcpproxy review show fs            # inspect the tools and scan verdicts
+     mcpproxy security scan fs          # scan it (approval needs a scan result)
+     mcpproxy security report fs        # read the scan report
+     mcpproxy review approve fs --yes   # admit it (alias: mcpproxy security approve fs)
+   Or review it in the Web UI / macOS app.
+```
+
+When the daemon is not running (the server was written to the config file only), the output starts with `mcpproxy serve`, because the review commands talk to the daemon. The same list is in `mcpproxy upstream add --help`.
+
 ### Review and Approve
 
 New servers and new or changed tools wait for review. `mcpproxy review` is the one entry point (see [Review Commands](/cli/review-commands)); the older verbs stay as documented aliases:

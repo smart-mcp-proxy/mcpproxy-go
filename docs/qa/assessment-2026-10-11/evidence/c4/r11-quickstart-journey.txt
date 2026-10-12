@@ -1,0 +1,56 @@
+# binary
+MCPProxy v0.1.0 (personal) darwin/arm64
+head: a49b87ac01b1c0efffcef4573f1165960231cb9d
+## 1 upstream add (local stdio fixture in place of Context7)
+✅ Added server 'fx'
+   ⚠️  'fx' is quarantined: its tools stay hidden and uncallable until you approve it.
+   Next steps:
+     mcpproxy review fetch fx               # capture its tool definitions (if none yet)
+     mcpproxy review show fx                # inspect the tools and scan verdicts
+     mcpproxy security scan fx              # scan it (approval needs a scan result)
+## upstream list
+   NAME  PROTOCOL  TOOLS  STATUS                         ACTION
+🔒  fx    stdio     0      Needs review · 3 pending held  review show fx
+## 2 review fetch
+Captured 3 tool definitions for fx (server remains quarantined; nothing was approved).
+Review them with: mcpproxy review show fx
+## 2 rescan
+  Docker isolation: false
+  Tools analyzed:   3
+
+=== Security Scan (Pass 1) ===
+  0 findings
+
+=== Supply Chain Audit (Pass 2) ===
+  Not started
+## 2 review show
+Server: fx
+Scan: clean · risk 0/100 · covers all 3 tools
+TOOL       TIER  APPROVAL  SCAN   DESCRIPTION
+echo_read  read  pending   clean  Echo the given text back. Read-only.
+leak_read  read  pending   clean  Returns a synthetic document containing fake credentials. Read-only.
+pem_read   read  pending   clean  Returns a synthetic fake private key block. Read-only.
+## call BEFORE approve (expected blocked)
+🚀 Intent-Based Tool Call
+   Tool: fx:echo_read
+   Variant: call_tool_read (operation_type=read)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## 3 approve
+Allowing 3 of 3 tools; blocking none
+Approved server fx: 3 tools approved, 0 blocked, 0 still pending, 0 changed
+## 4 call read
+      "text": "[map[text:echo: hello type:text]]",
+      "type": "text"
+    }
+  ],
+  "isError": false
+}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 4 activity
+ID                          SRC  TYPE          SERVER  TOOL       CLIENT  PROFILE  INTENT  SENSITIVE  STATUS         DURATION  TIME
+01M4Q75KDBQMY2E6DQX1PDPWC4  CLI  tool_call     fx      echo_read  -       -        📖       -          success        1ms       just now
+01M4Q75BF1B28AEEFDVQ7V5GPA  MCP  quarantine_c  fx                 -       -        -       -          enabled        0ms       just now
+01M4Q75BEQNK5BNRHDE8E8H2S3  MCP  tool_quarant  fx      pem_read   -       -        -       -          tool_approved  0ms       just now
+
+Showing 3 of 11 records (page 1)

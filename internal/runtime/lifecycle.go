@@ -2439,6 +2439,14 @@ func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
 	r.reindexAffectedProfiles(serverName)
 }
 
+// PurgeQuarantinedServerFromIndex is the exported seam for writers outside the
+// runtime package (e.g. Server.UpdateServer behind REST PATCH, issue #1561)
+// that set the quarantine flag themselves: it runs the same purge as the
+// dedicated quarantine path instead of duplicating it.
+func (r *Runtime) PurgeQuarantinedServerFromIndex(serverName string) {
+	r.purgeQuarantinedServerFromIndex(serverName)
+}
+
 // QuarantineServer updates the quarantine state and persists the change.
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.

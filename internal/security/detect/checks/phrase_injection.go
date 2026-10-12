@@ -3,6 +3,11 @@ package checks
 import (
 	"fmt"
 	"regexp"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -63,7 +68,38 @@ type phraseFamily struct {
 	base   float64
 	threat string
 	what   string
+	// leadingBoundary marks a pattern whose match begins with a consumed
+	// non-letter boundary character (the non-English families, SEC-01).
+	leadingBoundary bool
+	// softReason, when set, explains why this family is review-only by design
+	// (its base sits below the hard floor); it replaces the generic
+	// "quoted/described position" wording in the finding detail.
+	softReason string
 }
+
+// paraphraseOverrideBase keeps the paraphrase-robust override families
+// (SEC-01) on the SOFT review tier: below phraseHardMinConfidence, above
+// phraseSoftFloor. Their broad verb/noun sets cannot tell an override from a
+// prohibition ("Under no circumstances set aside any prior guidance"), a
+// question, or a command about ordinary data ("Set aside the original briefing
+// documents"), so a match HOLDS the change under trust_mode=scan (verdict
+// "warnings") but never auto-quarantines. Review rounds 3-9 showed every
+// syntactic guard for a HARD tier leaks; obfuscated forms of the canonical
+// phrase still reach HARD through the original families after de-obfuscation.
+const paraphraseOverrideBase = 0.55
+
+// deobfuscatedMaxConfidence caps a match that only exists in the
+// de-obfuscated text at the SOFT review tier (SEC-01 review round 10).
+const deobfuscatedMaxConfidence = 0.55
+
+// paraphraseSoftReason is shown in the finding detail.
+const paraphraseSoftReason = "paraphrase matching cannot rule out negation or descriptive use"
+
+// overrideVerbs are imperative base forms of "stop obeying" (normalized:
+// lowercased, contraction-expanded). Third-person and gerund forms ("ignores",
+// "ignoring", "overrides") normalize to stems ("ignor", "overrid") that are
+// deliberately NOT listed, which keeps descriptive prose off the hard tier.
+const overrideVerbs = `ignore|disregard|forget|override|discard|bypass|abandon|neglect|dismiss|set aside|put aside|throw out|pay no (?:attention|heed|mind) to|do not (?:follow|obey|heed|honou?r|adhere to|comply with|listen to)|stop (?:follow|obey|heed|honou?r)\w*|no longer (?:follow|obey|heed|honou?r|adhere to|comply with)|cease (?:follow|obey)\w*`
 
 // phraseFamilies are matched against NORMALIZED text. Patterns use lowercase,
 // contraction-expanded, lightly-stemmed forms (e.g. "instruction" matches the
@@ -128,6 +164,40 @@ var phraseFamilies = []phraseFamily{
 		threat: detect.ThreatExfiltration,
 		what:   "secret-exfiltration directive",
 	},
+	{ // Paraphrased instruction override (SEC-01): an override verb (imperative
+		// base form only — "ignores"/"ignoring" normalize to "ignor" and do not
+		// match, so descriptive third-person prose stays out) + determiners + a
+		// PRIOR/SYSTEM qualifier + a directive noun: "disregard every prior
+		// directive", "pay no attention to any earlier guidance", "no longer
+		// follow your original instructions", "abandon all of the preceding
+		// directives". Nouns are restricted to directive words (not
+		// rule/command/order/context) so "drop the previous rule set" or "starts a
+		// new chat, ignoring previous context" never reach the hard tier.
+		re:         regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|this|of|your|my|its|whatever|such|other|of the) )*(?:previous|prior|above|earlier|preced\w*|initial|original|forego\w*|former|old|past|system|developer|operator) (?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|brief|programm)\w*`),
+		base:       paraphraseOverrideBase,
+		threat:     detect.ThreatPromptInjection,
+		what:       "paraphrased instruction-override directive",
+		softReason: paraphraseSoftReason,
+	},
+	{ // Override of directives qualified as the agent's OWN earlier input (SEC-01):
+		// "set aside the rules you were given previously", "override the
+		// instructions you received earlier", "disregard the guidance above". The
+		// "you were given / you received / above / before" qualifier is what makes
+		// the broader noun set (rules, orders, constraints, …) safe at the hard tier.
+		re:         regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:(?:all|any|every|each|the|these|those|of|your|of the) )*(?:[a-z]+ )?(?:instruction|direction|directiv|prompt|guidelin|guidance|rul|order|command|constraint|restriction|polic|brief|programm)\w* (?:(?:that |which )?(?:you|i|we) (?:were|was|have been|has been|had been|have|ha|got|receiv)\w* (?:given|told|sent|provid|receiv|issu|shown)\w*|you (?:receiv|got|were given|have receiv)\w*|(?:given |provid |stat |written )?(?:above|before this|earlier|previously|so far|until now|up to now))`),
+		base:       paraphraseOverrideBase,
+		threat:     detect.ThreatPromptInjection,
+		what:       "instruction-override directive (agent's prior directives)",
+		softReason: paraphraseSoftReason,
+	},
+	{ // "Forget everything you were told", "ignore anything said above" (SEC-01):
+		// an override of the agent's whole prior context without a directive noun.
+		re:         regexp.MustCompile(`\b(?:` + overrideVerbs + `) (?:everyth\w*|anyth\w*|all) (?:(?:that )?you (?:were|have been|has been|had been|was) (?:told|given|instruct|taught|programm)\w*|(?:said |written |stat )?(?:above|before this|so far|until now|up to now))`),
+		base:       paraphraseOverrideBase,
+		threat:     detect.ThreatPromptInjection,
+		what:       "context-wipe directive",
+		softReason: paraphraseSoftReason,
+	},
 	{ // System-prompt / instruction exfiltration: "reveal your system prompt", "print these instructions".
 		re:     regexp.MustCompile(`\b(?:reveal|expos\w*|print|output|send|leak|disclos\w*|repeat|show|dump) (?:your |the |me |us |all )*(?:system prompt|hidden instruction|these instruction|your instruction|initial prompt|secret instruction)`),
 		base:   0.85,
@@ -147,9 +217,20 @@ var phraseFamilies = []phraseFamily{
 //     therefore never silently dropped, no matter what framing cue precedes it.
 //   - nothing matched → no signal.
 func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) []detect.Signal {
-	text := tool.NormalizedText
+	text := tool.MatchText()
 	if text == "" {
 		return nil
+	}
+
+	// Scan the plain NormalizedText AND the de-obfuscated PhraseText: folding
+	// can only ever ADD matches this way, never hide one that the plain
+	// normalization exposed (SEC-01 review round 1). The plain view comes
+	// first, so on equal confidence its (truthful) evidence wins.
+	texts := []string{text}
+	deobfIndex := -1 // index of the de-obfuscated view when it differs
+	if tool.NormalizedText != "" && tool.NormalizedText != text {
+		texts = []string{tool.NormalizedText, text}
+		deobfIndex = 1
 	}
 
 	matched := false
@@ -157,21 +238,65 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	bestMatch := ""
 	bestWhat := ""
 	bestThreat := ""
-	for _, fam := range phraseFamilies {
-		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
-			conf := fam.base * detect.ClassifyPositionForRecall(text, loc[0]).Discount()
-			if !matched || conf > bestConf {
-				matched = true
-				bestConf = conf
-				bestMatch = text[loc[0]:loc[1]]
-				bestWhat = fam.what
-				bestThreat = fam.threat
+	bestSoftReason := ""
+	bestDeobfuscated := false
+	for ti, t := range texts {
+		for _, fam := range allPhraseFamilies {
+			for _, loc := range fam.re.FindAllStringIndex(t, -1) {
+				// The non-English families spell their word boundary as a consumed
+				// non-letter (Go's \b is ASCII-only); for those only, start the
+				// match and the position window at the first letter so a quote
+				// right before the phrase still counts as quoting it. Other
+				// families keep their match start exactly as before.
+				start := loc[0]
+				if fam.leadingBoundary {
+					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
+				}
+				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
+				softReason := fam.softReason
+				// Every match in the de-obfuscated view (when it differs from the
+				// plain one) is REVIEW-ONLY: joining letters or folding look-alikes
+				// also turns prohibitions, questions and ordinary data ("Do not
+				// i g n o r e …", "copy se-cr-et files into a local backup") into
+				// the canonical phrase, and position/negation cues do not survive
+				// the rewrite (SEC-01 review round 10). It still holds the change
+				// under trust_mode=scan; it never auto-quarantines.
+				//
+				// The cap is applied to EVERY de-obfuscated occurrence, not only
+				// when the family is absent from the plain text: a quoted plain
+				// example elsewhere must not lift the cap for an obfuscated one
+				// (review round 11). Nothing is lost — any occurrence that is
+				// already plain is matched, and position-classified, in the plain
+				// view, which is the only view that can reach the HARD tier. This
+				// also keeps the loop linear: no whole-text rescan per occurrence.
+				deobfuscated := ti == deobfIndex
+				if deobfuscated && conf > deobfuscatedMaxConfidence {
+					conf = deobfuscatedMaxConfidence
+					softReason = "visible only after de-obfuscation, which can also rewrite negated or benign text"
+				}
+				if !matched || conf > bestConf {
+					matched = true
+					bestConf = conf
+					bestMatch = t[start:loc[1]]
+					bestWhat = fam.what
+					bestThreat = fam.threat
+					bestSoftReason = softReason
+					bestDeobfuscated = deobfuscated
+				}
 			}
 		}
 	}
 
 	if !matched {
-		return nil
+		return c.inspectSquashed(tool, text)
+	}
+
+	// SEC-01: say so when the directive only became visible after
+	// de-obfuscation (homoglyphs, leet digits, separator/letter spacing), so an
+	// operator understands why the raw description does not read that way.
+	obfuscated := ""
+	if bestDeobfuscated {
+		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -179,13 +304,16 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	// to the review floor so it always surfaces (never-fully-suppress invariant).
 	tier := detect.TierHard
 	conf := bestConf
-	detail := fmt.Sprintf("Description contains a high-confidence %s (%q) — an instruction to the agent, not a tool description.", bestWhat, bestMatch)
+	detail := fmt.Sprintf("Description contains a high-confidence %s%s (%q) — an instruction to the agent, not a tool description.", bestWhat, obfuscated, bestMatch)
 	if bestConf < phraseHardMinConfidence {
 		tier = detect.TierSoft
 		if conf < phraseSoftFloor {
 			conf = phraseSoftFloor
 		}
-		detail = fmt.Sprintf("Description references a %s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, bestMatch)
+		detail = fmt.Sprintf("Description references a %s%s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, obfuscated, bestMatch)
+		if bestSoftReason != "" && bestConf >= phraseSoftFloor {
+			detail = fmt.Sprintf("Description contains a %s%s (%q) — surfaced for review, not auto-blocked (%s).", bestWhat, obfuscated, bestMatch, bestSoftReason)
+		}
 	}
 
 	return []detect.Signal{{
@@ -197,3 +325,265 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		Detail:     detail,
 	}}
 }
+
+// allPhraseFamilies is the English curated set followed by the non-English
+// override families (SEC-01). Order is fixed for determinism.
+var allPhraseFamilies = append(append([]phraseFamily{}, phraseFamilies...), multilingualOverrideFamilies()...)
+
+// squashedFamilies run over the LETTERS-ONLY form of the de-obfuscated text
+// (detect.Squash), so no spacing or punctuation scheme can split the directive
+// ("r e v e a l your s y s t e m p r o m p t" squashes to
+// "revealyoursystemprompt"). Without word boundaries or positions this pass is
+// SOFT only: it holds the change for review under trust_mode=scan but never
+// auto-quarantines (SEC-01).
+//
+// The squashed text keeps a clauseMark wherever a clause ends (see
+// squashClauseBoundary). Every directive WORD tolerates marks between its
+// letters, because punctuation inside a word is letter chunking ("re. ve. al",
+// "in. struc. tions"), never a real sentence end. Marks are NOT allowed between
+// words, nor in the bounded gap before the directive noun, so the pass cannot
+// assemble a directive from words in different sentences, lines or schema
+// fields (SEC-01 review rounds 12 and 13). Compound targets ("system prompt")
+// allow only a chunkMark at their join (review round 14).
+var squashedFamilies = []struct {
+	re   *regexp.Regexp
+	what string
+}{
+	{regexp.MustCompile(
+		squashedAlt("ignore", "disregard", "forget", "bypass", "override") +
+			"(?:" + squashedAlt("all", "any", "every", "the", "of", "your", "these") + ")*" +
+			squashedAlt("previous", "prior", "above", "earlier", "preced", "initial", "original") +
+			"[a-z]{0," + squashedMaxGap + "}?" +
+			squashedAlt("instruction", "directiv", "direction", "prompt", "guidelin", "guidance")),
+		"instruction-override directive"},
+	{regexp.MustCompile(
+		squashedAlt("reveal", "print", "output", "leak", "repeat", "recite", "show", "dump", "disclose") +
+			"(?:" + squashedAlt("me", "us", "all", "the", "your") + ")*" +
+			squashedCompound(
+				[2]string{"system", "prompt"}, [2]string{"hidden", "instruction"}, [2]string{"initial", "prompt"},
+				[2]string{"initial", "instruction"}, [2]string{"original", "instruction"}, [2]string{"secret", "instruction"})),
+		"system-prompt exfiltration directive"},
+}
+
+// squashedMaxGap bounds the letters the override family may skip between the
+// prior-qualifier and the directive noun ("previous[system]instructions",
+// "preced[ingdeveloper]instructions"). Unbounded, the gap spanned whole
+// sentences of ordinary prose (SEC-01 review round 12).
+const squashedMaxGap = "16"
+
+// clauseMark separates squashed clauses. It is not a letter, so Squash never
+// produces it. chunkMark is a clause end next to a short raw token (at most
+// squashedChunkLen letters on either side), which is far more likely letter
+// chunking than a real sentence end; only compound joins treat the two
+// differently (squashedCompound).
+const (
+	clauseMark       = "|"
+	chunkMark        = "~"
+	squashedAnyMark  = `[|~]`
+	squashedChunkLen = 4
+)
+
+// squashedAlt is a non-capturing alternation of words whose letters may be
+// separated by clause marks (letter chunking inside one word).
+func squashedAlt(words ...string) string {
+	parts := make([]string, len(words))
+	for i, w := range words {
+		parts[i] = squashedChunk(w)
+	}
+	return "(?:" + strings.Join(parts, "|") + ")"
+}
+
+// squashedChunk is one word whose letters may be separated by clause or
+// chunk marks (letter chunking inside one word).
+func squashedChunk(w string) string {
+	var b strings.Builder
+	for j, r := range w {
+		if j > 0 {
+			b.WriteString(squashedAnyMark + "*")
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// squashedCompound is an alternation of two-word targets ("system"+"prompt").
+// Marks inside each word are chunking, as in squashedAlt. At the JOIN only a
+// chunkMark is allowed: a sentence or line end between two full-length words
+// ("Click show the system. Prompt editor opens") is a real clause end, while
+// one next to a short raw token ("sys. tem. pro. mpt", or letter spacing
+// wrapped across a line) is chunking (SEC-01 review round 14).
+func squashedCompound(pairs ...[2]string) string {
+	alts := make([]string, len(pairs))
+	for i, p := range pairs {
+		alts[i] = squashedChunk(p[0]) + regexp.QuoteMeta(chunkMark) + "*" + squashedChunk(p[1])
+	}
+	return "(?:" + strings.Join(alts, "|") + ")"
+}
+
+// squashClauseBoundary marks where one clause or field ends: line breaks, JSON
+// structure and key/value quotes (schema fields are separate clauses), and
+// sentence punctuation after a letter pair. It runs on the RAW tool text,
+// because PhraseText has already collapsed line breaks into spaces (review
+// round 13). Punctuation after a single letter ("i. g. n. o. r. e.") is letter
+// spacing and is kept; punctuation that lands inside a directive word is
+// tolerated by squashedAlt.
+var squashClauseBoundary = regexp.MustCompile(`[\r\n{}\[\]]|"\s*[:,]\s*"?|[:,]\s*"|\p{L}{2}[.!?;。！？；…]+`)
+
+// squashedClauses de-obfuscates and squashes each clause of text and joins
+// them with clauseMark, or chunkMark where the boundary is a line or sentence
+// end beside a short raw token (see chunkMark).
+func squashedClauses(text string) string {
+	text = foldClauseBreaks(text)
+	// Homoglyph folding reads the script majority of the whole field, not of
+	// each short clause (SEC-01 review, Sol round 7).
+	latin := detect.LatinMajority(text)
+	// Fold homoglyphs across the whole field BEFORE cutting it into clauses,
+	// so a fully look-alike chunk still sees its Latin neighbours in the
+	// adjacent clauses (SEC-01 review, Sol round 8). Letter-run lengths and
+	// boundaries are then read on the folded text.
+	text = detect.FoldHomoglyphsIn(text, latin)
+	runs := newLetterRuns(text)
+	var b strings.Builder
+	prev := 0
+	for _, loc := range squashClauseBoundary.FindAllStringIndex(text, -1) {
+		b.WriteString(detect.Squash(detect.NormalizeForPhraseIn(text[prev:loc[1]], latin)))
+		mark := clauseMark
+		if !strings.ContainsAny(text[loc[0]:loc[1]], `{}[]"`) &&
+			(runs.trailing(loc[1]) <= squashedChunkLen || runs.leading(loc[1]) <= squashedChunkLen) {
+			mark = chunkMark
+		}
+		b.WriteString(mark)
+		prev = loc[1]
+	}
+	b.WriteString(detect.Squash(detect.NormalizeForPhraseIn(text[prev:], latin)))
+	return b.String()
+}
+
+// unicodeLineBreaks are the line and paragraph separators other than CR/LF:
+// VT, FF, NEL (U+0085), LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR
+// (U+2029).
+var unicodeLineBreaks = strings.NewReplacer("\v", "\n", "\f", "\n", "\u0085", "\n", "\u2028", "\n", "\u2029", "\n")
+
+// foldClauseBreaks prepares raw tool text for clause splitting: NFKC folds
+// fullwidth, halfwidth and small-form punctuation ("．", "｡", "﹒") to the
+// marks squashClauseBoundary knows, and every Unicode line or paragraph
+// separator becomes "\n". Without it such a break stayed inside one clause and
+// the squashed pass joined two separate sentences ("Ignore previous search
+// results<U+2028>Instructions for installation follow") into an override
+// directive (SEC-01 review, Sol round 6). NormalizeForPhrase applies NFKC to
+// each clause anyway, so the clause text itself is unchanged.
+func foldClauseBreaks(text string) string {
+	return unicodeLineBreaks.Replace(norm.NFKC.String(text))
+}
+
+// letterRuns answers, for any rune boundary i of a text, how long the letter
+// run just before i is (trailing) and just after i is (leading), skipping
+// non-letters, capped at squashedChunkLen+1 since callers only compare with
+// squashedChunkLen. Both tables are filled in one pass each, so classifying
+// every clause boundary is linear in the text: re-reading the whole prefix or
+// suffix per boundary was quadratic on boundary-dense, upstream-controlled
+// tool metadata (SEC-01 review, Sol round 5).
+type letterRuns struct {
+	before, after []uint8
+}
+
+func newLetterRuns(s string) letterRuns {
+	const limit = squashedChunkLen + 1
+	r := letterRuns{before: make([]uint8, len(s)+1), after: make([]uint8, len(s)+1)}
+	// before[i]: the last letter run in s[:i], ignoring trailing non-letters;
+	// 0 when s[:i] has no letters ("sys. tem." → 3).
+	var cur, last uint8
+	inRun := false
+	for i, c := range s {
+		if inRun {
+			r.before[i] = cur
+		} else {
+			r.before[i] = last
+		}
+		if unicode.IsLetter(c) {
+			if !inRun {
+				cur, inRun = 0, true
+			}
+			if cur < limit {
+				cur++
+			}
+		} else if inRun {
+			last, inRun = cur, false
+		}
+	}
+	if inRun {
+		r.before[len(s)] = cur
+	} else {
+		r.before[len(s)] = last
+	}
+	// after[i]: the first letter run in s[i:], ignoring leading non-letters;
+	// empty or letterless input counts as long (" pro. mpt" → 3).
+	r.after[len(s)] = limit
+	next := uint8(limit) // after[] of the following rune start
+	runHere := uint8(0)  // length of the letter run starting at the following rune
+	for i := len(s); i > 0; {
+		c, size := utf8.DecodeLastRuneInString(s[:i])
+		i -= size
+		if unicode.IsLetter(c) {
+			if runHere < limit {
+				runHere++
+			}
+			next = runHere
+		} else {
+			runHere = 0
+		}
+		r.after[i] = next
+	}
+	return r
+}
+
+// trailing is the length of the last run of letters in text[:i], ignoring
+// trailing non-letters, capped at squashedChunkLen+1.
+func (r letterRuns) trailing(i int) int { return int(r.before[i]) }
+
+// leading is the length of the first run of letters in text[i:], ignoring
+// leading non-letters, capped at squashedChunkLen+1; no letters counts as long.
+func (r letterRuns) leading(i int) int { return int(r.after[i]) }
+
+// jsonLineBreakEscape matches the JSON escapes for line breaks, plus an
+// escaped backslash so "\\n" (a literal backslash then n) is left alone.
+var jsonLineBreakEscape = regexp.MustCompile(`\\\\|\\[nrf]|\\u(?:000[aAbBcCdD]|2028|2029|0085)`)
+
+// unescapeJSONLineBreaks turns line-break escapes inside serialized schema
+// JSON back into real line breaks, so a schema description's newline ends a
+// clause the same way a description's does (SEC-01 review round 14).
+func unescapeJSONLineBreaks(raw string) string {
+	return jsonLineBreakEscape.ReplaceAllStringFunc(raw, func(m string) string {
+		if m == `\\` {
+			return m
+		}
+		return "\n"
+	})
+}
+
+// inspectSquashed is the soft, spacing-agnostic last pass (see squashedFamilies).
+// It reads the raw tool text when available so line breaks still separate
+// clauses; a hand-built view with only normalized text falls back to that.
+func (c *PhraseInjection) inspectSquashed(tool detect.ToolView, normalized string) []detect.Signal {
+	raw := tool.RawText()
+	if strings.TrimSpace(raw) == "" {
+		raw = normalized
+	}
+	squashed := squashedClauses(unescapeJSONLineBreaks(raw))
+	for _, fam := range squashedFamilies {
+		if loc := fam.re.FindStringIndex(squashed); loc != nil {
+			match := strings.NewReplacer(clauseMark, "", chunkMark, "").Replace(squashed[loc[0]:loc[1]])
+			return []detect.Signal{{
+				CheckID:    c.ID(),
+				Tier:       detect.TierSoft,
+				ThreatType: detect.ThreatPromptInjection,
+				Confidence: 0.5,
+				Evidence:   detect.CapEvidence(match),
+				Detail:     fmt.Sprintf("Description spells out a %s once spacing and punctuation are removed (%q) — surfaced for review, not auto-blocked.", fam.what, match),
+			}}
+		}
+	}
+	return nil
+}
+
+func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }

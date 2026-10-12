@@ -9,7 +9,7 @@ keywords: [security, quarantine, tpa, tool poisoning]
 
 # Security Quarantine
 
-MCPProxy includes an automatic quarantine system to protect against Tool Poisoning Attacks (TPA).
+MCPProxy includes a quarantine and review system that reduces exposure to Tool Poisoning Attacks (TPA). It withholds unapproved servers from agents until a person releases them, and it holds new or changed tool definitions for review (under `manual` trust). Tool-level approval is not human-only: an MCP client with admin access can approve held tools itself (see below). It is an admission and review control, not a guarantee that an approved tool is safe; see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover).
 
 ## What is a Tool Poisoning Attack?
 
@@ -203,6 +203,21 @@ Manage held prompts with the `quarantine_security` MCP tool:
 { "operation": "approve_prompt", "name": "github", "prompt_name": "summarize_pr" }
 { "operation": "approve_all_prompts", "name": "github" }
 ```
+
+## What quarantine does and does not cover {#what-quarantine-does-and-does-not-cover}
+
+What it does, with quarantine enabled (the default):
+
+- **Withholds unapproved servers and tools.** A quarantined server's tools are not indexed, not returned by `retrieve_tools`, and calls to them are refused (the refusal carries a security analysis of the tool). A new or changed tool on a trusted server is held separately until approved.
+- **Holds changed definitions for review.** Each tool's name, description, input schema, output schema (when declared) and safety-relevant annotation hints are hashed. A different hash after approval is held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)), in every trust mode except `auto`. Only serialization noise is absorbed without a hold: an input schema that differs from the approved one only in key order or the order of its `required` list (same properties, types, constraints and required set) is re-baselined, while any structural input-schema difference (an added, removed or retyped parameter) is held. An output schema or description added to a tool approved without one is held as a change too: the empty stored value is the declared contract, not a wildcard. The single remaining wildcard is an approval record written before complete contract capture (older releases), where an empty stored field means "never captured" and the live value stands in once during the upgrade migration. In `scan` mode a changed contract is also held: the scan runs and its findings are recorded as hold evidence, but a clean verdict does not approve the change.
+- **Keeps server release in human hands.** There is no server-level approve over MCP, so an agent cannot release a quarantined server. This applies to server admission only. Tool approval is different: an MCP client with admin access (for example the main `/mcp` connection with the API key, not a scoped agent token) can call `quarantine_security` with `approve_tool` or `approve_all_tools` and release a pending or changed tool on an already-admitted server, with no human confirmation step. Agent tokens are refused ("Agent tokens cannot perform quarantine security operations"). Treat any admin-level MCP client as able to approve tool changes.
+
+What it does not do:
+
+- **It is not proof of safety.** Review is only as good as the reviewer, and the offline scanners can miss attacks. A clean scan means the checks found nothing in the captured definitions; it is not evidence that a server or tool is safe. Manual review, scanner-assisted review and agent-assisted inspection (`inspect_quarantined`) are inputs to your decision. None of them approves anything by itself.
+- **It does not see behavior outside the definition.** The hash covers name, description and schema. A server whose implementation or backend changes while its definitions stay identical is not detected, and neither is a malicious tool result returned at call time.
+- **Trust modes change the guarantee.** `manual` (default) holds every new server and every tool contract change until it is approved: server release needs a person, while tool approval can also come from an admin-access MCP client. `scan` admits a new server or a new tool automatically when the offline scan is clean, so a detector miss is admitted at that point; a changed contract is always held, whatever the verdict. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). Server admission and tool-change review are separate controls: `"quarantined": false` on a server entry only releases the server-level quarantine, and under `manual` trust a new or changed tool on that server is still held after its baseline. Tool-change holds are removed by `trust_mode: auto`, the legacy `auto_approve_tool_changes: true` (which an explicit `trust_mode` overrides), or `quarantine_enabled: false` globally. See [Trust modes](#trust-modes-auto--scan--manual).
+- **It is not data-loss prevention.** See [Sensitive Data Detection](./sensitive-data-detection.md) and [Output Sanitisation](./output-sanitisation.md) for what is flagged and what, if anything, is blocked.
 
 ## Managing Quarantine
 
@@ -418,7 +433,7 @@ new-server admission and tool-change approval (superseding the binary
 |------|----------|--------------|
 | `auto` | Admitted without quarantine or scanning | Trusted without scanning (rug-pull risk) |
 | `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | New tools are auto-approved only when the offline scan verdict is clean. A **changed** tool contract (rug pull) is always held for review: the scan still runs and records its findings as hold evidence, but a clean verdict does not approve the change, because paraphrased poisoning can scan clean |
-| `manual` (default) | Quarantined for human review | Every change held for review |
+| `manual` (default) | Quarantined for human review | Every change held for review, including input-schema-only changes, an added output schema, an added description and annotation-hint flips (see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover)) |
 
 Config field: per-server `trust_mode`; REST: `trust_mode` on
 `POST/PATCH/GET /api/v1/servers`; CLI: `mcpproxy upstream add --trust-mode`.
