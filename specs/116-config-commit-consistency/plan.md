@@ -214,7 +214,7 @@ L7 Runtime.mu                                        (leaf: field swaps only)
 capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` after Spec 117 PR-3 (either is compatible, because the commit never holds L1 and L3 together); L1(one)→L2 / L1' / L4(R) (discovery, approvals). Spec 117's global `captureSnapMu` sits above L1, and `Commit` never takes it.
 
 **Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):
-1. Calling `Commit` (directly or through `SaveConfiguration`, `ApplyConfig`, `ReloadConfiguration`, `UpdateConfig`, `QuarantineServer`, `EnableServer`, `RemoveServer`, scanner unquarantine) while holding any of L1-L7. Enforced by `TestLockOrder_*`, which drive each forbidden pairing concurrently with a commit under a 5 s watchdog that dumps all goroutines on timeout. Same-goroutine re-entry is caught by a `commitOwner` goroutine-id check that is compiled only under the `commitlockcheck` test build tag.
+1. Calling `Commit` (directly or through `SaveConfiguration`, `ApplyConfig`, `ReloadConfiguration`, `UpdateConfig`, `QuarantineServer`, `EnableServer`, `RemoveServer`, scanner unquarantine) while holding any of L1-L7. Enforced by `TestLockOrder_*`, which drive each forbidden pairing concurrently with a commit under a 5 s watchdog that dumps all goroutines on timeout. Same-goroutine re-entry is caught by a `commitOwner` goroutine-id check that always runs (no build tag): `Commit` reads the caller's goroutine id from `runtime.Stack` and returns `errCommitReentry` instead of deadlocking (`TestLockOrder_PR1/reentrant_commit`).
 2. Taking L1 while holding L3 for **writing**. The commit releases L1 before step 7.
 3. Taking more than one L1 outside `Commit`.
 4. Taking L0-L5 inside a `configsvc` hook or observer (L6).
@@ -329,7 +329,7 @@ owning later PR (see "Scope is binding" above).
 | A missed writer keeps writing storage directly, and its change is lost because `SaveConfiguration` no longer rebuilds from storage | `check-upstream-write-sites.sh` in CI (FR-009). The PR1 inventory in research §1 is exhaustive for `main` at `ee7834e71`. The script turns any new site into a CI failure |
 | The commit holds `configCommitMu` longer (bbolt, bleve, retire) | SC-004 budgets. The index purge happens only for removal and quarantine. `Retire` is bounded with a 1 s warning |
 | Changing `ApplyConfig` from "save disk, then async reconcile" to "reconcile in the commit" slows `PATCH /config` and `POST /config/apply` | Measured in PR1. Storage writes take milliseconds, and connects stay asynchronous |
-| Deadlock from a new edge | The lock order above, the `TestLockOrder_*` watchdog tests, and the `commitlockcheck` re-entry check |
+| Deadlock from a new edge | The lock order above, the `TestLockOrder_*` watchdog tests, and the always-on `commitOwner` re-entry check |
 | A per-instance `http.Transport` changes connection reuse | Distinct hosts per upstream in practice. Idle connections close on `Retire` and on `Disconnect` |
 | Generation counter reset (meta lost) | `SeedVersion(max(meta, max row generation))` |
 | Spurious 409 on approval during an unrelated edit | Approvals bind to the incarnation, not the generation (spec Definitions) |
