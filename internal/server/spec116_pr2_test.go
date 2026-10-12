@@ -120,10 +120,16 @@ func TestPromptApproval_T054_BoundToIncarnation(t *testing.T) {
 	assert.Equal(t, promptStatusPending, rec.Status)
 }
 
-// T2.5 (review R5.6): a scanner approval parked after its approval-lock
-// section saved the baseline, and before its unquarantine commit, does not
-// block a remove and re-add; released, it fails with server_replaced, the
-// replacement stays quarantined and inherits no baseline.
+// T2.5 (review R5.6): a scanner approval parked after it captured the
+// incarnation does not block a remove and re-add; released, it fails with
+// server_replaced, the replacement stays quarantined and inherits no
+// baseline. Since Spec 117 PR-2 the runtime's reviewed approval is one
+// locked commit section (baseline, promotion and unquarantine together), so
+// there is no longer a window between the baseline save and the unquarantine
+// to park in; the park point is the capture, and the incarnation is
+// re-checked under the approval lock before anything is recorded. (The
+// scanner's baseline-to-unquarantine seam only exists on the legacy path for
+// unquarantiners without the reviewed capability.)
 func TestScannerApproval_T2_5_ReAddKeepsReplacementQuarantined(t *testing.T) {
 	srv, _ := newSpec116Server(t, pr2Manual("acme", true))
 	dir := t.TempDir()
@@ -131,11 +137,11 @@ func TestScannerApproval_T2_5_ReAddKeepsReplacementQuarantined(t *testing.T) {
 	svc := scanner.NewService(srv.runtime.StorageManager(), scanner.NewRegistry(dir, logger), scanner.NewDockerRunner(logger), dir, logger)
 	svc.SetServerUnquarantiner(&serverUnquarantinerAdapter{server: srv})
 	hook, entered, release := pr2ParkOnce("acme")
-	svc.SetAfterBaselineBeforeUnquarantineHookForTest(hook)
+	srv.runtime.SetApprovalAfterCaptureHookForTest(hook)
 
 	done := make(chan error, 1)
 	go func() { done <- svc.ApproveServer(context.Background(), "acme", true, "api") }()
-	awaitSignal(t, entered, "the scanner approval to park before its unquarantine")
+	awaitSignal(t, entered, "the scanner approval to park after capturing the incarnation")
 
 	readd := make(chan error, 1)
 	go func() {
@@ -150,7 +156,7 @@ func TestScannerApproval_T2_5_ReAddKeepsReplacementQuarantined(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		close(release)
-		t.Fatal("remove and re-add must not wait for the parked approval (its lock section has exited)")
+		t.Fatal("remove and re-add must not wait for the parked approval (it holds no lock while parked)")
 	}
 	assert.Zero(t, srv.runtime.ApprovalLockWaitersForTest("acme"))
 	close(release)
