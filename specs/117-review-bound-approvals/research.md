@@ -30,8 +30,8 @@ All code references are to `origin/main` at `ee7834e71`. "Branch X" means `origi
 
 ### D1. The fingerprint is a separate value; the rug-pull hash is unchanged
 
-**Decision**: `reviewFingerprint(record) = "rv1-" + hex(sha256("rv1\x00" + server + "\x00" + name + "\x00" + base + "\x00" + hints))`.
-- `base` is `record.CurrentHash`. When `CurrentHash` is empty, `base` is `"nohash:" + sha256(description \x00 schema \x00 outputSchema)`.
+**Decision** (revised in Sol r2): `reviewFingerprint(record) = "rv2-" + hex(sha256(lp("rv2") + lp(server) + lp(name) + lp(CurrentHash) + lp(description) + lp(norm(schema)) + lp(norm(outputSchema)) + lp(hints)))`, where `lp(s)` is an 8-byte big-endian length followed by `s`.
+- The first version (`rv1`) hashed `CurrentHash` (or a `nohash:` digest when empty) in place of the fields. The storage hash joins the fields with an unescaped `|` and skips an absent output schema, so two different contracts could share a fingerprint (Sol r2 P1).
 - `hints` is `ro=<-|0|1>;de=…;id=…;ow=…`.
 
 **Rationale**: the issue says to keep the rug-pull hash policy. Annotations are excluded from it on purpose, because some servers flap them across reconnects (`tool_quarantine.go:27-31`). The fingerprint is only compared within one review → approve round trip, so flapping costs at most one extra reload.

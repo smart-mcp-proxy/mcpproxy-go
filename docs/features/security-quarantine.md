@@ -354,7 +354,7 @@ curl -H "X-API-Key: your-key" \
 # approval to the review you read (each tool's current_hash; {} for an empty
 # review): a tool that changed since answers 409 review_out_of_date.
 curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
-  -d '{"block":["tool-to-keep-disabled"],"expected_hashes":{"read_note":"rv1-...","tool-to-keep-disabled":"rv1-..."}}' \
+  -d '{"block":["tool-to-keep-disabled"],"expected_hashes":{"read_note":"rv2-...","tool-to-keep-disabled":"rv2-..."}}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 

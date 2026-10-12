@@ -347,11 +347,22 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 	if existing == nil {
 		return
 	}
-	if existing.CurrentHash == currentHash {
+	// The live contract is the recorded one only when the hash AND each
+	// definition field match (Spec 117 PR-2 Sol r2): the rug-pull hash joins
+	// the fields with an unescaped '|', so two different contracts can share
+	// a CurrentHash, and the review fingerprint must still follow the live one.
+	sameDefinition := existing.CurrentHash == currentHash &&
+		existing.CurrentDescription == tool.Description &&
+		normalizeJSON(existing.CurrentSchema) == normalizeJSON(schemaJSON) &&
+		normalizeJSON(existing.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
+	if sameDefinition {
 		captured := capturedToolAnnotations(tool.Annotations)
+		// RAW hints (Sol r2 P2, FR-017): an unset hint and its spelled-out
+		// default hash alike, but the review fingerprint tells them apart, so
+		// the recorded snapshot must follow the raw value.
 		if existing.CurrentHashSchemaVersion >= storage.ToolApprovalHashSchemaVersion &&
 			existing.CurrentAnnotations != nil &&
-			safetyHintsFingerprint(existing.CurrentAnnotations) == safetyHintsFingerprint(captured) {
+			reviewHintString(existing.CurrentAnnotations) == reviewHintString(captured) {
 			return
 		}
 		existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion

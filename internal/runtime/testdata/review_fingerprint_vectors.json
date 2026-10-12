@@ -15,7 +15,7 @@
       },
       "current_schema": "{\"type\":\"object\"}"
     },
-    "fingerprint": "rv1-7c7c567aca0bf5f3cae3bf72f1be5b1d7e1908c5faf9440375b63bec9dfc01c5"
+    "fingerprint": "rv2-de9f9dd42f6d3786f3371e9e422630b9a1818ceb52cd9b3e55089147379dd248"
   },
   {
     "name": "no annotations",
@@ -28,7 +28,7 @@
       "approved_at": "0001-01-01T00:00:00Z",
       "approved_by": ""
     },
-    "fingerprint": "rv1-3cd7f17d6828299415602faf7736ee3f8aca30cad3b592029537f9c8787e0710"
+    "fingerprint": "rv2-c26ef12bd6d75fe0b141fc20e54257a656eec3049245703a56e1d7bf76be70ef"
   },
   {
     "name": "destructive",
@@ -47,7 +47,7 @@
         "openWorldHint": true
       }
     },
-    "fingerprint": "rv1-ee9f9e87956288acc15be710fc0558c5d7f75232b37b9456759da5e5c594837b"
+    "fingerprint": "rv2-82e058a251d50169377fedc584e21df5315416cdeaf54de635b89dec084dbd09"
   },
   {
     "name": "hashless",
@@ -65,6 +65,6 @@
       },
       "current_schema": "{\"type\":\"object\"}"
     },
-    "fingerprint": "rv1-0a4cfc6fd0c043c2bba66cd9828b542d70805d1536050c9c156aa62569c8d055"
+    "fingerprint": "rv2-218d266580fc8c67c51660acd87336066b13f523823e82374f360dc17a8d7361"
   }
 ]

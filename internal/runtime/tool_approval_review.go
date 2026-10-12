@@ -95,6 +95,9 @@ func (r *Runtime) ApproveToolsReviewed(serverName string, toolNames []string, ex
 		unlock()
 		return 0, err
 	}
+	if h := r.testHooks.reviewBindingValidated; h != nil {
+		h(serverName)
+	}
 	approved, err := r.approveToolsLocked(serverName, names, approvedBy, false)
 	unlock()
 	r.notifyToolsApproved(serverName, approved, approvedBy)
@@ -129,6 +132,9 @@ func (r *Runtime) ApproveAllToolsReviewed(serverName string, expected map[string
 	if err := r.staleReviewError(serverName, changed, unreviewed, nil); err != nil {
 		unlock()
 		return 0, err
+	}
+	if h := r.testHooks.reviewBindingValidated; h != nil {
+		h(serverName)
 	}
 	approved := 0
 	if len(names) > 0 {

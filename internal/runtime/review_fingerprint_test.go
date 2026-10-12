@@ -32,7 +32,7 @@ func fpRecord() *storage.ToolApprovalRecord {
 	}
 }
 
-var fingerprintShape = regexp.MustCompile(`^rv1-[0-9a-f]{64}$`)
+var fingerprintShape = regexp.MustCompile(`^rv2-[0-9a-f]{64}$`)
 
 func TestReviewFingerprint_FormatAndStability(t *testing.T) {
 	fp := reviewFingerprint(fpRecord())

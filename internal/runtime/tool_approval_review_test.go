@@ -156,7 +156,7 @@ func TestApproveToolsReviewed_UnreviewedAndMissing(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusPending, rvRecord(t, rt, "a").Status)
 
 	// A requested name without a record is not an error; extra expected names are ignored.
-	n, err := rt.ApproveToolsReviewed(rvServer, []string{"a", "ghost"}, map[string]string{"a": h["a"], "ghost": "rv1-x", "b": "rv1-y"}, "api")
+	n, err := rt.ApproveToolsReviewed(rvServer, []string{"a", "ghost"}, map[string]string{"a": h["a"], "ghost": "rv2-x", "b": "rv2-y"}, "api")
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 }
@@ -180,7 +180,8 @@ func TestApproveToolsReviewed_UnboundIsLegacy(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusApproved, rvRecord(t, rt, "a").Status)
 }
 
-func TestApproveAllToolsReviewed_ValidatesPendingAndChanged(t *testing.T) {
+// Changed records: TestApproveAllToolsReviewed_CoversChangedRecords.
+func TestApproveAllToolsReviewed_ValidatesPending(t *testing.T) {
 	rt := newReviewRuntime(t, true)
 	capture(t, rt, rvTool("a", "A", readOnlyHints()), rvTool("b", "B", readOnlyHints()))
 	h := reviewHashes(t, rt)

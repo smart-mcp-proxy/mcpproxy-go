@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"strings"
 
@@ -19,36 +20,45 @@ import (
 // stored itself.
 //
 // It covers the server name (a binding for server A never matches server B),
-// the raw tool name, the approval-hashed contract (CurrentHash: description,
-// input schema, output schema, effective safety hints) and the four safety
-// hints by their RAW value (unset, false, true), so a hint change is always
-// visible to a review even where the rug-pull hash treats an unset hint and
-// its spelled-out default alike. title, status, disabled, timestamps and
-// scan evidence are not part of it. The rug-pull hash
-// (calculateToolApprovalHash*) is unchanged.
+// the raw tool name, the storage CurrentHash, the description, the input
+// schema, the output schema and the four safety hints by their RAW value
+// (unset, false, true), so a hint change is always visible to a review even
+// where the rug-pull hash treats an unset hint and its spelled-out default
+// alike. Each field is encoded on its own (length-prefixed, Sol r2 P1): the
+// rug-pull hash joins description and schemas with an unescaped '|' and
+// leaves out an absent output schema, so (D, I, O) and ("D|I", O, none) share
+// one CurrentHash, but never one fingerprint. Schemas are JSON-normalized, as
+// the rug-pull hash does, so a key-order-only difference is not a change.
+// title, status, disabled, timestamps and scan evidence are not part of it.
+// The rug-pull hash (calculateToolApprovalHash*) is unchanged.
 
 // reviewFingerprintVersion prefixes every fingerprint. A fingerprint of
-// another version never matches, which only makes the client reload.
-const reviewFingerprintVersion = "rv1"
+// another version never matches, which only makes the client reload. rv1
+// (PR-2 before Sol r2) hashed CurrentHash in place of the definition fields.
+const reviewFingerprintVersion = "rv2"
 
-// reviewFingerprint returns the review fingerprint of rec: "rv1-" followed by
+// reviewFingerprint returns the review fingerprint of rec: "rv2-" followed by
 // 64 hex characters. It is non-empty for every record, including one with an
 // empty CurrentHash (a toggle-synthesized record), whose stored definition
-// then stands in for the hash (FR-003).
+// still determines it (FR-003).
 func reviewFingerprint(rec *storage.ToolApprovalRecord) string {
 	if rec == nil {
 		return ""
 	}
-	base := rec.CurrentHash
-	if base == "" {
-		sum := sha256.Sum256([]byte(rec.CurrentDescription + "\x00" + rec.CurrentSchema + "\x00" + rec.CurrentOutputSchema))
-		base = "nohash:" + hex.EncodeToString(sum[:])
-	}
 	h := sha256.New()
-	for i, part := range []string{reviewFingerprintVersion, rec.ServerName, rec.ToolName, base, reviewHintString(rec.CurrentAnnotations)} {
-		if i > 0 {
-			h.Write([]byte{0})
-		}
+	for _, part := range []string{
+		reviewFingerprintVersion,
+		rec.ServerName,
+		rec.ToolName,
+		rec.CurrentHash,
+		rec.CurrentDescription,
+		normalizeJSON(rec.CurrentSchema),
+		normalizeJSON(rec.CurrentOutputSchema),
+		reviewHintString(rec.CurrentAnnotations),
+	} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		h.Write(n[:])
 		h.Write([]byte(part))
 	}
 	return reviewFingerprintVersion + "-" + hex.EncodeToString(h.Sum(nil))

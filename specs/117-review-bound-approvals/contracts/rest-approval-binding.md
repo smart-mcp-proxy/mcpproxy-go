@@ -15,7 +15,7 @@ Base `/api/v1`. Auth unchanged: `X-API-Key`, or the socket. Agent tokens are ref
         "tier": "read",
         "approval_status": "pending",
         "annotations": { "readOnlyHint": true },
-        "current_hash": "rv1-3f1c…(64 hex)",   // NEW: review fingerprint (opaque)
+        "current_hash": "rv2-3f1c…(64 hex)",   // NEW: review fingerprint (opaque)
         ...
       }
     ]
@@ -34,7 +34,7 @@ Request:
 {
   "force": false,
   "block": ["write_note"],
-  "expected_hashes": { "read_note": "rv1-…", "write_note": "rv1-…" }  // NEW, optional
+  "expected_hashes": { "read_note": "rv2-…", "write_note": "rv2-…" }  // NEW, optional
 }
 ```
 
@@ -76,8 +76,8 @@ Guarantees on 409:
 ## POST /servers/{id}/tools/approve
 
 ```jsonc
-{ "tools": ["t1"], "expected_hashes": { "t1": "rv1-…" } }          // bound per-tool
-{ "approve_all": true, "expected_hashes": { "t1": "rv1-…", … } }   // bound approve-all
+{ "tools": ["t1"], "expected_hashes": { "t1": "rv2-…" } }          // bound per-tool
+{ "approve_all": true, "expected_hashes": { "t1": "rv2-…", … } }   // bound approve-all
 ```
 
 - With `tools`: each requested name that has a record must match. Names without a record → `not_approved`, as today.

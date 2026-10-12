@@ -519,7 +519,7 @@ client showed (see [Review-bound approvals](#review-bound-approvals)):
 ```json
 {
   "tools": ["create_issue"],
-  "expected_hashes": {"create_issue": "rv1-3f1c..."}
+  "expected_hashes": {"create_issue": "rv2-3f1c..."}
 }
 ```
 With `tools`, every requested tool that has a record must still match its
@@ -1027,7 +1027,7 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 - `default_allowed` (always present) is the review screens' fail-closed default selection: `true` for an approved tool, or for a pending or changed `read` tool with `scan_verdict` `clean` that is not held; `false` for everything else (write, destructive, unannotated, unknown, not scanned, warnings, dangerous, held, or already disabled). A client that finds no such field (an older core) treats it as `false`.
 - `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
 - `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
-- `current_hash` is the tool's **review fingerprint** (`rv1-` + 64 hex): an opaque value over the server, the tool, its definition (description, input and output schema) and its four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Send it back in `expected_hashes` to bind an approval to what you showed. It is not the storage hash: the `current_hash` of `GET /api/v1/servers/{id}/tools/{tool}/diff` is a different value. Compare it only with a later review.
+- `current_hash` is the tool's **review fingerprint** (`rv2-` + 64 hex): an opaque value over the server, the tool, its definition (description, input and output schema) and its four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Send it back in `expected_hashes` to bind an approval to what you showed. It is not the storage hash: the `current_hash` of `GET /api/v1/servers/{id}/tools/{tool}/diff` is a different value. Compare it only with a later review.
 - Descriptions are returned verbatim and must be rendered as inert text.
 
 The review decisions use these routes (all existing):
@@ -1053,7 +1053,7 @@ the review:
 |---|---|
 | absent or `null` | **Unbound** (legacy): today's behaviour. A server approval still promotes only the pending tools present when it commits |
 | `{}` | Bound to the empty snapshot: any tool the approval would make callable fails it (use it for an empty or not-captured review) |
-| `{"name": "rv1-...", ...}` | Bound: every tool the approval makes callable must be listed with an equal fingerprint. Extra names are ignored |
+| `{"name": "rv2-...", ...}` | Bound: every tool the approval makes callable must be listed with an equal fingerprint. Extra names are ignored |
 
 For a server approval the checked set is every pending tool and every enabled
 approved tool, minus `block`; a `block` target that no longer exists is out of
