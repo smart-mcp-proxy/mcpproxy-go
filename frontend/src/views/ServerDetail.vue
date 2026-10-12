@@ -1579,7 +1579,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -2730,16 +2730,33 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   const bound = decisionIncarnation()
   if (bound === null) return
   toolToggleLoading.value = { ...toolToggleLoading.value, [toolName]: true }
+  const stillSameReview = captureToggleReview()
 
   // optimistic local UI update
   const idx = toolApprovals.value.findIndex(t => t.tool_name === toolName)
   const prev = idx >= 0 ? { ...toolApprovals.value[idx] } : null
+  let optimistic: ToolApproval | null = null
   if (idx >= 0) {
-    toolApprovals.value[idx] = {
+    optimistic = {
       ...toolApprovals.value[idx],
       enabled,
       disabled: !enabled,
     }
+    toolApprovals.value[idx] = optimistic
+  }
+  // Review round 5 (Sol): roll back only the row this toggle replaced, found
+  // by identity, and only while the screen still shows the review the toggle
+  // started on. A late failure (409 server_replaced) for a removed server must
+  // not write its saved row or quarantine counts into a same-name
+  // replacement's view, which would hide the replacement's pending or changed
+  // tool and its evidence.
+  const rollback = () => {
+    if (!stillSameReview()) return
+    if (prev && optimistic) {
+      const at = toolApprovals.value.findIndex(t => toRaw(t) === optimistic)
+      if (at >= 0) toolApprovals.value[at] = prev
+    }
+    restoreStoreQuarantine(prevQuarantine)
   }
   // Optimistically bump the local quarantine.blocked_count so the
   // "N disabled" stat-desc pill responds the instant the user flips the
@@ -2764,8 +2781,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       // Enable toggle leaves the stat-desc pill stuck on "N disabled".
       await syncAfterToolToggle()
     } else {
-      if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-      restoreStoreQuarantine(prevQuarantine)
+      rollback()
       systemStore.addToast({
         type: 'error',
         title: 'Update Failed',
@@ -2773,8 +2789,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       })
     }
   } catch (err) {
-    if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-    restoreStoreQuarantine(prevQuarantine)
+    rollback()
     systemStore.addToast({
       type: 'error',
       title: 'Update Failed',
@@ -2785,6 +2800,23 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     delete next[toolName]
     toolToggleLoading.value = next
   }
+}
+
+// captureToggleReview records which review an optimistic tool toggle started
+// on: this visit's load generation, the server name, the incarnation of the
+// rows on screen and of the store entry. The returned predicate is true only
+// while all of them are unchanged, so a late failure rolls back nothing once
+// the server was removed and re-added (review round 5).
+function captureToggleReview(): () => boolean {
+  const gen = loadGeneration
+  const name = props.serverName
+  const rowsInc = approvalsIncarnation.value
+  const liveInc = server.value?.incarnation
+  return () =>
+    gen === loadGeneration &&
+    name === props.serverName &&
+    rowsInc === approvalsIncarnation.value &&
+    liveInc === server.value?.incarnation
 }
 
 // bumpStoreBlockedCount adjusts the store server's quarantine.blocked_count
@@ -2846,6 +2878,7 @@ async function bulkToggleAllTools(enabled: boolean) {
   const bound = decisionIncarnation()
   if (bound === null) return
   bulkToolToggleLoading.value = true
+  const stillSameReview = captureToggleReview()
 
   // Optimistic store mutation — same idea as the single-tool path, but
   // we drive blocked_count straight to 0 (Enable All) or the count of
@@ -2897,7 +2930,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       // "N disabled" pill, and the Server List both lose any staleness.
       await syncAfterToolToggle()
     } else {
-      restoreStoreQuarantine(prevQuarantine)
+      if (stillSameReview()) restoreStoreQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Bulk Update Failed',
@@ -2905,7 +2938,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       })
     }
   } catch (err) {
-    restoreStoreQuarantine(prevQuarantine)
+    if (stillSameReview()) restoreStoreQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Bulk Update Failed',

@@ -276,6 +276,9 @@ type Runtime struct {
 	// localReindexAfterSnapshot is a test hook run by the local-snapshot
 	// reindex paths right after they selected their snapshot (lock held).
 	localReindexAfterSnapshot func()
+	// replayAfterOriginalRead is a test hook run by ReplayToolCall right after
+	// it read the original call record (Spec 116 PR2 review round 5).
+	replayAfterOriginalRead func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when
@@ -1564,6 +1567,9 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	if originalCall == nil {
 		return nil, fmt.Errorf("tool call not found: %s", id)
 	}
+	if hook := r.replayAfterOriginalRead; hook != nil {
+		hook()
+	}
 
 	// Use modified arguments if provided, otherwise use original.
 	//
@@ -1590,6 +1596,20 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	callInc, incOK := r.ServerIncarnation(originalCall.ServerName)
 	if !incOK && r.approvalBindingEnforced() {
 		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
+	}
+	// Review round 5: the original call was read BEFORE the incarnation was
+	// captured, so a removal and same-name re-add in between leaves callInc
+	// naming the replacement while originalCall still names the removed
+	// server's identity. The removal commit purged that identity together with
+	// its history, so its absence now means the call belongs to a server that
+	// no longer exists: the replay is refused before it dispatches anything to
+	// the replacement. A removal after this point changes the row's
+	// incarnation away from callInc, and the write below re-checks the
+	// identity in its own transaction (RecordReplayedToolCallIfIncarnation).
+	if originalCall.ServerID != "" {
+		if identity, idErr := storageManager.GetServerIdentityByID(originalCall.ServerID); idErr != nil || identity == nil || identity.ServerName != originalCall.ServerName {
+			return nil, fmt.Errorf("tool call not found: %s", id)
+		}
 	}
 
 	// Get the upstream client
@@ -1640,7 +1660,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	}
 
 	// Store the new tool call
-	if _, err := storageManager.RecordToolCallIfIncarnation(newCall, callInc); err != nil {
+	if _, err := storageManager.RecordReplayedToolCallIfIncarnation(newCall, callInc); err != nil {
 		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
 	}
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi, onTestFinished } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
@@ -105,4 +105,57 @@ describe('ServerDetail — decisions bound to the displayed incarnation', () => 
     const base = { quarantined: false, connected: true, enabled: true, tool_count: 1 }
     expect(key({ ...base, incarnation: 3 })).not.toBe(key({ ...base, incarnation: 4 }))
   })
+
+  // Review round 5 (Sol): a toggle started on incarnation A whose failure
+  // (409 server_replaced) arrives after the replacement B's rows loaded must
+  // not roll A's saved row or quarantine counts back into B's view.
+  for (const kind of ['single', 'bulk'] as const) {
+    it(`a late ${kind} toggle failure for the replaced incarnation leaves the replacement's state alone`, async () => {
+      const { wrapper, api } = await mountDetail()
+      const { useServersStore } = await import('@/stores/servers')
+      const store = useServersStore(pinia)
+      const originals = ['getToolApprovals', 'getServerTools', 'getToolDiff'].map(k => [k, api[k].getMockImplementation()] as const)
+      onTestFinished(() => { for (const [k, impl] of originals) api[k].mockImplementation(impl) })
+
+      let resolveToggle!: (v: unknown) => void
+      const deferred = new Promise(r => { resolveToggle = r })
+      if (kind === 'single') api.setToolEnabled.mockImplementationOnce(() => deferred)
+      else api.setAllToolsEnabled.mockImplementationOnce(() => deferred)
+      const pending = kind === 'single'
+        ? (wrapper.vm as any).toggleToolEnabled('echo', false)
+        : (wrapper.vm as any).bulkToggleAllTools(false)
+      await flushPromises()
+      expect(kind === 'single' ? api.setToolEnabled : api.setAllToolsEnabled).toHaveBeenCalledTimes(1)
+
+      // The server is removed and re-added as B (incarnation 5) with a
+      // changed same-name tool; B's store entry and rows finish loading.
+      const bQuarantine = { pending_count: 0, changed_count: 1, blocked_count: 0 }
+      serverPayload = { ...serverPayload, incarnation: 5, quarantine: { ...bQuarantine } }
+      api.getToolApprovals.mockImplementation(() => Promise.resolve({ success: true, data: {
+        tools: [{ server_name: SERVER, tool_name: 'echo', status: 'changed', enabled: true, disabled: false }],
+        count: 1, incarnation: 5 } }))
+      api.getServerTools.mockImplementation(() => Promise.resolve({ success: true, data: {
+        tools: [{ name: 'echo', description: 'Echo v2' }], incarnation: 5 } }))
+      api.getToolDiff.mockImplementation(() => Promise.resolve({ success: true, data: {
+        previous_description: 'Echo', current_description: 'Echo v2' } }))
+      await store.fetchServers(true)
+      await (wrapper.vm as any).loadToolApprovals()
+      await flushPromises()
+      const vm = wrapper.vm as any
+      expect(vm.toolApprovals[0].status).toBe('changed')
+
+      resolveToggle({ success: false, error: "server_replaced: server 'acme' was removed or replaced since it was reviewed" })
+      await pending
+      await flushPromises()
+
+      const row = vm.toolApprovals[0]
+      expect(row.status).toBe('changed')
+      expect(row.previous_description).toBe('Echo')
+      expect(row.current_description).toBe('Echo v2')
+      expect(vm.approvalsIncarnation).toBe(5)
+      const entry = store.servers.find((s: any) => s.name === SERVER)!
+      expect(entry.incarnation).toBe(5)
+      expect(entry.quarantine).toEqual(bQuarantine)
+    })
+  }
 })

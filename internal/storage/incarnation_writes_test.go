@@ -103,3 +103,37 @@ func TestIncarnationWrites_UnboundRefusedOnceCommitted(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 }
+
+// Review round 5 (Sol): a replay's original call names the identity it was
+// recorded under. When that identity was purged (the server was removed and
+// re-added under the same name with a different configuration), the replay
+// write is dropped even against the replacement's incarnation: it must not
+// recreate the removed server's history bucket or identity.
+func TestRecordReplayedToolCall_R5_RequiresOriginalIdentity(t *testing.T) {
+	m := newCommitTestManager(t)
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 3,
+		Saves: []ServerSave{{Config: commitEntry("acme"), Stamp: stamp(3, 3)}}}))
+	old := &config.ServerConfig{Name: "acme", Protocol: "stdio", Command: "old-binary"}
+	idA, written, err := m.RegisterServerIdentityIfIncarnation(old, "/cfg", 3)
+	require.NoError(t, err)
+	require.True(t, written)
+
+	// Identity present: the replay records against the current incarnation.
+	ok, err := m.RecordReplayedToolCallIfIncarnation(&ToolCallRecord{ID: "r1", ServerID: idA.ID, ServerName: "acme", ToolName: "t", Timestamp: time.Now()}, 3)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 4, Removes: []string{"acme"}}))
+	require.NoError(t, m.ApplyServerCommit(&ServerCommitBatch{Generation: 5,
+		Saves: []ServerSave{{Config: commitEntry("acme"), Stamp: stamp(5, 5)}}}))
+
+	// The replacement's incarnation matches, the original identity is gone.
+	ok, err = m.RecordReplayedToolCallIfIncarnation(&ToolCallRecord{ID: "r2", ServerID: idA.ID, ServerName: "acme", ToolName: "t", Timestamp: time.Now()}, 5)
+	require.NoError(t, err)
+	assert.False(t, ok, "a replay of a purged identity's call must not be recorded")
+	_, err = m.GetServerIdentityByID(idA.ID)
+	assert.Error(t, err, "the purged identity must not be recreated")
+	counts, err := m.PurgeSetCounts("acme")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{UpstreamsBucket: 1}, counts)
+}

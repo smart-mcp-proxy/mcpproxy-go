@@ -172,6 +172,11 @@ in PR2.
 
 ---
 
+### Review round 5 (Sol) design notes
+
+- Activity replay reads the original call (and its identity) before it can know the server name, so it cannot capture the incarnation first. Instead, after capturing the incarnation it refuses the replay ("tool call not found") when the original call's identity no longer exists or names another server: the removal commit purged it, so the call belongs to a server that is gone and nothing is dispatched to the replacement. The history write uses `RecordReplayedToolCallIfIncarnation`, which also requires that identity in the write's own transaction, so a replay never recreates a purged identity or its bucket (`TestReplay_R5_OriginalReadBeforeReplacementRecreatesNothing`, `TestRecordReplayedToolCall_R5_RequiresOriginalIdentity`).
+- Web UI: an optimistic tool toggle (single and bulk) rolls back only while the screen still shows the review it started on (same visit, server name, row incarnation and store incarnation), and the single toggle restores its row by object identity, not by index. A late `server_replaced` failure therefore leaves a same-name replacement's rows and quarantine counts alone.
+
 ### Review round 4 (Sol) design notes
 
 - Direct and nested tool calls take the history incarnation from the shared tool gate, which reads it BEFORE the persisted server record the history is built from. A remove and same-name re-add that lands after the gate leaves the call bound to the removed incarnation, so its history write is refused instead of recreating the removed server's identity and bucket (`TestToolGate_R4_IncarnationReadWithRecord`).

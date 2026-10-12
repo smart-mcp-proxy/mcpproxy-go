@@ -116,6 +116,22 @@ func (m *Manager) RegisterServerIdentityIfIncarnation(server *config.ServerConfi
 // record.ServerName carrying incarnation inc (code_execution parent records
 // are exempt: they belong to no upstream and are recorded unconditionally).
 func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64) (bool, error) {
+	return m.recordToolCallIfIncarnation(record, inc, false)
+}
+
+// RecordReplayedToolCallIfIncarnation is RecordToolCallIfIncarnation for an
+// activity replay (Spec 116 PR2 review round 5, FR-014c). The replayed call
+// carries the identity of the ORIGINAL call, read from that identity's history
+// bucket before the incarnation was captured. A removal purges that identity;
+// a same-name replacement then carries a new incarnation the replay may have
+// captured. The write is therefore also conditional on the original identity
+// still existing and naming record.ServerName, checked in the write's own
+// transaction, so a replay never recreates a purged identity or its history.
+func (m *Manager) RecordReplayedToolCallIfIncarnation(record *ToolCallRecord, inc int64) (bool, error) {
+	return m.recordToolCallIfIncarnation(record, inc, true)
+}
+
+func (m *Manager) recordToolCallIfIncarnation(record *ToolCallRecord, inc int64, requireIdentity bool) (bool, error) {
 	if record == nil || record.ServerID == codeExecutionServerID {
 		if err := m.RecordToolCall(record); err != nil {
 			return false, err
@@ -132,6 +148,12 @@ func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64)
 		ok, err := writeAllowedTx(tx, record.ServerName, inc)
 		if err != nil || !ok {
 			return err
+		}
+		if requireIdentity {
+			present, err := identityNamesServerTx(tx, record.ServerID, record.ServerName)
+			if err != nil || !present {
+				return err
+			}
 		}
 		// The history bucket is keyed by the server identity hash, and the
 		// removal purge finds such buckets through server_identities. A call
@@ -265,4 +287,25 @@ func (m *Manager) ServerIncarnation(name string) (inc int64, ok bool, err error)
 		return 0, false, err
 	}
 	return row.Stamp.Incarnation, true, nil
+}
+
+// identityNamesServerTx reports whether the server identity serverID exists
+// and names serverName.
+func identityNamesServerTx(tx *bbolt.Tx, serverID, serverName string) (bool, error) {
+	if serverID == "" {
+		return false, nil
+	}
+	ids := tx.Bucket([]byte(serverIdentitiesBucket))
+	if ids == nil {
+		return false, nil
+	}
+	data := ids.Get([]byte(serverID))
+	if data == nil {
+		return false, nil
+	}
+	identity := &ServerIdentity{}
+	if err := json.Unmarshal(data, identity); err != nil {
+		return false, fmt.Errorf("decode server identity %s: %w", serverID, err)
+	}
+	return identity.ServerName == serverName, nil
 }
