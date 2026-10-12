@@ -127,6 +127,12 @@ type ReviewTool struct {
 	DefaultAllowed bool                `json:"default_allowed"`
 	Previous       *ReviewToolPrevious `json:"previous"`
 	Diff           *ReviewToolDiff     `json:"diff,omitempty"`
+	// CurrentHash is the review fingerprint of this tool (Spec 117 PR-2,
+	// #1566), not the storage CurrentHash: send it back in expected_hashes
+	// to bind an approval to this review. Opaque; compare only with a later
+	// review. The /tools/{tool}/diff payload's current_hash is a different
+	// value (the storage hash).
+	CurrentHash string `json:"current_hash,omitempty"`
 }
 
 type ReviewToolPrevious struct {
@@ -286,6 +292,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 			HeldReason:  record.HeldReason, HeldSignals: append([]string(nil), record.HeldSignals...),
 		}
 		tool.DefaultAllowed = reviewDefaultAllowed(tool)
+		tool.CurrentHash = reviewFingerprint(record)
 		if record.PreviousDescription != "" || record.PreviousSchema != "" || record.PreviousOutputSchema != "" || record.PreviousAnnotations != nil {
 			tool.Previous = &ReviewToolPrevious{
 				Description: record.PreviousDescription, InputSchema: rawSchema(record.PreviousSchema),
