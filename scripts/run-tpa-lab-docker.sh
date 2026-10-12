@@ -82,6 +82,16 @@ fi
 # anything (tests/tpa-attack-lab/scripts_test.go).
 [[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok (cwd=$PWD data_dir=$cfg_data_dir config=$CONFIG)"; exit 0; }
 
+# Refuse ANY listener on the lab port before creating state, building or
+# starting anything (Sol r10 P2): the old authenticated-API probe let a
+# listener answering 401/404 or another protocol through, and the daemon
+# then opened the lab data dir before its bind failed. Nothing is killed.
+if lab_port_busy 8081; then
+  echo "ERROR: port 8081 is already in use; refusing to run (nothing was stopped)." >&2
+  echo "Inspect the listener with 'lsof -nP -iTCP:8081 -sTCP:LISTEN' (a previous KEEP=1 run?) and stop it yourself." >&2
+  exit 1
+fi
+
 mkdir -p "$DATA_DIR"
 export MCPPROXY_TRAY_ENDPOINT="unix://$DATA_DIR/mcpproxy.sock"
 
@@ -90,13 +100,6 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   docker build -f "$PROJECT_DIR/tests/tpa-attack-lab/Dockerfile" -t "$IMAGE" "$PROJECT_DIR"
   log "building mcpproxy binary"
   (cd "$PROJECT_DIR" && go build -o ./mcpproxy ./cmd/mcpproxy)
-fi
-
-# Refuse to double-start against the same socket.
-if curl -sf -o /dev/null -H "X-API-Key: $API_KEY" "$BASE_URL/api/v1/servers"; then
-  echo "ERROR: something is already listening on $BASE_URL (previous run with KEEP=1?)." >&2
-  echo "Stop it first: pkill -f 'mcpproxy serve.*tpa-lab-config-docker'" >&2
-  exit 1
 fi
 
 log "starting mcpproxy (log: $LOG_DIR/mcpproxy.log)"

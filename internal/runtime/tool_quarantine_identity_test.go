@@ -587,7 +587,7 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
 			ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
-			PreviousDescription: desc, CurrentDescription: rugPull,
+			PreviousDescription: desc, PreviousSchema: schema, CurrentDescription: rugPull,
 		}))
 
 		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
@@ -605,7 +605,9 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		assert.Equal(t, rugPull, rec.CurrentDescription)
 		assert.True(t, rec.IdentityKeyed)
 
-		// A revert to the approved contract restores it, as for any changed record.
+		// A revert to the approved contract restores it, as for any changed
+		// record (the lock carries its previous input schema; a missing one
+		// is not a wildcard, Sol r10 P1).
 		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
 			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
 		})
@@ -990,9 +992,11 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
 				ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
-				PreviousDescription: desc, CurrentDescription: rugPull, Disabled: true,
+				PreviousDescription: desc, PreviousSchema: schema, CurrentDescription: rugPull, Disabled: true,
 			}))
-			// The upstream serves the PREVIOUS (approved) description again.
+			// The upstream serves the PREVIOUS (approved) contract again. The
+			// previous input schema is recorded: a missing one is not a
+			// wildcard (Sol r10 P1).
 			result, err := rt.checkToolApprovals("a", nsErase(desc))
 			require.NoError(t, err)
 			assert.True(t, result.BlockedTools["ns:erase"], "reverted, but still user-disabled")

@@ -374,7 +374,17 @@ var isolationVariants = map[string]func(iso, server map[string]interface{}){
 		server["args"] = []interface{}{"run", "--network=host", "tpa-attack-lab:lab"}
 	},
 	"docker command by path": func(_, server map[string]interface{}) { server["command"] = "/usr/local/bin/docker" },
-	"isolation disabled":     func(iso, _ map[string]interface{}) { iso["enabled"] = false },
+	// Sol r10 P1: the daemon expands ${env:...}/${keyring:...} before launch,
+	// so a reference that resolves to docker would skip the wrap unseen.
+	"env-resolved docker command": func(_, server map[string]interface{}) {
+		server["command"] = "${env:TPA_CMD}"
+		server["args"] = []interface{}{"run", "--privileged", "--network=host", "tpa-attack-lab:lab"}
+	},
+	"keyring-resolved arg":         func(_, server map[string]interface{}) { server["args"] = []interface{}{"${keyring:lab_arg}"} },
+	"env-resolved extra_args":      func(iso, _ map[string]interface{}) { appendArgs(iso, "${env:TPA_EXTRA}") },
+	"env-resolved isolation image": func(iso, _ map[string]interface{}) { iso["image"] = "${env:TPA_IMAGE}" },
+	"env-resolved working dir":     func(_, server map[string]interface{}) { server["working_dir"] = "${env:HOME}" },
+	"isolation disabled":           func(iso, _ map[string]interface{}) { iso["enabled"] = false },
 	"http upstream": func(_, server map[string]interface{}) {
 		server["protocol"] = "streamable-http"
 		server["url"] = "http://127.0.0.1:1/mcp"
@@ -1140,5 +1150,64 @@ func TestRedteamSuiteRefusesBusyPortWithoutKilling(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(record); len(data) > 0 {
 		t.Fatalf("the binary ran despite the busy port:\n%s", data)
+	}
+}
+
+// TestRunLabDockerRefusesUnrelatedListener (Sol r10 P2): any listener on the
+// lab port, whether it answers 401, 404 or speaks another protocol, makes the
+// baseline runner refuse before the binary is invoked at all.
+func TestRunLabDockerRefusesUnrelatedListener(t *testing.T) {
+	verdictsLib(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listeners := map[string]func(net.Listener){
+		"http 401": func(ln net.Listener) {
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+			})}
+			go func() { _ = srv.Serve(ln) }()
+		},
+		"http 404": func(ln net.Listener) {
+			go func() { _ = http.Serve(ln, http.NotFoundHandler()) }()
+		},
+		"raw tcp": func(ln net.Listener) {
+			go func() {
+				for {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					_, _ = c.Write([]byte("SSH-2.0-not-mcpproxy\r\n"))
+					_ = c.Close()
+				}
+			}()
+		},
+	}
+	for name, serve := range listeners {
+		t.Run(name, func(t *testing.T) {
+			skipIfLabPortBusy(t)
+			ln, err := net.Listen("tcp", "127.0.0.1:8081")
+			if err != nil {
+				t.Skipf("cannot bind 127.0.0.1:8081: %v", err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			serve(ln)
+
+			stub, record := recordingStub(t)
+			cmd := exec.Command("bash", filepath.Join(project, "scripts", "run-tpa-lab-docker.sh"))
+			cmd.Env = append(os.Environ(), "IMAGE=tpa-attack-lab:lab", "SKIP_BUILD=1", "TPA_LAB_BINARY="+stub)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("a busy port 8081 must make the runner refuse:\n%s", out)
+			}
+			if !strings.Contains(string(out), "port 8081 is already in use") {
+				t.Errorf("expected the busy-port refusal:\n%s", out)
+			}
+			if data, _ := os.ReadFile(record); len(data) > 0 {
+				t.Fatalf("the binary ran despite the busy port:\n%s", data)
+			}
+		})
 	}
 }

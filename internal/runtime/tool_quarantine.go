@@ -1058,7 +1058,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// place so a genuine revert then read as a rug pull.
 		if existing.Status == storage.ToolApprovalStatusChanged {
 			// Only restore if the tool reverted to the PREVIOUS (approved) contract
-			if revertedToPreviousContract(existing, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
+			if revertedToPreviousContract(existing, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations, currentHash) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionRevert); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1495,9 +1495,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 // changed (adoptLegacyLockOrBaseline marks and falls through in one pass; the
 // ordinary rug-pull path on the next). A Previous* schema the record never
 // stored (a pre-output-schema record, or a producer that recorded only the
-// description) is not evidence and is not compared — the same idiom as
-// legacySiblingApprovesContract.
-func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) bool {
+// description) is not evidence of the approved contract and is never a
+// wildcard (Sol r10 P1): without a stored previous input schema the revert is
+// proven only when the live contract hashes, under the current formula, to
+// the record's ApprovedHash; otherwise the record stays held for an operator.
+func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations, currentHash string) bool {
 	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
 		return false
 	}
@@ -1513,7 +1515,15 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	if !previousHintsProveRevert(existing.PreviousAnnotations, annotations) {
 		return false
 	}
-	if existing.PreviousSchema != "" && normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {
+	if existing.PreviousSchema == "" {
+		// Unknown approved input schema (a legacy changed record): only the
+		// approved hash itself is positive proof of the input schema.
+		if existing.ApprovedHash == "" || currentHash == "" ||
+			existing.HashSchemaVersion != storage.ToolApprovalHashSchemaVersion ||
+			existing.ApprovedHash != currentHash {
+			return false
+		}
+	} else if normalizeJSON(existing.PreviousSchema) != normalizeJSON(schemaJSON) {
 		return false
 	}
 	// The output schema compares literally: an empty previous output schema

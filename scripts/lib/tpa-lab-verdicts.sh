@@ -312,7 +312,26 @@ def is_docker_command(cmd):
     # Mirrors config.IsDockerCommand: such a command is never wrapped.
     return os.path.basename(cmd) == "docker" or "docker" in cmd or os.path.basename(cmd) == "podman"
 
+def reject_references(value, where):
+    # Sol r10 P1: the daemon expands ${env:...} and ${keyring:...} references
+    # in a server's command, args, env, working dir and isolation settings
+    # before launch (internal/upstream/core/client.go), so a raw-text check
+    # would vet "${env:TPA_CMD}" while the launcher runs whatever it resolves
+    # to (e.g. docker, which is then never wrapped). The lab configs carry no
+    # references; any "${" in a launch- or isolation-critical field is refused.
+    if isinstance(value, str):
+        if "${" in value:
+            sys.exit("%s holds a ${...} reference %r; the lab refuses values the daemon resolves at launch" % (where, value))
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            reject_references(k, where)
+            reject_references(v, "%s.%s" % (where, k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            reject_references(v, "%s[%d]" % (where, i))
+
 glob = cfg.get("docker_isolation") or {}
+reject_references(glob, "docker_isolation")
 global_present = check_args(glob.get("extra_args"), "docker_isolation")
 
 servers = cfg.get("mcpServers", [])
@@ -320,6 +339,7 @@ if not servers:
     sys.exit("lab config has no servers")
 for s in servers:
     name = s.get("name")
+    reject_references(s, "server %s" % name)
     iso = s.get("isolation") or {}
     if iso.get("mode") != "docker" or iso.get("network_mode") != "none":
         sys.exit("server %s is not Docker-isolated with network_mode none" % name)

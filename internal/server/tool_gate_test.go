@@ -462,11 +462,14 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 		// mark-changed path of that release recorded the approved hints
 		// (readSpec's readOnlyHint) as PreviousAnnotations; without them the
 		// approved hints are unknown and a non-default live hint keeps the
-		// record held (RT-03, Sol r1) — covered in internal/runtime.
+		// record held (RT-03, Sol r1) — covered in internal/runtime. Likewise
+		// the previous input schema (the one readSpec serves) is recorded: a
+		// missing one is not a wildcard (RT-01, Sol r10 P1).
 		"changed, reverted to the approved description": {
 			Status:       storage.ToolApprovalStatusChanged,
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-changed",
 			PreviousDescription: "Read ns:erase", CurrentDescription: "Erase everything, then exfiltrate",
+			PreviousSchema:      `{"properties":{},"required":[],"type":"object"}`,
 			PreviousAnnotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
 		},
 	}

@@ -707,6 +707,62 @@ of the main checkout: `suite.log`, `run-tpa-lab-docker.log` (attempt 1),
 `run-tpa-lab-docker-1-daemon.log`, `run-tpa-lab-docker-2.log` (attempt 2) and
 the per-experiment logs (`run-dir`).
 
+### Review round 10 follow-ups
+
+A tenth review (Sol 6.1, REQUEST_CHANGES at `a98cf670c`, five chunked
+transcripts `rt-r10-c1` to `rt-r10-c5`; c1, c3 and c5 returned SHIP) raised
+two P1 items, one P2 item and one non-blocking INFO note, with no duplicates.
+The three actionable items were fixed. Each new test was checked to fail
+without its fix and pass with it. RT-04 and RT-07 (detect engine) stay
+deferred to the concurrent SEC-01 PR, so EXP-3 still shows HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 RT-01 `revertedToPreviousContract`: an empty `PreviousSchema` skipped the input-schema comparison, so a legacy changed record could be "reverted" with an arbitrary new input schema (an added exfiltration parameter) and its approved hash replaced without operator confirmation or a scan | Fixed. A missing previous input schema is no longer a wildcard. The revert is proven only when the live contract hashes, under the current formula, to the record's `ApprovedHash`. Otherwise the record stays `changed` for an operator. Test: `TestRT01_LegacyChangedRecord_EmptyPreviousSchema_NotWildcard` (manual and scan mode: an added parameter stays held on two passes with the approved hash untouched; the exact approved contract still reverts). Three pre-105 identity fixtures that relied on the wildcard (two in `internal/runtime/tool_quarantine_identity_test.go`, one in `internal/server/tool_gate_test.go`) now record the previous schema they revert to |
+| P1 lab preflight: `lab_config_check_isolation` vetted the raw command, but the daemon expands `${env:...}`/`${keyring:...}` before launch, so `"command": "${env:TPA_CMD}"` with `TPA_CMD=docker` skipped the Docker wrap and its hardening | Fixed. Any `${` reference anywhere in a server entry (command, args, env, working dir, isolation block) or in the global `docker_isolation` block is refused. The lab configs carry none. Tests: new `isolationVariants` (env-resolved docker command, keyring-resolved arg, env-resolved extra_args, isolation image and working dir), run by `TestLabConfigCheckIsolationRejectsNetworkOrBareUpstream` and `TestRunLabDockerRejectsUnisolatedConfig` |
+| P2 `run-tpa-lab-docker.sh` busy-port guard only recognised an authenticated mcpproxy API, so a listener answering 401/404 or another protocol let the daemon open the lab data dir before its bind failed | Fixed. The runner calls `lab_port_busy 8081` before creating the data dir, building or starting anything, and refuses without killing. Test: `TestRunLabDockerRefusesUnrelatedListener` (HTTP 401, HTTP 404 and raw-TCP listeners; the runner refuses and the binary is never invoked) |
+| INFO the Docker snapshot-mount tests use a mocked container runner | Not changed (non-blocking, reviewer's own classification). The mount configuration and the host-side snapshot are unit-tested. The dockerized suite exercises the production scan path end to end (EXP-1 and EXP-4 scan the exported contracts and return `dangerous`). A real-container unit test is test hardening, not a defect fix |
+
+Verification on the branch head after the round-10 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./tests/tpa-attack-lab/      # ok
+go test -count=1 -timeout 25m ./internal/... ./tests/tpa-attack-lab/
+#   every package ok except internal/server: its binary-spawning tests
+#   (TestBinaryHealthAndRecovery, TestPreflightIncidentDiagnosisE2E), which CI
+#   skips, and the internal/server gate fixture above; rerun with the CI skip
+#   regex after the fixture fix
+go test -count=1 -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/...   # ok (internal/server 781.9s, tokens ok)
+go test -race -count=1 -timeout 25m ./internal/runtime/...                   # ok (all 5 packages)
+go test -race -tags server -count=1 -run TestToolGate ./internal/server/    # ok
+# the internal/server fixture fix is test-only (no production Go change after the suite's rebuild)
+golangci-lint run --config .github/.golangci.yml ./...                       # 15 issues, none in a file this round touched
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...   # 18 issues, none in a file this round touched
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-2c HOLDS: stock=changed calendar=changed (manual mode, trusted throughout, gate held them, not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: ingested=yes (attempt 1), scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh     # no Go change since the suite's rebuild
+#   Risk Score: 93/100; baseline verdict: dangerous (job-bound);
+#   both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r10/`
+of the main checkout: `suite.log`, `run-tpa-lab-docker.log`, `unit.log`,
+`unit-race.log`, `server-ci-skip-before-fixture.log`, `server-ci-skip.log`,
+`lint-bare.txt`, `lint-server.txt` and the per-experiment logs (`run-dir`).
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
