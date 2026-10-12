@@ -1,0 +1,68 @@
+package managed
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
+)
+
+// TestConnect_DisconnectDuringDialDoesNotReportReady is the regression guard
+// for the stuck re-enable seen after Spec 116 PR1 (#1590): a Disconnect that
+// lands while Connect is dialing (mc.mu released) closes the transport and
+// resets the state to Disconnected. Connect then used to finish with
+// TransitionTo(Ready) regardless, so the client reported Ready over a closed
+// transport: every ListTools failed with "client not connected", and because
+// the client looked connected nothing ever reconnected it.
+//
+// Connect must instead report that it was aborted and leave the client
+// Disconnected, so the next connect attempt works.
+func TestConnect_DisconnectDuringDialDoesNotReportReady(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
+	ts := servertest.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(ts.Close)
+
+	cfg := &config.ServerConfig{Name: "race-server", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
+	mc, err := NewClient("race-server", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mc.Disconnect() })
+
+	// The seam runs after the transport connected and before Connect takes
+	// mc.mu back: exactly where a concurrent Disconnect (the supervisor's
+	// reconnect leg, a commit worker's RemoveServer) can land.
+	fired := false
+	hook := func() {
+		if fired {
+			return
+		}
+		fired = true
+		require.NoError(t, mc.Disconnect())
+	}
+	mc.connectAfterDial.Store(&hook)
+	t.Cleanup(func() { mc.connectAfterDial.Store(nil) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = mc.Connect(ctx)
+	require.True(t, fired, "seam did not run")
+	require.ErrorIs(t, err, ErrConnectAborted)
+	require.False(t, mc.IsConnected(), "a client whose transport was closed mid-connect must not report Ready")
+	require.Equal(t, types.StateDisconnected, mc.GetState())
+
+	// The aborted attempt leaves a clean client: the next connect succeeds and
+	// the transport really works.
+	require.NoError(t, mc.Connect(ctx))
+	require.True(t, mc.IsConnected())
+	_, err = mc.ListTools(ctx)
+	require.NoError(t, err)
+}

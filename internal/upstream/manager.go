@@ -623,6 +623,15 @@ func (m *Manager) AddServerAt(id string, serverConfig *config.ServerConfig, gen 
 					zap.String("state", client.GetState().String()))
 				return nil
 			}
+			// A concurrent disconnect (removal, or a newer commit replacing or
+			// disabling this server) superseded the dial. The disconnect owns
+			// the outcome; nothing failed.
+			if errors.Is(err, managed.ErrConnectAborted) {
+				m.logger.Debug("Connect superseded by a concurrent disconnect",
+					zap.String("id", id),
+					zap.String("name", serverConfig.Name))
+				return nil
+			}
 			// Check if this is an OAuth error - don't fail AddServer for OAuth
 			errStr := err.Error()
 			isOAuthError := strings.Contains(errStr, "OAuth") ||

@@ -612,12 +612,19 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 		return s.upstream.DisconnectServer(serverName)
 
 	case ActionReconnect:
-		// Disconnect then reconnect
-		if err := s.upstream.DisconnectServer(serverName); err != nil {
-			s.logger.Warn("Failed to disconnect server during reconnect",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
+		// Replace the instance only if it still runs a different connection
+		// config. There is deliberately no separate disconnect leg: a
+		// DisconnectServer here resolves the client by name when it runs, and
+		// since Spec 116 PR1 every config commit publishes to configsvc after
+		// its own worker has already installed (and started connecting) the
+		// instance with the new config. Disconnecting by name tore that fresh
+		// instance down mid-connect, so a re-enabled server came back with no
+		// tools. AddServer → Manager.AddServerConfigAt compares the registered
+		// instance with the desired config using config.ConnectionEquivalent,
+		// the same predicate configChanged uses to plan this action, and
+		// replaces and disconnects the instance atomically under the manager
+		// lock when they differ. Spec 116 PR3 binds supervisor actions to
+		// (generation, instance) for the remaining by-name paths.
 
 		// Get updated config
 		serverConfig := configSnapshot.GetServer(serverName)
