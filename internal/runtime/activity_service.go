@@ -1162,6 +1162,10 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 	if newValues := getMapPayload(evt.Payload, "new_values"); newValues != nil {
 		metadata["new_values"] = newValues
 	}
+	// Spec 116 PR2: a removal records what its purge deleted.
+	if purged := getMapPayload(evt.Payload, "purged"); purged != nil {
+		metadata["purged"] = purged
+	}
 
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypeConfigChange,

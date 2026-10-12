@@ -239,7 +239,9 @@ func TestRemoval_T2_12_LateIdentityRegistrationDropped(t *testing.T) {
 			once.Do(func() { close(entered); <-release })
 		}
 	}
-	_, err := rt.Commit("create_server", func(tx *CommitTx) error { return tx.CreateServer(unreachableHTTP("acme")) })
+	echo := newHeaderEchoUpstream(t)
+	sc := explicitServer(&config.ServerConfig{Name: "acme", URL: echo.srv.URL, Protocol: "streamable-http", Enabled: true})
+	_, err := rt.Commit("create_server", func(tx *CommitTx) error { return tx.CreateServer(sc) })
 	require.NoError(t, err)
 	spec116Await(t, entered, "the connect worker to park before the identity registration")
 	_, err = rt.Commit("remove_server", func(tx *CommitTx) error { return tx.RemoveServer("acme") })

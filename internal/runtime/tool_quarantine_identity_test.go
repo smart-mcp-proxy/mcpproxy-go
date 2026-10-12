@@ -262,7 +262,7 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		})
 		require.NoError(t, err)
 		require.Empty(t, result.BlockedTools)
-		flipped, err := rt.setToolEnabledNoEmit("a", "erase", false, "user")
+		flipped, err := rt.setToolEnabledNoEmit("a", "erase", false, "user", 0)
 		require.NoError(t, err)
 		require.True(t, flipped)
 		erase, err := rt.storageManager.GetToolApproval("a", "erase")

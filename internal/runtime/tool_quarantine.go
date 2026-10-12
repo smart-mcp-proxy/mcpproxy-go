@@ -2065,20 +2065,39 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 }
 
 // ApproveTools approves specific tools for a server, updating their status to approved.
+// It is bound to the server's incarnation when it starts (Spec 116 FR-014):
+// if the server is removed or replaced before the write, it writes nothing and
+// returns ErrServerReplaced.
 func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
-	_, err := r.approveToolsAndNotify(serverName, toolNames, approvedBy, false)
+	return r.ApproveToolsAt(serverName, toolNames, approvedBy, 0)
+}
+
+// ApproveToolsAt is ApproveTools bound to expectedIncarnation, the incarnation
+// the caller reviewed (the REST expected_incarnation). 0 binds to the
+// incarnation current when the call starts.
+func (r *Runtime) ApproveToolsAt(serverName string, toolNames []string, approvedBy string, expectedIncarnation int64) error {
+	_, err := r.approveToolsAndNotify(serverName, toolNames, approvedBy, false, expectedIncarnation)
 	return err
 }
 
 // approveToolsAndNotify runs approveToolsLocked under the server's
-// tool-approval lock, then — with the lock released — emits the SSE events
-// and spawns the reindex (which re-enters checkToolApprovals and takes the
-// lock itself). Returns the number of records actually approved.
-func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+// tool-approval lock, after the incarnation check, then — with the lock
+// released — emits the SSE events and spawns the reindex (which re-enters
+// checkToolApprovals and takes the lock itself). Returns the number of
+// records actually approved.
+func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, approvedBy string, pendingOnly bool, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	approved, err := r.approveToolsLocked(serverName, toolNames, approvedBy, pendingOnly)
 	unlock()
 	r.notifyToolsApproved(serverName, approved, approvedBy)
@@ -2201,11 +2220,18 @@ func (r *Runtime) notifyToolsApproved(serverName string, approved int, approvedB
 // compaction, …) is propagated to the caller. Without this check, a transient
 // I/O / unmarshal error could silently demote a `pending`/`changed` record to
 // `approved` — exactly the rug-pull bypass Spec 032 was designed to prevent.
-func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool, updatedBy string) (bool, error) {
+//
+// inc is the incarnation the caller captured (Spec 116 FR-014); a record is
+// never written, or synthesized, for a server that was removed or replaced
+// since.
+func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool, updatedBy string, inc int64) (bool, error) {
 	if r.storageManager == nil {
 		return false, nil
 	}
 	defer r.lockToolApprovals(serverName)()
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		return false, err
+	}
 
 	record, err := r.storageManager.GetToolApproval(serverName, toolName)
 	// Spec 105 FR-009: a pre-105 record the operator toggles between the
@@ -2339,7 +2365,20 @@ func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.Tool
 // transition without polling. The emit is skipped when the call was a
 // no-op (already in the desired state) to avoid wasted SSE traffic.
 func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
-	changed, err := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+	return r.SetToolEnabledAt(serverName, toolName, enabled, updatedBy, 0)
+}
+
+// SetToolEnabledAt is SetToolEnabled bound to expectedIncarnation (0 binds to
+// the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) SetToolEnabledAt(serverName, toolName string, enabled bool, updatedBy string, expectedIncarnation int64) error {
+	if r.storageManager == nil {
+		return nil
+	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return err
+	}
+	changed, err := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
 	if err != nil {
 		return err
 	}
@@ -2382,11 +2421,23 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 // PR #463) the bulk operation pays exactly one payload build no matter how
 // many tools changed.
 func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	return r.SetAllToolsEnabledAt(serverName, enabled, updatedBy, 0)
+}
+
+// SetAllToolsEnabledAt is SetAllToolsEnabled bound to expectedIncarnation (0
+// binds to the incarnation current when the call starts; Spec 116 FR-014).
+// Every per-tool write re-checks it, so a remove and re-add midway stops the
+// loop's writes on the replacement.
+func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
 	if serverName == "" {
 		return 0, fmt.Errorf("server name required")
+	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
 	}
 
 	toolNames, err := r.collectKnownToolNames(serverName)
@@ -2405,7 +2456,10 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 		if enabled && r.IsToolConfigDenied(serverName, toolName) {
 			continue
 		}
-		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
+		if errors.Is(setErr, ErrServerReplaced) {
+			return changed, setErr
+		}
 		if setErr != nil {
 			r.logger.Warn("Failed to toggle tool in bulk operation",
 				zap.String("server", serverName),
@@ -2506,14 +2560,19 @@ func (r *Runtime) approveBaselineToolsForServer(serverName string) error {
 
 // approveBaselineToolsForServerAt is the unquarantine baseline promotion bound
 // to the incarnation of the commit that unquarantined the server (Spec 116
-// FR-014i): the caller passes the incarnation from that commit's result and
-// never recaptures it by name. PR1 records the binding; Spec 116 PR2 adds the
-// under-lock check that the row still has that incarnation and is still
-// unquarantined, and writes nothing otherwise.
+// FR-014i, review R9.5): the caller passes the incarnation from that commit's
+// result (or the request's expected_incarnation) and never recaptures it by
+// name. Under the server's approval lock it requires the stored row to carry
+// that incarnation and to be unquarantined; otherwise it promotes nothing and
+// returns ErrServerReplaced (the replacement's pending records stay pending)
+// or nil (the server was re-quarantined meanwhile).
 func (r *Runtime) approveBaselineToolsForServerAt(serverName string, incarnation int64) error {
-	r.logger.Debug("Baseline promotion after unquarantine",
-		zap.String("server", serverName), zap.Int64("incarnation", incarnation))
-	return r.approveBaselineToolsForServer(serverName)
+	_, err := r.approveBaselineToolsForServerCountAt(serverName, incarnation)
+	if errors.Is(err, ErrServerReplaced) {
+		r.logger.Debug("Baseline promotion after unquarantine skipped: the server was removed or replaced",
+			zap.String("server", serverName), zap.Int64("incarnation", incarnation), zap.Error(err))
+	}
+	return err
 }
 
 // approveBaselineToolsForServerCount is approveBaselineToolsForServer
@@ -2522,12 +2581,31 @@ func (r *Runtime) approveBaselineToolsForServerAt(serverName string, incarnation
 // each record (pendingOnly), so a record that became "changed" is never
 // promoted and no concurrent pass can revert the promotion.
 func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, error) {
+	return r.approveBaselineToolsForServerCountAt(serverName, 0)
+}
+
+// approveBaselineToolsForServerCountAt is approveBaselineToolsForServerCount
+// bound to incarnation (0: unbound, the legacy callers). A bound promotion
+// also requires the stored row to be unquarantined under the lock.
+func (r *Runtime) approveBaselineToolsForServerCountAt(serverName string, incarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
 	const approvedBy = "system:server-approval-baseline"
 
 	unlock := r.lockToolApprovals(serverName)
+	if incarnation != 0 {
+		if err := r.checkApprovalIncarnationHeld(serverName, incarnation); err != nil {
+			unlock()
+			return 0, err
+		}
+		if r.approvalBindingEnforced() && r.serverQuarantinedInStorage(serverName) {
+			unlock()
+			r.logger.Debug("Baseline promotion after unquarantine skipped: the server is quarantined again",
+				zap.String("server", serverName), zap.Int64("incarnation", incarnation))
+			return 0, nil
+		}
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()
@@ -2562,11 +2640,25 @@ func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, er
 // and approval run under one hold of the server's tool-approval lock; the
 // count is the number of records actually approved.
 func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, error) {
+	return r.ApproveAllToolsAt(serverName, approvedBy, 0)
+}
+
+// ApproveAllToolsAt is ApproveAllTools bound to expectedIncarnation (0 binds
+// to the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) ApproveAllToolsAt(serverName string, approvedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()
@@ -2607,10 +2699,24 @@ func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, er
 // Returns the number of tools actually blocked. Missing approval records are
 // skipped with a warning (mirrors ApproveTools), not treated as a hard error.
 func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy string) (int, error) {
+	return r.BlockToolsAt(serverName, toolNames, blockedBy, 0)
+}
+
+// BlockToolsAt is BlockTools bound to expectedIncarnation (0 binds to the
+// incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) BlockToolsAt(serverName string, toolNames []string, blockedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	blocked, err := r.blockToolsLocked(serverName, toolNames, blockedBy)
 	unlock()
 	r.notifyToolsBlocked(serverName, blocked, blockedBy)
@@ -2694,11 +2800,25 @@ func (r *Runtime) notifyToolsBlocked(serverName string, blocked int, blockedBy s
 // dismiss the same quarantine queue — approve keeps tools visible, block hides
 // them. Returns the number of tools blocked.
 func (r *Runtime) BlockAllTools(serverName string, blockedBy string) (int, error) {
+	return r.BlockAllToolsAt(serverName, blockedBy, 0)
+}
+
+// BlockAllToolsAt is BlockAllTools bound to expectedIncarnation (0 binds to
+// the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) BlockAllToolsAt(serverName string, blockedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()

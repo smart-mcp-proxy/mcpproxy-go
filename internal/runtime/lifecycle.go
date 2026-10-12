@@ -1919,11 +1919,29 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 // written to storage under the server's approval lock in the same step that
 // purges the index (FR-008), and published before this returns.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
+	return r.QuarantineServerAt(serverName, quarantined, 0)
+}
+
+// QuarantineServerAt is QuarantineServer bound to expectedIncarnation (Spec
+// 116 FR-015, FR-017): when it is > 0 the commit fails with ErrServerReplaced
+// (and changes nothing) unless the server still has that incarnation — the
+// scanner approval and an unquarantine the operator reviewed in the Web UI use
+// it, so a remove and re-add in between can never release the replacement.
+func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
+	var baseInc int64
 	res, err := r.Commit("quarantine_toggle", func(tx *CommitTx) error {
+		if g, ok := tx.Generation(serverName); ok {
+			baseInc = g.Incarnation
+		}
+		if expectedIncarnation > 0 {
+			if err := tx.ExpectIncarnation(serverName, expectedIncarnation); err != nil {
+				return err
+			}
+		}
 		// The commit sends the one servers.changed and review.changed of this
 		// transition (FR-028); no caller-side copy follows.
 		tx.EventExtra(map[string]any{"server": serverName, "quarantined": quarantined})
@@ -1944,7 +1962,9 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	//
 	// The follow-up is bound to the incarnation of the commit that
 	// unquarantined, taken from its result and never recaptured by name
-	// (FR-014i); Spec 116 PR2 adds the under-lock check of that incarnation.
+	// (FR-014i, review R9.5): under the approval lock it promotes nothing
+	// when the row no longer has that incarnation (a remove and re-add ran
+	// after this commit) or is quarantined again.
 	if !quarantined {
 		var inc int64
 		if res != nil && res.Snapshot != nil {
@@ -1952,7 +1972,16 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 				inc = g.Incarnation
 			}
 		}
-		if err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil {
+		if inc == 0 {
+			// The commit published nothing (the server was already
+			// unquarantined): bind to the incarnation the commit read
+			// under its lock.
+			inc = baseInc
+		}
+		if h := r.testHooks.approvalAfterUnquarantineCommit; h != nil {
+			h(serverName, inc)
+		}
+		if err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil && !errors.Is(err, ErrServerReplaced) {
 			r.logger.Warn("Failed to baseline-approve tools on server unquarantine",
 				zap.String("server", serverName),
 				zap.Error(err))

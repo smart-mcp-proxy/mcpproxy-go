@@ -120,6 +120,8 @@ type Runtime struct {
 	commitWaitState
 	// Spec 116 commit bookkeeping (commit.go).
 	commitState
+	// purgeObserverState: Spec 116 PR2 purge observers (commit_purge.go).
+	purgeObserverState
 
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
@@ -1599,6 +1601,9 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	startTime := time.Now()
+	// Spec 116 FR-014c: the history write is bound to the incarnation the
+	// replay started on.
+	callInc, _ := r.ServerIncarnation(originalCall.ServerName)
 	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
 	duration := time.Since(startTime)
 
@@ -1621,7 +1626,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	}
 
 	// Store the new tool call
-	if err := storageManager.RecordToolCall(newCall); err != nil {
+	if _, err := storageManager.RecordToolCallIfIncarnation(newCall, callInc); err != nil {
 		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
 	}
 
@@ -2534,6 +2539,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	}
 
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
+	snapGens := r.serverGenerationSnapshot()
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
@@ -2751,6 +2757,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["reconnect_on_use"] = true
 		}
 
+		// Spec 116 FR-017: the committed generation and incarnation, so a
+		// client can bind an approval to the server identity it rendered
+		// (expected_incarnation).
+		addServerGenerationFields(serverMap, snapGens, serverStatus.Name)
+
 		// MCP-2940: surface the per-server auto-approve intent so the REST GET
 		// payload (and SSE servers.changed embed) can drive the Web UI toggle.
 		// Tri-state *bool — only emit the key when set so the projection stays
@@ -2936,6 +2947,28 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// serverGenerationSnapshot returns the per-server committed generations of
+// the live snapshot (nil before the first commit).
+func (r *Runtime) serverGenerationSnapshot() map[string]configsvc.ServerGen {
+	if r.configSvc == nil {
+		return nil
+	}
+	snap := r.configSvc.Current()
+	if snap == nil {
+		return nil
+	}
+	return snap.ServerGenerations
+}
+
+// addServerGenerationFields adds "generation" and "incarnation" (Spec 116
+// FR-017) to a server payload when the server has a committed stamp.
+func addServerGenerationFields(m map[string]interface{}, gens map[string]configsvc.ServerGen, name string) {
+	if g, ok := gens[name]; ok {
+		m["generation"] = g.Gen
+		m["incarnation"] = g.Incarnation
+	}
+}
+
 // getAllServersLegacy is the storage-based fallback implementation.
 func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 	r.logger.Warn("Using legacy storage-based GetAllServers (slow path)")
@@ -2954,6 +2987,7 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 
 	// Get connection status from upstream manager
 	result := make([]map[string]interface{}, 0, len(servers))
+	snapGens := r.serverGenerationSnapshot()
 	for _, srv := range servers {
 		serverInfo := map[string]interface{}{
 			"id":          srv.Name,
@@ -2977,6 +3011,10 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		if srv.SourceRegistryProvenance != "" {
 			serverInfo["source_registry_provenance"] = srv.SourceRegistryProvenance
 		}
+
+		// Spec 116 FR-017: generation and incarnation in parity with the
+		// StateView path.
+		addServerGenerationFields(serverInfo, snapGens, srv.Name)
 
 		// MCP-2940: per-server auto-approve intent in parity with the
 		// StateView path. Tri-state *bool — only emit when set.

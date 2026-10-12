@@ -107,6 +107,13 @@ type ReviewServer struct {
 	// inventory (Tools), which retains operator decisions for absent tools.
 	LiveToolCount int        `json:"live_tool_count,omitempty"`
 	LastCaptureAt *time.Time `json:"last_capture_at,omitempty"`
+	// Generation and Incarnation identify the committed server this review
+	// shows (Spec 116 FR-017). A client echoes Incarnation back as
+	// expected_incarnation on approve, block and unquarantine, so a decision
+	// made on this review can never land on a server re-added under the same
+	// name (409 server_replaced).
+	Generation  int64 `json:"generation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 type ReviewTool struct {
@@ -239,6 +246,9 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		URL: contractServer.URL, Env: contractServer.Env, Headers: contractServer.Headers,
 		Quarantined: server.Quarantined, TrustMode: string(server.EffectiveTrustMode()),
 		SourceRegistryID: server.SourceRegistryID, SourceRegistryProvenance: server.SourceRegistryProvenance,
+	}
+	if g, ok := r.serverGenerationSnapshot()[serverName]; ok {
+		reviewServer.Generation, reviewServer.Incarnation = g.Gen, g.Incarnation
 	}
 	// Stored records and the live capture state are published by different
 	// writers. A capture holds captureSnapMu for persist + prune + stamp, so
