@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
@@ -187,4 +189,88 @@ func TestToolBaselineMarkerFault_DiscoveryMarkerFailureIsNotAnAbort(t *testing.T
 	require.True(t, ok)
 	assert.Equal(t, toolreview.BaselineSourceInferred, d.Source)
 	requireHeldUnindexed(t, rt, "wipe_all_notes", "after discovery-marker fault")
+}
+
+// stateViewTools is the StateView's published view of baselineServer.
+func stateViewTools(t *testing.T, rt *Runtime) (tools []stateview.ToolInfo, discovered bool, epoch int64) {
+	t.Helper()
+	st, ok := rt.supervisor.StateView().GetServer(baselineServer)
+	require.True(t, ok, "the server is in the StateView")
+	return append([]stateview.ToolInfo(nil), st.Tools...), st.ToolsDiscovered, st.DiscoveryEpoch
+}
+
+func destructiveHintOf(tools []stateview.ToolInfo, name string) (hint, found bool) {
+	for _, ti := range tools {
+		if ti.Name == name || ti.Name == baselineServer+":"+name {
+			if ti.Annotations != nil && ti.Annotations.DestructiveHint != nil {
+				return *ti.Annotations.DestructiveHint, true
+			}
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// FR-027a with a published capture (review round 1, finding 2): the marker
+// step of a capture-carrying pass precedes the StateView publication, so a
+// failed marker write publishes nothing — no new destructive hint, no new
+// tool, no discovery-identity change — while the old records, snapshot and
+// capture stamp stay in place. The plain commitTools tests pass a nil capture
+// and never reach the publication branch.
+func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools []*config.ToolMetadata
+	}{
+		{"destructive hint update", []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)}},
+		{"replaced inventory", []*config.ToolMetadata{wipeAll()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newBaselineRuntime(t, t.TempDir(), false)
+			require.NotNil(t, rt.supervisor)
+			capture := rt.discoveryGeneration(baselineServer)
+			eligible, published, err := rt.commitDiscoveredToolsAt(context.Background(), baselineServer, []*config.ToolMetadata{readNote()}, 0, &capture)
+			require.NoError(t, err)
+			require.True(t, eligible)
+			require.True(t, published, "seed capture is published")
+			dropBaselineMarkers(t, rt)
+
+			svBefore, discBefore, epochBefore := stateViewTools(t, rt)
+			require.True(t, discBefore)
+			hint, found := destructiveHintOf(svBefore, "read_note")
+			require.True(t, found, "seed publishes read_note")
+			require.False(t, hint)
+			snapBefore := lastGood(rt)
+			recBefore := recordJSON(t, rt, "read_note")
+
+			failBaseline(rt, "write")
+			capture = rt.discoveryGeneration(baselineServer)
+			eligible, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, 0, &capture)
+			require.ErrorIs(t, err, errBaselineMarker)
+			assert.True(t, eligible)
+			assert.False(t, published, "a marker failure publishes nothing")
+
+			svAfter, discAfter, epochAfter := stateViewTools(t, rt)
+			assert.Equal(t, svBefore, svAfter, "StateView tools unchanged")
+			assert.Equal(t, discBefore, discAfter, "discovery completion unchanged")
+			assert.Equal(t, epochBefore, epochAfter, "discovery identity unchanged")
+			hint, _ = destructiveHintOf(svAfter, "read_note")
+			assert.False(t, hint, "the failed capture's destructive hint is not published")
+			_, found = destructiveHintOf(svAfter, "wipe_all_notes")
+			assert.False(t, found, "the failed capture's new tool is not published")
+			assert.Equal(t, recBefore, recordJSON(t, rt, "read_note"), "record untouched")
+			assert.Nil(t, approvalOf(t, rt, "wipe_all_notes"))
+			snapAfter := lastGood(rt)
+			assert.Equal(t, snapBefore.tools, snapAfter.tools, "last-good snapshot unchanged")
+			assert.True(t, snapBefore.at.Equal(snapAfter.at), "capture stamp unchanged")
+			_, ok := baselineDecision(t, rt)
+			assert.False(t, ok, "no marker written")
+
+			healBaseline(rt)
+			capture = rt.discoveryGeneration(baselineServer)
+			_, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, 0, &capture)
+			require.NoError(t, err)
+			assert.True(t, published, "the healed pass publishes")
+		})
+	}
 }

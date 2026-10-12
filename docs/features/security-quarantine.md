@@ -451,9 +451,16 @@ discovery after an upgrade for servers that already have approved tools. It is
 removed only when the server itself is removed (or pruned from the config), so
 a server removed and added again under the same name starts with a fresh
 baseline. A server whose first tool list is empty gets no record; its first
-non-empty list is still its baseline. If the record cannot be read or written,
-the discovery pass is skipped (nothing is removed, nothing new is indexed) and
-retried by the next pass.
+non-empty list is still its baseline. If the record cannot be read, or the
+server's earlier approval records cannot be listed, or the record cannot be
+written for a server that already has approved tools (the back-fill), the
+discovery pass is skipped before it writes anything: nothing is removed,
+nothing new is indexed, no approval record changes, and the server keeps the
+tool list of its last applied discovery until the next pass retries. A failed
+write on a server's first trusted discovery (no approved tools yet) does not
+skip the pass: its tools are approved and indexed as usual, and those approved
+tools are themselves the baseline, so the next pass writes the record before it
+can remove or auto-approve anything.
 
 ### Trust modes (auto | scan | manual)
 
