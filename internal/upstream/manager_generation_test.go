@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/callstats"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Spec 116 PR3 manager tests (tasks.md T064, T3.8, T3.10): the *At methods,
@@ -233,4 +235,40 @@ func TestManagerGenerations_T3_8_ForceReconnectAllAfterCommit(t *testing.T) {
 	assert.Equal(t, []string{"two"}, registered(t, m, "b").GetConfig().Args)
 	assert.Contains(t, result.SkippedServers, "a")
 	assert.Contains(t, result.SkippedServers, "b")
+}
+
+type recordingNotifier struct{ ch chan *Notification }
+
+func (r recordingNotifier) SendNotification(n *Notification) { r.ch <- n }
+
+// A superseded instance's state transitions are not reported under the
+// server's name: the Disconnect of an instance a commit unregistered must not
+// overwrite the status of the instance that now serves the server.
+func TestManagerGenerations_UnregisteredInstanceIsSilent(t *testing.T) {
+	m := newGenTestManager(t)
+	rec := recordingNotifier{ch: make(chan *Notification, 16)}
+	m.notificationMgr = NewNotificationManager()
+	m.notificationMgr.AddHandler(rec)
+	cfg := genCfg("s", "http://127.0.0.1:1/s")
+	m.AdvanceGenerations([]GenerationChange{present("s", 1, cfg)})
+	require.NoError(t, m.AddServerConfigAt("s", cfg, 1))
+	inst := registered(t, m, "s")
+
+	inst.StateManager.TransitionTo(types.StateConnecting)
+	select {
+	case n := <-rec.ch:
+		assert.Equal(t, "s", n.ServerName)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a registered instance's transition must be notified")
+	}
+
+	res := m.AdvanceGenerations([]GenerationChange{{Name: "s", Gen: 2, Present: true, Reconnect: true, Config: genCfg("s", "http://127.0.0.1:1/other")}})
+	require.Len(t, res.Unregistered, 1)
+	require.NoError(t, inst.Disconnect())
+	inst.StateManager.TransitionTo(types.StateConnecting)
+	select {
+	case n := <-rec.ch:
+		t.Fatalf("an unregistered instance reported %q for %s", n.Title, n.ServerName)
+	case <-time.After(300 * time.Millisecond):
+	}
 }

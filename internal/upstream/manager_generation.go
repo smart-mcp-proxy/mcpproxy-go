@@ -235,6 +235,14 @@ func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen 
 			if existingCallback != nil {
 				existingCallback(oldState, newState, info)
 			}
+			// A superseded instance's transitions (the Disconnect of an
+			// instance a commit or replacement unregistered) are notified
+			// under the server NAME and would overwrite the status of the
+			// instance that now serves it: the replacement could show as
+			// disconnected while it is connected. They are not reported.
+			if client.Unregistered() {
+				return
+			}
 			notifierCallback(oldState, newState, info)
 		})
 	}
