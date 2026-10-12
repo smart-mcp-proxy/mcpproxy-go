@@ -342,7 +342,7 @@ func TestRT06_Pass2_LiveExportError_RunsOnlyMetadataIndependentScanners(t *testi
 	source := staleSourceDir(t)
 	info := &ServerInfo{Name: "toctou-p2", Protocol: "stdio", Command: "node", Args: []string{"server.js"}, WorkingDir: source}
 	svc, store := newR3Service(t, &liveFailProvider{info: info, liveErr: errors.New("server not found: toctou-p2")})
-	svc.startPass2("toctou-p2", info)
+	svc.startPass2("toctou-p2", info, 1)
 
 	require.Eventually(t, func() bool {
 		jobs, err := store.ListScanJobs("toctou-p2")
@@ -436,7 +436,7 @@ func TestRT06_Pass2_LiveExportError_TrivyRunsMetadataScannerRefused(t *testing.T
 		return "", "", 0, nil
 	}
 
-	svc.startPass2("toctou-p2", info)
+	svc.startPass2("toctou-p2", info, 1)
 	require.Eventually(t, func() bool {
 		jobs, err := store.ListScanJobs("toctou-p2")
 		return err == nil && len(jobs) == 1 && jobs[0].Status != ScanJobStatusRunning && jobs[0].Status != ScanJobStatusPending

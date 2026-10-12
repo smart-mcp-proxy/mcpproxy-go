@@ -13,7 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -261,6 +263,9 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "already in progress") {
 			s.writeError(w, r, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "server is not configured") {
+			// Spec 116 FR-014a: the committed view does not know the server.
+			s.writeError(w, r, http.StatusNotFound, err.Error())
 		} else {
 			s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		}
@@ -335,6 +340,10 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 type securityApproveRequest struct {
 	Force bool     `json:"force"`
 	Block []string `json:"block,omitempty"`
+	// ExpectedIncarnation binds the approval to the server the client
+	// reviewed (Spec 116 FR-017): a remove and re-add since then is refused
+	// with 409 server_replaced and the replacement stays quarantined.
+	ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
 }
 
 // handleSecurityApprove godoc
@@ -349,7 +358,8 @@ type securityApproveRequest struct {
 // @Param body body securityApproveRequest false "Force approval and tool names to keep disabled"
 // @Success 200 {object} contracts.SuccessResponse "Server approved"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
-// @Failure 409 {object} contracts.ErrorResponse "Dangerous scan verdict requires force or approval failed"
+// @Failure 409 {object} contracts.ErrorResponse "Dangerous scan verdict requires force, approval failed, or server_replaced (the server was removed or re-added since expected_incarnation)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not configured"
 // @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
@@ -371,7 +381,11 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 
 	// Use "api" as the approver since we don't have user context in personal edition
 	var approveErr error
-	if len(req.Block) > 0 {
+	if boundApprover, ok := s.securityController.(interface {
+		ApproveServerAt(context.Context, string, bool, string, []string, int64) error
+	}); ok {
+		approveErr = boundApprover.ApproveServerAt(r.Context(), name, req.Force, "api", req.Block, req.ExpectedIncarnation)
+	} else if len(req.Block) > 0 {
 		blockApprover, ok := s.securityController.(interface {
 			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
 		})
@@ -386,6 +400,12 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if approveErr != nil {
 		if errors.Is(approveErr, scanner.ErrToolApprovalBlockNotFound) {
 			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
+			return
+		}
+		if errors.Is(approveErr, commitview.ErrServerReplaced) || errors.Is(approveErr, internalRuntime.ErrServerNotFound) {
+			// 409 server_replaced; 404 for a server that is not configured
+			// (documented, review round 4).
+			s.writeApprovalWriteError(w, r, approveErr, "Failed to approve server")
 			return
 		}
 		s.writeError(w, r, http.StatusConflict, approveErr.Error())

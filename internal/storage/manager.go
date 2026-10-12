@@ -2459,9 +2459,16 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 // clearOAuthStateTx deletes a server's cached OAuth state (tokens and DCR
 // client credentials) inside the caller's transaction: the exact server name
 // key (legacy) and every hashed serverKey entry. Tokens are stored under
-// oauth.GenerateServerKey(name, url), which prefixes the server name and
-// appends a hash of the URL; both forms are cleared so a logout or an OAuth
-// config change actually removes them. It returns the number of keys deleted.
+// oauth.GenerateServerKey(name, url), which appends "_" and the first 16
+// lowercase hex characters of a hash of the name and URL; both forms are
+// cleared so a logout, an OAuth config change or a removal actually removes
+// them. It returns the number of keys deleted.
+//
+// The match is exact (Spec 116 B2): a key "name_" + suffix is this server's
+// only when the suffix is exactly 16 lowercase hex characters. A plain prefix
+// match on "name_" would also delete the tokens of another server whose name
+// starts with it — removing "foo" signed "foo_bar" out (its keys are
+// "foo_bar_<hex>").
 //
 // The whole prefix range is collected before any of it is deleted. bbolt
 // cursors are invalidated by mutations made during iteration ("Changing data
@@ -2484,7 +2491,9 @@ func clearOAuthStateTx(bucket *bbolt.Bucket, serverName string) (int, error) {
 	var keys [][]byte
 	cursor := bucket.Cursor()
 	for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
-		keys = append(keys, append([]byte(nil), k...))
+		if oauthKeyBelongsTo(string(k), serverName) {
+			keys = append(keys, append([]byte(nil), k...))
+		}
 	}
 	for _, k := range keys {
 		if err := bucket.Delete(k); err != nil {
@@ -2493,6 +2502,28 @@ func clearOAuthStateTx(bucket *bbolt.Bucket, serverName string) (int, error) {
 		cleared++
 	}
 	return cleared, nil
+}
+
+// oauthKeySuffixLen is the length of the hash suffix oauth.GenerateServerKey
+// appends to the server name.
+const oauthKeySuffixLen = 16
+
+// oauthKeyBelongsTo reports whether an oauth_tokens key belongs to server
+// name: exactly name (legacy) or name + "_" + 16 lowercase hex characters
+// (oauth.GenerateServerKey). Spec 116 B2.
+func oauthKeyBelongsTo(key, name string) bool {
+	if key == name {
+		return true
+	}
+	if len(key) != len(name)+1+oauthKeySuffixLen || !strings.HasPrefix(key, name+"_") {
+		return false
+	}
+	for _, c := range key[len(name)+1:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.

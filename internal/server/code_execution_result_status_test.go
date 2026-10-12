@@ -86,10 +86,10 @@ func TestUpstreamToolCaller_StoresUpstreamErrorInHistory(t *testing.T) {
 	start := time.Now()
 	u.storeToolCallInHistory("time", "get_current_time",
 		map[string]interface{}{"timezone": "Mars/Olympus"},
-		isErrorResult("Invalid timezone: 'Mars/Olympus'"), nil, start, time.Millisecond)
+		isErrorResult("Invalid timezone: 'Mars/Olympus'"), nil, start, time.Millisecond, 0)
 	u.storeToolCallInHistory("time", "get_current_time",
 		map[string]interface{}{"timezone": "UTC"},
-		mcp.NewToolResultText("ok"), nil, start.Add(time.Second), time.Millisecond)
+		mcp.NewToolResultText("ok"), nil, start.Add(time.Second), time.Millisecond, 0)
 
 	records, err := store.GetServerToolCalls(storage.GenerateServerID(serverCfg), 10)
 	require.NoError(t, err)

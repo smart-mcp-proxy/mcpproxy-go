@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -115,14 +116,68 @@ type promptApprovalResult struct {
 	changed int
 }
 
+// promptApprovalRuntime returns the runtime that owns the per-server approval
+// locks and incarnations (Spec 116 FR-016), or nil for a bare proxy built by
+// package tests.
+func (p *MCPProxyServer) promptApprovalRuntime() *runtime.Runtime {
+	if p.mainServer != nil {
+		return p.mainServer.runtime
+	}
+	return nil
+}
+
+// capturePromptIncarnations returns the current incarnation of every
+// configured server. RefreshPrompts takes it BEFORE it lists the upstream
+// prompts, so a pass whose listing straddled a remove and re-add writes
+// nothing for the replacement (Spec 116 FR-014).
+func (p *MCPProxyServer) capturePromptIncarnations() map[string]int64 {
+	rt := p.promptApprovalRuntime()
+	if rt == nil {
+		return nil
+	}
+	snap := rt.ConfigSnapshot()
+	if snap == nil || snap.ServerGenerations == nil {
+		// No committed view yet (before the boot commit): unbound.
+		return nil
+	}
+	out := make(map[string]int64, len(snap.ServerGenerations))
+	for name, g := range snap.ServerGenerations {
+		out[name] = g.Incarnation
+	}
+	return out
+}
+
+// withPromptApprovalLock runs fn under serverName's approval lock — the lock
+// the removal commit purges the server's prompt records under — after the
+// incarnation check (Spec 116 FR-014, FR-016). A bare proxy runs fn as is.
+func (p *MCPProxyServer) withPromptApprovalLock(serverName string, inc int64, fn func() error) error {
+	rt := p.promptApprovalRuntime()
+	if rt == nil {
+		return fn()
+	}
+	return rt.WithServerApprovalLockAt(serverName, inc, fn)
+}
+
 // checkPromptApprovals is the prompt analogue of runtime.checkToolApprovals
 // (spec 100 FR-4). For each aggregated, colon-qualified prompt it computes the
 // metadata hash, compares against the stored baseline, updates the record, and
 // returns the set of qualified names to withhold (pending or changed). The
 // prompts reaching here have already survived the TPA scan-and-drop, so this
 // decides visibility based on CHANGE, not poison. It reads live config for the
-// quarantine kill-switch and per-server trust.
+// quarantine kill-switch and per-server trust. It binds every server to the
+// incarnation current when it is called.
 func (p *MCPProxyServer) checkPromptApprovals(prompts []mcp.Prompt) promptApprovalResult {
+	return p.checkPromptApprovalsAt(prompts, p.capturePromptIncarnations())
+}
+
+// checkPromptApprovalsAt is checkPromptApprovals with the incarnations
+// captured before the prompts were listed. Each server's records are read,
+// decided and written in ONE hold of its approval lock, after the check that
+// the server still has the captured incarnation (Spec 116 FR-014, FR-016): a
+// server removed or replaced since the capture has its prompts withheld and
+// gets no record, so a removal's purge is never undone by a pass that was
+// already listing.
+func (p *MCPProxyServer) checkPromptApprovalsAt(prompts []mcp.Prompt, incs map[string]int64) promptApprovalResult {
 	res := promptApprovalResult{blocked: map[string]struct{}{}}
 	if len(prompts) == 0 || p.storage == nil {
 		return res
@@ -140,30 +195,71 @@ func (p *MCPProxyServer) checkPromptApprovals(prompts []mcp.Prompt) promptApprov
 		}
 	}
 
-	// hasBaseline[server] = server already has an approved/changed record (so a
-	// first-seen prompt is NOT auto-approved as baseline).
-	hasBaseline := map[string]bool{}
-	baselineKnown := map[string]bool{}
-
+	// Group by server, keeping the first-seen order.
+	var order []string
+	byServer := map[string][]mcp.Prompt{}
 	for _, pr := range prompts {
-		serverName, promptName, ok := strings.Cut(pr.Name, ":")
+		serverName, _, ok := strings.Cut(pr.Name, ":")
 		if !ok {
 			continue // malformed; buildAggregatedServerPrompts drops it anyway
 		}
-
-		if !baselineKnown[serverName] {
-			recs, _ := p.storage.ListPromptApprovals(serverName)
-			has := false
-			for _, r := range recs {
-				if r.Status == promptStatusApproved || r.Status == promptStatusChanged {
-					has = true
-					break
-				}
-			}
-			hasBaseline[serverName] = has
-			baselineKnown[serverName] = true
+		if _, seen := byServer[serverName]; !seen {
+			order = append(order, serverName)
 		}
+		byServer[serverName] = append(byServer[serverName], pr)
+	}
 
+	for _, serverName := range order {
+		serverPrompts := byServer[serverName]
+		inc, configured := incs[serverName]
+		if incs != nil && !configured {
+			// Not configured when the pass started (removed, or never
+			// committed): withhold and record nothing, so no record outlives
+			// the removal's purge.
+			for _, pr := range serverPrompts {
+				res.blocked[pr.Name] = struct{}{}
+			}
+			continue
+		}
+		err := p.withPromptApprovalLock(serverName, inc, func() error {
+			p.checkServerPromptApprovalsHeld(serverName, serverPrompts, serverCfg[serverName], quarantineEnabled, &res)
+			return nil
+		})
+		if err != nil {
+			// Removed or replaced since the capture (or unreadable): withhold
+			// its prompts and write nothing.
+			p.logger.Debug("prompt approval pass skipped a server",
+				zap.String("server", serverName), zap.Error(err))
+			for _, pr := range serverPrompts {
+				res.blocked[pr.Name] = struct{}{}
+			}
+		}
+	}
+
+	if res.pending > 0 || res.changed > 0 {
+		p.logger.Info("prompt rug-pull baseline withheld prompts",
+			zap.Int("pending", res.pending), zap.Int("changed", res.changed))
+	}
+	return res
+}
+
+// checkServerPromptApprovalsHeld decides and records one server's prompts.
+// The caller holds the server's approval lock.
+func (p *MCPProxyServer) checkServerPromptApprovalsHeld(serverName string, prompts []mcp.Prompt, sc *config.ServerConfig, quarantineEnabled bool, res *promptApprovalResult) {
+	// hasBaseline = server already has an approved/changed record (so a
+	// first-seen prompt is NOT auto-approved as baseline).
+	recs, _ := p.storage.ListPromptApprovals(serverName)
+	hasBaseline := false
+	for _, r := range recs {
+		if r.Status == promptStatusApproved || r.Status == promptStatusChanged {
+			hasBaseline = true
+			break
+		}
+	}
+	trustAuto := sc != nil && (sc.EffectiveTrustMode() == config.TrustModeAuto || sc.IsAutoApproveToolChanges())
+
+	for _, pr := range prompts {
+		_, promptName, _ := strings.Cut(pr.Name, ":")
 		argsJSON := promptArgsJSON(pr.Arguments)
 		curHash := calculatePromptApprovalHash(promptName, pr.Description, argsJSON)
 
@@ -176,11 +272,9 @@ func (p *MCPProxyServer) checkPromptApprovals(prompts []mcp.Prompt) promptApprov
 			continue
 		}
 
-		sc := serverCfg[serverName]
-		trustAuto := sc != nil && (sc.EffectiveTrustMode() == config.TrustModeAuto || sc.IsAutoApproveToolChanges())
 		// Baseline pass: a trusted (non-manual) server with no prior record treats
 		// its current prompt set as the approved baseline (mirrors tool isBaselinePass).
-		baselinePass := sc != nil && sc.EffectiveTrustMode() != config.TrustModeManual && !hasBaseline[serverName]
+		baselinePass := sc != nil && sc.EffectiveTrustMode() != config.TrustModeManual && !hasBaseline
 
 		if existing == nil {
 			rec := &storage.PromptApprovalRecord{
@@ -204,7 +298,7 @@ func (p *MCPProxyServer) checkPromptApprovals(prompts []mcp.Prompt) promptApprov
 			if saveErr := p.storage.SavePromptApproval(rec); saveErr != nil {
 				p.logger.Error("failed to save prompt approval", zap.String("server", serverName), zap.String("prompt", promptName), zap.Error(saveErr))
 			}
-			hasBaseline[serverName] = true
+			hasBaseline = true
 			continue
 		}
 
@@ -247,12 +341,6 @@ func (p *MCPProxyServer) checkPromptApprovals(prompts []mcp.Prompt) promptApprov
 			p.logger.Error("failed to save prompt approval", zap.String("server", serverName), zap.String("prompt", promptName), zap.Error(saveErr))
 		}
 	}
-
-	if res.pending > 0 || res.changed > 0 {
-		p.logger.Info("prompt rug-pull baseline withheld prompts",
-			zap.Int("pending", res.pending), zap.Int("changed", res.changed))
-	}
-	return res
 }
 
 // filterBlockedPrompts drops the withheld (pending/changed) prompts before
@@ -276,50 +364,26 @@ func filterBlockedPrompts(prompts []mcp.Prompt, blocked map[string]struct{}) []m
 // the current metadata hash and clears the withhold, then a RefreshPrompts
 // re-registers it. Fails closed via enforcePromptInvariant. Reason is
 // user_approve (an operator/agent explicitly approved).
+//
+// Spec 116 FR-014/FR-016: the approval is bound to the server's incarnation
+// when it starts, and the record is read and written under the server's
+// approval lock after the incarnation check: once the server was removed or
+// replaced it writes nothing and returns runtime.ErrServerReplaced.
 func (p *MCPProxyServer) ApprovePrompt(serverName, promptName, approvedBy string) error {
 	if p.storage == nil {
 		return fmt.Errorf("storage unavailable")
 	}
-	rec, err := p.storage.GetPromptApproval(serverName, promptName)
+	inc, err := p.capturePromptApprovalIncarnation(serverName)
 	if err != nil {
 		return err
 	}
-	if invErr := enforcePromptInvariant(rec.Status, promptStatusApproved, reasonPromptUserApprove); invErr != nil {
-		return invErr
-	}
-	rec.ApprovedHash = rec.CurrentHash
-	rec.Status = promptStatusApproved
-	rec.ApprovedAt = time.Now()
-	rec.ApprovedBy = approvedBy
-	rec.PreviousDescription = ""
-	rec.PreviousArguments = ""
-	if err := p.storage.SavePromptApproval(rec); err != nil {
-		return err
-	}
-	p.RefreshPrompts()
-	return nil
-}
-
-// ApproveAllPrompts approves every pending/changed prompt for a server (or all
-// servers when serverName is empty), then refreshes once. Returns the count
-// approved. Each promotion is guarded by enforcePromptInvariant.
-func (p *MCPProxyServer) ApproveAllPrompts(serverName, approvedBy string) (int, error) {
-	if p.storage == nil {
-		return 0, fmt.Errorf("storage unavailable")
-	}
-	recs, err := p.storage.ListPromptApprovals(serverName)
-	if err != nil {
-		return 0, err
-	}
-	approved := 0
-	for _, rec := range recs {
-		if rec.Status == promptStatusApproved {
-			continue
+	err = p.withPromptApprovalLock(serverName, inc, func() error {
+		rec, err := p.storage.GetPromptApproval(serverName, promptName)
+		if err != nil {
+			return err
 		}
 		if invErr := enforcePromptInvariant(rec.Status, promptStatusApproved, reasonPromptUserApprove); invErr != nil {
-			p.logger.Warn("skipping illegal prompt approval promotion",
-				zap.String("server", rec.ServerName), zap.String("prompt", rec.PromptName), zap.Error(invErr))
-			continue
+			return invErr
 		}
 		rec.ApprovedHash = rec.CurrentHash
 		rec.Status = promptStatusApproved
@@ -327,11 +391,111 @@ func (p *MCPProxyServer) ApproveAllPrompts(serverName, approvedBy string) (int, 
 		rec.ApprovedBy = approvedBy
 		rec.PreviousDescription = ""
 		rec.PreviousArguments = ""
-		if err := p.storage.SavePromptApproval(rec); err != nil {
-			p.logger.Error("failed to save prompt approval", zap.String("server", rec.ServerName), zap.String("prompt", rec.PromptName), zap.Error(err))
+		return p.storage.SavePromptApproval(rec)
+	})
+	if err != nil {
+		return err
+	}
+	p.RefreshPrompts()
+	return nil
+}
+
+// capturePromptApprovalIncarnation is step 1 of a prompt approval writer: the
+// server's current incarnation (runtime.CaptureApprovalIncarnation; 0 for a
+// bare proxy).
+func (p *MCPProxyServer) capturePromptApprovalIncarnation(serverName string) (int64, error) {
+	rt := p.promptApprovalRuntime()
+	if rt == nil {
+		return 0, nil
+	}
+	return rt.CaptureApprovalIncarnation(serverName, 0)
+}
+
+// ApproveAllPrompts approves every pending/changed prompt for a server (or all
+// servers when serverName is empty), then refreshes once. Returns the count
+// approved. Each promotion is guarded by enforcePromptInvariant. Each server's
+// records are re-read and written under its approval lock, bound to the
+// incarnation captured when the call started (Spec 116 FR-014/FR-016): a
+// named server that was removed or replaced fails with
+// runtime.ErrServerReplaced; with serverName empty such a server is skipped.
+func (p *MCPProxyServer) ApproveAllPrompts(serverName, approvedBy string) (int, error) {
+	if p.storage == nil {
+		return 0, fmt.Errorf("storage unavailable")
+	}
+	var servers []string
+	if serverName != "" {
+		servers = []string{serverName}
+	} else {
+		recs, err := p.storage.ListPromptApprovals("")
+		if err != nil {
+			return 0, err
+		}
+		seen := map[string]bool{}
+		for _, rec := range recs {
+			if !seen[rec.ServerName] {
+				seen[rec.ServerName] = true
+				servers = append(servers, rec.ServerName)
+			}
+		}
+		sort.Strings(servers)
+	}
+	incs := map[string]int64{}
+	for _, name := range servers {
+		inc, err := p.capturePromptApprovalIncarnation(name)
+		if err != nil {
+			if serverName != "" {
+				return 0, err
+			}
+			p.logger.Debug("skipping prompt approvals of an unconfigured server",
+				zap.String("server", name), zap.Error(err))
 			continue
 		}
-		approved++
+		incs[name] = inc
+	}
+	approved := 0
+	for _, name := range servers {
+		inc, ok := incs[name]
+		if !ok {
+			continue
+		}
+		err := p.withPromptApprovalLock(name, inc, func() error {
+			recs, err := p.storage.ListPromptApprovals(name)
+			if err != nil {
+				return err
+			}
+			for _, rec := range recs {
+				if rec.Status == promptStatusApproved {
+					continue
+				}
+				if invErr := enforcePromptInvariant(rec.Status, promptStatusApproved, reasonPromptUserApprove); invErr != nil {
+					p.logger.Warn("skipping illegal prompt approval promotion",
+						zap.String("server", rec.ServerName), zap.String("prompt", rec.PromptName), zap.Error(invErr))
+					continue
+				}
+				rec.ApprovedHash = rec.CurrentHash
+				rec.Status = promptStatusApproved
+				rec.ApprovedAt = time.Now()
+				rec.ApprovedBy = approvedBy
+				rec.PreviousDescription = ""
+				rec.PreviousArguments = ""
+				if err := p.storage.SavePromptApproval(rec); err != nil {
+					p.logger.Error("failed to save prompt approval", zap.String("server", rec.ServerName), zap.String("prompt", rec.PromptName), zap.Error(err))
+					continue
+				}
+				approved++
+			}
+			return nil
+		})
+		if err != nil {
+			if serverName != "" {
+				if approved > 0 {
+					p.RefreshPrompts()
+				}
+				return approved, err
+			}
+			p.logger.Debug("skipping prompt approvals of a removed or replaced server",
+				zap.String("server", name), zap.Error(err))
+		}
 	}
 	if approved > 0 {
 		p.RefreshPrompts()

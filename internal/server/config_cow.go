@@ -112,17 +112,29 @@ func configWithoutServer(current *config.Config, name string) *config.Config {
 }
 
 // removeServerFromConfig removes a server through one config commit (Spec 116):
-// the live config, its storage row and call history, and the file lose it
-// together, and the commit purges its tools from the index. A delete followed
-// immediately by an add of the same name therefore always succeeds, and no
-// later save can resurrect the server (#1559). Unknown names fail with
-// runtime.ErrServerNotFound.
-func (s *Server) removeServerFromConfig(name string) error {
+// the live config, its storage row and its whole purge set (tool and prompt
+// approvals, OAuth tokens and DCR client, scan reports and jobs, integrity
+// baseline, call history, tool hashes; PR2), and the file lose it together,
+// and the commit purges its tools from the index and its in-memory state. A
+// delete followed immediately by an add of the same name therefore always
+// succeeds, starts clean (#1562), and no later save can resurrect the server
+// (#1559). Unknown names fail with runtime.ErrServerNotFound. It returns what
+// the purge deleted.
+func (s *Server) removeServerFromConfig(name string) (storage.PurgeReport, error) {
 	if s.runtime == nil {
-		return fmt.Errorf("runtime not available")
+		return storage.PurgeReport{}, fmt.Errorf("runtime not available")
 	}
-	_, err := s.runtime.Commit("remove_server", func(tx *runtime.CommitTx) error {
+	res, err := s.runtime.Commit("remove_server", func(tx *runtime.CommitTx) error {
 		return tx.RemoveServer(name)
 	})
-	return err
+	if err != nil {
+		return storage.PurgeReport{}, err
+	}
+	rep := storage.PurgeReport{Server: name}
+	if res != nil {
+		if r, ok := res.Purged[name]; ok {
+			rep = r
+		}
+	}
+	return rep, nil
 }

@@ -367,6 +367,40 @@ definitions and the scan-gated approval is complete. Do not edit
 `quarantined: false` into the configuration file as an approval shortcut:
 that bypasses the informed-review record and its baseline check.
 
+### Removing a server purges its security state
+
+Removing a server (REST `DELETE /api/v1/servers/{id}`, MCP `upstream_servers
+remove`, the Web UI, or a config edit that drops it) deletes everything
+MCPProxy stored under its name in the same commit, before the call returns:
+approved tool and prompt hashes, OAuth tokens and the DCR client
+registration, scan reports and jobs, the integrity baseline, call history and
+tool hashes, plus its search-index entries and refresh schedule. OAuth state
+is matched exactly, so removing `foo` never signs out `foo_bar`.
+
+A server added again under the same name is therefore a new server that
+inherits none of the old one's records: an unforced scanner approval needs a
+new scan, and it needs a new OAuth sign-in. Admission policy applies to it as
+to any new server. Under the default manual trust it starts quarantined and
+every tool and prompt it exposes is pending review, even when the definitions
+are identical. With `trust_mode: "auto"` or an explicit `quarantined: false`
+it is admitted per that setting, and tool discovery can record a fresh
+approved baseline for it. Removal purges the inherited records; it does not
+override the admission policy.
+
+One gap remains for OAuth: credential writes are not yet bound to the
+server's incarnation. If the removed server's connection was saving a token
+or registering a DCR client at the moment of removal, that write can still
+land afterwards, and a server re-added under the same name right away may
+find it. Sign the server out to clear it. Binding OAuth writes to the
+incarnation is a planned follow-up (Spec 116 PR2b).
+
+An approval made on the old server cannot land on the new one. Each server
+has an `incarnation` (in `GET /api/v1/servers` and the review payload) that
+changes only on remove and re-create; approvals are bound to it, and the
+REST approval routes accept it as `expected_incarnation`. A decision bound to
+a removed incarnation writes nothing and answers `409 server_replaced`. See
+[REST API: Removal and incarnation](../api/rest-api.md#removal-and-incarnation).
+
 ### Re-quarantine a Server
 
 If you need to quarantine a previously approved server:

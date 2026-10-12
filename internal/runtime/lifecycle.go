@@ -1538,6 +1538,20 @@ func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName 
 // eligibility check passed and before any index write (the discovery pass's
 // last-good and StateView publish, D15). It never runs for a rejected pass.
 func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func()) error {
+	return r.applyDifferentialToolUpdateGuarded(ctx, serverName, newTools, instanceGen, nil, held)
+}
+
+// errLocalSnapshotPurged reports a local reindex whose last-good snapshot was
+// purged by a removal after it was selected (review round 3): the copy belongs
+// to the removed server and must not reach a same-name replacement.
+var errLocalSnapshotPurged = errors.New("last-good snapshot was purged by a removal after it was selected")
+
+// applyDifferentialToolUpdateGuarded is applyDifferentialToolUpdateHeld with
+// stale, checked under the approval lock right after the eligibility verdict
+// and before held and any write: when it reports true the update writes
+// nothing and returns errLocalSnapshotPurged. The local reindex paths pass a
+// purge-sequence check, because their tools carry no instance generation.
+func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, stale func() bool, held func()) error {
 	unlock := r.lockToolApprovals(serverName)
 	locked := true
 	release := func() {
@@ -1557,6 +1571,11 @@ func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverNam
 		r.logger.Info("Discovery result dropped: it came from a superseded instance generation; the current instance is re-listed",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return errDiscoveryStaleGeneration
+	}
+	if stale != nil && stale() {
+		r.logger.Info("Local reindex dropped: the server was removed after its last-good snapshot was selected",
+			zap.String("server", serverName))
+		return errLocalSnapshotPurged
 	}
 	// Spec 117 PR-1 (FR-027, FR-027a): the server's tool baseline is resolved
 	// (and an older store's marker back-filled) BEFORE anything of this pass
@@ -2215,11 +2234,42 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 // written to storage under the server's approval lock in the same step that
 // purges the index (FR-008), and published before this returns.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
+	return r.QuarantineServerAt(serverName, quarantined, 0)
+}
+
+// QuarantineServerAt is QuarantineServer bound to expectedIncarnation (Spec
+// 116 FR-015, FR-017): when it is > 0 the commit fails with ErrServerReplaced
+// (and changes nothing) unless the server still has that incarnation — the
+// scanner approval and an unquarantine the operator reviewed in the Web UI use
+// it, so a remove and re-add in between can never release the replacement.
+func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
+	// An unquarantine without an expected incarnation is bound to the one
+	// current when it arrives (FR-017, review round 4), so a remove and
+	// re-add that lands before its commit fails it with ErrServerReplaced
+	// instead of releasing the replacement. Quarantining stays unbound: it
+	// never releases anything.
+	if !quarantined && expectedIncarnation <= 0 {
+		inc, err := r.CaptureApprovalIncarnation(serverName, 0)
+		if err != nil {
+			return fmt.Errorf("failed to update quarantine state for server '%s': %w", serverName, err)
+		}
+		expectedIncarnation = inc
+	}
+
+	var baseInc int64
 	res, err := r.Commit("quarantine_toggle", func(tx *CommitTx) error {
+		if g, ok := tx.Generation(serverName); ok {
+			baseInc = g.Incarnation
+		}
+		if expectedIncarnation > 0 {
+			if err := tx.ExpectIncarnation(serverName, expectedIncarnation); err != nil {
+				return err
+			}
+		}
 		// The commit sends the one servers.changed and review.changed of this
 		// transition (FR-028); no caller-side copy follows.
 		tx.EventExtra(map[string]any{"server": serverName, "quarantined": quarantined})
@@ -2240,7 +2290,9 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	//
 	// The follow-up is bound to the incarnation of the commit that
 	// unquarantined, taken from its result and never recaptured by name
-	// (FR-014i); Spec 116 PR2 adds the under-lock check of that incarnation.
+	// (FR-014i, review R9.5): under the approval lock it promotes nothing
+	// when the row no longer has that incarnation (a remove and re-add ran
+	// after this commit) or is quarantined again.
 	if !quarantined {
 		var inc int64
 		if res != nil && res.Snapshot != nil {
@@ -2248,7 +2300,16 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 				inc = g.Incarnation
 			}
 		}
-		if err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil {
+		if inc == 0 {
+			// The commit published nothing (the server was already
+			// unquarantined): bind to the incarnation the commit read
+			// under its lock.
+			inc = baseInc
+		}
+		if h := r.testHooks.approvalAfterUnquarantineCommit; h != nil {
+			h(serverName, inc)
+		}
+		if err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil && !errors.Is(err, ErrServerReplaced) {
 			r.logger.Warn("Failed to baseline-approve tools on server unquarantine",
 				zap.String("server", serverName),
 				zap.Error(err))
@@ -2675,10 +2736,8 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	r.lastGoodToolsMu.RLock()
-	snapshot, hasSnapshot := r.lastGoodTools[serverName]
-	r.lastGoodToolsMu.RUnlock()
-	if !hasSnapshot || len(snapshot) == 0 {
+	snapshot, seq := r.lastGoodSnapshotWithSeq(serverName)
+	if len(snapshot) == 0 {
 		return
 	}
 	if hook := r.localReindexAfterSnapshot; hook != nil {
@@ -2692,5 +2751,7 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 		zap.Int("snapshot_tools", len(snapshot)))
 
 	// Re-checks eligibility again immediately before the write.
-	r.applyServerDiffIfEligible(ctx, serverName, snapshot)
+	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, func() bool {
+		return r.lastGoodPurgedSince(serverName, seq)
+	})
 }

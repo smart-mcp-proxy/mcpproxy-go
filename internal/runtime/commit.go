@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -34,9 +35,11 @@ import (
 //  4. Locks    the approval lock (L1) of every changed server, sorted; then
 //     the UnderApprovalLock hooks.
 //  5. Disk     capture the raw file, write the new file (self-write marker).
-//  6. Storage  one bbolt transaction (rows with their stamps, deletions, meta),
-//     then the index purge; release L1. On failure the raw file of
-//     step 5 is restored and nothing is published.
+//  6. Storage  one bbolt transaction (rows with their stamps, the removal
+//     purge set of every removed or replaced server, meta), then
+//     the index purge and the in-memory purge; release L1. On
+//     failure the raw file of step 5 is restored and nothing is
+//     published.
 //  7. Advance  restamp retained instances (RestampRetained).
 //  8. Publish  configsvc.Publish and the legacy r.cfg / desiredCfg swap.
 //
@@ -65,6 +68,12 @@ type CommitResult struct {
 	DiskWritten bool
 	// Restamped lists the retained instances step 7 updated in place.
 	Restamped []string
+	// Purged reports, per removed or replaced server, what the storage step
+	// deleted from the purge set (Spec 116 PR2, data-model §PurgeSet).
+	Purged map[string]storage.PurgeReport
+	// exemptionsDropped reports whether the commit revoked an inspection
+	// exemption of a purged server (the supervisor reconciles after unlock).
+	exemptionsDropped bool
 }
 
 // ServerNotFoundError reports a server that is not in the live configuration.
@@ -86,8 +95,10 @@ type ServerExistsError struct{ Name string }
 func (e *ServerExistsError) Error() string { return fmt.Sprintf("server '%s' already exists", e.Name) }
 
 // ErrServerReplaced reports that the server a caller bound to (by generation or
-// incarnation) was removed or replaced before its commit ran.
-var ErrServerReplaced = errors.New("server_replaced")
+// incarnation) was removed or replaced before its commit ran. It is
+// commitview.ErrServerReplaced, so the scanner and the HTTP layer match it
+// without importing the runtime.
+var ErrServerReplaced = commitview.ErrServerReplaced
 
 // ErrCommitInvariant marks a commit that violated a Spec 116 invariant: a bug,
 // never a user error.
@@ -360,7 +371,7 @@ func (tx *CommitTx) ExpectGeneration(name string, gen int64) error {
 func (tx *CommitTx) ExpectIncarnation(name string, inc int64) error {
 	g, ok := tx.base.ServerGeneration(name)
 	if !ok || g.Incarnation != inc {
-		return fmt.Errorf("%w: server '%s' was removed or replaced since it was reviewed", ErrServerReplaced, name)
+		return serverReplacedError(name)
 	}
 	return nil
 }
@@ -451,6 +462,9 @@ func (r *Runtime) Commit(reason string, fn func(tx *CommitTx) error) (*CommitRes
 		return nil, err
 	}
 	if after != nil {
+		if h := r.testHooks.beforeAfterCommit; h != nil {
+			h(reason)
+		}
 		after()
 	}
 	return res, nil
@@ -681,16 +695,35 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			}
 		}
 		next := serverNameSet(tx.next)
+		removes := map[string]bool{}
 		for name := range stored {
 			if !next[name] {
-				batch.Removes = append(batch.Removes, name)
+				removes[name] = true
 			}
+		}
+		// A committed removal purges even when its projection row is missing
+		// (review round 2): the purge set (approvals, credentials, scan
+		// evidence) is keyed by name and outlives a lost row, and a same-name
+		// re-add would inherit it.
+		for name, ch := range changes {
+			if ch.Kind == configsvc.ChangeRemoved && !next[name] {
+				removes[name] = true
+			}
+		}
+		for name := range removes {
+			batch.Removes = append(batch.Removes, name)
 		}
 		for name := range replaced {
 			batch.Replaces = append(batch.Replaces, name)
 		}
 		sort.Strings(batch.Removes)
 		sort.Strings(batch.Replaces)
+		// The boot-time empty-set guard (as in commitOrphanGC): a startup
+		// commit that loads no server at all deletes the stale rows but keeps
+		// their approvals and credentials, so a configuration that came up
+		// empty never wipes the trust state of every server.
+		batch.RowOnlyRemoves = len(tx.next.Servers) == 0 &&
+			(reason == commitReasonBoot || reason == commitReasonAdmissionGate)
 		batch.OAuthClears = r.commitOAuthClears(tx, changes, stored, replaced, batch.Saves)
 		qe := tx.next.IsQuarantineEnabled()
 		if enabled, ok, _ := r.storageManager.StoredQuarantineEnabled(); !ok || enabled != qe {
@@ -841,14 +874,16 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		h(reason)
 	}
 
-	// Step 6: storage, then index purge, then path-specific purges.
+	// Step 6: storage (with the removal purge, Spec 116 PR2), then index
+	// purge, then the in-memory purge, all under the approval locks.
+	var purgeReports map[string]storage.PurgeReport
 	if storageNeeded {
 		serr := error(nil)
 		if fault := hooks.storageFault; fault != nil {
 			serr = fault(reason)
 		}
 		if serr == nil {
-			serr = r.storageManager.ApplyServerCommit(batch)
+			purgeReports, serr = r.storageManager.ApplyServerCommitWithReport(batch)
 		}
 		if serr != nil {
 			if diskWritten {
@@ -859,10 +894,12 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		}
 	}
 	purged := r.commitIndexPurge(tx, changes, batch, stored)
+	r.commitMemoryPurgeHeld(purgeReports)
 	if tx.reconcile || len(tx.removed) > 0 || len(tx.replaced) > 0 || (batch != nil && len(batch.Removes) > 0) {
 		r.commitOrphanGC(tx)
 	}
 	releaseLocks()
+	exemptionsDropped := r.commitDropPurgedSchedules(purgeReports)
 	if tx.reconcile {
 		if h := hooks.reconcileExit; h != nil {
 			h()
@@ -880,7 +917,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 			r.desiredCfg = tx.desired
 			r.mu.Unlock()
 		}
-		res := &CommitResult{Changes: changes, DiskWritten: diskWritten}
+		res := &CommitResult{Changes: changes, DiskWritten: diskWritten, Purged: purgeReports, exemptionsDropped: exemptionsDropped}
 		return res, r.afterCommitFunc(tx, res, nil, purged), nil
 	}
 
@@ -939,6 +976,9 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		Published:   true,
 		DiskWritten: diskWritten,
 		Restamped:   restamped,
+		Purged:      purgeReports,
+
+		exemptionsDropped: exemptionsDropped,
 	}
 	return res, r.afterCommitFunc(tx, res, snap, purged), nil
 }
@@ -1097,7 +1137,7 @@ func baseEntry(cfg *config.Config, name string) *config.ServerConfig {
 //     base, so only the stored row still holds the old OAuth config.
 //
 // Only names whose row this commit writes qualify; a replaced name is a new
-// server whose state PR2's purge handles. The result is sorted.
+// server whose whole purge set the storage step deletes. The result is sorted.
 func (r *Runtime) commitOAuthClears(tx *CommitTx, changes map[string]ServerChange, stored map[string]*storage.StoredServer, replaced map[string]bool, saves []storage.ServerSave) []string {
 	var names []string
 	for _, s := range saves {
@@ -1162,6 +1202,7 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		for _, name := range purged {
 			r.reindexAffectedProfiles(name)
 		}
+		r.afterServerPurge(res.Purged, res.exemptionsDropped)
 		if res.Published {
 			r.runCommitWorkers(tx, res, snap)
 			r.notifyTelemetryInOrder(res.Generation, tx.next)
@@ -1251,17 +1292,26 @@ func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *config
 		}
 		sg, _ := snap.ServerGeneration(sc.Name)
 		if sc.Enabled {
-			go func(cfg *config.ServerConfig, gen int64) {
+			go func(cfg *config.ServerConfig, gen, inc int64) {
 				if err := r.upstreamManager.AddServerAt(cfg.Name, cfg, gen); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 					return
 				}
 				if r.storageManager != nil {
-					if _, err := r.storageManager.RegisterServerIdentity(cfg, cfgPath); err != nil {
+					if h := r.testHooks.beforeRegisterIdentity; h != nil {
+						h(cfg.Name)
+					}
+					// Incarnation-conditional (FR-014c): a worker that
+					// outlives a removal registers nothing for the
+					// removed server or its replacement.
+					if _, written, err := r.storageManager.RegisterServerIdentityIfIncarnation(cfg, cfgPath, inc); err != nil {
 						r.logger.Warn("Failed to register server identity", zap.Error(err), zap.String("server", cfg.Name))
+					} else if !written {
+						r.logger.Debug("Server identity not registered: the server was removed or replaced",
+							zap.String("server", cfg.Name), zap.Int64("incarnation", inc))
 					}
 				}
-			}(sc, sg.Gen)
+			}(sc, sg.Gen, sg.Incarnation)
 		} else {
 			go func(name string) {
 				r.upstreamManager.RemoveServer(name)

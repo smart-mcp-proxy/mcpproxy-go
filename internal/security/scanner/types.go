@@ -211,6 +211,11 @@ type ScanJob struct {
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses"`
 	// Scan context — what was scanned and how
 	ScanContext *ScanContext `json:"scan_context,omitempty"`
+	// Incarnation is the incarnation of the server this job scans (Spec 116
+	// FR-014a): its saves are conditional on the server still having it, so
+	// a scan that outlives a remove and re-add leaves nothing for the
+	// replacement. 0 for a job started without a committed view.
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // clone returns a snapshot copy of the job.
@@ -404,6 +409,9 @@ type ScanReport struct {
 	RiskScore  int             `json:"risk_score"` // 0-100
 	SarifRaw   json.RawMessage `json:"sarif_raw,omitempty"`
 	ScannedAt  time.Time       `json:"scanned_at"`
+	// Incarnation is the incarnation of the scanned server (Spec 116
+	// FR-014a), copied from the job.
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // AggregatedReport combines results from all scanners for a single scan job

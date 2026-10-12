@@ -237,4 +237,64 @@ describe('api.getToolApprovals — export records + best-effort evidence enrichm
     expect(urls).toContain('/api/v1/servers/io.github.owner%2Frepo/tools/export')
     expect(urls).toContain('/api/v1/servers/io.github.owner%2Frepo/tools')
   })
+
+  // Spec 116 PR2 review round 8 (FR-017): the export and the inventory are
+  // read independently. A remove + same-name re-add between them must not
+  // attach the removed server's hold verdict and signals to the
+  // replacement's records.
+  it('does not attach evidence read for another incarnation; keeps the records', async () => {
+    let releaseInventory: (v: unknown) => void = () => {}
+    const inventoryGate = new Promise((resolve) => { releaseInventory = resolve })
+    fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('/tools/export')) {
+        // B (incarnation 9) is already committed when the export is read.
+        const body = structuredClone(exportBody) as typeof exportBody & { data: { incarnation?: number } }
+        body.data.incarnation = 9
+        return { ok: true, status: 200, json: async () => body }
+      }
+      // A's inventory (incarnation 4) was deferred across the replacement.
+      await inventoryGate
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, data: { incarnation: 4, tools: [
+          { name: 'create_issue', held_reason: 'scan_findings', held_verdict: 'dangerous', held_signals: ['A.only.signal'] },
+        ] } }),
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const api = await freshApi()
+
+    const pending = api.getToolApprovals('github')
+    releaseInventory(undefined)
+    const res = await pending
+
+    expect(res.success).toBe(true)
+    expect(res.data!.incarnation).toBe(9)
+    expect(res.data!.tools.map((t) => t.tool_name)).toEqual(['create_issue', 'list_issues'])
+    expect(res.data!.tools[0].status).toBe('pending')
+    expect(res.data!.tools[0].held_reason).toBeUndefined()
+    expect(res.data!.tools[0].held_verdict).toBeUndefined()
+    expect(res.data!.tools[0].held_signals).toBeUndefined()
+  })
+
+  it('keeps the enrichment when both reads name the same incarnation', async () => {
+    fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('/tools/export')) {
+        const body = structuredClone(exportBody) as typeof exportBody & { data: { incarnation?: number } }
+        body.data.incarnation = 9
+        return { ok: true, status: 200, json: async () => body }
+      }
+      const body = structuredClone(toolsBody) as typeof toolsBody & { data: { incarnation?: number } }
+      body.data.incarnation = 9
+      return { ok: true, status: 200, json: async () => body }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const api = await freshApi()
+
+    const res = await api.getToolApprovals('github')
+
+    expect(res.data!.tools[0].held_verdict).toBe('dangerous')
+    expect(res.data!.tools[0].held_signals).toEqual([TPA_HIDDEN, 'phrase.injection'])
+  })
 })

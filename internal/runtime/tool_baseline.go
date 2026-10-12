@@ -178,11 +178,29 @@ func (r *Runtime) markDiscoveryToolBaselineHeld(serverName string) {
 // committed. A commit that fails after the marker leaves the marker in place:
 // that only holds later tools for review, which is the safe direction.
 func (r *Runtime) CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	return r.commitServerApproval(serverName, 0, false, blocks, expected, by, commit)
+}
+
+// CommitServerApprovalAt is CommitServerApproval bound to a server
+// incarnation (Spec 116 FR-014): under the approval lock, and before the
+// marker is written, the stored row must still carry inc, else
+// ErrServerReplaced and nothing is recorded or committed. The removal commit
+// purges the marker under the same lock.
+func (r *Runtime) CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	return r.commitServerApproval(serverName, inc, true, blocks, expected, by, commit)
+}
+
+func (r *Runtime) commitServerApproval(serverName string, inc int64, bound bool, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
 	_ = blocks
 	if expected != nil {
 		return 0, fmt.Errorf("review-bound server approval is not supported by this core")
 	}
 	defer r.lockToolApprovals(serverName)()
+	if bound {
+		if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+			return 0, err
+		}
+	}
 	if r.storageManager != nil {
 		if by == "" {
 			by = "unknown"

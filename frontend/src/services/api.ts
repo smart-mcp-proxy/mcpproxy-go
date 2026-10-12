@@ -90,6 +90,20 @@ function queryString(params: Record<string, string | number | boolean | undefine
   return text ? `?${text}` : ''
 }
 
+
+/**
+ * withExpectedIncarnation adds `expected_incarnation` to an approval body when
+ * the caller knows the incarnation of the server it reviewed (Spec 116
+ * FR-017). Unknown (undefined or 0) leaves the body unchanged: the backend then
+ * binds to the incarnation current when the request arrives.
+ */
+export function withExpectedIncarnation<T extends object>(body: T, expectedIncarnation?: number): T & { expected_incarnation?: number } {
+  if (expectedIncarnation && expectedIncarnation > 0) {
+    return { ...body, expected_incarnation: expectedIncarnation }
+  }
+  return body
+}
+
 class APIService {
   private baseUrl = ''
   private apiKey = ''
@@ -500,8 +514,10 @@ class APIService {
     )
   }
 
-  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
-    return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
+  // `incarnation` (Spec 116 FR-017) is the server identity the rows were read
+  // for; per-tool decisions echo it as expected_incarnation.
+  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[]; incarnation?: number }>> {
+    return this.request<{ tools: Tool[]; incarnation?: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }
 
   // Global tools listing (Spec 050) — all tools across all servers from a single consolidated endpoint.
@@ -523,12 +539,14 @@ class APIService {
   // index is empty. That payload carries no held_* evidence, so the inventory
   // endpoint `/tools` is fetched in parallel purely as ENRICHMENT and joined by
   // tool name. The enrichment call is caught individually and degrades to null —
-  // a failed evidence fetch must never drop a durable approval record.
-  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
+  // a failed evidence fetch must never drop a durable approval record. The
+  // enrichment is joined only when both reads name the same server incarnation
+  // (Spec 116 FR-017).
+  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number, incarnation?: number }>> {
     const encoded = encodeURIComponent(serverName)
     const [response, enrichment] = await Promise.all([
-      this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encoded}/tools/export`),
-      this.request<{ tools: HoldEvidenceSource[] }>(`/api/v1/servers/${encoded}/tools`)
+      this.request<{ tools: ToolApproval[], count: number, incarnation?: number }>(`/api/v1/servers/${encoded}/tools/export`),
+      this.request<{ tools: HoldEvidenceSource[]; incarnation?: number }>(`/api/v1/servers/${encoded}/tools`)
         .catch(() => null),
     ])
 
@@ -543,7 +561,13 @@ class APIService {
           enabled: !disabled,
         }
       })
-      const evidence = enrichment?.success ? enrichment.data?.tools ?? null : null
+      // Spec 116 PR2 review round 8 (FR-017): the two reads are independent,
+      // so a remove + same-name re-add between them pairs the replacement's
+      // records with the removed server's hold verdict and signals. Enrich
+      // only when both envelopes name the same incarnation; otherwise the
+      // records are returned without evidence (the degraded path above).
+      const sameServer = (enrichment?.data?.incarnation ?? null) === (response.data.incarnation ?? null)
+      const evidence = enrichment?.success && sameServer ? enrichment.data?.tools ?? null : null
       response.data.tools = joinHoldEvidence(normalized, evidence)
     }
     return response
@@ -553,13 +577,17 @@ class APIService {
     return this.request<ToolApproval>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/diff`)
   }
 
-  async approveTools(serverName: string, tools?: string[]): Promise<APIResponse<{ approved: number }>> {
+  // Spec 116 FR-017: every approval write accepts the incarnation of the server
+  // the operator reviewed (the `incarnation` of GET /servers or of the review
+  // payload). The backend answers 409 server_replaced, and writes nothing, when
+  // the server was removed and re-added since. Omitted when unknown.
+  async approveTools(serverName: string, tools?: string[], expectedIncarnation?: number): Promise<APIResponse<{ approved: number }>> {
     const body = tools && tools.length > 0
       ? { tools }
       : { approve_all: true }
     return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 
@@ -567,38 +595,40 @@ class APIService {
   // against POST .../tools/block — {tools:[...]} for an explicit set,
   // {block_all:true} otherwise. Blocking is reversible (the tool can be
   // re-enabled later), so no destructive-confirm gate is needed.
-  async blockTools(serverName: string, tools?: string[]): Promise<APIResponse<{ blocked: number }>> {
+  async blockTools(serverName: string, tools?: string[], expectedIncarnation?: number): Promise<APIResponse<{ blocked: number }>> {
     const body = tools && tools.length > 0
       ? { tools }
       : { block_all: true }
     return this.request<{ blocked: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/block`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 
-  async setToolEnabled(serverName: string, toolName: string, enabled: boolean): Promise<APIResponse<{
+  async setToolEnabled(serverName: string, toolName: string, enabled: boolean, expectedIncarnation?: number): Promise<APIResponse<{
     server_name: string
     tool_name: string
     enabled: boolean
   }>> {
     return this.request<{ server_name: string; tool_name: string; enabled: boolean }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/enabled`, {
       method: 'POST',
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(withExpectedIncarnation({ enabled }, expectedIncarnation)),
     })
   }
 
   // Bulk-toggle every known tool of a server. The response's `changed`
   // field reflects only tools whose state actually changed — already-correct
   // tools are skipped on the server side.
-  async setAllToolsEnabled(serverName: string, enabled: boolean): Promise<APIResponse<{
+  async setAllToolsEnabled(serverName: string, enabled: boolean, expectedIncarnation?: number): Promise<APIResponse<{
     server_name: string
     enabled: boolean
     changed: number
   }>> {
     const action = enabled ? 'enable_all' : 'disable_all'
+    const bound = expectedIncarnation && expectedIncarnation > 0
     return this.request<{ server_name: string; enabled: boolean; changed: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${action}`, {
       method: 'POST',
+      ...(bound ? { body: JSON.stringify({ expected_incarnation: expectedIncarnation }) } : {}),
     })
   }
 
@@ -1600,10 +1630,10 @@ class APIService {
     })
   }
 
-  async securityApprove(serverName: string, force = false, block: string[] = []): Promise<APIResponse<void>> {
+  async securityApprove(serverName: string, force = false, block: string[] = [], expectedIncarnation?: number): Promise<APIResponse<void>> {
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
       method: 'POST',
-      body: JSON.stringify({ force, block }),
+      body: JSON.stringify(withExpectedIncarnation({ force, block }, expectedIncarnation)),
     })
   }
 
