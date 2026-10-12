@@ -25,7 +25,10 @@ import (
 // without any further connect or notification.
 func TestCoalescedDiscovery_BurstPastFollowUpCap_VerifiesFinalTrigger(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "burst", Enabled: true}})
-	rt.coalescedDiscoveryContinuationDelay = 20 * time.Millisecond
+	// The continuation is gated on a channel, not a timer, so the assertions
+	// about the capped owner cannot race it (Sol r8 P2).
+	gate := make(chan struct{})
+	rt.coalescedDiscoveryContinuationGate = gate
 
 	// One owner performs 1 + maxCoalescedDiscoveryFollowUps runs; notify
 	// during every one of them and once more during the first continued run.
@@ -50,7 +53,10 @@ func TestCoalescedDiscovery_BurstPastFollowUpCap_VerifiesFinalTrigger(t *testing
 	rt.runCoalescedDiscovery("burst", run)
 	require.Equal(t, int32(maxCoalescedDiscoveryFollowUps+1), runs.Load(), "one owner stops at the follow-up cap")
 	assert.False(t, verifiedArmed.Load(), "the armed contract was not listed by the capped owner")
+	_, pending := rt.discoveryRerunPending.Load("burst")
+	require.True(t, pending, "the final trigger is still pending for the continuation")
 
+	close(gate)
 	require.Eventually(t, verifiedArmed.Load, 5*time.Second, 10*time.Millisecond,
 		"a deferred continuation must verify the final coalesced trigger")
 	require.Eventually(t, func() bool {

@@ -770,13 +770,22 @@ func (r *Runtime) scheduleCoalescedDiscoveryContinuation(serverName string, run 
 	if lifetime.Err() != nil {
 		return
 	}
+	gate := r.coalescedDiscoveryContinuationGate
 	go func() {
-		timer := time.NewTimer(r.coalescedContinuationDelay())
-		defer timer.Stop()
-		select {
-		case <-lifetime.Done():
-			return
-		case <-timer.C:
+		if gate != nil {
+			select {
+			case <-lifetime.Done():
+				return
+			case <-gate:
+			}
+		} else {
+			timer := time.NewTimer(r.coalescedContinuationDelay())
+			defer timer.Stop()
+			select {
+			case <-lifetime.Done():
+				return
+			case <-timer.C:
+			}
 		}
 		if lifetime.Err() != nil {
 			return

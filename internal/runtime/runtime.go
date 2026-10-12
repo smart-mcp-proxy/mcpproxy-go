@@ -234,6 +234,10 @@ type Runtime struct {
 	// deferred coalesced-discovery continuation runs (tests only; zero means
 	// defaultCoalescedDiscoveryContinuationDelay). Set before any discovery.
 	coalescedDiscoveryContinuationDelay time.Duration
+	// coalescedDiscoveryContinuationGate, when non-nil, replaces the delay:
+	// a deferred continuation waits until the channel is closed (tests only,
+	// so assertions about the capped owner cannot race the continuation).
+	coalescedDiscoveryContinuationGate chan struct{}
 	// notificationDiscoverHook replaces DiscoverAndIndexToolsForServer for
 	// notification-triggered discovery runs (tests only).
 	notificationDiscoverHook func(ctx context.Context, serverName string) error

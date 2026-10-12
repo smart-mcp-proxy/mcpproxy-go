@@ -139,6 +139,12 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	// A tools/list (e.g. a tool-count refresh) is answered with the approved
 	// contract and held in flight.
 	held.arm()
+	// Release the held response on every exit path: a t.Fatal below would
+	// otherwise leave the handler blocked and upstream.Close (an earlier
+	// cleanup, so it runs after this one) hanging (Sol r8 P2).
+	var releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(held.release) }) }
+	t.Cleanup(releaseHeld)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	inFlight := make(chan struct{})
@@ -180,7 +186,7 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 			t.Fatal("the notification's discovery never reached the in-flight tools/list")
 		}
 	}
-	close(held.release)
+	releaseHeld()
 	<-inFlight
 
 	select {
