@@ -598,7 +598,7 @@ mcpproxy security reject <server>
 5. Leaves the server **still quarantined** — its config is untouched so you can run a fresh scan later.
 
 :::note Reject is not "delete"
-`security reject` never removes the server config or the server from the BBolt `servers` bucket. To fully remove a server, use `mcpproxy upstream delete <server>`.
+`security reject` never removes the server config or the server from the BBolt `servers` bucket. To fully remove a server, use `mcpproxy upstream remove <server>`.
 :::
 
 ### Example
@@ -714,7 +714,7 @@ $ mcpproxy security overview -o json | jq '.batch_status // "none"'
 
 ```bash
 # 1. Add the server (lands in quarantine by default)
-mcpproxy upstream add my-server --command=npx --args="-y,@my-org/mcp-server"
+mcpproxy upstream add my-server -- npx -y @my-org/mcp-server
 
 # 2. Make sure scanners are ready
 mcpproxy security scanners

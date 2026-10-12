@@ -1004,6 +1004,15 @@ func (r *Runtime) commitIndexPurge(tx *CommitTx, changes map[string]ServerChange
 			if ch.QuarantineRaised {
 				targets[name] = true
 			}
+			// An explicit quarantine decision made in this commit purges too,
+			// even when the entry was already quarantined implicitly by the
+			// admission gate (#1561): a REST PATCH {"quarantined":true} is the
+			// operator's quarantine and must leave no description indexed.
+			if sc := tx.entry(name); sc != nil && sc.Quarantined && sc.QuarantineExplicitlySet() {
+				if prev := baseEntry(tx.base.Config, name); prev == nil || !prev.Quarantined || !prev.QuarantineExplicitlySet() {
+					targets[name] = true
+				}
+			}
 			if sc := tx.entry(name); sc != nil && !sc.Enabled {
 				if prev := baseEntry(tx.base.Config, name); prev == nil || prev.Enabled {
 					targets[name] = true
