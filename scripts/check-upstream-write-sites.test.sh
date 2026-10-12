@@ -7,7 +7,9 @@
 # DeleteServerAsync, EnableServerAsync, QuarantineServerAsync; must exit 1), the same call in a test file, in internal/storage and in
 # internal/runtime/commit.go (must exit 0), the AddUpstream alias (exit 1), a
 # method value such as `save := st.SaveUpstreamServer` (exit 1), a selector
-# split across lines (exit 1), and a whole-line comment (must exit 0). Then runs the real script on the repository (must exit 0).
+# split across lines (exit 1), a code line starting with `*` such as
+# `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
+# (exit 1), and whole-line, block and string-literal mentions (must exit 0). Then runs the real script on the repository (must exit 0).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,6 +84,26 @@ multival="$(mkroot planted-multiline-value)"
 printf '\tsave := (*BoltDB).\n\t\tSaveUpstreamServer\n' > "$multival/internal/server/a.go"
 expect "planted multiline SaveUpstreamServer method value in internal/server" 1 "$multival"
 
+# A code line whose first non-blank character is `*` is code, not a block
+# comment continuation (review round 9): `*save = st.SaveUpstreamServer` then
+# `(*save)(sc)` writes the row. Block-comment state is tracked across lines,
+# so genuine continuation lines stay skipped (see the allowed tree below).
+deref="$(mkroot planted-deref-assign)"
+printf 'package server\n\nfunc f(st *S, sc *C) {\n\tvar save *func(*C) error\n\t*save = st.SaveUpstreamServer\n\t_ = (*save)(sc)\n}\n' > "$deref/internal/server/a.go"
+expect "planted SaveUpstreamServer method value assigned through a pointer (line starts with *)" 1 "$deref"
+derefsplit="$(mkroot planted-deref-split)"
+printf '\t*save = st.\n\t\tSaveUpstreamServer\n' > "$derefsplit/internal/server/a.go"
+expect "planted split selector on a line starting with *" 1 "$derefsplit"
+afterblock="$(mkroot planted-after-block)"
+printf '\t/* closed */ _ = st.SaveUpstreamServer(sc)\n' > "$afterblock/internal/server/a.go"
+expect "planted call after a closed block comment on the same line" 1 "$afterblock"
+afterblockml="$(mkroot planted-after-multiline-block)"
+printf '\t/*\n\t * notes\n\t */\n\t_ = st.SaveUpstreamServer(sc)\n' > "$afterblockml/internal/server/a.go"
+expect "planted call after a multi-line block comment" 1 "$afterblockml"
+strslash="$(mkroot planted-after-string-opener)"
+printf '\tpat := "/*"\n\t_ = st.SaveUpstreamServer(sc)\n' > "$strslash/internal/server/a.go"
+expect "planted call after a string containing /* (not a comment opener)" 1 "$strslash"
+
 allowed="$(mkroot allowed)"
 echo '	_ = m.SaveUpstreamServer(sc)' > "$allowed/internal/storage/manager.go"
 echo '	save := m.SaveUpstreamServer' > "$allowed/internal/storage/value.go"
@@ -97,6 +119,10 @@ printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/storage
 printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/server/multi_test.go"
 printf '\tx := st.\n\t\tSaveUpstreamServerCount\n' > "$allowed/internal/server/multi_longer.go"
 printf '\t// ends with a dot.\n\tSaveUpstreamServer := 1\n' > "$allowed/internal/server/not_selector.go"
+printf '/*\n * a direct st.SaveUpstreamServer(sc) here would be a second source\n *save = st.SaveUpstreamServer\n */\n' > "$allowed/internal/server/block.go"
+printf '\t/* st.SaveUpstreamServer(sc) */\n' > "$allowed/internal/server/block_inline.go"
+# shellcheck disable=SC2016 # literal backticks: a Go raw string
+printf '\tmsg := "st.SaveUpstreamServer(sc)"\n\tdoc := `\n st.QuarantineServerAsync(name, true)\n`\n' > "$allowed/internal/server/strings.go"
 expect "storage, commit.go, tests and comments are allowed" 0 "$allowed"
 
 if bash "$CHECK" >/dev/null 2>&1; then

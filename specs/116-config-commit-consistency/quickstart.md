@@ -62,7 +62,7 @@ go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEn
 |---|---|---|---|
 | T1.1 | stale-read: `ApplyConfig` returns; its downstream reconcile is parked at the `reconcileEntry` seam (`LoadConfiguredServers` entry on `main`; inside the apply commit after PR1, where the add of B then blocks on L0) | REST add B, approve all, block one tool, record one call | B row, approvals, block and history present. Rediscovery keeps the block. Same with an `ApplyConfig` that removes A in the parked commit: A gone, B intact |
 | T1.2 | `ApplyConfig` (quarantine and disable A) at `afterStorage` | none (the stale-snapshot window no longer exists). Then toggle B | A quarantined and disabled in live, storage, disk and manager. B toggled. No async reconcile goroutine exists (assert with the goroutine-count probe) |
-| T1.3 | REST PATCH `{args}` at `restPatchAfterParse` | MCP patch sets `trust_mode: manual`, removes the forwarding allowlist, disables, adds env K2. REST PUT adds header H2 | PATCH result has the new args **and** manual trust, no allowlist, disabled, K2, H2. Repeat with MCP update parked inside its callback (it must block on L0, not read early) |
+| T1.3 | REST PATCH `{args}` at `restPatchAfterParse` | MCP patch sets `trust_mode: manual`, removes the forwarding allowlist, disables, adds env K2. a second REST PATCH adds header H2 | PATCH result has the new args **and** manual trust, no allowlist, disabled, K2, H2. Repeat with MCP update parked inside its callback (it must block on L0, not read early) |
 | T1.4 | stale-read: reconcile caller parked at `beforeCommit` holding an explicit `quarantined:false` | `QuarantineServer(name,true)` | quarantined in all stores, tools absent from global and profile index, `SaveUpstreamKeepingQuarantine` never refuses |
 | T1.5 | stale-read: `upstream_servers add` parked after the `Config()` read at `config_cow.go:93`, before `UpdateConfig` (after PR1 the seam sits before `Commit`) | `ApplyConfig` changing `profiles` | the profiles change survives. The add's server is present. Previously `config_cow.go:74` would publish a copy of the stale `Config()` |
 | T1.6 | none | MCP `quarantine_security quarantine_server` on an indexed trusted server | `retrieve_tools` returns 0 hits for its tools immediately after the call returns (B1) |
@@ -187,7 +187,7 @@ because other sessions share the harness. Evidence goes to
    On `main` this returned the same hits after 35 s (baseline evidence B1).
 2. **Concurrent writers**: in parallel, run 20 iterations of (a) `PATCH
    /api/v1/servers/team-03-customer-data {"args":[...]}` (b) `upstream_servers
-   patch team-03-customer-data trust_mode=manual` (c) `PUT /api/v1/config` with
+   patch team-03-customer-data trust_mode=manual` (c) `PATCH /api/v1/config` with
    a profiles edit (d) `touch $QA_CFG` (watcher reload). Then check that
    `GET /api/v1/servers/team-03-customer-data`, `$QA_CFG` and `$CLI upstream
    list -o json` agree, and the last writer's values for every field are

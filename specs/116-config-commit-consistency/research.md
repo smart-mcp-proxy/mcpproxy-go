@@ -26,7 +26,7 @@ Nothing makes a change land in all four together.
 | `Runtime.BulkEnableServers` | per-name storage flag, one save, one reconcile | storage writes before the lock | `lifecycle.go:2260-2305` |
 | `Runtime.RestartServer` | read disk entry, save it to storage, re-create the client in a goroutine | none | `lifecycle.go:2332-2349`, `:2382` |
 | `Server.AddServer` / `createServer` | `createMu`; existence check against `runtime.Config()`; `CreateUpstreamServer`; `UpdateConfig(copy of Config())` | `createMu`; `configCommitMu` only inside `UpdateConfig` | `server.go:1969`, `config_cow.go:74-96` |
-| `Server.UpdateServer` (REST PUT/PATCH) | read storage, merge, save storage, **mutate the published snapshot in place**, `UpdateConfig`, `SaveConfiguration` | none for the read-modify-write | `server.go:2016-2125`, in-place write `:2117` |
+| `Server.UpdateServer` (REST `PATCH /servers/{id}`) | read storage, merge, save storage, **mutate the published snapshot in place**, `UpdateConfig`, `SaveConfiguration` | none for the read-modify-write | `server.go:2016-2125`, in-place write `:2117` |
 | REST PATCH handler | resolves omitted fields from `GetConfig()` before calling `UpdateServer` | none | `httpapi/server.go:2682-2982` |
 | `Server.RemoveServer` (REST) | manager `RemoveServer`, storage delete + config drop under `createMu`, OAuth clear, index delete, tool-approval delete, `SaveConfiguration` | `createMu` for the delete only | `server.go:2139-2190` |
 | MCP `upstream_servers` add | `createServer` | as above | `mcp.go:8520` |

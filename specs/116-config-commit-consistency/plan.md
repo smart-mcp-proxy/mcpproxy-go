@@ -328,7 +328,7 @@ owning later PR (see "Scope is binding" above).
 |---|---|
 | A missed writer keeps writing storage directly, and its change is lost because `SaveConfiguration` no longer rebuilds from storage | `check-upstream-write-sites.sh` in CI (FR-009). The PR1 inventory in research §1 is exhaustive for `main` at `ee7834e71`. The script turns any new site into a CI failure |
 | The commit holds `configCommitMu` longer (bbolt, bleve, retire) | SC-004 budgets. The index purge happens only for removal and quarantine. `Retire` is bounded with a 1 s warning |
-| Changing `ApplyConfig` from "save disk, then async reconcile" to "reconcile in the commit" slows `PUT /config` | Measured in PR1. Storage writes take milliseconds, and connects stay asynchronous |
+| Changing `ApplyConfig` from "save disk, then async reconcile" to "reconcile in the commit" slows `PATCH /config` and `POST /config/apply` | Measured in PR1. Storage writes take milliseconds, and connects stay asynchronous |
 | Deadlock from a new edge | The lock order above, the `TestLockOrder_*` watchdog tests, and the `commitlockcheck` re-entry check |
 | A per-instance `http.Transport` changes connection reuse | Distinct hosts per upstream in practice. Idle connections close on `Retire` and on `Disconnect` |
 | Generation counter reset (meta lost) | `SeedVersion(max(meta, max row generation))` |

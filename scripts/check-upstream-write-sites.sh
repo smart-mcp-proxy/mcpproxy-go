@@ -13,7 +13,9 @@
 # the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
 # EnableServerAsync, QuarantineServerAsync), which write rows from a worker.
 # A selector split across lines (`st.` then `SaveUpstreamServer(sc)`) is
-# matched too. Whole-line comments are ignored.
+# matched too. Comments and string literals are ignored; block comments are
+# tracked across lines, so a code line starting with `*` (`*save = ...`) is
+# still scanned.
 #
 # Usage: scripts/check-upstream-write-sites.sh [ROOT]
 # ROOT defaults to the repository root. Exit 0 = clean, 1 = a hit (printed).
@@ -30,41 +32,72 @@ for d in internal cmd; do
 done
 [[ ${#dirs[@]} -gt 0 ]] || { echo "upstream write sites: nothing to scan"; exit 0; }
 
-# A selector of one of the methods followed by anything but an identifier
-# character: a call `st.SaveUpstreamServer(sc)` AND a method value or method
-# expression (`save := st.SaveUpstreamServer`, `run(st.SaveServerAsync, x)`,
-# `(*BoltDB).SaveUpstreamServer`) that writes the row when it is called later
-# (review round 7). A longer identifier such as `.SaveUpstreamServerCount`
-# does not match.
-hits="$(grep -rnE "\.(${methods})([^A-Za-z0-9_]|$)" "${dirs[@]}" --include='*.go' 2>/dev/null \
-  | grep -vE '^[^:]+_test\.go:' \
-  | grep -vE '^internal/storage/' \
-  | grep -vE '^internal/runtime/commit[^/]*\.go:' \
-  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|/\*)' || true)"
-
-# A selector split across lines is valid Go and gofmt keeps it split:
-# `return st.` then `SaveUpstreamServer(sc)` (review round 8). Join each code
-# line ending in `.` with the next code line (blank lines, line comments and
-# whole-line block-comment lines in between are skipped) and apply the same
-# match to the method name that starts it.
+# One pass over every non-test Go file outside the allowed writers. Each line
+# is reduced to its CODE by a small Go lexer that carries state across lines:
+# block comments (`/* ... */`, including continuation lines that start with
+# `*`), line comments, interpreted strings, rune literals and raw strings
+# (which may span lines) are removed. Tracking the block-comment state rather
+# than skipping every line that starts with `*` matters: `*save =
+# st.SaveUpstreamServer` is code, not a comment continuation (review round 9).
+#
+# On that code:
+#  - a selector of one of the methods followed by anything but an identifier
+#    character is a hit: a call `st.SaveUpstreamServer(sc)` AND a method value
+#    or method expression (`save := st.SaveUpstreamServer`,
+#    `run(st.SaveServerAsync, x)`, `(*BoltDB).SaveUpstreamServer`) that writes
+#    the row when it is called later (review round 7). A longer identifier such
+#    as `.SaveUpstreamServerCount` does not match.
+#  - a selector split across lines is valid Go and gofmt keeps it split:
+#    `return st.` then `SaveUpstreamServer(sc)` (review round 8). A code line
+#    ending in `.` joined with the next code line (lines that are blank or only
+#    comments in between are skipped) is matched on the method name that starts
+#    it.
 files="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go' 2>/dev/null \
   | grep -vE '^internal/storage/' \
   | grep -vE '^internal/runtime/commit[^/]*\.go$' || true)"
+hits=""
 if [[ -n "$files" ]]; then
-  split_hits="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk -v re="^(${methods})([^A-Za-z0-9_]|$)" '
-    FNR == 1 { prev = "" }
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk \
+    -v sel="[.](${methods})([^A-Za-z0-9_]|\$)" \
+    -v head="^(${methods})([^A-Za-z0-9_]|\$)" '
+    function strip(line,    out, i, n, c, nx, q, d) {
+      out = ""; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1); nx = substr(line, i + 1, 1)
+        if (inblock) {
+          if (c == "*" && nx == "/") { inblock = 0; i += 2; out = out " "; continue }
+          i++; continue
+        }
+        if (inraw) {
+          if (c == "`") { inraw = 0; out = out "\"\"" }
+          i++; continue
+        }
+        if (c == "/" && nx == "/") break
+        if (c == "/" && nx == "*") { inblock = 1; i += 2; continue }
+        if (c == "`") { inraw = 1; i++; continue }
+        if (c == "\"" || c == "\047") {
+          q = c; i++
+          while (i <= n) {
+            d = substr(line, i, 1)
+            if (d == "\\") { i += 2; continue }
+            i++
+            if (d == q) break
+          }
+          out = out q q; continue
+        }
+        out = out c; i++
+      }
+      return out
+    }
+    FNR == 1 { prev = ""; inblock = 0; inraw = 0 }
     {
-      code = $0
-      sub(/\/\/.*$/, "", code)
+      code = strip($0)
       gsub(/^[ \t]+|[ \t]+$/, "", code)
-      if (code == "" || code ~ /^(\*|\/\*)/) next
-      if (prev ~ /\.$/ && code ~ re) print FILENAME ":" FNR ":" $0
+      if (code == "") next
+      if (code ~ sel || (prev ~ /\.$/ && code ~ head)) print FILENAME ":" FNR ":" $0
       prev = code
     }' 2>/dev/null || true)"
-  if [[ -n "$split_hits" ]]; then
-    hits="${hits:+$hits
-}$split_hits"
-  fi
 fi
 
 if [[ -n "$hits" ]]; then

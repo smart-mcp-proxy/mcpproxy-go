@@ -12,9 +12,9 @@ and one error code. Everything else stays byte-compatible.
 |---|---|---|---|
 | `POST /api/v1/servers` | 201. 409 "already exists". Storage and runtime published; disk saved best-effort | Same codes. Live, storage and disk are committed together before the 201 | PR1 |
 | `PATCH /api/v1/servers/{id}` | resolved against a snapshot read before the write; `max_concurrent_requests`, `queue_size`, `queue_timeout` were accepted but not applied | resolved inside the commit against the live entry. 404 if the server was removed concurrently. The concurrency overrides are now applied, and validated inside the commit against the live global defaults: a value the next start would refuse (negative, or a positive queue on a disabled limit) is **400** with the live config, storage and file unchanged (review R2.1) | PR1 |
-| `PUT /api/v1/servers/{id}` (UpdateServer) | storage first, then in-place snapshot mutation | one commit | PR1 |
+| `Server.UpdateServer` (controller method, no route of its own (there is no PUT on a server); `PATCH /api/v1/servers/{id}` calls it only on a controller without `PatchServer`) | storage first, then in-place snapshot mutation | one commit | PR1 |
 | `POST .../enable`, `.../disable`, `.../quarantine`, `.../unquarantine` | storage flag, then save, then async reconcile | one commit. Quarantine has purged the index by the time the call returns | PR1 |
-| `PUT /api/v1/config`, `POST /api/v1/config/apply` | publishes, then async reconcile | publishes the reconciled state. `ConfigApplyResult` unchanged | PR1 |
+| `PATCH /api/v1/config`, `POST /api/v1/config/apply` | publishes, then async reconcile | publishes the reconciled state. `ConfigApplyResult` unchanged | PR1 |
 | `DELETE /api/v1/servers/{id}` | partial purge, then save | one commit with the full purge set. A follow-up `POST` of the same name succeeds immediately | PR2 |
 | `GET /api/v1/servers[/{id}]` | — | adds `"generation"` and `"incarnation"` (int64) | PR2 |
 | Tool and prompt approve, block and unblock endpoints, security approve | — | accept optional `"expected_incarnation"`. Mismatch → **409** `{"success":false,"error":"server_replaced: server '<name>' was removed or replaced since it was reviewed"}` | PR2 |
