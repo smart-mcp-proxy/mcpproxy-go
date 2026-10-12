@@ -155,7 +155,8 @@ describe('ReviewScreen drops late responses for another server or visit (#1568)'
     const dlg = w.findAll('dialog')[0].element as HTMLDialogElement; dlg.showModal = vi.fn()
     await approveBtn(w).trigger('click')
     await w.findAll('dialog')[0].get('button.btn-warning').trigger('click'); await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('a', false, [])
+    // An empty review binds to the empty snapshot (Spec 117 PR-2).
+    expect(api.securityApprove).toHaveBeenCalledWith('a', false, [], {})
   })
 
   it('a forced retry after a refresh is not sent with the old block list', async () => {

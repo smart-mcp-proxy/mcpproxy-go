@@ -553,10 +553,14 @@ class APIService {
     return this.request<ToolApproval>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/diff`)
   }
 
-  async approveTools(serverName: string, tools?: string[]): Promise<APIResponse<{ approved: number }>> {
-    const body = tools && tools.length > 0
+  // Spec 117 PR-2 (#1566): expectedHashes (tool name -> the review's current_hash) binds the
+  // approval to the reviewed definitions; the core answers 409 "out of date" and approves
+  // nothing when one changed. Undefined sends an unbound (legacy) request.
+  async approveTools(serverName: string, tools?: string[], expectedHashes?: Record<string, string>): Promise<APIResponse<{ approved: number }>> {
+    const body: Record<string, unknown> = tools && tools.length > 0
       ? { tools }
       : { approve_all: true }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -1600,10 +1604,14 @@ class APIService {
     })
   }
 
-  async securityApprove(serverName: string, force = false, block: string[] = []): Promise<APIResponse<void>> {
+  // Spec 117 PR-2 (#1566): expectedHashes binds the approval to the reviewed definitions ({} for
+  // an empty review); undefined sends an unbound request (a review without fingerprints).
+  async securityApprove(serverName: string, force = false, block: string[] = [], expectedHashes?: Record<string, string>): Promise<APIResponse<void>> {
+    const body: Record<string, unknown> = { force, block }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
       method: 'POST',
-      body: JSON.stringify({ force, block }),
+      body: JSON.stringify(body),
     })
   }
 
