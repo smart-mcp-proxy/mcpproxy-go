@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"go.uber.org/zap"
@@ -405,6 +406,12 @@ const (
 type commitState struct {
 	commitOwner  atomic.Int64 // goroutine id holding configCommitMu inside Commit
 	bootstrapped atomic.Bool
+
+	// telemetryMu orders the after-unlock telemetry notifications by commit
+	// generation (review rounds 19-20): telemetryGen is the newest generation
+	// whose configuration the telemetry service was given.
+	telemetryMu  sync.Mutex
+	telemetryGen int64
 }
 
 // Commit runs fn against a working copy of the live configuration while holding
@@ -1114,9 +1121,7 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 		}
 		if res.Published {
 			r.runCommitWorkers(tx, res, snap)
-			if r.telemetryService != nil {
-				r.telemetryService.NotifyConfigChanged(tx.next)
-			}
+			r.notifyTelemetryInOrder(res.Generation, tx.next)
 			if len(res.Changes) > 0 {
 				names := make([]string, 0, len(res.Changes))
 				for n := range res.Changes {
@@ -1145,6 +1150,26 @@ func (r *Runtime) afterCommitFunc(tx *CommitTx, res *CommitResult, snap *configs
 			fn(res)
 		}
 	}
+}
+
+// notifyTelemetryInOrder hands cfg, published at generation gen, to the
+// telemetry service unless a newer commit's configuration was already handed
+// over. The notification runs after the commit lock is released, so a commit
+// parked in its follow-up work (a profile rebuild) can reach it after a newer
+// commit; installing its older configuration then would undo the newer
+// commit's opt-out (review rounds 19-20). The newer commit's configuration
+// already includes everything the older one published.
+func (r *Runtime) notifyTelemetryInOrder(gen int64, cfg *config.Config) {
+	if r.telemetryService == nil {
+		return
+	}
+	r.telemetryMu.Lock()
+	defer r.telemetryMu.Unlock()
+	if gen <= r.telemetryGen {
+		return
+	}
+	r.telemetryGen = gen
+	r.telemetryService.NotifyConfigChanged(cfg)
 }
 
 // runCommitWorkers is the after-unlock scheduling (T025). Removed and replaced

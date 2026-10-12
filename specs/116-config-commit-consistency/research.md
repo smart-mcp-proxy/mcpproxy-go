@@ -283,20 +283,25 @@ Inside `configCommitMu`:
    approval steps from Spec 117 (validate, record the decision, baseline and
    blocks, promote). A hook error aborts the commit. Hooks may write only in
    the fail-safe direction (§6), because steps 5-6 can still fail after them.
-5. **Disk**: write the pending-aware file and record the self-write marker.
-   A failure aborts the commit before any server row changes. ApplyConfig
-   already saves first (`runtime.go:1930`).
+5. **Disk** (only for a commit that writes the file; a file reload calls
+   `tx.noDisk()` and skips this step, as plan.md §Commit pipeline step 5
+   says): capture the raw file state `{exists, bytes, mode}`, then write the
+   pending-aware file and record the self-write marker. A failure aborts the
+   commit before any server row changes. ApplyConfig already saves first
+   (`runtime.go:1930`).
 6. **Storage**: run **one** bbolt transaction with the row saves/deletes, the
    purge, the generation and incarnation stamps, and the meta key
    `config_commit_generation = G`. Purge the index for removed or newly
    quarantined servers, then do the in-memory purge. Release the approval
-   locks. On failure, restore the previous **disk** content (compensating
-   write), return the error and publish nothing. The previous disk content is
+   locks. On failure, when step 5 wrote the file, restore the previous
+   **disk** content (compensating write); return the error and publish
+   nothing. A reload wrote nothing, so the file still holds the edit it was
+   applying and there is nothing to compensate (rounds 19-20 on PR1). The previous disk content is
    the raw file state (`{exists, bytes, mode}`) read inside the lock before
    step 5. It is not `base`, because with a restart-required change pending
    disk intentionally differs from the live snapshot (review R5.5). It is not
    `pendingAwareDiskConfig(base)` either, because that is rebuilt from memory
-   and erases an operator edit that a reload is applying (review R9.2).
+   and erases an operator edit that no reload has applied yet (review R9.2).
 7. **Advance manager**: unregister and retire (PR3/PR4) instances whose
    generation moved with a connection-relevant change. Restamp instances with a
    generation-only change, in PR1 already (`RestampRetained`, review R9.1).

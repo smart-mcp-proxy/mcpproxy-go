@@ -63,7 +63,10 @@ type ServerChange struct {
 Rules:
 - `fn` runs with `configCommitMu` held. It MUST NOT call `Commit`,
   `SaveConfiguration`, `ApplyConfig`, `QuarantineServer`, `EnableServer` or
-  take an approval lock. A test hook asserts re-entry (`commitDepth`).
+  take an approval lock. Re-entry is detected in production, not by a test
+  hook: `Commit` records the goroutine that holds `configCommitMu`
+  (`commitOwner`), and a nested `Commit` from that goroutine returns
+  `errCommitReentry` instead of deadlocking (`TestLockOrder_PR1`).
 - An error from `fn` aborts the commit: nothing is written.
 - **Same-name replacement (review R8.2).** `RemoveServer(n)` followed by
   `CreateServer(n)` in one transaction sets `tx.replaced[n]`. It is one

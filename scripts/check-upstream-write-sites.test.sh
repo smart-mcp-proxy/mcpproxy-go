@@ -10,7 +10,9 @@
 # split across lines (exit 1), a code line starting with `*` such as
 # `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
 # (exit 1), a block comment or blanks between the dot and the method name on
-# one line or across lines (exit 1), and whole-line, block and string-literal mentions (must exit 0). Then runs the real script on the repository (must exit 0).
+# one line or across lines (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
+# find or awk (must exit 2, not report a clean tree). Then runs the real script
+# on the repository (must exit 0).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +145,25 @@ printf '\t/* st.SaveUpstreamServer(sc) */\n' > "$allowed/internal/server/block_i
 # shellcheck disable=SC2016 # literal backticks: a Go raw string
 printf '\tmsg := "st.SaveUpstreamServer(sc)"\n\tdoc := `\n st.QuarantineServerAsync(name, true)\n`\n' > "$allowed/internal/server/strings.go"
 expect "storage, commit.go, tests and comments are allowed" 0 "$allowed"
+
+# An operational failure never reports a clean tree (review rounds 18-20): a
+# failing file discovery or scanner exits 2, whether the tool is shadowed on
+# PATH or by an exported shell function.
+for tool in find awk; do
+  shim="$TMP/shim-$tool"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\nexit 2\n' > "$shim/$tool"
+  chmod +x "$shim/$tool"
+  PATH="$shim:$PATH" bash "$CHECK" "$clean" >/dev/null 2>&1
+  rc=$?
+  if [[ "$rc" == 2 ]]; then echo "ok   - failing $tool on PATH (exit $rc)"; pass=$((pass+1));
+  else echo "FAIL - failing $tool on PATH (expected exit 2, got $rc)"; fail=$((fail+1)); fi
+  # shellcheck disable=SC2016 # the function body is expanded by the inner bash
+  bash -c "$tool() { return 2; }; export -f $tool; bash \"\$0\" \"\$1\" >/dev/null 2>&1" "$CHECK" "$clean"
+  rc=$?
+  if [[ "$rc" == 2 ]]; then echo "ok   - failing $tool shell function (exit $rc)"; pass=$((pass+1));
+  else echo "FAIL - failing $tool shell function (expected exit 2, got $rc)"; fail=$((fail+1)); fi
+done
 
 if bash "$CHECK" >/dev/null 2>&1; then
   echo "ok   - the repository is clean"; pass=$((pass+1))

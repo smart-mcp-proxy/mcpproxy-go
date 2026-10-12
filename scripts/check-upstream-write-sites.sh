@@ -19,7 +19,8 @@
 # still scanned.
 #
 # Usage: scripts/check-upstream-write-sites.sh [ROOT]
-# ROOT defaults to the repository root. Exit 0 = clean, 1 = a hit (printed).
+# ROOT defaults to the repository root. Exit 0 = clean, 1 = a hit (printed),
+# 2 = the scan could not run (file discovery or the scanner failed).
 set -uo pipefail
 
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -57,13 +58,27 @@ done
 #    ending in `.` joined with the next code line (lines that are blank or only
 #    comments in between are skipped) is matched on the method name that starts
 #    it.
-files="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go' 2>/dev/null \
-  | grep -vE '^internal/storage/' \
-  | grep -vE '^internal/runtime/commit[^/]*\.go$' || true)"
+# An operational failure (file discovery or the scanner itself) exits 2: a scan
+# that could not run proves nothing, so it never reports a clean tree (review
+# rounds 18-20).
+if ! listing="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go')"; then
+  echo "upstream write sites: file discovery failed" >&2
+  exit 2
+fi
+files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/storage/*) continue ;;
+  esac
+  [[ "$f" =~ ^internal/runtime/commit[^/]*\.go$ ]] && continue
+  files+=("$f")
+done <<<"$listing"
 hits=""
-if [[ -n "$files" ]]; then
+if [[ ${#files[@]} -gt 0 ]]; then
+  # awk is called directly (no xargs) so its own exit status is the one seen.
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
-  hits="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk \
+  hits="$(awk \
     -v sel="[.][ \t]*(${methods})([^A-Za-z0-9_]|\$)" \
     -v head="^(${methods})([^A-Za-z0-9_]|\$)" '
     function strip(line,    out, i, n, c, nx, q, d) {
@@ -102,7 +117,12 @@ if [[ -n "$files" ]]; then
       if (code == "") next
       if (code ~ sel || (prev ~ /\.$/ && code ~ head)) print FILENAME ":" FNR ":" $0
       prev = code
-    }' 2>/dev/null || true)"
+    }' "${files[@]}")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "upstream write sites: scanner failed (awk exit $rc)" >&2
+    exit 2
+  fi
 fi
 
 if [[ -n "$hits" ]]; then
