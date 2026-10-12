@@ -1259,6 +1259,20 @@ func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName 
 // eligibility check passed and before any index write (the discovery pass's
 // last-good and StateView publish, D15). It never runs for a rejected pass.
 func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func()) error {
+	return r.applyDifferentialToolUpdateGuarded(ctx, serverName, newTools, instanceGen, nil, held)
+}
+
+// errLocalSnapshotPurged reports a local reindex whose last-good snapshot was
+// purged by a removal after it was selected (review round 3): the copy belongs
+// to the removed server and must not reach a same-name replacement.
+var errLocalSnapshotPurged = errors.New("last-good snapshot was purged by a removal after it was selected")
+
+// applyDifferentialToolUpdateGuarded is applyDifferentialToolUpdateHeld with
+// stale, checked under the approval lock right after the eligibility verdict
+// and before held and any write: when it reports true the update writes
+// nothing and returns errLocalSnapshotPurged. The local reindex paths pass a
+// purge-sequence check, because their tools carry no instance generation.
+func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, stale func() bool, held func()) error {
 	unlock := r.lockToolApprovals(serverName)
 	locked := true
 	release := func() {
@@ -1278,6 +1292,11 @@ func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverNam
 		r.logger.Info("Discovery result dropped: it came from a superseded instance generation; the current instance is re-listed",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return errDiscoveryStaleGeneration
+	}
+	if stale != nil && stale() {
+		r.logger.Info("Local reindex dropped: the server was removed after its last-good snapshot was selected",
+			zap.String("server", serverName))
+		return errLocalSnapshotPurged
 	}
 	if held != nil {
 		held()
@@ -2408,10 +2427,8 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	r.lastGoodToolsMu.RLock()
-	snapshot, hasSnapshot := r.lastGoodTools[serverName]
-	r.lastGoodToolsMu.RUnlock()
-	if !hasSnapshot || len(snapshot) == 0 {
+	snapshot, seq := r.lastGoodSnapshotWithSeq(serverName)
+	if len(snapshot) == 0 {
 		return
 	}
 	if hook := r.localReindexAfterSnapshot; hook != nil {
@@ -2425,5 +2442,7 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 		zap.Int("snapshot_tools", len(snapshot)))
 
 	// Re-checks eligibility again immediately before the write.
-	r.applyServerDiffIfEligible(ctx, serverName, snapshot)
+	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, func() bool {
+		return r.lastGoodPurgedSince(serverName, seq)
+	})
 }

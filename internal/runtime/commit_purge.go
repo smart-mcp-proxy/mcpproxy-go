@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -24,11 +25,41 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 		return
 	}
 	r.lastGoodToolsMu.Lock()
+	if r.lastGoodPurgeSeq == nil {
+		r.lastGoodPurgeSeq = make(map[string]uint64)
+	}
 	for name := range reports {
 		delete(r.lastGoodTools, name)
 		delete(r.lastCaptureAt, name)
+		// A local reindex that already copied the snapshot sees the bump
+		// under the approval lock and drops its copy (review round 3).
+		r.lastGoodPurgeSeq[name]++
 	}
 	r.lastGoodToolsMu.Unlock()
+}
+
+// lastGoodSnapshotWithSeq returns a copy of serverName's last-good snapshot
+// and the server's purge sequence, read together under lastGoodToolsMu.
+func (r *Runtime) lastGoodSnapshotWithSeq(serverName string) ([]*config.ToolMetadata, uint64) {
+	r.lastGoodToolsMu.RLock()
+	defer r.lastGoodToolsMu.RUnlock()
+	seq := r.lastGoodPurgeSeq[serverName]
+	snapshot := r.lastGoodTools[serverName]
+	if len(snapshot) == 0 {
+		return nil, seq
+	}
+	cp := make([]*config.ToolMetadata, len(snapshot))
+	copy(cp, snapshot)
+	return cp, seq
+}
+
+// lastGoodPurgedSince reports whether serverName's snapshot was purged after
+// the caller read purge sequence seq. Callers hold serverName's approval lock,
+// so the answer cannot change before their index write.
+func (r *Runtime) lastGoodPurgedSince(serverName string, seq uint64) bool {
+	r.lastGoodToolsMu.RLock()
+	defer r.lastGoodToolsMu.RUnlock()
+	return r.lastGoodPurgeSeq[serverName] != seq
 }
 
 // commitDropPurgedSchedules runs in commit step 6, after the approval locks

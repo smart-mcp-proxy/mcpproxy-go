@@ -204,8 +204,14 @@ type Service struct {
 	// by the in-flight reader storing the pre-scan summary — leaving a stale
 	// "clean" verdict cached for a server whose scan is running. The reader
 	// samples the generation on the cache miss and refuses to store if it moved.
+	//
+	// summaryCacheInc records the server incarnation each entry was computed
+	// for (Spec 116 PR2 review round 3): the purge observer that invalidates
+	// a removed server's entry runs after the commit, so a same-name
+	// replacement committed in between must not be served the old entry.
 	summaryCache    map[string]*ScanSummary
 	summaryCacheGen map[string]uint64
+	summaryCacheInc map[string]int64
 	summaryCacheMu  sync.RWMutex
 
 	// approvalHooks are Spec 116 PR2 test seams (plan.md §Test seams), nil
@@ -239,6 +245,7 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		queue:           NewScanQueue(logger),
 		summaryCache:    make(map[string]*ScanSummary),
 		summaryCacheGen: make(map[string]uint64),
+		summaryCacheInc: make(map[string]int64),
 		logger:          logger,
 	}
 	var noop EventEmitter = &NoopEmitter{}
@@ -1025,8 +1032,12 @@ func (s *Service) incarnationIsCurrent(serverName string, inc int64) bool {
 // checked cleanup keeps the detached job's goroutine from evicting it.
 func (s *Service) InvalidateServerState(serverName string) {
 	if s.engine != nil {
-		cur, configured := s.currentIncarnation(serverName)
+		// The incarnation is read inside the predicate, under the engine
+		// lock that registration also takes (review round 3): a value read
+		// before it could predate a re-add whose own scan registered in
+		// between, and that scan would be detached as obsolete.
 		s.engine.DetachObsoleteJob(serverName, func(job *ScanJob) bool {
+			cur, configured := s.currentIncarnation(serverName)
 			return !configured || job.Incarnation != cur
 		})
 	}
@@ -2337,9 +2348,13 @@ type IntegrityViolation struct {
 // Returns nil if no scans have been run for this server.
 // Considers both Pass 1 and Pass 2 results when computing status.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+	// The entry must belong to the server's current incarnation: a removed
+	// server's entry is dropped by the purge observer only after the commit,
+	// and a same-name re-add may already be live (review round 3).
+	inc, _ := s.currentIncarnation(serverName)
 	// Check cache first (avoids expensive BBolt reads for every server)
 	s.summaryCacheMu.RLock()
-	if cached, ok := s.summaryCache[serverName]; ok {
+	if cached, ok := s.summaryCache[serverName]; ok && s.summaryCacheInc[serverName] == inc {
 		s.summaryCacheMu.RUnlock()
 		return cached
 	}
@@ -2347,7 +2362,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// miss. Everything below reads BBolt with no lock held, so this is the
 	// token that lets cacheScanSummary tell "still current" from "a scan
 	// started while I was computing".
-	cacheGen := s.summaryCacheGen[serverName]
+	cacheGen := summaryCacheToken{gen: s.summaryCacheGen[serverName], inc: inc}
 	s.summaryCacheMu.RUnlock()
 
 	// Check for active scan (Pass 1 takes priority in status display)
@@ -2616,8 +2631,17 @@ type FindingCounts struct {
 func (s *Service) invalidateScanSummaryCache(serverName string) {
 	s.summaryCacheMu.Lock()
 	delete(s.summaryCache, serverName)
+	delete(s.summaryCacheInc, serverName)
 	s.summaryCacheGen[serverName]++
 	s.summaryCacheMu.Unlock()
+}
+
+// summaryCacheToken is what GetScanSummary samples on a cache miss: the
+// server's invalidation generation and the incarnation the summary is
+// computed for.
+type summaryCacheToken struct {
+	gen uint64
+	inc int64
 }
 
 // cacheScanSummary stores a computed scan summary in the cache. A nil summary
@@ -2625,20 +2649,22 @@ func (s *Service) invalidateScanSummaryCache(serverName string) {
 // scans" — used by spec 047 to avoid re-scanning the BBolt scan-job bucket on
 // every poll for untouched servers.
 //
-// gen is the generation sampled when the caller missed the cache. If the server
+// tok carries the generation sampled when the caller missed the cache and the
+// incarnation the summary was computed for. If the server
 // was invalidated since (a scan started, progressed or finished while this
 // summary was being computed) the result describes a superseded state, so it is
 // dropped rather than published: a resurrected pre-scan summary would report a
 // stale "clean" verdict for a server that is being scanned right now, and
 // quarantine_security's scan_server/get_scan_report hand that verdict straight
 // to an agent.
-func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, gen uint64) {
+func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, tok summaryCacheToken) {
 	s.summaryCacheMu.Lock()
 	defer s.summaryCacheMu.Unlock()
-	if s.summaryCacheGen[serverName] != gen {
+	if s.summaryCacheGen[serverName] != tok.gen {
 		return
 	}
 	s.summaryCache[serverName] = summary
+	s.summaryCacheInc[serverName] = tok.inc
 }
 
 // waitForConnection polls IsConnected until the server connects or the timeout expires.

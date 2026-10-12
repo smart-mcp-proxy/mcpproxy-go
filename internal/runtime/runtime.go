@@ -253,6 +253,12 @@ type Runtime struct {
 	// lastCaptureAt (guarded by lastGoodToolsMu) records when each server's
 	// toolset was last captured, for the review payload's fresh-capture proof.
 	lastCaptureAt map[string]time.Time
+	// lastGoodPurgeSeq (guarded by lastGoodToolsMu) counts the removal purges
+	// of each server's last-good snapshot (Spec 116 PR2 review round 3). A
+	// local reindex reads it together with the snapshot and re-checks it under
+	// the approval lock — the lock the purge runs under — so a snapshot
+	// selected before a remove and re-add is never applied to the replacement.
+	lastGoodPurgeSeq map[string]uint64
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
 	// captureSnapMu makes "records persisted + pruned + stamp published" one

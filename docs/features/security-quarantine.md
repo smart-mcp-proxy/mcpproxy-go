@@ -379,6 +379,13 @@ quarantined (unless its config says otherwise), every tool and prompt it
 exposes is pending review even when the definitions are identical, an
 unforced scanner approval needs a new scan, and it needs a new OAuth sign-in.
 
+One gap remains for OAuth: credential writes are not yet bound to the
+server's incarnation. If the removed server's connection was saving a token
+or registering a DCR client at the moment of removal, that write can still
+land afterwards, and a server re-added under the same name right away may
+find it. Sign the server out to clear it. Binding OAuth writes to the
+incarnation is a planned follow-up (Spec 116 PR2b).
+
 An approval made on the old server cannot land on the new one. Each server
 has an `incarnation` (in `GET /api/v1/servers` and the review payload) that
 changes only on remove and re-create; approvals are bound to it, and the

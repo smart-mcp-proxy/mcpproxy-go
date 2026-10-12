@@ -1978,12 +1978,21 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 // last-good snapshot for a since-quarantined server) — is never (re)indexed.
 // Returns true only when the differential update actually ran.
 func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
+	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, nil)
+}
+
+// applyServerDiffIfEligibleGuarded is applyServerDiffIfEligible with the
+// under-lock stale check of applyDifferentialToolUpdateGuarded.
+func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, stale func() bool) bool {
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return false
 	}
-	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+	if err := r.applyDifferentialToolUpdateGuarded(ctx, serverName, tools, 0, stale, nil); err != nil {
+		if errors.Is(err, errLocalSnapshotPurged) {
+			return false
+		}
 		r.logger.Error("Failed to apply differential update for server during sweep",
 			zap.String("server", serverName),
 			zap.Error(err))
@@ -2040,7 +2049,7 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot := r.lastGoodToolsSnapshot(serverName)
+	snapshot, seq := r.lastGoodSnapshotWithSeq(serverName)
 	if len(snapshot) == 0 {
 		return false
 	}
@@ -2057,7 +2066,8 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	// Re-run the differential update against the current approval records.
 	// Rug-pull safety is preserved: if the tool mutated after approval,
 	// checkToolApprovals re-flags it changed and it stays blocked.
-	if err := r.applyDifferentialToolUpdate(r.AppContext(), serverName, snapshot); err != nil {
+	stale := func() bool { return r.lastGoodPurgedSince(serverName, seq) }
+	if err := r.applyDifferentialToolUpdateGuarded(r.AppContext(), serverName, snapshot, 0, stale, nil); err != nil && !errors.Is(err, errLocalSnapshotPurged) {
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}
@@ -2444,11 +2454,8 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 	if err != nil {
 		return 0, err
 	}
-	if len(toolNames) == 0 {
-		return 0, nil
-	}
 
-	changed := 0
+	changed, attempted := 0, 0
 	for _, toolName := range toolNames {
 		// Never enable a tool the config denies — user-owned Disabled flag is
 		// irrelevant here; enforcement is in isToolCallable, but we avoid a
@@ -2456,6 +2463,7 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 		if enabled && r.IsToolConfigDenied(serverName, toolName) {
 			continue
 		}
+		attempted++
 		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
 		if errors.Is(setErr, ErrServerReplaced) {
 			return changed, setErr
@@ -2471,6 +2479,15 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 		if flipped {
 			changed++
 		}
+	}
+	if attempted == 0 {
+		// No per-tool write ran, so no write checked the incarnation: an
+		// empty or all-config-denied inventory must still refuse a request
+		// bound to a removed or replaced server (review round 3).
+		if err := r.WithServerApprovalLockAt(serverName, inc, func() error { return nil }); err != nil {
+			return 0, err
+		}
+		return 0, nil
 	}
 
 	if changed > 0 {

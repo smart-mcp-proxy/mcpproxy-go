@@ -509,8 +509,15 @@ removing `foo` never touches `foo_bar`), scan reports and jobs, the integrity
 baseline, tool-call history and identities, and tool hashes — together with its
 search-index entries, refresh schedule and cached scan verdict. A server added
 again under the same name starts clean: quarantined with nothing approved and
-no OAuth token. Activity log removal records carry the per-bucket counts in
+no stored OAuth token. Activity log removal records carry the per-bucket counts in
 `metadata.purged`.
+
+Known limitation: OAuth credential writes are not yet bound to the server's
+incarnation. A token save or DCR registration that the removed server's
+connection had already started can still land after the removal and be found
+by a same-name server added right after it. Signing out (`POST
+/api/v1/servers/{id}/logout`) clears it. Binding OAuth writes to the
+incarnation is planned as a follow-up (Spec 116 PR2b).
 
 Every server payload (`GET /api/v1/servers`, the single-server routes and the
 review payload) carries two committed identifiers:

@@ -153,7 +153,14 @@ config is published and runs one pipeline:
    prompt approvals, OAuth tokens and DCR client (exact `name` or
    `name_<16 hex>` key), OAuth completion events, scan reports and jobs, the
    integrity baseline, tool-call history and identities, and tool hashes.
-   The approval locks are released. On a
+   The in-memory purge also bumps the server's last-good purge sequence, so a
+   local reindex that copied the snapshot before the removal drops its copy
+   (it re-checks the sequence under the approval lock).
+   The approval locks are released, then — still under the commit lock — the
+   purged servers' OAuth refresh schedules are cancelled and their inspection
+   exemptions revoked (leaf locks only), so no later commit's same-name
+   replacement can lose a fresh schedule or exemption to a name-keyed clear.
+   On a
    storage failure nothing is published; when step 5 wrote the file, the
    captured file is restored byte for byte (or removed if it did not exist).
    A failed reload wrote nothing, so the file keeps the operator's edit
@@ -164,10 +171,12 @@ config is published and runs one pipeline:
    (`Manager.RestampRetained`).
 8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.
 
-After the lock is released the commit unregisters removed servers, cancels
-their OAuth refresh schedules, revokes inspection exemptions, drops cached
-scan verdicts (purge observers), schedules connect workers, requests
-discovery for restamped instances and sends its events once.
+After the lock is released the commit unregisters removed servers,
+reconciles the supervisor when an exemption was revoked, drops cached scan
+verdicts (purge observers; the scanner's verdict cache is also keyed by
+incarnation, so a replacement is never served the old entry before the
+observer runs), schedules connect workers, requests discovery for restamped
+instances and sends its events once.
 
 **Incarnation-bound approvals** (Spec 116 PR2). Each server has an
 incarnation that changes only when its name is removed and created again.

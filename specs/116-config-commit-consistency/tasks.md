@@ -172,6 +172,13 @@ in PR2.
 
 ---
 
+### Review round 3 (Sol) design notes
+
+- The in-memory purge bumps a per-server last-good purge sequence (under `lastGoodToolsMu`, inside the approval lock). The two local reindex paths (`reindexFromLastGoodSnapshot`, `reapplyLastGoodSnapshot`) read the snapshot and the sequence together and re-check the sequence under the approval lock before any write, so a copy selected before a remove and same-name re-add is dropped instead of being applied to the replacement with generation 0.
+- Bulk enable-all/disable-all checks the incarnation under the approval lock when no per-tool write ran (empty or all-config-denied inventory), so a stale `expected_incarnation` gets `server_replaced` rather than a successful no-op.
+- Scanner: summary-cache entries record the incarnation they were computed for and are served only for the current one; the purge observer reads the incarnation inside `DetachObsoleteJob`'s predicate, under the engine mutex.
+- Docs disclose that in-flight OAuth writes are not incarnation-bound until PR2b.
+
 ### Review round 2 (Sol) design notes
 
 - The removal purge set is built from the committed removals as well as the stored rows: a configured server whose projection row is missing still has its approvals, credentials, scan evidence and last-good snapshot purged.

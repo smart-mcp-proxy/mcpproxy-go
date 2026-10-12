@@ -24,10 +24,25 @@ func TestApproval_T2_4_ExplicitExpectedIncarnation(t *testing.T) {
 	rt, _ := newSpec116Runtime(t, nil, manualStdio("acme", false))
 	old, ok := rt.ConfigSnapshot().ServerGeneration("acme")
 	require.True(t, ok)
-	removeAndReAdd(t, rt, manualStdio("acme", false))
+	replacement := manualStdio("acme", false)
+	replacement.DisabledTools = []string{"echo"}
+	removeAndReAdd(t, rt, replacement)
+
+	// Review round 3: a bulk toggle on a replacement with no tool inventory
+	// writes nothing either way, but a stale request still reports the
+	// replacement instead of a successful no-op.
+	_, err := rt.SetAllToolsEnabledAt("acme", true, "api", old.Incarnation)
+	require.ErrorIs(t, err, ErrServerReplaced, "empty inventory")
+	_, err = rt.SetAllToolsEnabledAt("acme", false, "api", old.Incarnation)
+	require.ErrorIs(t, err, ErrServerReplaced, "empty inventory")
+
 	seedPendingTool(t, rt, "acme", "echo", "new")
 
-	_, err := rt.BlockToolsAt("acme", []string{"echo"}, "api", old.Incarnation)
+	// Every tool is config-denied, so enable-all attempts no write.
+	_, err = rt.SetAllToolsEnabledAt("acme", true, "api", old.Incarnation)
+	require.ErrorIs(t, err, ErrServerReplaced, "all tools config-denied")
+
+	_, err = rt.BlockToolsAt("acme", []string{"echo"}, "api", old.Incarnation)
 	require.ErrorIs(t, err, ErrServerReplaced)
 	assert.Equal(t, "server_replaced: server 'acme' was removed or replaced since it was reviewed", err.Error())
 	_, err = rt.BlockAllToolsAt("acme", "api", old.Incarnation)
@@ -47,6 +62,9 @@ func TestApproval_T2_4_ExplicitExpectedIncarnation(t *testing.T) {
 
 	cur, ok := rt.ConfigSnapshot().ServerGeneration("acme")
 	require.True(t, ok)
+	n, err := rt.SetAllToolsEnabledAt("acme", true, "api", cur.Incarnation)
+	require.NoError(t, err, "the current incarnation's no-op bulk toggle succeeds")
+	assert.Zero(t, n)
 	require.NoError(t, rt.ApproveToolsAt("acme", []string{"echo"}, "api", cur.Incarnation))
 	assert.Equal(t, storage.ToolApprovalStatusApproved, toolStatus(t, rt, "acme", "echo"))
 }
