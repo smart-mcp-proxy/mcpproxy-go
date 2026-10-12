@@ -586,6 +586,67 @@ of the main checkout. They include `suite.log`, `unit.log`, `server-ci.log`,
 `race.log`, `lint.log`, `lint-server.log`, `run-tpa-lab-docker.log` and the
 per-experiment daemon logs (`run-dir-full1`).
 
+### Review round 8 follow-ups
+
+An eighth review (Sol 6.1, REQUEST_CHANGES at `d3b365f61`, seven chunked
+transcripts `rt-r8a` to `rt-r8g`) raised ten items with no duplicates. Eight
+were fixed, one P2 was rebutted with a regression test, and one P3 typo was
+corrected. Each fix's test was checked to fail without the fix. RT-04 and
+RT-07 (detect engine) stay deferred to the concurrent SEC-01 PR, so EXP-3
+still shows HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P1 lab scripts: the daemon inherited `MCPPROXY_DATA`, `MCPPROXY_LISTEN` and `MCPPROXY_API_KEY`, which `internal/config/loader.go` applies over the checked config, and `--data-dir`/`--listen` were not pinned | Fixed. `lab_scrub_mcpproxy_env` (in `scripts/lib/tpa-lab-verdicts.sh`) unsets every inherited `MCPPROXY_*` variable before any preflight in both scripts and reports each one. Both daemons start with `--data-dir` set to the checked data dir and `--listen 127.0.0.1:8081`. Tests: `TestRunLabDockerIgnoresInheritedOverrides` and `TestRedteamSuiteIgnoresInheritedOverrides` run each script with the three overrides set and a recording stub binary, then assert the pinned flags and that no override reached the daemon. Removing the scrub or the flags fails both |
+| P2 RT-06: legacy scans without `ToolHashes` (name-only, count-only) could cover a record that has an output schema | Fixed in `runtime/review.go`. The output-schema rejection now runs before every legacy fallback. Test: `TestReviewToolCovered_LegacyJobsNeverCoverOutputSchema` |
+| P2 RT-06: a connected StateView with zero tools plus a failed live `tools/list` returned `(empty, nil)`, which defeated the scanner's fail-closed export | Fixed in `server/server.go`. `GetServerTools` returns the live error when there is no cached tool. A live list that really answers zero tools is still a valid empty list. Tests: `TestConfigServerInfoProvider_EmptyCacheLiveFailure_PropagatesError` and the real-provider `TestScanRealProvider_EmptyCacheLiveFailure_FailsClosed`, where `StartScan` on a source dir refuses to start |
+| P2 RT-06: decoding the output schema into `interface{}` loses large-integer precision, so the export digest would differ from the stored one | Rebutted, no code change. Both sides decode through `float64`: the export path (`addScanOutputSchema`, then `normalizedScanJSON`) and the stored digest (`hash.ToolContractDigest`, then `hash.NormalizeJSON`). Both canonicalise a large integer to the same text, so the digests are equal. Regression guard: `TestScanExport_LargeIntegerSchemas_DigestMatchesStoredContract` covers integers beyond 2^53, int64 max, -(2^64-1) and 1e21+ in both the input and output schema, and passes on the unchanged code. The precision loss itself is a property of `hash.NormalizeJSON`, which is shared by every contract hash and outside this round's scope |
+| P2 lab runner: a relative `TPA_LAB_CONFIG` was validated from the caller's cwd but launched after `cd` to the project root | Fixed. The path is made absolute before any check, and preflight prints it. Test: `TestRunLabDockerResolvesRelativeConfigBeforeChecks`, which fails without the fix |
+| P2 suite: EXP-2b reuses records that EXP-2a already moved to `changed`, so it cannot catch a re-introduced RT-01 approved-to-changed fallback on a trusted manual-mode server | Fixed with a new experiment. EXP-2c restarts at stage 2 from a pristine copy of the approved baseline, on a manual-mode server that is never quarantined. It requires the gate log, and requires the schema-only `stock_quote` (and `calendar_get_events`) to be held and not indexed |
+| P2 RT-05 test: the fresh-discovery handler blocked on `release`, which was closed only on the success path | Fixed. An idempotent release is registered with `t.Cleanup` and runs before `upstream.Close` |
+| P2 RT-05 test: the burst test's 20 ms continuation timer could fire before its assertions | Fixed. A test-only `coalescedDiscoveryContinuationGate` channel replaces the timer, and the test asserts the trigger is still pending before it opens the gate |
+| P3 RT-06 test: the Pass-2 integration test did not show Trivy running or a metadata scanner being refused | Fixed. `TestRT06_Pass2_LiveExportError_TrivyRunsMetadataScannerRefused` installs `trivy-mcp` plus a metadata-scanner fixture and drives `startPass2` through the container-run seam. Only the Trivy container runs, and the fixture's job status records "could not be exported" |
+| P3 docs: reversed expectation in the handoff prompt | Fixed ("dangerous/clean respectively") |
+
+Verification on the branch head after the round-8 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/server/ ./internal/security/scanner/ ./tests/tpa-attack-lab/
+go test -count=1 ./internal/... ./tests/tpa-attack-lab/
+#   every package ok except internal/server (unfiltered run hits the binary/E2E tests and the
+#   10m default timeout, as in earlier rounds), so it was rerun with the CI subset below
+go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/... ./internal/security/...
+#   ok internal/server 991.0s, ok internal/security/scanner 50.0s, all packages ok
+go test -race -count=1 ./internal/runtime/...
+#   ok internal/runtime 367.3s, no DATA RACE
+go test -count=1 ./tests/tpa-attack-lab/      # ok
+golangci-lint run --config .github/.golangci.yml ./...                       # 15 issues, none in a file this round touched
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...   # 18 issues, none in a file this round touched
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-2c HOLDS: stock=changed calendar=changed (manual mode, trusted throughout, gate held them, not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: ingested=yes (attempt 1), scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh    # no Go change since the suite's full build
+#   Risk Score: 93/100; baseline verdict: dangerous (job-bound);
+#   both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r8/`
+of the main checkout: `suite.log`, `server-ci-race.log`,
+`run-tpa-lab-docker.log` and the per-experiment daemon logs
+(`run-dir-full1`).
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -644,3 +705,10 @@ per-experiment daemon logs (`run-dir-full1`).
   and `--security-opt no-new-privileges` on every wrapped `docker run`.
   `run-tpa-lab-docker.sh` fails unless the baseline scan's own report is
   `dangerous` (review round 7).
+- Both lab scripts ignore inherited `MCPPROXY_*` variables and start the
+  daemon with `--data-dir` and `--listen 127.0.0.1:8081` pinned. A relative
+  `TPA_LAB_CONFIG` is resolved against the caller's cwd. The suite gains
+  EXP-2c (review round 8).
+- The scanner-facing tool export reports the live `tools/list` error when a
+  connected server's tool cache is empty, so the scan fails closed instead
+  of exporting an empty snapshot (review round 8).
