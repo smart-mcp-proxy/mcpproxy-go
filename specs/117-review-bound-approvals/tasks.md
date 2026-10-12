@@ -91,19 +91,19 @@
 Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 
 ### Fingerprint and review payload
-- [ ] T201 [P] [PR-2] test: `internal/runtime/review_fingerprint_test.go`.
+- [x] T201 [P] [PR-2] test: `internal/runtime/review_fingerprint_test.go`.
   - Golden vectors (`testdata/review_fingerprint_vectors.json`).
   - It changes for a description, input schema, output schema and each of the 4 hints (nil → false → true).
   - It does not change for title, status, disabled or held evidence.
   - Two servers with identical tool definitions get different fingerprints.
   - A record with an empty `CurrentHash` gets a non-empty, definition-sensitive fingerprint.
   - The prefix is `rv1-`.
-- [ ] T202 [PR-2] impl: `internal/runtime/review_fingerprint.go` (data-model §1).
-- [ ] T203 [P] [PR-2] test: `internal/runtime/review_test.go` + `internal/httpapi/review_test.go`. Every tool in `GET /servers/{id}/review` has `current_hash == reviewFingerprint(record)`. It is absent when there are no records. Fails: the field does not exist.
-- [ ] T204 [PR-2] impl: `ReviewTool.CurrentHash` in `review.go` (data-model §2); `frontend/src/types/api.ts`.
+- [x] T202 [PR-2] impl: `internal/runtime/review_fingerprint.go` (data-model §1).
+- [x] T203 [P] [PR-2] test: `internal/runtime/review_test.go` + `internal/httpapi/review_test.go`. Every tool in `GET /servers/{id}/review` has `current_hash == reviewFingerprint(record)`. It is absent when there are no records. Fails: the field does not exist.
+- [x] T204 [PR-2] impl: `ReviewTool.CurrentHash` in `review.go` (data-model §2); `frontend/src/types/api.ts`.
 
 ### Runtime validation
-- [ ] T205 [P] [PR-2] test: `internal/runtime/tool_approval_review_test.go` (US1 scenario 4 + edge cases).
+- [x] T205 [P] [PR-2] test: `internal/runtime/tool_approval_review_test.go` (US1 scenario 4 + edge cases).
   - `ApproveToolsReviewed` with a matching fingerprint → approved.
   - Changed definition → `*StaleToolReviewError{Changed}` and the record unchanged (status, hashes).
   - Hint-only change → Changed.
@@ -114,16 +114,16 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - `ApproveAllToolsReviewed` validates pending+changed.
   - Bound request with a duplicate name → validated once, written once, counted once. Unbound duplicates keep today's behaviour (design review r3 #5).
   - The check and write are atomic: `toolApprovalReadHook` mutates the record (simulated capture) after the handler read but before the lock → still stale, because validation re-reads under the lock.
-- [ ] T205b [P] [PR-2] test: `internal/runtime/tool_quarantine_changed_tracking_test.go` (FR-017).
+- [x] T205b [P] [PR-2] test: `internal/runtime/tool_quarantine_changed_tracking_test.go` (FR-017).
   - Approved H0 → capture H1 (changed) → capture H2 → the record's current fields describe H2, `Previous*` and `ApprovedHash` are still H0, and the review fingerprint is H2's.
   - `ApproveToolsReviewed(fp(H1))` → 409.
   - Hint-only variant (design review r5 #1): approved H0 → changed H1 (read-only hints) → the same H1 definition with destructive hints → the record's annotations are destructive, and `ApproveToolsReviewed(fp(H1 read-only))` → 409.
   - A revert to H0 still restores approved.
 
   Fails on main: the record still shows H1.
-- [ ] T205c [P] [PR-2] test: `internal/runtime/tool_quarantine_output_schema_test.go` (FR-017a, spec review r4 #2). Seed an approved read-only record at the pre-output-schema `HashSchemaVersion` on a quarantined server → capture the same description and input schema with `destructiveHint: true` (the migration branch) → the backfill succeeded (`HashSchemaVersion` is current, the rug-pull policy unchanged: still approved), and the record's `CurrentAnnotations` and the review payload show the destructive hints. `ApproveToolsReviewed` / a bound server approval carrying the fingerprint computed from the read-only hints → 409 out of date; the fingerprint of the destructive hints succeeds. A variant with a different description still routes to the rug-pull (`changed`) path. Fails on main: the backfill keeps the read-only `CurrentAnnotations`.
-- [ ] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash **or the hints** differ from the stored current ones, i.e. whenever the review fingerprint would change; keep `Previous*`); FR-017a in the output-schema backfill (`tool_quarantine.go:572-601`: set `CurrentAnnotations` from the capture before the save; a failed save counts as a failed record write for FR-018), plus an audit comment listing every recording branch and its hint refresh; `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
-- [ ] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
+- [x] T205c [P] [PR-2] test: `internal/runtime/tool_quarantine_output_schema_test.go` (FR-017a, spec review r4 #2). Seed an approved read-only record at the pre-output-schema `HashSchemaVersion` on a quarantined server → capture the same description and input schema with `destructiveHint: true` (the migration branch) → the backfill succeeded (`HashSchemaVersion` is current, the rug-pull policy unchanged: still approved), and the record's `CurrentAnnotations` and the review payload show the destructive hints. `ApproveToolsReviewed` / a bound server approval carrying the fingerprint computed from the read-only hints → 409 out of date; the fingerprint of the destructive hints succeeds. A variant with a different description still routes to the rug-pull (`changed`) path. Fails on main: the backfill keeps the read-only `CurrentAnnotations`.
+- [x] T206 [PR-2] impl: FR-017 in the `changed` branch of `checkToolApprovals` (refresh the current fields when the hash **or the hints** differ from the stored current ones, i.e. whenever the review fingerprint would change; keep `Previous*`); FR-017a in the output-schema backfill (`tool_quarantine.go:572-601`: set `CurrentAnnotations` from the capture before the save; a failed save counts as a failed record write for FR-018), plus an audit comment listing every recording branch and its hint refresh; `internal/toolreview/errors.go` (leaf package); `staleReviewedRecords`, `ApproveToolsReviewed`, `ApproveAllToolsReviewed` in `tool_quarantine.go` (validation and approval in one locked section; `notifyToolsApproved` after unlock).
+- [x] T207 [P] [PR-2] test: `internal/runtime/server_approval_commit_test.go` (US1 scenarios 1-3, 5; FR-011/FR-012).
   - Bound mismatch → error, and: `commit` was not called, no marker written, storage still quarantined, records unchanged.
   - **Composition regression** (already green on top of PR-1): bound `{}` on an empty review → success; then a pass with `[T]` after `FinishServerApproval` → T pending.
   - The **failing-first** pair for T208 is the post-commit promotion window above: unbound, a record filed between commit and finish stays pending.
@@ -132,45 +132,45 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
   - Unbound → promotes the pending records present at commit only. A record filed by a pass after `CommitServerApproval` returns but before `FinishServerApproval` stays pending. On main, `approveBaselineToolsForServer` promotes it; that is the failing assertion.
   - `FinishServerApproval` does not call `approveBaselineToolsForServer` (spy).
   - A missing block target under a bound request → `MissingBlocks`, nothing written.
-- [ ] T208 [PR-2] impl: `CommitServerApproval`, `FinishServerApproval` in `tool_approval_lock.go`. Split `QuarantineServer` into flip + `finishQuarantineChange(server, quarantined, promote bool)` in `lifecycle.go` (the non-review path keeps `promote=true`). This extends PR-1's `CommitServerApproval` (the mark stays the first write after validation).
-- [ ] T209 [P] [PR-2] test: `internal/security/scanner/service_test.go`.
+- [x] T208 [PR-2] impl: `CommitServerApproval`, `FinishServerApproval` in `tool_approval_lock.go`. Split `QuarantineServer` into flip + `finishQuarantineChange(server, quarantined, promote bool)` in `lifecycle.go` (the non-review path keeps `promote=true`). This extends PR-1's `CommitServerApproval` (the mark stays the first write after validation).
+- [x] T209 [P] [PR-2] test: `internal/security/scanner/service_test.go`.
   - `ApproveServerReviewed` uses `ReviewedServerApprover` when present and passes `expected` through.
   - The dangerous gate still runs first (its message contains "dangerous").
   - A stale error propagates unchanged (`errors.As`).
   - `ApproveServer`/`WithBlocks` call it with nil.
   - A fake without the capability keeps the legacy path.
-- [ ] T210 [PR-2] impl: scanner `ApproveServerReviewed`, interface; adapter in `internal/server/server.go`.
+- [x] T210 [PR-2] impl: scanner `ApproveServerReviewed`, interface; adapter in `internal/server/server.go`.
 
 ### REST
-- [ ] T211 [P] [PR-2] test: `internal/httpapi/tool_quarantine_test.go` + `security_scanner_test.go`.
+- [x] T211 [P] [PR-2] test: `internal/httpapi/tool_quarantine_test.go` + `security_scanner_test.go`.
   - Body decoding: absent / `null` → unbound; `{}` → bound.
   - 409 body exactly per contracts/rest-approval-binding.md: `error_code`, `stale_tools` lists always present, the message contains "out of date" and not "dangerous".
   - A bound missing block → 409 (an unbound one keeps 400).
   - Success bodies unchanged.
   - The controller receives `expected`.
-- [ ] T212 [PR-2] impl: `security_scanner.go`, `server.go` handlers, `review_errors.go`; controller interface additions; swagger annotations + `oas/swagger.yaml` regeneration.
+- [x] T212 [PR-2] impl: `security_scanner.go`, `server.go` handlers, `review_errors.go`; controller interface additions; swagger annotations + `oas/swagger.yaml` regeneration.
 
 ### Clients
-- [ ] T213 [P] [PR-2] test: vitest `frontend/tests/unit/review-screen-binding.spec.ts`.
+- [x] T213 [P] [PR-2] test: vitest `frontend/tests/unit/review-screen-binding.spec.ts`.
   - The approve request carries the click-time hashes of all reviewed tools.
   - Not-captured / empty → `{}`.
   - No hashes anywhere → no key.
   - A force retry after "dangerous" re-sends the original binding even after a reload.
   - A per-tool approve sends `{name: hash}`.
   - A 409 out of date → the review reloads, a notice shows the message, the force dialog is not opened, and explicit choices are kept for tools still present.
-- [ ] T214 [PR-2] impl: `api.ts` (`securityApprove(server, force, block, expectedHashes?)`, `approveTools(server, tools, expectedHashes?)`), `reviewPresentation.ts` (`expectedHashes(tools, review)` mirroring the tray's `ReviewPresentation.expectedHashes`), `ReviewScreen.vue`.
-- [ ] T215 [P] [PR-2] test: `cmd/mcpproxy/review_cmd_test.go`.
+- [x] T214 [PR-2] impl: `api.ts` (`securityApprove(server, force, block, expectedHashes?)`, `approveTools(server, tools, expectedHashes?)`), `reviewPresentation.ts` (`expectedHashes(tools, review)` mirroring the tray's `ReviewPresentation.expectedHashes`), `ReviewScreen.vue`.
+- [x] T215 [P] [PR-2] test: `cmd/mcpproxy/review_cmd_test.go`.
   - Quarantined path body includes `expected_hashes` (all tools, or `{}` when empty).
   - Trusted path: `tools` → expected for those tools; default → `approve_all` + expected for the pending+changed tools.
   - A 409 out of date → exit 1, the message + hint line, the JSON envelope under `-o json`.
   - **Failing-first (design review r2 #1)**: save `review show -o json` at H1, change the stub server to H2, then run `review approve --from-review file --yes` → the request carries H1 and the CLI exits 1 on the stub's 409. Main has no `--from-review`, and its request carries no binding.
   - The interactive prompt lists the reachable tools with tier and status before asking.
   - Servers A and B with identical definitions: `review approve B --from-review A.json --yes` → exit 1, and the stub sees **zero** approve requests. A malformed or error-envelope file → exit 1, zero requests (design review r6 #2).
-- [ ] T216 [PR-2] impl: `review_cmd.go` (`reviewToolState.CurrentHash`; `--from-review`; prompt listing; body builders; error mapping); `docs/cli/review-commands.md`.
+- [x] T216 [PR-2] impl: `review_cmd.go` (`reviewToolState.CurrentHash`; `--from-review`; prompt listing; body builders; error mapping); `docs/cli/review-commands.md`.
 
 ### Docs, verify, ship
-- [ ] T217 [PR-2] docs: `docs/api/rest-api.md` (review field, both approve bodies, 409, compatibility matrix), `docs/cli/review-commands.md`, `docs/features/security-quarantine.md`; CLAUDE.md Recent Changes.
-- [ ] T218 [PR-2] Full lanes, both lints, `make build`. Live check **L2** (all 8 steps; step 8 only once #1572 is merged), evidence under `evidence/s117-pr2/`. Playwright review sweep per `docs/development/web-ui-verification.md`.
+- [x] T217 [PR-2] docs: `docs/api/rest-api.md` (review field, both approve bodies, 409, compatibility matrix), `docs/cli/review-commands.md`, `docs/features/security-quarantine.md`; CLAUDE.md Recent Changes.
+- [x] T218 [PR-2] Full lanes, both lints, `make build`. Live check **L2** (all 8 steps; step 8 only once #1572 is merged), evidence under `evidence/s117-pr2/`. Playwright review sweep per `docs/development/web-ui-verification.md`.
 - [ ] T219 [PR-2] Open the PR (`Closes #1566`; note that #1572 becomes effective) and run an opencode Sol 6.1 review. This is a security PR: escalate to codex Sol only if Sol misses a defect twice.
 
 ---

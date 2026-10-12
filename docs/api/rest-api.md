@@ -514,6 +514,18 @@ Or approve all pending/changed tools:
 }
 ```
 
+Either form may carry `expected_hashes` to bind the approval to the review the
+client showed (see [Review-bound approvals](#review-bound-approvals)):
+```json
+{
+  "tools": ["create_issue"],
+  "expected_hashes": {"create_issue": "rv1-3f1c..."}
+}
+```
+With `tools`, every requested tool that has a record must still match its
+fingerprint; with `approve_all`, every pending and changed tool must. A
+mismatch answers `409 review_out_of_date` and approves nothing.
+
 **Response:**
 ```json
 {
@@ -546,7 +558,9 @@ it reports what actually applied:
   the remaining holds are unknown; check `GET /api/v1/servers/{id}/review`.
 
 `POST /api/v1/servers/{id}/security/approve` returns the same four counts (and
-`held_tools`) next to `status: "approved"` and `server_name`. `status` keeps its
+`held_tools`) next to `status: "approved"` and `server_name`. `still_pending`
+also counts tools filed after the approval: a server approval promotes only the
+pending tools present when it commits, never one that appears afterwards. `status` keeps its
 meaning — the server approval is done — so check `still_pending` and
 `still_changed` to know whether every tool is usable. When the tool state
 cannot be read back it returns `outcome_unavailable: true` instead of counts.
@@ -1013,18 +1027,69 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 - `default_allowed` (always present) is the review screens' fail-closed default selection: `true` for an approved tool, or for a pending or changed `read` tool with `scan_verdict` `clean` that is not held; `false` for everything else (write, destructive, unannotated, unknown, not scanned, warnings, dangerous, held, or already disabled). A client that finds no such field (an older core) treats it as `false`.
 - `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
 - `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
+- `current_hash` is the tool's **review fingerprint** (`rv1-` + 64 hex): an opaque value over the server, the tool, its definition (description, input and output schema) and its four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Send it back in `expected_hashes` to bind an approval to what you showed. It is not the storage hash: the `current_hash` of `GET /api/v1/servers/{id}/tools/{tool}/diff` is a different value. Compare it only with a later review.
 - Descriptions are returned verbatim and must be rendered as inert text.
 
 The review decisions use these routes (all existing):
 
 | Decision | Route |
 |---|---|
-| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...]}`; the `block` tools are blocked in the same transaction that records the integrity baseline, before the server is unquarantined |
+| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...], "expected_hashes": {...}}`; the `block` tools are blocked in the same locked step that records the integrity baseline, promotes the reviewed pending tools and clears the quarantine |
 | Reject server | `POST /api/v1/servers/{id}/security/reject` |
 | Approve tools | `POST /api/v1/servers/{id}/tools/approve` |
 | Reject (block) tools | `POST /api/v1/servers/{id}/tools/block` |
 
 `POST /api/v1/servers/{id}/unquarantine` is kept for API compatibility only; no first-party surface calls it. See [Review Commands](../cli/review-commands.md).
+
+#### Review-bound approvals {#review-bound-approvals}
+
+An approval can be bound to the review the operator saw, so a tool definition
+that changes between `GET /review` and the approval is never approved unseen
+(issue #1566). Both `POST .../security/approve` and `POST .../tools/approve`
+accept `expected_hashes`, an object mapping tool name to the `current_hash` of
+the review:
+
+| `expected_hashes` | Meaning |
+|---|---|
+| absent or `null` | **Unbound** (legacy): today's behaviour. A server approval still promotes only the pending tools present when it commits |
+| `{}` | Bound to the empty snapshot: any tool the approval would make callable fails it (use it for an empty or not-captured review) |
+| `{"name": "rv1-...", ...}` | Bound: every tool the approval makes callable must be listed with an equal fingerprint. Extra names are ignored |
+
+For a server approval the checked set is every pending tool and every enabled
+approved tool, minus `block`; a `block` target that no longer exists is out of
+date too. The check, the integrity baseline, the blocks, the promotion of the
+pending tools and the storage quarantine flip run as one step under the
+server's tool-approval lock. On a mismatch nothing is written: no integrity
+baseline, no record, no baseline marker, no event, and the server stays
+quarantined.
+
+```json
+HTTP/1.1 409 Conflict
+{
+  "success": false,
+  "error": "tool review for server 'notes2' is out of date (definition changed since review: read_note; not in the review: drop_db); nothing was approved — fetch the review again",
+  "error_code": "review_out_of_date",
+  "stale_tools": {"changed": ["read_note"], "unreviewed": ["drop_db"], "missing_blocks": []},
+  "request_id": "..."
+}
+```
+
+The message always contains "out of date" and never "dangerous". Clients
+reload the review and show the message; they do not offer a force approval.
+The dangerous-scan gate answers first, with its own 409 ("dangerous"); a force
+retry re-sends the original binding. An unbound request with a missing `block`
+target keeps the `400` it had.
+
+Client rules (Web UI, CLI, macOS tray): bind every reviewed tool that carries
+`current_hash` (blocked ones included), send `{}` for an empty or not-captured
+review, and send an unbound request only when no tool in the review carries a
+fingerprint (an older core). The Tools page bulk approve, `mcpproxy security
+approve` and the MCP `quarantine_security` approval operations stay unbound.
+
+| Client \ Core | Core without `current_hash` | This core |
+|---|---|---|
+| Older tray, scripts (unbound) | unchanged | accepted; tools filed after the approval stay pending |
+| macOS tray with #1572, Web UI, CLI | unbound (no fingerprints in the review) | bound and validated |
 
 ### Catalog
 
