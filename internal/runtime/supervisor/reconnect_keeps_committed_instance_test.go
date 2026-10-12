@@ -123,8 +123,11 @@ func TestReconnect_DoesNotDisconnectTheCommittedInstance(t *testing.T) {
 	up := newInstanceUpstream()
 	sup := New(svc, up, zap.NewNop())
 
-	// The supervisor's snapshot holds the disabled entry.
+	// The supervisor's snapshot holds the disabled entry. reconcile dispatches
+	// its actions asynchronously; drain them so none lands after the steps
+	// below.
 	require.NoError(t, sup.reconcile(svc.Current()))
+	sup.actionWg.Wait()
 
 	// The re-enable commit's worker installs and connects the enabled instance
 	// (runCommitWorkers → Manager.AddServerAt).
@@ -165,7 +168,11 @@ func TestReconnect_ReplacesAnInstanceWithAnOldConnectionConfig(t *testing.T) {
 	require.NoError(t, up.AddServer("s", oldCfg))
 	require.NoError(t, up.ConnectServer(context.Background(), "s"))
 	old := up.current["s"].id
+	// Drain the reconcile's asynchronous actions: a late ActionConnect from
+	// the old snapshot would otherwise re-install the old config after the
+	// reconnect below (seen on the Windows runner).
 	require.NoError(t, sup.reconcile(svc.Current()))
+	sup.actionWg.Wait()
 
 	require.NoError(t, svc.Update(&config.Config{Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{newCfg}}, configsvc.UpdateTypeModify, "test_edit"))
 	require.NoError(t, sup.executeAction("s", ActionReconnect, svc.Current()))
