@@ -9,7 +9,7 @@ keywords: [activity, logging, audit, observability, compliance]
 
 # Activity Log
 
-MCPProxy provides comprehensive activity logging to track AI agent tool calls, policy decisions, and system events. This enables debugging, auditing, and compliance monitoring.
+MCPProxy records AI agent tool calls, policy decisions, and system events in a local activity log. This supports debugging and after-the-fact inspection. Records are kept subject to configurable retention (age, record count and total size) and a per-record response size cap (see [Configuration](#configuration)), so the log is not a complete or tamper-proof audit trail and is not a regulatory compliance certification.
 
 ## What Gets Logged
 
@@ -188,7 +188,7 @@ Every tool call includes intent information for security auditing:
 
 ### Sensitive Data Detection
 
-Activity records automatically include sensitive data detection metadata when MCPProxy detects potentially sensitive information in tool arguments or responses. This helps identify data handling patterns and supports compliance monitoring.
+Activity records automatically include sensitive data detection metadata when MCPProxy detects potentially sensitive information in tool arguments or responses. This helps identify data handling patterns. Detection only flags records; it does not block the call by default (see [what detection does and does not do](/features/sensitive-data-detection#what-detection-does-and-does-not-do)).
 
 ```json
 {

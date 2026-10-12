@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/require"
 )
 
 // ACT-03: published command examples must exist in the shipped binary. This
@@ -20,14 +20,29 @@ import (
 // resolves in the real cobra tree, so a guide can never advertise a command or
 // flag the release does not have.
 
-var (
-	docsRootOnce sync.Once
-	docsRoot     *cobra.Command
-)
+// docsSmokeRoot builds the real command tree for one test. newRootCmd attaches
+// the package-level singleton commands (activityCmd, ...) to the new root, which
+// re-parents them: cobra's Execute() on a child runs Root(), so any later test
+// that executes such a command would run this root instead, whose default
+// RunE is `serve` (it binds the listen port and blocks, hanging the shuffled
+// run). The cleanup detaches every child again so the singletons are
+// parentless, as they are before this test ran.
+func docsSmokeRoot(t *testing.T) *cobra.Command {
+	t.Helper()
+	root := newRootCmd()
+	t.Cleanup(func() { root.RemoveCommand(root.Commands()...) })
+	return root
+}
 
-func docsSmokeRoot() *cobra.Command {
-	docsRootOnce.Do(func() { docsRoot = newRootCmd() })
-	return docsRoot
+// TestDocsSmokeRootDoesNotReparentSingletons guards the leak above: after the
+// docs root is torn down, executing a shared command must still run that
+// command's own tree, not a leftover root.
+func TestDocsSmokeRootDoesNotReparentSingletons(t *testing.T) {
+	t.Run("build and tear down", func(t *testing.T) {
+		root := docsSmokeRoot(t)
+		require.Same(t, root, activityCmd.Root())
+	})
+	require.Same(t, activityCmd, activityCmd.Root(), "activityCmd stayed attached to a finished test root")
 }
 
 // docsSmokeFiles are the guides whose command lines are checked. Paths are
@@ -249,7 +264,7 @@ func repoRootFromTest(t *testing.T) string {
 }
 
 func TestDocsCommandsExistInCobraTree(t *testing.T) {
-	root := docsSmokeRoot()
+	root := docsSmokeRoot(t)
 	repo := repoRootFromTest(t)
 	checked := 0
 	for _, rel := range docsSmokeFiles {
@@ -272,7 +287,7 @@ func TestDocsCommandsExistInCobraTree(t *testing.T) {
 
 // The checker must actually bite: a nonexistent subcommand and flag fail.
 func TestDocsCommandCheckerRejectsMissing(t *testing.T) {
-	root := docsSmokeRoot()
+	root := docsSmokeRoot(t)
 	good := []string{
 		"mcpproxy connect cursor --profile work --lock",
 		"mcpproxy client set-profile cursor work-full",
@@ -343,7 +358,7 @@ func TestDocsExtractorJoinsContinuationLines(t *testing.T) {
 	if !strings.Contains(cmds[0].Cmd, "--no-such-flag") {
 		t.Fatalf("continuation line dropped: %q", cmds[0].Cmd)
 	}
-	if msg := checkDocCommand(docsSmokeRoot(), cmds[0].Cmd); msg == "" {
+	if msg := checkDocCommand(docsSmokeRoot(t), cmds[0].Cmd); msg == "" {
 		t.Errorf("bad flag on a continuation line accepted: %q", cmds[0].Cmd)
 	}
 }
