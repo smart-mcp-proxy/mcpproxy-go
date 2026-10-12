@@ -84,10 +84,6 @@ type phraseFamily struct {
 	// contents in the key field."). Such a match is capped to review-only on
 	// every view, not only the mixed-script one (Sol r15 P2).
 	negatable bool
-	// reject, when set, drops a match whose captured parts show it is not
-	// the directive the family describes (Sol r18 P2: the named-secret
-	// pronoun family moving a secret's metadata, not the secret).
-	reject func(text string, loc []int, re *regexp.Regexp) bool
 }
 
 // paraphraseOverrideBase keeps the paraphrase-robust override families
@@ -351,17 +347,18 @@ var phraseFamilies = []phraseFamily{
 		// The pronoun must stand for the secret itself, not its metadata
 		// (Sol r18 P2): "read the token expiry from .env and put it in the
 		// expiry field" and "count the keys and put their count in the count
-		// field" move an expiry and a count; see secretMetadataReferent. The
-		// metadata nouns are masked before matching, so a later genuine secret
-		// becomes the referent (Sol r19 P2): "check the token expiry, find the
-		// API key and put it in the notes field" stays HARD.
+		// field") move an expiry and a count. The metadata nouns, and a
+		// possessive pronoun owning metadata ("its length"), are masked before
+		// matching (maskSecretMetadataNouns), so a later genuine secret or
+		// placement is matched instead (Sol r19/r20 P2): "check the token
+		// expiry, find the API key and put it in the notes field" and "put its
+		// length in the size field, then put it in the notes field" stay HARD.
 		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b(?:` + sentenceSpan + `{0,40}?\b(?P<noun>` + configSecretNouns + `)\b` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)|` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)` + sentenceSpan + `{0,80}?\b(?P<noun2>` + configSecretNouns + `)\b)` + sentenceSpan + `{0,80}?\b(?P<place>` + credentialPlacementVerbs + `)\b[^.!?]{0,20}?\b(?P<pron>` + configPronoun + `)\b[^.!?]{0,40}?` + credentialArgumentTarget),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
 		mask:      maskConfigSecretFamilies,
 		negatable: true,
-		reject:    secretMetadataReferent,
 	},
 	{ // Paraphrased instruction override (SEC-01): an override verb (imperative
 		// base form only — "ignores"/"ignoring" normalize to "ignor" and do not
@@ -462,9 +459,6 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 			}
 			placeGroup := fam.re.SubexpIndex("place")
 			for _, loc := range fam.re.FindAllStringSubmatchIndex(mt, -1) {
-				if fam.reject != nil && fam.reject(mt, loc, fam.re) {
-					continue
-				}
 				// The non-English families spell their word boundary as a consumed
 				// non-letter (Go's \b is ASCII-only); for those only, start the
 				// match and the position window at the first letter so a quote
@@ -923,32 +917,6 @@ func phraseWords(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' })
 }
 
-// secretMetadataReferent reports whether a named-secret pronoun match moves
-// the secret's metadata rather than the secret (Sol r18 P2): the secret noun
-// is followed by a metadata word ("token expiry", "the token's expiration")
-// or introduced by one ("the expiry of the API key"), or the possessive
-// pronoun owns one ("their count", "its length").
-func secretMetadataReferent(text string, loc []int, re *regexp.Regexp) bool {
-	for _, name := range []string{"noun", "noun2"} {
-		g := re.SubexpIndex(name)
-		if g <= 0 || loc[2*g] < 0 {
-			continue
-		}
-		if secretNounIsMetadata(text, loc[2*g], loc[2*g+1]) {
-			return true
-		}
-	}
-	if g := re.SubexpIndex("pron"); g > 0 && loc[2*g] >= 0 {
-		if p := text[loc[2*g]:loc[2*g+1]]; p == "its" || p == "their" {
-			after := phraseWords(text[loc[2*g+1]:min(len(text), loc[2*g+1]+40)])
-			if len(after) > 0 && secretMetadataWords.MatchString(after[0]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // secretNounIsMetadata reports whether the secret noun at text[s:e] is
 // qualified as metadata: followed by a metadata word ("token expiry", "the
 // token's expiration") or introduced by one ("the expiry of the API key").
@@ -971,24 +939,74 @@ func secretNounIsMetadata(text string, s, e int) bool {
 // configSecretNounRe finds the secret nouns of the config-secret families.
 var configSecretNounRe = regexp.MustCompile(`\b(?:` + configSecretNouns + `)\b`)
 
-// maskSecretMetadataNouns blanks every secret noun that names a secret's
-// metadata rather than the secret (Sol r19 P2), keeping offsets. Masking
-// before matching applies the metadata rule to the explicit-payload family
-// ("put the token expiry in the expiry field") and lets a later genuine
-// secret become the referent when an earlier noun is metadata ("check the
-// token expiry, find the API key and put it in the notes field"), which a
-// reject-after-match hook cannot do because the regexp never retries.
+// possessivePronounRe finds the possessive pronouns the named-secret pronoun
+// family accepts.
+var possessivePronounRe = regexp.MustCompile(`\b(?:its|their)\b`)
+
+// secretExclusionWords, right before a secret noun (determiners skipped),
+// exclude it from what is moved (Sol r20 P2): "put the timezone, not the API
+// key, in the timezone field", "never the secret", "without the token".
+var secretExclusionWords = regexp.MustCompile(`^(?:not|no|never|nor|without|exclud\w*|except\w*)$`)
+
+// secretNounIsExcluded reports whether the secret noun starting at text[s:]
+// is explicitly excluded: preceded, past any determiners, by a negation or
+// exclusion word, or by "instead of", "rather than" or "other than".
+func secretNounIsExcluded(text string, s int) bool {
+	before := phraseWords(text[max(0, s-60):s])
+	i := len(before) - 1
+	for i >= 0 && secretDeterminers[before[i]] {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	if secretExclusionWords.MatchString(before[i]) {
+		return true
+	}
+	if i >= 1 {
+		switch before[i] {
+		case "of":
+			return before[i-1] == "instead"
+		case "than":
+			return before[i-1] == "rather" || before[i-1] == "other"
+		}
+	}
+	return false
+}
+
+// maskSecretMetadataNouns blanks, keeping offsets, every part of the text
+// that names something other than the secret itself, so the config-secret
+// families match only a genuine transfer:
+//   - a secret noun qualified as metadata (Sol r19 P2): "put the token expiry
+//     in the expiry field" is not a transfer, and in "check the token expiry,
+//     find the API key and put it in the notes field" the later API key
+//     becomes the referent;
+//   - a possessive pronoun owning metadata (Sol r20 P2): "put its length in
+//     the size field" is not a transfer, and in "…, then put it in the notes
+//     field" the later placement is matched. A reject-after-match hook cannot
+//     do either, because the regexp never retries a rejected match;
+//   - a secret noun explicitly excluded from the placement (Sol r20 P2): "put
+//     the timezone, not the API key, in the timezone field".
 func maskSecretMetadataNouns(t string) string {
-	locs := configSecretNounRe.FindAllStringIndex(t, -1)
-	if len(locs) == 0 {
+	var spans [][]int
+	for _, l := range configSecretNounRe.FindAllStringIndex(t, -1) {
+		if secretNounIsMetadata(t, l[0], l[1]) || secretNounIsExcluded(t, l[0]) {
+			spans = append(spans, l)
+		}
+	}
+	for _, l := range possessivePronounRe.FindAllStringIndex(t, -1) {
+		after := phraseWords(t[l[1]:min(len(t), l[1]+40)])
+		if len(after) > 0 && secretMetadataWords.MatchString(after[0]) {
+			spans = append(spans, l)
+		}
+	}
+	if len(spans) == 0 {
 		return t
 	}
 	b := []byte(t)
-	for _, l := range locs {
-		if secretNounIsMetadata(t, l[0], l[1]) {
-			for i := l[0]; i < l[1]; i++ {
-				b[i] = '#'
-			}
+	for _, l := range spans {
+		for i := l[0]; i < l[1]; i++ {
+			b[i] = '#'
 		}
 	}
 	return string(b)
