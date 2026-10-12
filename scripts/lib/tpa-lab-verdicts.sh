@@ -69,18 +69,116 @@ exp2b_verdict() {
   held_unquarantined_verdict "$1" "$2" "$3" "$4" "$6" "$5" "$7"
 }
 
-# exp3_verdict <scan_verdict> — EXP-3 (served detector-evasion mutants).
+# exp3_verdict <scan_verdict> <tool_findings> — EXP-3 (served detector-evasion mutants).
 # "dangerous" HOLDS (since RT-04/RT-07 the homoglyph and combo mutants are
 # hard-tier); a recognised "clean"/"warnings" verdict is a HOLE (a soft-only
 # or clean verdict means the hardening regressed); anything else
 # (scan-failed, stale-report, an unreadable/unknown report) proves nothing and
-# is INCONCLUSIVE (Sol r4 P2).
+# is INCONCLUSIVE (Sol r4 P2). Sol r12 P2: the aggregate verdict masks a
+# single bypassed mutant, so "dangerous" HOLDS only with <tool_findings>
+# (exp3_tool_findings) "ok"; a "missing:…" per-tool result is a HOLE and any
+# other (stale/unknown/absent) result is INCONCLUSIVE.
 exp3_verdict() {
   case "$1" in
-    dangerous) echo HOLDS ;;
+    dangerous)
+      case "${2:-}" in
+        ok) echo HOLDS ;;
+        missing:*) echo HOLE ;;
+        *) echo INCONCLUSIVE ;;
+      esac ;;
     clean | warnings) echo HOLE ;;
     *) echo INCONCLUSIVE ;;
   esac
+}
+
+# exp3_tool_findings <report.json> <job_id> — per-mutant check of the stored
+# EXP-3 report (Sol r12 P2): the aggregate "dangerous" verdict alone would
+# mask a single detector bypass (M03 undetected while M01 stays hard). Prints
+# "ok" only when the report belongs to <job_id> and the homoglyph override
+# (M01 mutant_override_env) and the exfil combo (M03 mutant_exfil_combo) each
+# carry a hard-tier dangerous finding, and the system-prompt paraphrase (M02
+# mutant_reveal_prompt), the German override (M04 mutant_german_override) and
+# the renamed sink (M06 translate_text) each carry at least one finding.
+# Otherwise prints "stale-report", "unknown" or "missing:<tool>=<what>,...".
+exp3_tool_findings() {
+  python3 - "$1" "${2:-}" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print("unknown"); raise SystemExit
+data = d.get("data") if isinstance(d, dict) else None
+if not sys.argv[2] or not isinstance(data, dict) or data.get("job_id") != sys.argv[2]:
+    print("stale-report"); raise SystemExit
+findings = data.get("findings")
+if not isinstance(findings, list):
+    print("unknown"); raise SystemExit
+def of(tool):
+    return [f for f in findings if isinstance(f, dict) and f.get("location") == "tpa-lab-attacker:" + tool]
+missing = []
+for tool in ("mutant_override_env", "mutant_exfil_combo"):
+    if not any(f.get("tier") == "hard" and f.get("threat_level") == "dangerous" for f in of(tool)):
+        missing.append(tool + "=no-hard-finding")
+for tool in ("mutant_reveal_prompt", "mutant_german_override", "translate_text"):
+    if not of(tool):
+        missing.append(tool + "=no-finding")
+print("missing:" + ",".join(missing) if missing else "ok")
+PY
+}
+
+# scan_gate_logged <log> <tool>... — "yes" when the daemon log shows the
+# trust_mode: scan change gate itself scanning every named tool (Sol r12
+# P2): either its non-green hold ("trust_mode scan held tool change for
+# review") or its clean-verdict hold ("clean verdict does not auto-approve a
+# changed contract"). Manual mode emits neither, so the generic "changed
+# since approval" line cannot stand in for the scan-mode gate.
+scan_gate_logged() {
+  local logf="$1" t
+  shift
+  [[ $# -gt 0 ]] || { echo "no(no-tools)"; return; }
+  for t in "$@"; do
+    grep -E 'trust_mode scan held tool change for review|clean verdict does not auto-approve a changed contract' "$logf" 2>/dev/null \
+      | grep -q "\"tool\": \"$t\"" || { echo "no($t)"; return; }
+  done
+  echo yes
+}
+
+# scan_hold_evidence_ok <diff.json> — "yes" when a changed tool's stored
+# approval record (GET /servers/{id}/tools/{tool}/diff) carries persisted
+# trust_mode: scan hold evidence for a hostile change: held_reason
+# scan_findings, a non-clean held_verdict and at least one matched signal
+# (Sol r12 P2). Anything else prints "no(<what>)".
+scan_hold_evidence_ok() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    d = (json.load(open(sys.argv[1])) or {}).get("data") or {}
+except Exception:
+    print("no(unreadable)"); raise SystemExit
+if d.get("status") != "changed":
+    print("no(status=%s)" % d.get("status")); raise SystemExit
+if d.get("held_reason") != "scan_findings":
+    print("no(reason=%s)" % d.get("held_reason")); raise SystemExit
+if d.get("held_verdict") not in ("warnings", "dangerous"):
+    print("no(verdict=%s)" % d.get("held_verdict")); raise SystemExit
+sig = d.get("held_signals")
+if not isinstance(sig, list) or not [x for x in sig if isinstance(x, str) and x]:
+    print("no(signals)"); raise SystemExit
+print("yes")
+PY
+}
+
+# scan_evidence_verdict <held_verdict> <evidence> — EXP-6c: a held,
+# unindexed overt pull (held_unquarantined_verdict HOLDS) still fails when
+# the scan-mode gate did not persist its evidence (scan_hold_evidence_ok not
+# "yes"): that is the hold-evidence regression the experiment exists to
+# catch (Sol r12 P2). Other verdicts pass through.
+scan_evidence_verdict() {
+  if [[ "$1" == "HOLDS" ]]; then
+    [[ "$2" == "yes" ]] && echo HOLDS || echo HOLE
+  else
+    echo "$1"
+  fi
 }
 
 # scan_job_id <scan-output-file> — the job id "mcpproxy security scan"
@@ -223,8 +321,15 @@ lab_config_images() {
   python3 - "$1" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1]))
-for s in cfg.get("mcpServers", []):
-    print((s.get("isolation") or {}).get("image") or "<none>")
+def ci(d, name):
+    # The daemon matches keys case-insensitively (last match wins).
+    hit = None
+    for k, v in (d or {}).items():
+        if k.casefold() == name:
+            hit = v
+    return hit
+for s in ci(cfg, "mcpservers") or []:
+    print(ci(ci(s, "isolation"), "image") or "<none>")
 PY
 }
 
@@ -245,8 +350,30 @@ PY
 lab_config_check_isolation() {
   python3 - "$1" <<'PY'
 import json, os, sys
+
+class CaseFoldedDuplicate(ValueError):
+    pass
+
+def fold_keys(pairs):
+    # Sol r12 P1: the daemon decodes the config with encoding/json, which
+    # matches object keys to struct fields case-insensitively (Unicode
+    # simple folding) and lets the last match win, so {"command": "/lab",
+    # "Command": "docker"} runs docker while an exact-case check sees /lab,
+    # and an "EXTRA_ARGS" key is applied but never vetted. Every object is
+    # therefore re-keyed by its case-folded names, and two keys that fold to
+    # the same name are refused outright.
+    out = {}
+    for k, v in pairs:
+        f = k.casefold()
+        if f in out:
+            raise CaseFoldedDuplicate("keys that differ only in case (%r) are ambiguous to the daemon's decoder" % k)
+        out[f] = v
+    return out
+
 try:
-    cfg = json.load(open(sys.argv[1]))
+    cfg = json.load(open(sys.argv[1]), object_pairs_hook=fold_keys)
+except CaseFoldedDuplicate as e:
+    sys.exit("lab config %s is refused: %s" % (sys.argv[1], e))
 except Exception as e:
     sys.exit("lab config %s is unreadable: %s" % (sys.argv[1], e))
 
@@ -334,7 +461,7 @@ glob = cfg.get("docker_isolation") or {}
 reject_references(glob, "docker_isolation")
 global_present = check_args(glob.get("extra_args"), "docker_isolation")
 
-servers = cfg.get("mcpServers", [])
+servers = cfg.get("mcpservers", [])
 if not servers:
     sys.exit("lab config has no servers")
 for s in servers:
@@ -373,8 +500,17 @@ lab_config_require() {
   fi
   python3 - "$1" <<'PY' || return 1
 import json, sys
+def fold_keys(pairs):
+    # Sol r12 P1: the daemon matches config keys case-insensitively, so a
+    # "Data_Dir" beside "data_dir" would move it; refuse such pairs.
+    out = {}
+    for k, v in pairs:
+        if k.casefold() in out:
+            raise ValueError("keys that differ only in case (%r) are ambiguous to the daemon's decoder" % k)
+        out[k.casefold()] = v
+    return out
 try:
-    d = json.load(open(sys.argv[1])).get("data_dir")
+    d = json.load(open(sys.argv[1]), object_pairs_hook=fold_keys).get("data_dir")
 except Exception as e:
     sys.exit("lab config %s is unreadable: %s" % (sys.argv[1], e))
 if not isinstance(d, str) or not d.strip():
@@ -398,7 +534,10 @@ servers = cfg.get("mcpServers", [])
 if not servers or not image:
     sys.exit("lab config has no servers or the image is empty")
 for s in servers:
-    s["isolation"]["image"] = image
+    iso = next(v for k, v in s.items() if k.casefold() == "isolation")
+    for k in [k for k in iso if k.casefold() == "image"]:
+        del iso[k]
+    iso["image"] = image
 json.dump(cfg, open(path, "w"), indent=2)
 PY
 }

@@ -949,3 +949,49 @@ golangci-lint run --config .github/.golangci.yml ./internal/security/... ./tests
 go run ./cmd/tpa-redteam
 go run ./cmd/scan-eval --gate --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json
 ```
+
+## Review round 12 follow-ups (2026-10-12)
+
+Sol round 12 (13 chunks) raised one P1 and five P2s. All six were verified
+and fixed. Each fix has a test that fails without it.
+
+| Finding | Fix | Test |
+|---|---|---|
+| P1: the isolation preflight vetted exact-case keys only, but the daemon's `encoding/json` matches keys case-insensitively (last match wins). `{"command":"/tpa-attack-lab","Command":"docker"}` passed and ran docker unwrapped, which was confirmed against `config.ServerConfig` | `lab_config_check_isolation` and `lab_config_require` decode with an `object_pairs_hook` that re-keys every object by its case-folded names and refuses two keys that fold to the same name (U+212A Kelvin sign included). `lab_config_use_image` and `lab_config_images` look keys up case-insensitively | `TestLabConfigCheckIsolationRejectsCaseFoldedKeys`: command/Command, mode/Mode, network_mode/NETWORK_MODE, extra_args/EXTRA_ARGS, Kelvin-sign network_mode, isolation/Isolation, data_dir/Data_Dir |
+| P2: EXP-6 accepted manual mode's generic "changed since approval" line as proof of the gate | `scan_gate_logged` requires the scan-mode gate's own line for every tool: the non-green hold or the clean-verdict hold. EXP-6 and EXP-6b require it. The new EXP-6c sends an overt stage-2 pull to a trusted scan-mode server, and `scan_hold_evidence_ok` then requires `held_reason=scan_findings`, a non-clean `held_verdict` and matched `held_signals` on the stored record (`/tools/{tool}/diff`). A missing record is a HOLE | `TestScanGateLoggedRequiresScanModeMessages`, `TestScanHoldEvidenceOK`, `TestScanEvidenceVerdict` |
+| P2: EXP-3 reduced the report to the aggregate verdict | `exp3_tool_findings` reads the current job's findings: M01/M03 must have a hard-tier dangerous finding, and M02/M04/M06 must have at least one finding. `exp3_verdict` HOLDS only with `ok`. A `missing:` result is a HOLE | `TestExp3ToolFindingsRequiresEveryMutant`, `TestExp3VerdictOnlyDangerousHolds` |
+| P2: the docs claimed one wildcard and held annotation flips | `security-quarantine.md` and `tool-quarantine.md` now document the pre-v4 unknown-hints exception: any record approved before hints joined the hash with no stored snapshot, full capture or not, baselines the live hints on its first pass. The flip guarantee applies after that pass. The "hash covers" line now lists the hints | `TestRT03_Migration_ExistingApprovalsSurviveUpgrade` (re-run) |
+| P2: the destination→secret and credential-file→argument windows (`[^!?]`) joined separate sentences into a HARD finding | `sentenceSpan` = `(?:[^.!?]\|\.\S)` crosses a dot inside a token (URL, `[.]`, `~/.ssh`, `.env`) but not a sentence-ending period. `exfilDestination` no longer ends in a period, so "… to https://x.com. Include …" is bounded | `TestPhraseInjection_R12_ExfilWindowsStopAtSentenceEnd` (4 benign, 5 hostile incl. M03); corpus `rt04-ctl-dest-next-sentence`, `rt04-ctl-credfile-next-sentence` (`not_dangerous`) |
+| P2: RT-07 closed an open single quote at a possessive (`'the user's colleague's file; ignore …'` → HARD) | `stem` keeps the possessive `'s` (`user's` stays `user's` in the normalized view). `oddQuoteCount` never treats an apostrophe inside a word as a quote mark. A word-final apostrophe closes an open quote and otherwise counts as a plural possessive | `TestOddQuoteCount_RT07_PossessiveIsNotAQuote` (+6 rows), `TestNormalize_R12_KeepsPossessiveInsideWord`, `TestPhraseInjection_R12_PossessivesInsideQuotedExample`; corpus `rt04-ex-quoted-possessives` |
+
+Detector gates after the fix:
+
+- `go run ./cmd/tpa-redteam`: 69 blocked, 35 downgraded, 1 BYPASS
+  (`shadow-desc-rewrite`, MCP-3520), 0 baseline-miss. This is unchanged from
+  RT-04.
+- `go run ./cmd/scan-eval --gate --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json`
+  gives recall 1.0 and fp 0.0.
+- `TestSEC01_RealWorldBenignCorpora_NoNewHolds` (572 tools) and
+  `TestSEC01_VariantCorpus_ScanGateOutcomes` (with the 3 new controls) pass.
+
+Live suite (fresh image and binary at the round-12 tree):
+
+```
+EXP-1 HOLDS: baseline scan → dangerous
+EXP-2a HOLDS: calendar=changed stock=changed
+EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+EXP-2c HOLDS: stock=changed calendar=changed (manual mode, trusted throughout, gate held them, not indexed)
+EXP-3 HOLDS: mutants → dangerous, per-mutant findings ok
+EXP-4 HOLDS: ingested=yes (attempt 2), scan=dangerous, stored=changed
+EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+EXP-6c HOLDS: calendar=changed (scan-mode gate scanned it, non-clean verdict + signals persisted, not indexed)
+suite result: PASS (every experiment holds)
+```
+
+EXP-6c stored record: `held_reason=scan_findings`, `held_verdict=dangerous`,
+`held_signals=[phrase.injection, directive.imperative, secret.embedded,
+tpa.TPA-2026-0001.hidden_instruction, tpa.TPA-2026-0003.hidden_tag]`.
+`scripts/run-tpa-lab-docker.sh` gives a baseline verdict of dangerous (93/100).

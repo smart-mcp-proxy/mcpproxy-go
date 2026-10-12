@@ -23,6 +23,8 @@ When an upstream server connects and reports its tools, MCPProxy computes a SHA2
 
 This hash is compared against previously approved hashes to detect changes. A tool that flips its hints (for example from destructive to read-only) while keeping its description and schema is therefore held as `changed`, like any other rug pull. Approvals recorded by older releases are migrated on the first discovery after an upgrade without re-review, as long as the stored contract still matches.
 
+One exception applies during that migration. An approval recorded before annotation hints joined the hash that never stored an annotation snapshot has unknown hints. This covers every record with a hash schema below v4, including ones that did capture the full description and schemas. Its first discovery after the upgrade accepts the live hints and records them as the approved baseline instead of holding them. A hint flip served at that moment is therefore not held. From then on, hint flips on that tool are held like on a fresh install.
+
 ### Tool Approval States
 
 | Status | Meaning | Tool Indexed? | Tool Callable? |

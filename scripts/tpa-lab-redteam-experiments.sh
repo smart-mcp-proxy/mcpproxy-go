@@ -468,13 +468,18 @@ if want_only EXP-3; then
   cfg="$(make_config exp3 mutants 1 "$RUN_DIR/exp3-data")" || config_failed EXP-3; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp3.log" || { record "EXP-3: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp3-scan.txt")"
-  log "scan verdict: $v (full output: $RUN_DIR/exp3-scan.txt)"
-  # A recognised clean/warnings verdict is a HOLE (the RT-04 hardening
-  # regressed); an unreadable or unknown report is INCONCLUSIVE (Sol r4 P2).
-  case "$(exp3_verdict "$v")" in
-    HOLDS) pass "EXP-3 mutants flagged dangerous (RT-04 hard-tier detection)"; record "EXP-3 HOLDS: mutants → dangerous" ;;
-    HOLE) hole "EXP-3 mutant tools scan '$v' — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v" ;;
-    *) record "EXP-3 INCONCLUSIVE: scan=$v" ;;
+  # Per-mutant findings of THIS job (Sol r12 P2): the aggregate verdict
+  # would mask one bypassed mutant while another stays hard-tier.
+  tf="unknown"; job="$(scan_job_id "$RUN_DIR/exp3-scan.txt")"
+  [[ -n "$job" ]] && tf="$(exp3_tool_findings "$RUN_DIR/exp3-scan.txt.json" "$job")"
+  log "scan verdict: $v, per-mutant findings: $tf (full output: $RUN_DIR/exp3-scan.txt)"
+  # A recognised clean/warnings verdict or a missing per-mutant finding is a
+  # HOLE (the RT-04 hardening regressed); an unreadable or unknown report is
+  # INCONCLUSIVE (Sol r4 P2).
+  case "$(exp3_verdict "$v" "$tf")" in
+    HOLDS) pass "EXP-3 mutants flagged dangerous (M01/M03 hard, M02/M04/M06 surfaced)"; record "EXP-3 HOLDS: mutants → dangerous, per-mutant findings ok" ;;
+    HOLE) hole "EXP-3 mutant tools scan '$v' ($tf) — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v findings=$tf" ;;
+    *) record "EXP-3 INCONCLUSIVE: scan=$v findings=$tf" ;;
   esac
   stop_daemon
 fi
@@ -628,8 +633,10 @@ if want_only EXP-6; then
   if [[ $baseline_ok != 1 ]]; then
     record "EXP-6 INCONCLUSIVE: stage-1 baseline not approved (approve ok=$approve_ok, calendar=$pre)"
     record "EXP-6b INCONCLUSIVE: stage-1 baseline not approved"
+    record "EXP-6c INCONCLUSIVE: stage-1 baseline not approved"
   else
   copy_data_dir "$RUN_DIR/exp6-data" "$RUN_DIR/exp6b-data"
+  copy_data_dir "$RUN_DIR/exp6-data" "$RUN_DIR/exp6c-data"
   cfg="$(make_config exp6 facade 3 "$RUN_DIR/exp6-data" scan)" || config_failed EXP-6; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp6-2.log" || { record "EXP-6: INCONCLUSIVE (restart)"; exit 1; }
   sleep 3
@@ -640,6 +647,10 @@ if want_only EXP-6; then
   postq="$(wait_status_not stock_quote approved 30)"
   post_idx="$(tool_indexed calendar_get_events)"
   postq_idx="$(tool_indexed stock_quote)"
+  # Sol r12 P2: held + unindexed alone is what manual mode produces too, so
+  # require the trust_mode: scan gate's own log line for both tools.
+  sp="$(scan_gate_logged "$RUN_DIR/exp6-2.log" calendar_get_events stock_quote)"
+  [[ "$sp" == "yes" ]] || DISCOVERED="unproven(scan-gate=$sp)"
   log "after paraphrased rug pull + unquarantine (ok=$UNQ_OK quarantined=$QUARANTINED discovered=$DISCOVERED): calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)"
   case "$(held_unquarantined_verdict "$UNQ_OK" "$QUARANTINED" "$DISCOVERED" "$post" "$post_idx" "$postq" "$postq_idx")" in
     HOLDS)
@@ -664,6 +675,8 @@ if want_only EXP-6; then
   post_idx="$(tool_indexed calendar_get_events)"
   postq_idx="$(tool_indexed stock_quote)"
   proof="$(gate_held_logged "$RUN_DIR/exp6b.log" calendar_get_events stock_quote)"
+  sp="$(scan_gate_logged "$RUN_DIR/exp6b.log" calendar_get_events stock_quote)"
+  [[ "$sp" == "yes" ]] || proof="unproven(scan-gate=$sp)"
   log "EXP-6b (trusted throughout, quarantined=$q gate=$proof): calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)"
   case "$(held_unquarantined_verdict 1 "$q" "$proof" "$post" "$post_idx" "$postq" "$postq_idx")" in
     HOLDS)
@@ -674,6 +687,35 @@ if want_only EXP-6; then
       record "EXP-6b HOLE: calendar=$post (indexed=$post_idx) stock=$postq (indexed=$postq_idx)" ;;
     *)
       record "EXP-6b INCONCLUSIVE: quarantined=$q gate=$proof calendar=$post stock=$postq" ;;
+  esac
+  stop_daemon
+
+  # EXP-6c: an OVERT (signatured, stage-2) pull reaches the same trusted
+  # scan-mode server. Besides holding it, the scan-mode gate must scan it and
+  # persist its non-clean verdict and matched signals on the approval record
+  # (FR-018), so a regression that holds without scanning, or drops the
+  # evidence, fails here (Sol r12 P2).
+  cfg="$(make_config exp6c facade 2 "$RUN_DIR/exp6c-data" scan noquarantine)" || config_failed EXP-6c; CURRENT_CONFIG="$cfg"
+  start_daemon "$cfg" "$RUN_DIR/exp6c.log" || { record "EXP-6c: INCONCLUSIVE (restart)"; exit 1; }
+  q="$(server_quarantined)"
+  post="$(wait_status_not calendar_get_events approved 90)"
+  post_idx="$(tool_indexed calendar_get_events)"
+  curl -s -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/tools/calendar_get_events/diff" \
+    >"$RUN_DIR/exp6c-calendar-diff.json" 2>/dev/null
+  ev="$(scan_hold_evidence_ok "$RUN_DIR/exp6c-calendar-diff.json")"
+  proof="$(gate_held_logged "$RUN_DIR/exp6c.log" calendar_get_events)"
+  sp="$(scan_gate_logged "$RUN_DIR/exp6c.log" calendar_get_events)"
+  [[ "$sp" == "yes" ]] || proof="unproven(scan-gate=$sp)"
+  log "EXP-6c (overt pull, trusted scan mode, quarantined=$q gate=$proof evidence=$ev): calendar=$post (indexed=$post_idx)"
+  case "$(scan_evidence_verdict "$(held_unquarantined_verdict 1 "$q" "$proof" "$post" "$post_idx")" "$ev")" in
+    HOLDS)
+      pass "EXP-6c overt pull held with persisted scan evidence (calendar=$post)"
+      record "EXP-6c HOLDS: calendar=$post (scan-mode gate scanned it, non-clean verdict + signals persisted, not indexed)" ;;
+    HOLE)
+      hole "EXP-6c overt pull on a trusted scan-mode server: calendar=$post/$post_idx evidence=$ev"
+      record "EXP-6c HOLE: calendar=$post (indexed=$post_idx) evidence=$ev" ;;
+    *)
+      record "EXP-6c INCONCLUSIVE: quarantined=$q gate=$proof calendar=$post evidence=$ev" ;;
   esac
   stop_daemon
   fi

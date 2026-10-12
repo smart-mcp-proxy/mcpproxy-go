@@ -204,18 +204,26 @@ func TestRunLabDockerRejectsImageOverride(t *testing.T) {
 // unreadable or unknown report is INCONCLUSIVE, and both fail the suite.
 func TestExp3VerdictOnlyDangerousHolds(t *testing.T) {
 	lib := verdictsLib(t)
-	for _, tc := range []struct{ in, want string }{
-		{"dangerous", "HOLDS"},
-		{"clean", "HOLE"},
-		{"warnings", "HOLE"},
-		{"unknown", "INCONCLUSIVE"},
-		{"scan-failed", "INCONCLUSIVE"},
-		{"stale-report", "INCONCLUSIVE"},
-		{"", "INCONCLUSIVE"},
+	// Sol r12 P2: the aggregate verdict alone no longer HOLDS — the
+	// per-mutant findings (exp3_tool_findings) must be "ok" too, and a
+	// missing per-tool finding is a HOLE even while the aggregate stays
+	// dangerous.
+	for _, tc := range []struct{ in, tools, want string }{
+		{"dangerous", "ok", "HOLDS"},
+		{"dangerous", "", "INCONCLUSIVE"},
+		{"dangerous", "missing:mutant_exfil_combo=no-hard-finding", "HOLE"},
+		{"dangerous", "stale-report", "INCONCLUSIVE"},
+		{"dangerous", "unknown", "INCONCLUSIVE"},
+		{"clean", "ok", "HOLE"},
+		{"warnings", "", "HOLE"},
+		{"unknown", "ok", "INCONCLUSIVE"},
+		{"scan-failed", "", "INCONCLUSIVE"},
+		{"stale-report", "", "INCONCLUSIVE"},
+		{"", "", "INCONCLUSIVE"},
 	} {
-		got, code := runLib(t, lib, `exp3_verdict "$1"`, tc.in)
+		got, code := runLib(t, lib, `exp3_verdict "$1" "$2"`, tc.in, tc.tools)
 		if code != 0 || got != tc.want {
-			t.Errorf("exp3_verdict(%q) = %q (exit %d), want %q", tc.in, got, code, tc.want)
+			t.Errorf("exp3_verdict(%q, %q) = %q (exit %d), want %q", tc.in, tc.tools, got, code, tc.want)
 		}
 	}
 	// End to end through the result line the suite records for it.
@@ -1213,5 +1221,180 @@ func TestRunLabDockerRefusesUnrelatedListener(t *testing.T) {
 				t.Fatalf("the binary ran despite the busy port:\n%s", data)
 			}
 		})
+	}
+}
+
+// TestLabConfigCheckIsolationRejectsCaseFoldedKeys (Sol r12 P1): the daemon
+// decodes the config with encoding/json, which matches keys to fields
+// case-insensitively and lets the last match win, so a case variant placed
+// after the vetted key (command/Command, mode/Mode, ...) silently replaces
+// the value the preflight checked. The preflight must refuse any object
+// with two keys that fold to the same name.
+func TestLabConfigCheckIsolationRejectsCaseFoldedKeys(t *testing.T) {
+	lib := verdictsLib(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(project, "tests", "tpa-lab-config-docker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(data)
+	at := strings.Index(raw, `"name": "tpa-lab-attacker"`)
+	if at < 0 {
+		t.Fatal("attacker server missing from the checked-in config")
+	}
+	// inject inserts extra right after the first anchor that follows the
+	// attacker's name, so the variant is decoded after the vetted key.
+	inject := func(anchor, extra string) string {
+		i := strings.Index(raw[at:], anchor)
+		if i < 0 {
+			t.Fatalf("anchor %q not found in the attacker block", anchor)
+		}
+		end := at + i + len(anchor)
+		return raw[:end] + extra + raw[end:]
+	}
+	cases := map[string]string{
+		"command/Command":            inject(`"command": "/tpa-attack-lab",`, ` "Command": "docker",`),
+		"mode/Mode":                  inject(`"mode": "docker",`, ` "Mode": "none",`),
+		"network_mode/NETWORK_MODE":  inject(`"network_mode": "none",`, ` "NETWORK_MODE": "host",`),
+		"extra_args/EXTRA_ARGS":      inject(`"network_mode": "none",`, ` "EXTRA_ARGS": ["--privileged", "--network=host"],`),
+		"network_mode/Kelvin-sign K": inject(`"network_mode": "none",`, ` "networK_mode": "host",`),
+		"isolation/Isolation":        inject(`"oauth": null,`, ` "Isolation": {"mode": "none"},`),
+	}
+	for name, cfg := range cases {
+		path := writeTemp(t, "cfg.json", cfg)
+		out, code := runLib(t, lib, `lab_config_check_isolation "$1" 2>&1`, path)
+		if code == 0 {
+			t.Errorf("%s: a case-folded duplicate key must be refused", name)
+		} else if !strings.Contains(out, "differ only in case") {
+			t.Errorf("%s: refused for the wrong reason: %s", name, out)
+		}
+		if _, code := runLib(t, lib, `lab_config_require "$1" 2>/dev/null`, path); code == 0 {
+			t.Errorf("%s: lab_config_require must refuse it too", name)
+		}
+	}
+	dup := writeTemp(t, "dd.json", strings.Replace(raw, `"data_dir": "./test-data-tpa-lab-docker",`, `"data_dir": "./test-data-tpa-lab-docker", "Data_Dir": "/Users/nobody/.mcpproxy",`, 1))
+	if _, code := runLib(t, lib, `lab_config_require "$1" 2>/dev/null`, dup); code == 0 {
+		t.Error("data_dir/Data_Dir: lab_config_require must refuse a case-folded data_dir duplicate")
+	}
+}
+
+// TestExp3ToolFindingsRequiresEveryMutant (Sol r12 P2): the aggregate
+// "dangerous" verdict masks a single detector bypass, so EXP-3 checks the
+// current job's per-tool findings: hard-tier for M01/M03, any finding for
+// M02/M04/M06. Dropping any one of them must fail even while the aggregate
+// stays dangerous.
+func TestExp3ToolFindingsRequiresEveryMutant(t *testing.T) {
+	lib := verdictsLib(t)
+	type finding struct {
+		Location    string `json:"location"`
+		Tier        string `json:"tier"`
+		ThreatLevel string `json:"threat_level"`
+	}
+	full := []finding{
+		{"tpa-lab-attacker:mutant_exfil_combo", "hard", "dangerous"},
+		{"tpa-lab-attacker:mutant_german_override", "soft", "warning"},
+		{"tpa-lab-attacker:mutant_override_env", "hard", "dangerous"},
+		{"tpa-lab-attacker:mutant_reveal_prompt", "soft", "warning"},
+		{"tpa-lab-attacker:translate_text", "soft", "warning"},
+	}
+	report := func(job string, fs []finding) string {
+		b, err := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+			"job_id": job, "verdict": "dangerous", "findings": fs,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return writeTemp(t, "report.json", string(b))
+	}
+	without := func(i int, repl *finding) []finding {
+		out := append([]finding{}, full[:i]...)
+		if repl != nil {
+			out = append(out, *repl)
+		}
+		return append(out, full[i+1:]...)
+	}
+	if got, _ := runLib(t, lib, `exp3_tool_findings "$1" "$2"`, report("job-1", full), "job-1"); got != "ok" {
+		t.Fatalf("full mutant findings = %q, want ok", got)
+	}
+	cases := map[string][]finding{
+		"M03 undetected":            without(0, nil),
+		"M03 only soft":             without(0, &finding{"tpa-lab-attacker:mutant_exfil_combo", "soft", "warning"}),
+		"M04 lost review finding":   without(1, nil),
+		"M01 undetected":            without(2, nil),
+		"M02 lost review finding":   without(3, nil),
+		"M06 lost review finding":   without(4, nil),
+		"M01 finding on other tool": without(2, &finding{"tpa-lab-victim:mutant_override_env", "hard", "dangerous"}),
+	}
+	for name, fs := range cases {
+		if got, _ := runLib(t, lib, `exp3_tool_findings "$1" "$2"`, report("job-1", fs), "job-1"); !strings.HasPrefix(got, "missing:") {
+			t.Errorf("%s: exp3_tool_findings = %q, want missing:…", name, got)
+		}
+	}
+	if got, _ := runLib(t, lib, `exp3_tool_findings "$1" "$2"`, report("job-0", full), "job-1"); got != "stale-report" {
+		t.Errorf("another job's report = %q, want stale-report", got)
+	}
+}
+
+// TestScanGateLoggedRequiresScanModeMessages (Sol r12 P2): manual mode's
+// generic "changed since approval" line must not prove the trust_mode: scan
+// gate ran.
+func TestScanGateLoggedRequiresScanModeMessages(t *testing.T) {
+	lib := verdictsLib(t)
+	manual := writeTemp(t, "manual.log",
+		`WARN	Tool description/schema changed since approval (potential rug pull)	{"server": "tpa-lab-attacker", "tool": "calendar_get_events"}`+"\n")
+	if got, _ := runLib(t, lib, `scan_gate_logged "$1" calendar_get_events`, manual); got == "yes" {
+		t.Error("a manual-mode change line must not prove the scan-mode gate")
+	}
+	scan := writeTemp(t, "scan.log",
+		`WARN	Tool change held for operator confirmation (trust_mode: scan, clean verdict does not auto-approve a changed contract)	{"server": "tpa-lab-attacker", "tool": "calendar_get_events"}`+"\n"+
+			`INFO	trust_mode scan held tool change for review (non-green verdict)	{"server": "tpa-lab-attacker", "tool": "stock_quote", "verdict": "warnings"}`+"\n")
+	if got, _ := runLib(t, lib, `scan_gate_logged "$1" calendar_get_events stock_quote`, scan); got != "yes" {
+		t.Errorf("scan-mode messages for both tools = %q, want yes", got)
+	}
+	if got, _ := runLib(t, lib, `scan_gate_logged "$1" calendar_get_events notes_export`, scan); got != "no(notes_export)" {
+		t.Errorf("a tool without a scan-mode message = %q, want no(notes_export)", got)
+	}
+}
+
+// TestScanHoldEvidenceOK (Sol r12 P2): a hostile scan-mode change must
+// persist a non-clean verdict with matched signals on its approval record.
+func TestScanHoldEvidenceOK(t *testing.T) {
+	lib := verdictsLib(t)
+	cases := []struct {
+		name, body, want string
+	}{
+		{"persisted evidence", `{"data":{"status":"changed","held_reason":"scan_findings","held_verdict":"dangerous","held_signals":["tpa.sensitive_path"]}}`, "yes"},
+		{"warnings evidence", `{"data":{"status":"changed","held_reason":"scan_findings","held_verdict":"warnings","held_signals":["phrase.injection"]}}`, "yes"},
+		{"no evidence (manual-style hold)", `{"data":{"status":"changed"}}`, "no(reason=None)"},
+		{"clean verdict", `{"data":{"status":"changed","held_reason":"scan_findings","held_verdict":"clean","held_signals":["x"]}}`, "no(verdict=clean)"},
+		{"no signals", `{"data":{"status":"changed","held_reason":"scan_findings","held_verdict":"dangerous","held_signals":[]}}`, "no(signals)"},
+		{"coverage hold", `{"data":{"status":"changed","held_reason":"scan_coverage","held_verdict":"warnings"}}`, "no(reason=scan_coverage)"},
+		{"not changed", `{"data":{"status":"approved"}}`, "no(status=approved)"},
+		{"unreadable", `not json`, "no(unreadable)"},
+	}
+	for _, tc := range cases {
+		if got, _ := runLib(t, lib, `scan_hold_evidence_ok "$1"`, writeTemp(t, "diff.json", tc.body)); got != tc.want {
+			t.Errorf("%s: scan_hold_evidence_ok = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestScanEvidenceVerdict (Sol r12 P2): EXP-6c fails when the overt pull is
+// held but its scan evidence was not persisted.
+func TestScanEvidenceVerdict(t *testing.T) {
+	lib := verdictsLib(t)
+	for _, tc := range []struct{ held, ev, want string }{
+		{"HOLDS", "yes", "HOLDS"},
+		{"HOLDS", "no(reason=None)", "HOLE"},
+		{"HOLDS", "", "HOLE"},
+		{"HOLE", "yes", "HOLE"},
+		{"INCONCLUSIVE", "yes", "INCONCLUSIVE"},
+	} {
+		if got, _ := runLib(t, lib, `scan_evidence_verdict "$1" "$2"`, tc.held, tc.ev); got != tc.want {
+			t.Errorf("scan_evidence_verdict(%q, %q) = %q, want %q", tc.held, tc.ev, got, tc.want)
+		}
 	}
 }

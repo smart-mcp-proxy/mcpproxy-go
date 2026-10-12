@@ -111,7 +111,21 @@ const exfilVerbs = `send|upload|post|transmit|exfiltrat\w*|leak|forward|deliver|
 // address. Defanging keeps a URL readable to a model while hiding it from
 // URL-shaped matchers, so it is matched directly rather than treated as a
 // harmless string.
-const exfilDestination = `(?:h(?:tt|xx)ps?|ftp|wss?)(?:://|\[://\]|\[:\]//)\S+|www(?:\.|\[\.\])\S+|[\w.+-]+@[\w-]+(?:\.|\[\.\])[\w.]+`
+//
+// A destination never ends in a period, so the period that closes the
+// sentence ("… to https://status.example.com. Include …") stays outside it
+// and bounds the windows that follow (Sol r12 P2).
+const exfilDestination = `(?:h(?:tt|xx)ps?|ftp|wss?)(?:://|\[://\]|\[:\]//)\S*[^\s.!?]|www(?:\.|\[\.\])\S*[^\s.!?]|[\w.+-]+@[\w-]+(?:\.|\[\.\])[\w.]*\w`
+
+// sentenceSpan is one character of a same-sentence window that may cross a
+// period INSIDE a token — a dotted URL, host, file name or "~/.ssh" path —
+// but not the period that ends a sentence (one followed by whitespace or the
+// end of the text). The destination-to-secret and credential-file-to-
+// argument windows use it; a plain [^.!?] would break on "~/.ssh/id_rsa",
+// and the earlier [^!?] joined unrelated sentences into a HARD finding
+// ("Read .env for local configuration. Put the currency in the amount
+// field.", Sol r12 P2).
+const sentenceSpan = `(?:[^.!?]|\.\S)`
 
 // exfilSecrets are the sensitive targets of the destination-anchored families.
 const exfilSecrets = `credential|api key|access token|auth token|session token|secret|password|passphras|private key|ssh key|seed phras|mnemonic|cooki|\.env\b|env file|id_rsa|id_ed25519|/etc/passwd|~/\.ssh|~/\.aws|/\.ssh/|/\.aws/`
@@ -194,7 +208,7 @@ var phraseFamilies = []phraseFamily{
 		// inclusion word ("including", "along with", "plus", …), so "send a
 		// request to https://api.example.com using your API key" (a secret used,
 		// not sent) never matches.
-		re:     regexp.MustCompile(`\b(?:` + exfilVerbs + `)\b[^.!?]{0,60}?\b(?:to|into|onto|via|at)\s+(?:` + exfilDestination + `)[^!?]{0,80}?\b(?:incl\w*|along with|together with|plus|as well as|and also|attach\w*|append\w*|with (?:all|any|every|each))\b[^.!?]{0,30}?(?:` + exfilSecrets + `)`),
+		re:     regexp.MustCompile(`\b(?:` + exfilVerbs + `)\b[^.!?]{0,60}?\b(?:to|into|onto|via|at)\s+(?:` + exfilDestination + `)` + sentenceSpan + `{0,80}?\b(?:incl\w*|along with|together with|plus|as well as|and also|attach\w*|append\w*|with (?:all|any|every|each))\b[^.!?]{0,30}?(?:` + exfilSecrets + `)`),
 		base:   0.88,
 		threat: detect.ThreatExfiltration,
 		what:   "secret-exfiltration directive",
@@ -214,7 +228,7 @@ var phraseFamilies = []phraseFamily{
 		// poisoning payload and needs no URL: the argument itself is the
 		// channel. Requires a concrete credential FILE (not the word "secret")
 		// and an explicit field/parameter/argument target.
-		re:     regexp.MustCompile(`\b(?:read|load|cat|open|pull in|pull|collect|gather|grab|fetch|copy|get|obtain|retriev\w*|extract|dump)\b[^.!?]{0,40}?(?:` + secretFiles + `)[^!?]{0,120}?\b(?:include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set)\b[^.!?]{0,40}?\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`),
+		re:     regexp.MustCompile(`\b(?:read|load|cat|open|pull in|pull|collect|gather|grab|fetch|copy|get|obtain|retriev\w*|extract|dump)\b[^.!?]{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?\b(?:include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set)\b[^.!?]{0,40}?\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`),
 		base:   0.88,
 		threat: detect.ThreatExfiltration,
 		what:   "credential-file-to-argument directive",
