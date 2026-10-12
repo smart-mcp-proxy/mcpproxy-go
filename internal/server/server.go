@@ -4470,8 +4470,21 @@ func (a *serverUnquarantinerAdapter) WithToolApprovalLock(serverName string, fn 
 	return a.server.runtime.WithToolApprovalLock(serverName, fn)
 }
 
+// CommitServerApproval runs the scanner's approval commit under the
+// runtime's per-server tool-approval lock after recording the server's
+// durable tool baseline decision (Spec 117 PR-1, #1567).
+func (a *serverUnquarantinerAdapter) CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	if a.server == nil || a.server.runtime == nil {
+		// No runtime: no discovery can auto-baseline either (as
+		// WithToolApprovalLock above).
+		return 0, commit()
+	}
+	return a.server.runtime.CommitServerApproval(serverName, blocks, expected, by, commit)
+}
+
 var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 var _ scanner.ToolApprovalLocker = (*serverUnquarantinerAdapter)(nil)
+var _ scanner.ServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

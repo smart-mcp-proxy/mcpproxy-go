@@ -24,6 +24,10 @@ type commitTestHooks struct {
 	// its tools/list returned and before the result is committed (review
 	// round 7: a list that outlives a connection-changing commit).
 	discoveryAfterList func(serverName string)
+	// toolBaselineFault injects a storage failure into the Spec 117 PR-1
+	// baseline step of a discovery pass: op is "list" (the prior-record
+	// listing), "read" (the marker read) or "write" (the marker write).
+	toolBaselineFault func(serverName, op string) error
 
 	// Commit pipeline seams (plan.md §Test seams). Each runs inside
 	// configCommitMu with the reason of the commit.

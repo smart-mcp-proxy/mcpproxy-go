@@ -65,6 +65,12 @@ const (
 	ScanReportsBucket        = "security_reports"
 	IntegrityBaselinesBucket = "integrity_baselines"
 
+	// ToolBaselineDecisionsBucket holds one marker per server stating that the
+	// server's tool baseline has been decided (Spec 117 FR-020, #1567). Created
+	// on first write; removed per server only together with its tool-approval
+	// records.
+	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )

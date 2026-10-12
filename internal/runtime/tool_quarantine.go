@@ -561,6 +561,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 // serverName's approval lock (Spec 116 D15: the discovery pass makes its final
 // eligibility check, the approval decisions and its index writes in one hold).
 func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
+	return r.checkToolApprovalsResolved(serverName, tools, nil)
+}
+
+// checkToolApprovalsResolved is checkToolApprovalsHeld with the server's
+// baseline already resolved under the same lock hold (resolveToolBaselineHeld),
+// so a caller that must abort BEFORE publishing anything can run the baseline
+// step first (Spec 117 FR-027a). A nil baseline is resolved here.
+func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.ToolMetadata, baseline *toolBaseline) (*ToolApprovalResult, error) {
 	if r.storageManager == nil {
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
 	}
@@ -596,16 +604,22 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 	// which "erase" and "ns:erase" are processed cannot change the outcome —
 	// processing "erase" first re-saves (and stamps) its record, which would
 	// otherwise hide it from "ns:erase" on the very pass that migrates it.
-	serverHasBaseline := false
-	priorByName := make(map[string]*storage.ToolApprovalRecord)
-	if priorRecords, listErr := r.storageManager.ListToolApprovals(serverName); listErr == nil {
-		for _, rec := range priorRecords {
-			priorByName[rec.ToolName] = rec
-			if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
-				serverHasBaseline = true
-			}
+	//
+	// Spec 117 PR-1 (#1567): the decision is no longer inferred from the
+	// records alone. A durable per-server marker records that the baseline
+	// was decided, so a replaced inventory or an authoritative empty refresh
+	// (which delete the approved records) never makes the server "new" again.
+	// The marker step runs before the first record write of this pass and
+	// fails closed (resolveToolBaselineHeld).
+	if baseline == nil {
+		resolved, err := r.resolveToolBaselineHeld(serverName)
+		if err != nil {
+			return nil, err
 		}
+		baseline = resolved
 	}
+	priorByName := baseline.prior
+	serverHasBaseline := baseline.hasBaseline
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{
@@ -1505,6 +1519,10 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 	}
 
 	r.stampRemainingLegacyToolApprovals(serverName)
+
+	if !serverHasBaseline {
+		r.markDiscoveryToolBaselineHeld(serverName)
+	}
 
 	if len(result.BlockedTools) > 0 {
 		r.logger.Info("Tool-level quarantine: tools blocked",

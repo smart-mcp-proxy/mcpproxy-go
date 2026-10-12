@@ -231,7 +231,7 @@ func TestReviewApprovePromptNamesCount(t *testing.T) {
 		var prompt string
 		_, err := runReviewApprove(t, "table", func(message string) (bool, error) { prompt = message; return false, nil }, "bare")
 		require.NoError(t, err)
-		require.Equal(t, "Approve server 'bare' without seeing tools?", prompt)
+		require.Equal(t, "Approve server 'bare' without seeing tools? Tools the server lists later will wait for review.", prompt)
 		require.Empty(t, recorder.writes())
 	})
 	t.Run("confirming sends the write", func(t *testing.T) {

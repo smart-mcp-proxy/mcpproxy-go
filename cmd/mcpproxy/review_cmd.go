@@ -64,7 +64,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 			return runReviewWrite(server, "tools/approve", body)
 		}
 		body := map[string]interface{}{"force": force}
-		prompt := fmt.Sprintf("Approve server '%s' without seeing tools?", server)
+		// Spec 117 FR-026: the approval records the server's tool baseline,
+		// so nothing it lists later is auto-approved.
+		prompt := fmt.Sprintf("Approve server '%s' without seeing tools? Tools the server lists later will wait for review.", server)
 		var summary string
 		if len(state.tools) > 0 {
 			block, allowed, err := reviewApproveSelection(state.tools, all, tools, except)

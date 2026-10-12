@@ -317,7 +317,10 @@ mcpproxy review show github [--full]
    allows every pending or changed tool (tools you blocked earlier on a
    re-quarantined server stay blocked). If no tool definitions have been captured, the button
    reads "Approve without seeing tools" and the UI asks for a separate
-   confirmation before a blind approval can proceed.
+   confirmation before a blind approval can proceed. A blind or empty-review
+   approval still records the server's tool baseline (see
+   [Durable tool baseline](#durable-tool-baseline)), so any tool the server
+   lists later waits for review instead of being trusted automatically.
 
 The review controls are deliberate: **Fetch tool definitions** (CLI: `mcpproxy review fetch`) uses the
 inspection-only `discover-tools` capture to store current upstream metadata
@@ -422,6 +425,35 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 - CLI commands: `mcpproxy upstream inspect` and `mcpproxy upstream approve`
 - Configuration: `quarantine_enabled` (global) and `auto_approve_tool_changes` (per-server; deprecates `skip_quarantine`)
 - REST API endpoints for tool approval management
+
+### Durable tool baseline {#durable-tool-baseline}
+
+A trusted (non-quarantined) server whose tools were never approved treats its
+first non-empty tool list as its **baseline**: those tools are approved
+automatically (`approved_by: auto-baseline`). From then on, under `manual`
+trust, every new or replaced tool waits for review.
+
+MCPProxy records that the baseline was decided in its database, per server
+(bucket `tool_baseline_decisions`), so the decision survives everything that
+removes the approved tool records:
+
+- the server replaces its whole tool list (for example `read_note` disappears
+  and `wipe_all_notes` appears): the new tool stays **pending**, on every
+  later discovery and after a restart, and cannot be called until approved;
+- an explicit refresh that returns zero tools, followed by new tools: the same;
+- a quarantined server approved from an empty review, or approved "without
+  seeing tools": tools it lists after the approval are **pending**.
+
+The record is written by the first trusted discovery that approves a tool, by
+every server approval from the review screen, CLI, tray or
+`POST /api/v1/servers/{id}/security/approve`, and back-filled on the first
+discovery after an upgrade for servers that already have approved tools. It is
+removed only when the server itself is removed (or pruned from the config), so
+a server removed and added again under the same name starts with a fresh
+baseline. A server whose first tool list is empty gets no record; its first
+non-empty list is still its baseline. If the record cannot be read or written,
+the discovery pass is skipped (nothing is removed, nothing new is indexed) and
+retried by the next pass.
 
 ### Trust modes (auto | scan | manual)
 
