@@ -374,6 +374,10 @@ type Server struct {
 	// preflightPollOverride lowers the 250 ms poll floor. Tests set it; nothing
 	// in production does.
 	preflightPollOverride time.Duration
+	// preflightNowOverride replaces time.Now as the source of the wait start,
+	// so tests can observe the exact budget the server computed. Tests set it;
+	// nothing in production does.
+	preflightNowOverride func() time.Time
 
 	// sessionPrincipalResolver resolves a session cookie or bearer JWT to an
 	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
