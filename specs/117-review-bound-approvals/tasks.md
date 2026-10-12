@@ -14,10 +14,10 @@
 **Declared scope**: `internal/storage` (new bucket + removal), `internal/toolreview` (value type), `internal/runtime/tool_quarantine.go` (`serverHasBaseline`, marking: inferred before the loop, discovery after it, FR-027a), `internal/runtime/lifecycle.go` (FR-027 error path in `applyDifferentialToolUpdate`, snapshot restore in `commitDiscoveredTools`, and the sweep's StateView batch omitting aborted servers, FR-027a), `internal/runtime/tool_approval_lock.go` (PR-1 `CommitServerApproval`), `internal/server/server.go` (adapter), `internal/security/scanner/service.go` (marking inside the locked commit), blind-approval copy in `ReviewScreen.vue` and `review_cmd.go`, `docs/features/security-quarantine.md`. Nothing else.
 
 ### Setup
-- [ ] T101 Branch from `origin/main`. Run the baseline suites once and record the timings: `go test -race ./internal/runtime/... ./internal/storage/... ./internal/security/scanner/...`.
+- [x] T101 Branch from `origin/main`. Run the baseline suites once and record the timings: `go test -race ./internal/runtime/... ./internal/storage/... ./internal/security/scanner/...`.
 
 ### Storage
-- [ ] T102 [P] [PR-1] test: `internal/storage/tool_baseline_decision_test.go`.
+- [x] T102 [P] [PR-1] test: `internal/storage/tool_baseline_decision_test.go`.
   - `MarkToolBaselineDecided` then `ToolBaselineDecided` → true.
   - Idempotent: the first `decided_at` is kept, and `source` is upgraded only from `inferred`.
   - Unknown server → false.
@@ -25,10 +25,10 @@
   - `DeleteServerToolApprovals("s")` removes the marker in the same tx (assert with a single `View` after).
   - `PruneToolApprovalsNotIn({a})` drops b's marker and keeps a's.
   - A store without the bucket reads false and does not create it on read.
-- [ ] T103 [PR-1] impl: `internal/storage/models.go` const, `tool_baseline_decision.go`, `bbolt.go` delete hooks, `manager.go` wrappers (data-model §5).
+- [x] T103 [PR-1] impl: `internal/storage/models.go` const, `tool_baseline_decision.go`, `bbolt.go` delete hooks, `manager.go` wrappers (data-model §5).
 
 ### Runtime
-- [ ] T104 [P] [PR-1] test: `internal/runtime/tool_baseline_durable_test.go` (US2 scenarios 1, 2, 4, 5), on a trusted manual-trust server with quarantine enabled.
+- [x] T104 [P] [PR-1] test: `internal/runtime/tool_baseline_durable_test.go` (US2 scenarios 1, 2, 4, 5), on a trusted manual-trust server with quarantine enabled.
   - (a) Drive the **full** apply path (`commitDiscoveredTools` → `applyDifferentialToolUpdate`, with the index manager), because absent records are deleted there, not in `checkToolApprovals` (`lifecycle.go:1149-1185`; design review r1 #5). Steps: baseline `[A]` (A indexed) → apply `[B]` (A's record and index entry deleted) → apply `[B]` ×2 → new Runtime on the same DB → apply `[B]`. Expect B pending throughout and B absent from the index. Dispatch refusal is asserted in a separate test, T104s (`internal/server`, exported runtime entry points only: refresh via `RefreshServerTools`, then `call_tool_destructive`), because `internal/server` imports `internal/runtime` and a runtime-package test cannot import it (design review r3 #2).
   - (b) The same with an authoritative empty apply (`[]` through the authoritative path) between A and B.
   - (c) A pre-seeded approved record without a marker → one pass → marker present with `source: inferred`.
@@ -36,8 +36,8 @@
   - (e) First inventory `[]` → no marker; then `[A]` → auto-baselined (FR-025).
 
   (a) and (b) fail on main: B becomes approved by `auto-baseline` on the second apply, as the live repro showed. (c) and (e) are marker-inference tests and are kept separate from the failing-first pair.
-- [ ] T104s [P] [PR-1] test: `internal/server/tool_baseline_durable_dispatch_test.go`. An in-process server with a stub upstream whose inventory can be swapped. Flow: baseline `[A]` → swap to `[B]` → `RefreshServerTools` ×2 → `call_tool_destructive server:B` refused, and the stub saw zero `tools/call`. Fails on main (B dispatched). It runs in the internal/server race lane under the CI skip regex.
-- [ ] T104f [P] [PR-1] test: `internal/runtime/tool_baseline_marker_fault_test.go` (FR-027). This is fault injection through a storage wrapper that fails `MarkToolBaselineDecided`, on an older store (approved A, no marker):
+- [x] T104s [P] [PR-1] test: `internal/server/tool_baseline_durable_dispatch_test.go`. An in-process server with a stub upstream whose inventory can be swapped. Flow: baseline `[A]` → swap to `[B]` → `RefreshServerTools` ×2 → `call_tool_destructive server:B` refused, and the stub saw zero `tools/call`. Fails on main (B dispatched). It runs in the internal/server race lane under the CI skip regex.
+- [x] T104f [P] [PR-1] test: `internal/runtime/tool_baseline_marker_fault_test.go` (FR-027). This is fault injection through a storage wrapper that fails `MarkToolBaselineDecided`, on an older store (approved A, no marker):
   - Apply `[B]` (wholesale replacement) → A's record is **not** deleted, B is not indexed, and the error is logged. Then heal the storage and apply `[B]` → marker written, A deleted, B pending.
   - The same with the authoritative empty inventory.
 
@@ -47,19 +47,19 @@
   - **Discovery-marker fault is not an abort**: a fresh trusted server, first inventory `[A]`, marker write fails → A approved (auto-baseline), the apply completes and A is indexed; the next pass `[B]` writes the `inferred` marker before the loop and leaves B pending.
 
   Fails on main: the swallowed error path deletes A, and the next pass auto-baselines B.
-- [ ] T105 [PR-1] impl: `tool_quarantine.go`.
+- [x] T105 [PR-1] impl: `tool_quarantine.go`.
   - `serverHasBaseline` ORs `ToolBaselineDecided` (read error → true).
   - Marking, under the lock: `inferred` before the loop when `priorByName` holds an approved or changed record; otherwise, after the loop, `discovery` when the pass approved at least one record (track it in the loop). See the FR-027a ordering bullet below.
   - Log at Info once per server when a marker is first written.
   - FR-027a ordering (spec review r3 #1): when no marker exists and `priorByName` holds an approved or changed record, write the `inferred` marker **before the loop**, ahead of every `SaveToolApproval` / `recordScanHold` / `scanApproveChange` write. A marker read error, that write's error, or a `ListToolApprovals` error on the pre-pass read returns `errBaselineMarker` before any record write. The `discovery` marker (no prior approved/changed record) stays after the loop and its failure is logged at Warn, not returned (FR-021 inference covers it).
   - FR-027: on `errBaselineMarker`, `applyDifferentialToolUpdate` (`lifecycle.go:1019-1026`) evicts the blocked set it can compute from the stored records, skips absent deletes, hash deletes and every index write, and **returns** `errBaselineMarker`, so the reactive caller publishes no StateView entry (`lifecycle.go:937-940`). The sweep's batch `RefreshToolsFromDiscovery` omits the servers whose apply aborted and keeps their previous entries. Other `checkToolApprovals` errors keep today's handling.
   - `commitDiscoveredTools` (`lifecycle.go:776-796`) publishes `lastGoodTools` and stamps `lastCaptureAt` **before** the apply. On `errBaselineMarker` it restores both previous values while still holding `captureSnapMu`, so the failed inventory is never available to the approval reindex or the sweep fallback (design review r7 #3).
-- [ ] T106 [P] [PR-1] test: `internal/security/scanner/service_test.go` + `internal/runtime/tool_baseline_durable_test.go` (US2 scenario 3).
+- [x] T106 [P] [PR-1] test: `internal/security/scanner/service_test.go` + `internal/runtime/tool_baseline_durable_test.go` (US2 scenario 3).
   - `ApproveServer` and `ApproveServerWithBlocks` on an empty inventory write the marker (`server_approval`, `by: api`) inside the locked commit: the recording locker sees the mark between lock and unlock.
   - After the unquarantine, a pass with `[T]` leaves T pending.
 
   Fails on main: no marker, T auto-approved.
-- [ ] T107 [PR-1] impl:
+- [x] T107 [PR-1] impl:
   - new leaf package `internal/toolreview` (`BaselineDecision`);
   - `Runtime.CommitServerApproval` in its PR-1 form: lock, mark, `commit()`;
   - scanner `ServerApprovalCommitter` capability, used by both branches (`SaveIntegrityBaseline` and `…WithBlocks`) when present, with a fallback to today's path for fakes;
@@ -68,11 +68,11 @@
   The scanner must not import `internal/storage` or `internal/runtime` (storage imports scanner).
 
 ### Copy and docs
-- [ ] T108 [P] [PR-1] test: vitest `frontend/tests/unit/review-screen-blind-copy.spec.ts` (the dialog text mentions that later tools wait for review) + `cmd/mcpproxy/review_cmd_test.go` (the blind prompt text).
-- [ ] T109 [PR-1] impl: copy changes (FR-026); `docs/features/security-quarantine.md` "Baseline" section; CLAUDE.md Recent Changes line.
+- [x] T108 [P] [PR-1] test: vitest `frontend/tests/unit/review-screen-blind-copy.spec.ts` (the dialog text mentions that later tools wait for review) + `cmd/mcpproxy/review_cmd_test.go` (the blind prompt text).
+- [x] T109 [PR-1] impl: copy changes (FR-026); `docs/features/security-quarantine.md` "Baseline" section; CLAUDE.md Recent Changes line.
 
 ### Verify and ship
-- [ ] T110 [PR-1] Run the full lanes (quickstart §4), both lints, `make build`. Live check **L1** (quickstart §3) with evidence under `evidence/s117-pr1/`.
+- [x] T110 [PR-1] Run the full lanes (quickstart §4), both lints, `make build`. Live check **L1** (quickstart §3) with evidence under `evidence/s117-pr1/`.
 - [ ] T111 [PR-1] Open the PR (`Closes #1567`) and run an opencode Sol 6.1 review (≤10 rounds; record in research.md "PR-1 review log").
 
 ---
