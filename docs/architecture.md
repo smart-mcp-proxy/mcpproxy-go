@@ -147,7 +147,13 @@ config is published and runs one pipeline:
    (`ReloadConfiguration`) never writes the file, so it skips this step.
 6. **Storage**: one bbolt transaction (rows with their stamps, deletions,
    `meta.config_commit_generation`), then the index purge for removed,
-   quarantined and disabled servers. The approval locks are released. On a
+   quarantined and disabled servers, then the in-memory purge (last-good tool
+   snapshot, capture stamp). A removed or replaced server loses its whole
+   **purge set** in that transaction (`internal/storage/purge.go`): tool and
+   prompt approvals, OAuth tokens and DCR client (exact `name` or
+   `name_<16 hex>` key), OAuth completion events, scan reports and jobs, the
+   integrity baseline, tool-call history and identities, and tool hashes.
+   The approval locks are released. On a
    storage failure nothing is published; when step 5 wrote the file, the
    captured file is restored byte for byte (or removed if it did not exist).
    A failed reload wrote nothing, so the file keeps the operator's edit
@@ -158,9 +164,23 @@ config is published and runs one pipeline:
    (`Manager.RestampRetained`).
 8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.
 
-After the lock is released the commit unregisters removed servers, schedules
-connect workers, requests discovery for restamped instances and sends its
-events once. A discovery pass makes its final eligibility check (stored row
+After the lock is released the commit unregisters removed servers, cancels
+their OAuth refresh schedules, revokes inspection exemptions, drops cached
+scan verdicts (purge observers), schedules connect workers, requests
+discovery for restamped instances and sends its events once.
+
+**Incarnation-bound approvals** (Spec 116 PR2). Each server has an
+incarnation that changes only when its name is removed and created again.
+Every approval writer (tool approve/block/toggle, the unquarantine baseline
+promotion, prompt approvals, the scanner's baseline and blocks) captures the
+incarnation when it starts — or takes the client's `expected_incarnation` —
+and re-checks it against the stored row under the server's approval lock,
+the lock the removal purges under. A mismatch writes nothing and returns
+`ErrServerReplaced` (REST 409 `server_replaced`). Scanner approval
+unquarantines through a commit with `ExpectIncarnation`. Asynchronous
+writers that can outlive a removal (scan job and report saves, identity
+registration, tool-call history) use storage methods that check the row's
+incarnation in the same bbolt transaction as the write. A discovery pass makes its final eligibility check (stored row
 present, enabled, not quarantined, generation unchanged) and its index writes
 in one hold of the server's approval lock, and approval policy is read from
 storage, so a pass can never re-index a server a commit has just quarantined

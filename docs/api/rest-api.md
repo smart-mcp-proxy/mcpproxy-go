@@ -238,6 +238,8 @@ a prompt-injected agent could otherwise read another upstream's PAT via
         "connected": true,
         "quarantined": false,
         "tool_count": 15,
+        "generation": 42,
+        "incarnation": 17,
         "health": {
           "level": "healthy",
           "admin_state": "enabled",
@@ -412,7 +414,9 @@ Place a server in quarantine to prevent tool execution. No request body required
 
 #### POST /api/v1/servers/{name}/unquarantine
 
-Remove a server from quarantine to allow tool execution. No request body required.
+Remove a server from quarantine to allow tool execution. No request body
+required; an optional `{"expected_incarnation": 17}` binds the call to the
+server you reviewed (see [Removal and incarnation](#removal-and-incarnation)).
 
 #### POST /api/v1/servers/{name}/restart
 
@@ -494,6 +498,44 @@ OAuth errors return structured error responses for better debugging:
 
 Clear OAuth tokens and disconnect a server.
 
+#### Removal and incarnation
+
+Removing a server (`DELETE /api/v1/servers/{id}`, MCP `upstream_servers remove`,
+the Web UI delete, or a config edit that drops it) is one config commit: the server
+leaves the live config, the file and storage together, and **everything stored
+under its name is deleted in the same storage transaction** — tool and prompt
+approvals, OAuth tokens and DCR client registration (exact key match, so
+removing `foo` never touches `foo_bar`), scan reports and jobs, the integrity
+baseline, tool-call history and identities, and tool hashes — together with its
+search-index entries, refresh schedule and cached scan verdict. A server added
+again under the same name starts clean: quarantined with nothing approved and
+no OAuth token. Activity log removal records carry the per-bucket counts in
+`metadata.purged`.
+
+Every server payload (`GET /api/v1/servers`, the single-server routes and the
+review payload) carries two committed identifiers:
+
+- `generation` (int64) changes whenever the server's configuration changes.
+- `incarnation` (int64) changes only when the name is removed and created
+  again; ordinary edits keep it.
+
+The approval writes — `tools/approve`, `tools/block`, `tools/{tool}/enabled`,
+`tools/enable_all`, `tools/disable_all`, `unquarantine` and
+`security/approve` — accept an optional `"expected_incarnation"`: the
+`incarnation` of the server the decision was made on. If the server was
+removed (and possibly re-added) since, nothing is written and the call answers:
+
+```http
+HTTP/1.1 409 Conflict
+
+{"success": false, "error": "server_replaced: server 'github' was removed or replaced since it was reviewed"}
+```
+
+Without the field the call is bound to the incarnation current when it
+arrives, so a removal that lands while the call is in flight still refuses it.
+A call for a server that is not configured answers `404`. An unrelated edit of
+the server (for example `disabled_tools`) never refuses an approval.
+
 ### Tool Quarantine
 
 #### POST /api/v1/servers/{name}/tools/approve
@@ -513,6 +555,9 @@ Or approve all pending/changed tools:
   "approve_all": true
 }
 ```
+
+Either form takes an optional `"expected_incarnation"`
+([Removal and incarnation](#removal-and-incarnation)).
 
 **Response:**
 ```json
@@ -992,6 +1037,7 @@ The review payload of one server: a summary of the server (secrets in the URL, h
   "success": true,
   "data": {
     "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
+               "generation": 42, "incarnation": 17,
                "scan": {"verdict": "clean", "risk_score": 0, "coverage": "current", "tools_scanned": 2},
                "definitions_captured": true},
     "tools": [
@@ -1014,12 +1060,13 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 - `scan_verdict` is `dangerous`, `warnings`, `clean` or `not_scanned`. `clean` means the latest scan covered this tool's current definition and found nothing; a tool whose definition changed after the scan is `not_scanned` (or carries its held verdict).
 - `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
 - Descriptions are returned verbatim and must be rendered as inert text.
+- `generation` and `incarnation` identify the reviewed server; send `incarnation` back as `expected_incarnation` with the decision ([Removal and incarnation](#removal-and-incarnation)).
 
 The review decisions use these routes (all existing):
 
 | Decision | Route |
 |---|---|
-| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...]}`; the `block` tools are blocked in the same transaction that records the integrity baseline, before the server is unquarantined |
+| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...], "expected_incarnation": 17}`; the `block` tools are blocked in the same transaction that records the integrity baseline, before the server is unquarantined. A remove and re-add since the review answers `409 server_replaced` and the replacement stays quarantined |
 | Reject server | `POST /api/v1/servers/{id}/security/reject` |
 | Approve tools | `POST /api/v1/servers/{id}/tools/approve` |
 | Reject (block) tools | `POST /api/v1/servers/{id}/tools/block` |
