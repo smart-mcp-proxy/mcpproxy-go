@@ -3566,11 +3566,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	// zero, which fails ValidateDetailed on the /config/apply path. Normalize
 	// to the production defaults up front so both legs exercise a config that
 	// differs from its predecessor ONLY in tool_response_mode.
-	def := config.DefaultConfig()
-	env.proxyServer.runtime.Config().ToolsLimit = def.ToolsLimit
-	env.proxyServer.runtime.Config().CallToolTimeout = def.CallToolTimeout
-	require.Empty(t, env.proxyServer.runtime.Config().ValidateDetailed(),
-		"normalized harness config must validate — otherwise the apply legs cannot isolate tool_response_mode")
+	normalizeHarnessConfigForApply(t, env)
 
 	const serverName = "toggledemo"
 	tools := []mcp.Tool{
@@ -3616,7 +3612,7 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 
 	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
-	cfg := env.proxyServer.runtime.Config()
+	cfg := copyLiveConfig(t, env)
 	cfg.Servers = servers
 	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 
@@ -3675,19 +3671,18 @@ func TestE2E_ToolResponseModeToggle(t *testing.T) {
 	assertFullShape(retrieveResponse(), "default-unset")
 
 	// ---- Leg A: config-FILE reload path (FR-015, SC-007) ----
-	liveCfg, err := json.Marshal(env.proxyServer.runtime.Config())
-	require.NoError(t, err)
-	var fileCfg config.Config
-	require.NoError(t, json.Unmarshal(liveCfg, &fileCfg))
+	// The E2E harness builds the server with an in-memory config (no file
+	// path); production always tracks one. Register the path FIRST so the disk
+	// reload has a source: a commit that adopts a new path writes the committed
+	// config there, replacing whatever file was at it (Spec 116 edge case
+	// "Path change"), so the operator's hand edit has to land after it.
+	env.proxyServer.runtime.UpdateConfig(copyLiveConfig(t, env), env.proxyServer.GetConfigPath())
+	fileCfg := copyLiveConfig(t, env)
 	fileCfg.ToolResponseMode = config.ToolResponseModeCompact
 	servers, err = env.proxyServer.runtime.StorageManager().ListUpstreamServers()
 	require.NoError(t, err)
 	fileCfg.Servers = servers
-	require.NoError(t, config.SaveConfig(&fileCfg, env.proxyServer.GetConfigPath()))
-	// The E2E harness builds the server with an in-memory config (no file
-	// path); production always tracks one. Register the path so the disk
-	// reload has a source, without changing the live config itself.
-	env.proxyServer.runtime.UpdateConfig(env.proxyServer.runtime.Config(), env.proxyServer.GetConfigPath())
+	require.NoError(t, config.SaveConfig(fileCfg, env.proxyServer.GetConfigPath()))
 	require.NoError(t, env.proxyServer.ReloadConfiguration())
 
 	assertCompactShape(retrieveResponse(), "file-reload")
@@ -3852,15 +3847,34 @@ func requireDirectTool(t *testing.T, tools []mcp.Tool, name string) mcp.Tool {
 // production defaults ValidateDetailed insists on. Without it every
 // /api/v1/config/apply below fails on tools_limit being zero rather than on the
 // field the test is actually about.
+//
+// The defaults go in through a config commit on a copy, never by writing into
+// Config() in place: since Spec 116 the published snapshot is an immutable
+// commit product and the desired config GET /api/v1/config serves is a separate
+// copy of it, so an in-place write never reaches the REST read-modify-write
+// view (TestE2E_HarnessNormalizeReachesRESTConfig).
 func normalizeHarnessConfigForApply(t *testing.T, env *TestEnvironment) {
 	t.Helper()
 
+	cfg := copyLiveConfig(t, env)
 	def := config.DefaultConfig()
-	cfg := env.proxyServer.runtime.Config()
 	cfg.ToolsLimit = def.ToolsLimit
 	cfg.CallToolTimeout = def.CallToolTimeout
 	require.Empty(t, cfg.ValidateDetailed(),
-		"normalized harness config must validate — otherwise the apply legs cannot isolate direct_tool_response_mode")
+		"normalized harness config must validate — otherwise the apply legs cannot isolate the field under test")
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
+}
+
+// copyLiveConfig returns a caller-owned deep copy of the live configuration,
+// suitable for editing and committing back.
+func copyLiveConfig(t *testing.T, env *TestEnvironment) *config.Config {
+	t.Helper()
+
+	data, err := json.Marshal(env.proxyServer.runtime.Config())
+	require.NoError(t, err)
+	var cfg config.Config
+	require.NoError(t, json.Unmarshal(data, &cfg))
+	return &cfg
 }
 
 // applyDirectToolResponseMode flips direct_tool_response_mode through the same
@@ -4215,4 +4229,29 @@ func TestE2E_DirectModeLegacyAliasesFollowSerializationMode(t *testing.T) {
 	}, 20*time.Second, 250*time.Millisecond, "/mcp/all must flip to the deferred serialization")
 
 	assertAliasesMatchDirect("deferred", true)
+}
+
+// TestE2E_HarnessNormalizeReachesRESTConfig pins the contract the apply-path
+// E2Es rest on: after normalizeHarnessConfigForApply, the configuration the
+// REST API hands back for a read-modify-write (GET /api/v1/config, which serves
+// the desired config) validates. Spec 116 made the published snapshot an
+// immutable commit product whose desired copy is distinct from it, so a
+// normalization written into Config() in place never reaches that view and
+// every /config/apply below failed on tools_limit instead of the field under
+// test.
+func TestE2E_HarnessNormalizeReachesRESTConfig(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	normalizeHarnessConfigForApply(t, env)
+
+	apiCfg, err := env.GetConfig()
+	require.NoError(t, err)
+	def := config.DefaultConfig()
+	require.Equal(t, def.ToolsLimit, apiCfg.ToolsLimit,
+		"the REST read-modify-write view must carry the normalized tools_limit")
+	require.Equal(t, def.CallToolTimeout, apiCfg.CallToolTimeout,
+		"the REST read-modify-write view must carry the normalized call_tool_timeout")
+	_, err = env.ApplyConfig(apiCfg)
+	require.NoError(t, err, "an unchanged apply of the normalized config must validate")
 }
