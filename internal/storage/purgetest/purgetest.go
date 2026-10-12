@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // Bucket labels used in Counts.
@@ -35,6 +36,7 @@ const (
 	ScanJobs        = "security_scan_jobs"
 	ScanJobIndex    = "security_scan_job_index"
 	ToolHash        = "toolhash"
+	ToolBaseline    = "tool_baseline_decisions"
 )
 
 // OAuthKey returns a token key in the oauth.GenerateServerKey format
@@ -55,6 +57,7 @@ func Seed(t *testing.T, mgr *storage.Manager, name string) {
 			t.Fatalf("seed %s for %s: %v", what, name, err)
 		}
 	}
+	must(mgr.MarkToolBaselineDecided(name, toolreview.BaselineDecision{Source: toolreview.BaselineSourceServerApproval, By: "seed"}), "tool baseline marker")
 	must(mgr.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: name, ToolName: "echo", Status: storage.ToolApprovalStatusApproved,
 		ApprovedHash: "h1", CurrentHash: "h1", ApprovedAt: now, ApprovedBy: "seed",
@@ -201,6 +204,11 @@ func Counts(t *testing.T, mgr *storage.Manager, name string) map[string]int {
 				out[ToolHash]++
 			}
 		})
+		each(storage.ToolBaselineDecisionsBucket, func(k, _ []byte) {
+			if string(k) == name {
+				out[ToolBaseline]++
+			}
+		})
 		return nil
 	})
 	if err != nil {
@@ -226,7 +234,7 @@ func AssertSeeded(t *testing.T, mgr *storage.Manager, name string) {
 	t.Helper()
 	c := Counts(t, mgr, name)
 	for _, bucket := range []string{Identities, ToolCalls, ToolApprovals, PromptApprovals, OAuthTokens,
-		OAuthCompletion, Baselines, ScanReports, ScanJobs, ScanJobIndex, ToolHash} {
+		OAuthCompletion, Baselines, ScanReports, ScanJobs, ScanJobIndex, ToolHash, ToolBaseline} {
 		if c[bucket] == 0 {
 			t.Fatalf("fixture: %s has no key of %q", bucket, name)
 		}
