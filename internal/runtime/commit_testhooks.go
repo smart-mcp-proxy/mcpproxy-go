@@ -20,6 +20,10 @@ type commitTestHooks struct {
 	// discoveryBeforeIndex runs in a discovery pass after its approval check
 	// and before its index write.
 	discoveryBeforeIndex func(serverName string)
+	// discoveryAfterList runs in a single-server discovery pass right after
+	// its tools/list returned and before the result is committed (review
+	// round 7: a list that outlives a connection-changing commit).
+	discoveryAfterList func(serverName string)
 
 	// Commit pipeline seams (plan.md §Test seams). Each runs inside
 	// configCommitMu with the reason of the commit.

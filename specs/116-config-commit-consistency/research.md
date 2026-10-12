@@ -221,8 +221,10 @@ the live config.
 **Startup.** The boot reconcile still treats the config file as the source of
 truth, as today. Storage rows for names absent from the file are removed. The
 only storage-to-config flow that remains is the admission gate's "inherit a
-recorded quarantine" rule (`applyConfigLoadAdmissionGate`). It runs in the
-commit's prepare step, so storage and the published config agree.
+recorded quarantine" rule (`applyConfigLoadAdmissionGate`). It runs in
+commit pipeline step 2 (admission), before `configsvc.Prepare` and outside
+`configsvc.updateMu` (D10 step 2, FR-001a), so storage and the published
+config agree.
 
 ### D3. Mutations run on the live entry, inside the lock
 
@@ -600,6 +602,16 @@ discovery pass (any trigger), per server:
 
 The order L3(R) → L1 (today's capture path) or L1 → L3(R) (Spec 117 PR-3) is
 unchanged. `Commit` still never holds L1 and L3 together.
+
+**Rejection outcomes (PR1 review round 7).** A rejection is terminal only when
+the row is missing, quarantined or disabled. A rejection for a generation
+mismatch on an otherwise eligible row means a newer instance serves the
+server; its own reactive discovery may have been skipped by the per-server
+in-progress dedup while the stale pass was listing. The rejected pass
+therefore reports "not published" and its caller re-lists the current
+instance: the single-server path through its bounded re-list loop, the sweep
+through its stale list. This covers both a non-empty result and an empty one
+(the `ToolsDiscovered` stamp).
 
 ## 9. Design review round 3 (opencode `github-copilot/gpt-6.1-sol`, 2026-10-11)
 

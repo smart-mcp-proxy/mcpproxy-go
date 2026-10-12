@@ -408,10 +408,13 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// (Spec 105 FR-009, research D4). Its tool set is left alone — the sweep
 	// never wipes a server on an empty result — and servers the sweep skipped
 	// or that failed to list are not stamped.
-	r.markZeroToolServersDiscovered(listed, toolsByServer, gens, instanceGens)
+	// An empty result from a superseded instance generation is re-listed
+	// below like a non-empty one (review round 7).
+	staleEmpty := r.markZeroToolServersDiscovered(listed, toolsByServer, gens, instanceGens)
 
 	if len(tools) == 0 {
 		r.logger.Warn("No tools discovered from upstream servers")
+		r.relistStaleSweepServers(ctx, staleEmpty)
 		return nil
 	}
 
@@ -447,7 +450,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// changed while the sweep was listing had its result dropped and is
 	// collected in stale.
 	processedServers := make(map[string]struct{}, len(toolsByServer))
-	var stale []string
+	stale := staleEmpty
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
 		// No generation captured before the list: the result cannot be bound
@@ -502,15 +505,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// linger in the connect→discovery window until the next sweep tick (the
 	// reactive connect discovery may have been skipped by the in-progress
 	// dedup).
-	sort.Strings(stale)
-	for _, serverName := range stale {
-		r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
-			zap.String("server", serverName))
-		if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
-			r.logger.Warn("Failed to re-list server after a stale sweep result",
-				zap.String("server", serverName), zap.Error(err))
-		}
-	}
+	r.relistStaleSweepServers(ctx, stale)
 
 	// Profiles v2 (Spec 057, T1): reconcile per-profile indexes against the
 	// current config — build new profiles, rebuild those whose membership changed
@@ -821,9 +816,12 @@ func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, 
 // commitDiscoveredToolsAt is commitDiscoveredTools that also publishes the
 // result into the supervisor snapshot and StateView inside the same approval
 // lock hold when capture (the DiscoveryGeneration taken before the list) is
-// non-nil. published is false only when that publish was dropped because the
-// server's connection changed while the tools were listed (the caller
-// re-lists); a pass rejected by the D15 check returns eligible=false.
+// non-nil. published is false when that publish was dropped because the
+// server's connection changed while the tools were listed, or when the D15
+// check found the result came from a superseded instance generation; the
+// caller re-lists in both cases. A pass rejected by the D15 check because the
+// server was removed, disabled or quarantined returns eligible=false
+// (terminal, no re-list).
 func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture) (eligible, published bool, err error) {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
@@ -863,6 +861,11 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 	if err := r.applyDifferentialToolUpdateHeld(ctx, serverName, tools, instanceGen, held); err != nil {
 		if errors.Is(err, errDiscoveryIneligible) {
 			return false, false, nil
+		}
+		if errors.Is(err, errDiscoveryStaleGeneration) {
+			// Eligible but not published: the caller re-lists the
+			// current instance (review round 7).
+			return true, false, nil
 		}
 		return true, published, err
 	}
@@ -971,6 +974,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	if err != nil {
 		return false, fmt.Errorf("failed to list tools for server %s after %d attempts: %w", serverName, maxRetries, err)
 	}
+	if h := r.testHooks.discoveryAfterList; h != nil {
+		h(serverName)
+	}
 
 	if len(tools) == 0 {
 		if !authoritative {
@@ -985,8 +991,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			// window until a non-empty or authoritative pass (astra r1 I1).
 			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
 				zap.String("server", serverName))
-			r.markServerZeroToolsDiscovered(serverName, gen, instanceGen)
-			return true, nil
+			// A stale-generation empty result is re-listed like a
+			// non-empty one (review round 7).
+			return r.markServerZeroToolsDiscovered(serverName, gen, instanceGen), nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
 		// is the truth. Fall through with an empty toolset so the differential
@@ -1075,15 +1082,37 @@ func (r *Runtime) discoveryGeneration(serverName string) supervisor.DiscoveryCap
 // stamp a server still holding a previous connection's retained set). gens
 // is the connection-generation capture and instanceGens the commit
 // generations (Spec 116 D15) taken before the list.
-func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture, instanceGens map[string]int64) {
+//
+// It returns the servers whose empty result came from a superseded instance
+// generation, for the caller to re-list (review round 7).
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture, instanceGens map[string]int64) []string {
 	if r.supervisor == nil {
-		return
+		return nil
 	}
+	var stale []string
 	for _, serverName := range listed {
 		if _, hasTools := toolsByServer[serverName]; hasTools {
 			continue
 		}
-		r.markServerZeroToolsDiscoveredWith(serverName, gens, instanceGens[serverName])
+		if !r.markServerZeroToolsDiscoveredWith(serverName, gens, instanceGens[serverName]) {
+			stale = append(stale, serverName)
+		}
+	}
+	return stale
+}
+
+// relistStaleSweepServers re-lists, in name order, every server whose sweep
+// result was dropped because its connection or its instance generation
+// changed while the sweep was listing.
+func (r *Runtime) relistStaleSweepServers(ctx context.Context, stale []string) {
+	sort.Strings(stale)
+	for _, serverName := range stale {
+		r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
+			zap.String("server", serverName))
+		if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
+			r.logger.Warn("Failed to re-list server after a stale sweep result",
+				zap.String("server", serverName), zap.Error(err))
+		}
 	}
 }
 
@@ -1095,24 +1124,33 @@ func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer m
 // connection-changing commit at G+1. The supervisor never calls back into the
 // runtime, so stateMu under the approval lock adds no edge (the non-empty
 // publish already nests it there).
-func (r *Runtime) markServerZeroToolsDiscovered(serverName string, gen supervisor.DiscoveryCapture, instanceGen int64) {
-	r.markServerZeroToolsDiscoveredWith(serverName, map[string]supervisor.DiscoveryCapture{serverName: gen}, instanceGen)
+//
+// It reports false only when the result came from a superseded instance
+// generation, so the caller re-lists the current instance (review round 7).
+func (r *Runtime) markServerZeroToolsDiscovered(serverName string, gen supervisor.DiscoveryCapture, instanceGen int64) bool {
+	return r.markServerZeroToolsDiscoveredWith(serverName, map[string]supervisor.DiscoveryCapture{serverName: gen}, instanceGen)
 }
 
 // markServerZeroToolsDiscoveredWith is markServerZeroToolsDiscovered with the
 // sweep's capture map handed to the supervisor as is (a server missing from it
 // is judged by the supervisor's own rules, as before).
-func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[string]supervisor.DiscoveryCapture, instanceGen int64) {
+func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[string]supervisor.DiscoveryCapture, instanceGen int64) bool {
 	if r.supervisor == nil {
-		return
+		return true
 	}
 	defer r.lockToolApprovals(serverName)()
-	if !r.discoveryEligibleHeld(serverName, instanceGen) {
+	switch r.discoveryVerdictHeld(serverName, instanceGen) {
+	case discoveryIneligible:
 		r.logger.Info("Empty discovery result dropped: the server is no longer eligible at the captured generation",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
-		return
+		return true
+	case discoveryStaleGen:
+		r.logger.Info("Empty discovery result dropped: it came from a superseded instance generation",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return false
 	}
 	r.supervisor.MarkServersToolsDiscovered([]string{serverName}, gens)
+	return true
 }
 
 // applyDifferentialToolUpdate performs differential update of tools for a server.
@@ -1129,7 +1167,24 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 // eligibility check (D15). It is not an error for the caller's caller.
 var errDiscoveryIneligible = errors.New("server not eligible for indexing at the committed generation")
 
-// discoveryEligibleHeld is the final eligibility check of a discovery pass
+// errDiscoveryStaleGeneration reports a discovery result dropped by the final
+// check because it came from an instance whose commit generation no longer
+// matches the stored row (a connection-changing commit ran while it listed).
+// Unlike errDiscoveryIneligible it is not terminal: the caller re-lists the
+// current instance, whose own discovery may have been deduped while this
+// pass was in flight (review round 7).
+var errDiscoveryStaleGeneration = errors.New("discovery result came from a superseded instance generation")
+
+// discoveryVerdict is the outcome of the final D15 check.
+type discoveryVerdict int
+
+const (
+	discoveryCurrent    discoveryVerdict = iota // eligible at the instance's generation
+	discoveryIneligible                         // removed, disabled or quarantined: terminal
+	discoveryStaleGen                           // generation mismatch: re-list the current instance
+)
+
+// discoveryVerdictHeld is the final eligibility check of a discovery pass
 // (Spec 116 D15), made while the caller holds serverName's approval lock: the
 // server's stored row exists, is enabled and not quarantined, and — when both
 // are known — carries the generation of the instance the tools came from. A
@@ -1137,31 +1192,39 @@ var errDiscoveryIneligible = errors.New("server not eligible for indexing at the
 // a pass either finished before the commit and was purged by it, or sees the
 // new row here and writes nothing. A database no commit has written yet
 // (unit-test fixtures) is not authoritative and is not consulted.
-func (r *Runtime) discoveryEligibleHeld(serverName string, instanceGen int64) bool {
+//
+// A removed, disabled or quarantined row is terminal (discoveryIneligible),
+// while a generation mismatch on an otherwise eligible row means a newer
+// instance now serves the server and must be listed (discoveryStaleGen,
+// review round 7).
+func (r *Runtime) discoveryVerdictHeld(serverName string, instanceGen int64) discoveryVerdict {
 	if r.storageManager == nil {
-		return true
+		return discoveryCurrent
 	}
 	if committed, err := r.storageManager.ConfigCommitted(); err != nil || !committed {
-		return err == nil
+		if err == nil {
+			return discoveryCurrent
+		}
+		return discoveryIneligible
 	}
 	row, err := r.storageManager.GetStoredServer(serverName)
 	if err != nil || row == nil || row.Config == nil {
-		return false
+		return discoveryIneligible
 	}
 	if !row.Config.Enabled || row.Config.Quarantined {
-		return false
+		return discoveryIneligible
 	}
 	if instanceGen != 0 && row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
-		return false
+		return discoveryStaleGen
 	}
-	return true
+	return discoveryCurrent
 }
 
 // discoveryCaptureCurrentHeld is the final check of a REVIEW capture (a
 // discovery result for a server that is not eligible for indexing), made
 // while the caller holds serverName's approval lock: the stored row exists
 // and — when both are known — carries the generation of the instance the
-// tools came from. Unlike discoveryEligibleHeld it accepts a quarantined or
+// tools came from. Unlike discoveryVerdictHeld it accepts a quarantined or
 // disabled row: recording definitions for review is the point. A database no
 // commit has written yet is not authoritative and is not consulted.
 func (r *Runtime) discoveryCaptureCurrentHeld(serverName string, instanceGen int64) bool {
@@ -1206,10 +1269,15 @@ func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverNam
 	}
 	defer release()
 
-	if !r.discoveryEligibleHeld(serverName, instanceGen) {
+	switch r.discoveryVerdictHeld(serverName, instanceGen) {
+	case discoveryIneligible:
 		r.logger.Info("Discovery result dropped: the server is no longer eligible at the captured generation",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return errDiscoveryIneligible
+	case discoveryStaleGen:
+		r.logger.Info("Discovery result dropped: it came from a superseded instance generation; the current instance is re-listed",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return errDiscoveryStaleGeneration
 	}
 	if held != nil {
 		held()

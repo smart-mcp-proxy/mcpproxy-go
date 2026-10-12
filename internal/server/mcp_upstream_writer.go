@@ -16,8 +16,10 @@ type upstreamWriter interface {
 	createServer(sc *config.ServerConfig) error
 	// updateServer runs fn on a copy of the live entry inside the commit;
 	// an error from fn aborts with nothing written. It returns the server's
-	// committed generation, or 0 when the commit changed nothing for it (the
-	// running instance already is the right one) or the writer has none.
+	// committed generation — the new one when the commit changed the entry,
+	// the base snapshot's when it changed nothing (an earlier commit's
+	// replacement may still be connecting: review round 7) — or 0 when the
+	// writer has none.
 	updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error)
 	removeServer(name string) error
 	quarantineServer(name string) error
@@ -52,7 +54,16 @@ func (w commitUpstreamWriter) createServer(sc *config.ServerConfig) error {
 }
 
 func (w commitUpstreamWriter) updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error) {
+	// The generation the entry carries in the snapshot this commit starts
+	// from, read inside the commit lock. An update that changes nothing
+	// keeps it, and the instance at that generation is the one whose
+	// connection the caller must report (an earlier endpoint change may
+	// still be connecting its replacement).
+	var baseGen int64
 	res, err := w.s.runtime.Commit("mcp_update_server", func(tx *runtime.CommitTx) error {
+		if g, ok := tx.Generation(name); ok {
+			baseGen = g.Gen
+		}
 		return tx.UpdateServer(name, fn)
 	})
 	if err != nil || res == nil {
@@ -61,7 +72,7 @@ func (w commitUpstreamWriter) updateServer(name string, fn func(cur *config.Serv
 	if ch, ok := res.Changes[name]; ok {
 		return ch.New.Gen, nil
 	}
-	return 0, nil
+	return baseGen, nil
 }
 
 func (w commitUpstreamWriter) removeServer(name string) error {

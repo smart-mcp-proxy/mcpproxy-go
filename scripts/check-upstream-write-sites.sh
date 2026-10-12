@@ -7,7 +7,8 @@
 # resurrects a removed server (#1558, #1559, #1560).
 #
 # Fails when a non-test Go file outside internal/storage/ and
-# internal/runtime/commit*.go calls one of the row-writing storage methods,
+# internal/runtime/commit*.go calls, or takes a method value of, one of the
+# row-writing storage methods,
 # including the exported alias AddUpstream (it calls SaveUpstreamServer) and
 # the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
 # EnableServerAsync, QuarantineServerAsync), which write rows from a worker.
@@ -28,7 +29,13 @@ for d in internal cmd; do
 done
 [[ ${#dirs[@]} -gt 0 ]] || { echo "upstream write sites: nothing to scan"; exit 0; }
 
-hits="$(grep -rnE "\.(${methods})\(" "${dirs[@]}" --include='*.go' 2>/dev/null \
+# A selector of one of the methods followed by anything but an identifier
+# character: a call `st.SaveUpstreamServer(sc)` AND a method value or method
+# expression (`save := st.SaveUpstreamServer`, `run(st.SaveServerAsync, x)`,
+# `(*BoltDB).SaveUpstreamServer`) that writes the row when it is called later
+# (review round 7). A longer identifier such as `.SaveUpstreamServerCount`
+# does not match.
+hits="$(grep -rnE "\.(${methods})([^A-Za-z0-9_]|$)" "${dirs[@]}" --include='*.go' 2>/dev/null \
   | grep -vE '^[^:]+_test\.go:' \
   | grep -vE '^internal/storage/' \
   | grep -vE '^internal/runtime/commit[^/]*\.go:' \

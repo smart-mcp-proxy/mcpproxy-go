@@ -182,15 +182,17 @@ func TestCommit_R1_StaleDiscoveryWritesNoLastGoodOrStateView(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{ServerName: "omega", Name: "stale_tool", Description: "from the old instance", ParamsJSON: `{"type":"object"}`, Hash: "hs"},
 	}
+	// A generation mismatch reports eligible (the caller re-lists the current
+	// instance, review round 7) but writes nothing.
 	eligible, err := rt.commitDiscoveredTools(context.Background(), "omega", tools, oldGen)
 	require.NoError(t, err)
-	assert.False(t, eligible)
+	assert.True(t, eligible)
 	assert.Nil(t, rt.lastGoodToolsSnapshot("omega"), "a rejected pass must not overwrite the last-good snapshot")
 	capture := rt.discoveryGeneration("omega")
 	eligible, published, err := rt.commitDiscoveredToolsAt(context.Background(), "omega", tools, oldGen, &capture)
 	require.NoError(t, err)
-	assert.False(t, eligible)
-	assert.False(t, published)
+	assert.True(t, eligible)
+	assert.False(t, published, "a rejected pass is not published; the caller re-lists")
 	assert.Nil(t, rt.lastGoodToolsSnapshot("omega"))
 	if st, ok := rt.supervisor.StateView().GetServer("omega"); ok && st != nil {
 		assert.Empty(t, st.Tools, "a rejected pass must not publish into the StateView")
