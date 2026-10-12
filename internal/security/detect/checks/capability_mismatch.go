@@ -216,8 +216,13 @@ func unexplainedSinkParam(tool detect.ToolView) (string, bool) {
 			if sinkSideChannel.MatchString(pd) {
 				return name, true
 			}
-			if m := sinkHarvest.FindString(pd); m != "" && !strings.Contains(normDesc, harvestNoun(m)) {
-				return name, true
+			// Every harvest phrase must be explained: an explained one
+			// ("conversation history" on a chat summarizer) must not mask
+			// another ("plus your system prompt") in the same line.
+			for _, m := range sinkHarvest.FindAllString(pd, -1) {
+				if !strings.Contains(normDesc, harvestNoun(m)) {
+					return name, true
+				}
 			}
 		}
 	}

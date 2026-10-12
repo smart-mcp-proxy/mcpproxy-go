@@ -529,18 +529,21 @@ if want_only EXP-4; then
     baseline_lines="$(grep -c 'auto-baseline' "$EXP4_LOG" || true)"
     flap_lines="$(grep -c 'changed since approval' "$EXP4_LOG" || true)"
     log "stored tool status: $stored (auto-baseline approvals: $baseline_lines, rug-pull flags: $flap_lines)"
-    case "$(exp4_verdict "$ingested" "$v" "$stored")" in
+    tf="unknown"; job="$(scan_job_id "$RUN_DIR/exp4-scan.txt")"
+    [[ -n "$job" ]] && tf="$(exp4_tool_findings "$RUN_DIR/exp4-scan.txt.json" "$job")"
+    log "per-tool findings (summarize_text, convert_currency hard): $tf"
+    case "$(exp4_verdict "$ingested" "$v" "$stored" "$tf")" in
       HOLDS)
-        pass "EXP-4 scan flagged the poisoned discovery contract ($v)"
-        record "EXP-4 HOLDS: ingested=yes (attempt $attempt), scan=$v, stored=$stored" ;;
+        pass "EXP-4 scan flagged both poisoned discovery contracts ($v, $tf)"
+        record "EXP-4 HOLDS: ingested=yes (attempt $attempt), scan=$v, findings=$tf, stored=$stored" ;;
       PARTIAL-HOLE)
         hole "EXP-4 PARTIAL: scan export is attacker-controllable (verdict=$v on a poisoned server; poisoned contract WAS ingested) — the flap was caught, but a session-fingerprinting variant would scan clean without flapping"
         record "EXP-4 PARTIAL-HOLE: scan=$v on poisoned server; poisoned list ingested; flap caught ($stored)" ;;
       HOLE)
-        hole "EXP-4 scan=$v on a server whose poisoned contract was ingested, and stored=$stored"
-        record "EXP-4 HOLE: scan=$v, stored=$stored (poisoned list ingested)" ;;
+        hole "EXP-4 scan=$v ($tf) on a server whose poisoned contracts were ingested, and stored=$stored"
+        record "EXP-4 HOLE: scan=$v, findings=$tf, stored=$stored (poisoned list ingested)" ;;
       *)
-        record "EXP-4 INCONCLUSIVE: scan=$v, stored=$stored" ;;
+        record "EXP-4 INCONCLUSIVE: scan=$v, findings=$tf, stored=$stored" ;;
     esac
   fi
   stop_daemon

@@ -292,7 +292,7 @@ var phraseFamilies = []phraseFamily{
 		// poisoning payload and needs no URL: the argument itself is the
 		// channel. Requires a concrete credential FILE (not the word "secret")
 		// and an explicit field/parameter/argument target.
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?\b(?:` + credentialPlacementVerbs + `)\b[^.!?]{0,40}?` + credentialArgumentTarget),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?\b(?P<place>` + credentialPlacementVerbs + `)\b[^.!?]{0,40}?` + credentialArgumentTarget),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -308,7 +308,7 @@ var phraseFamilies = []phraseFamily{
 		// The payload may sit after the placement verb or between the file and
 		// the verb ("take the API key from .env and put it …" is covered by
 		// "it").
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)` + sentenceSpan + `{0,120}?\b(?:` + credentialPlacementVerbs + `)\b[^.!?]{0,40}?` + configSecretPayload + `[^.!?]{0,40}?` + credentialArgumentTarget),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)` + sentenceSpan + `{0,120}?\b(?P<place>` + credentialPlacementVerbs + `)\b[^.!?]{0,40}?` + configSecretPayload + `[^.!?]{0,40}?` + credentialArgumentTarget),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -437,7 +437,8 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 			if fam.mask != nil {
 				mt = fam.mask(t)
 			}
-			for _, loc := range fam.re.FindAllStringIndex(mt, -1) {
+			placeGroup := fam.re.SubexpIndex("place")
+			for _, loc := range fam.re.FindAllStringSubmatchIndex(mt, -1) {
 				// The non-English families spell their word boundary as a consumed
 				// non-letter (Go's \b is ASCII-only); for those only, start the
 				// match and the position window at the first letter so a quote
@@ -481,6 +482,17 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				if fam.negatable && ti != mixedIndex && negatedBefore(t, start) && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
 					softReason = "negated directive: reads as a prohibition"
+				}
+				// The placement step may be negated on its own even when the
+				// read is affirmative ("Read ~/.ssh/id_ed25519 locally but never
+				// put its contents in the key field"): that too is a prohibition,
+				// on every view (Sol r16 P2). Only a negation inside the match,
+				// between the read verb and the placement verb, governs it, so a
+				// separate negated clause before the directive does not.
+				if fam.negatable && placeGroup > 0 && loc[2*placeGroup] > start &&
+					negatedBefore(t[start:loc[2*placeGroup]], loc[2*placeGroup]-start) && conf > deobfuscatedMaxConfidence {
+					conf = deobfuscatedMaxConfidence
+					softReason = "negated placement: reads as a prohibition"
 				}
 				if deobfuscated && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence

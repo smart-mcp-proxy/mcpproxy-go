@@ -696,24 +696,75 @@ func TestExp4PoisonRecorded(t *testing.T) {
 
 func TestExp4Verdict(t *testing.T) {
 	lib := verdictsLib(t)
-	for _, tc := range []struct{ ingested, scan, stored, want string }{
-		{"yes", "dangerous", "changed", "HOLDS"},
-		{"yes", "dangerous", "approved", "HOLDS"},
-		{"yes", "clean", "changed", "PARTIAL-HOLE"},
-		{"yes", "warnings", "changed(blocked)", "PARTIAL-HOLE"},
-		{"yes", "clean", "approved", "HOLE"},
-		{"yes", "scan-failed", "changed", "INCONCLUSIVE"},
-		{"yes", "stale-report", "changed", "INCONCLUSIVE"},
-		{"yes", "unknown", "changed", "INCONCLUSIVE"},
+	for _, tc := range []struct{ ingested, scan, stored, tools, want string }{
+		{"yes", "dangerous", "changed", "ok", "HOLDS"},
+		{"yes", "dangerous", "approved", "ok", "HOLDS"},
+		// Sol r16 P2: the aggregate verdict masks one dropped poisoned
+		// contract; each must carry its own hard-tier finding.
+		{"yes", "dangerous", "changed", "missing:summarize_text=no-hard-finding", "HOLE"},
+		{"yes", "dangerous", "changed", "missing:convert_currency=no-hard-finding", "HOLE"},
+		{"yes", "dangerous", "changed", "stale-report", "INCONCLUSIVE"},
+		{"yes", "dangerous", "changed", "unknown", "INCONCLUSIVE"},
+		{"yes", "dangerous", "changed", "", "INCONCLUSIVE"},
+		{"yes", "clean", "changed", "ok", "PARTIAL-HOLE"},
+		{"yes", "warnings", "changed(blocked)", "ok", "PARTIAL-HOLE"},
+		{"yes", "clean", "approved", "ok", "HOLE"},
+		{"yes", "scan-failed", "changed", "ok", "INCONCLUSIVE"},
+		{"yes", "stale-report", "changed", "ok", "INCONCLUSIVE"},
+		{"yes", "unknown", "changed", "ok", "INCONCLUSIVE"},
 		// Precondition not met: whatever the scan says proves nothing.
-		{"no", "dangerous", "changed", "INCONCLUSIVE"},
-		{"no", "clean", "approved", "INCONCLUSIVE"},
-		{"", "dangerous", "changed", "INCONCLUSIVE"},
+		{"no", "dangerous", "changed", "ok", "INCONCLUSIVE"},
+		{"no", "clean", "approved", "ok", "INCONCLUSIVE"},
+		{"", "dangerous", "changed", "ok", "INCONCLUSIVE"},
 	} {
-		got, code := runLib(t, lib, `exp4_verdict "$1" "$2" "$3"`, tc.ingested, tc.scan, tc.stored)
+		got, code := runLib(t, lib, `exp4_verdict "$1" "$2" "$3" "$4"`, tc.ingested, tc.scan, tc.stored, tc.tools)
 		if code != 0 || got != tc.want {
-			t.Errorf("exp4_verdict(%q, %q, %q) = %q (exit %d), want %q", tc.ingested, tc.scan, tc.stored, got, code, tc.want)
+			t.Errorf("exp4_verdict(%q, %q, %q, %q) = %q (exit %d), want %q", tc.ingested, tc.scan, tc.stored, tc.tools, got, code, tc.want)
 		}
+	}
+}
+
+// TestExp4ToolFindingsRequiresBothPoisonedTools (Sol r16 P2): EXP-4's
+// fixture serves two poisoned contracts to discovery. Dropping either one's
+// hard-tier finding while the other keeps the aggregate "dangerous" must not
+// yield HOLDS.
+func TestExp4ToolFindingsRequiresBothPoisonedTools(t *testing.T) {
+	lib := verdictsLib(t)
+	type finding struct {
+		Location    string `json:"location"`
+		Tier        string `json:"tier"`
+		ThreatLevel string `json:"threat_level"`
+	}
+	sum := finding{"tpa-lab-attacker:summarize_text", "hard", "dangerous"}
+	cur := finding{"tpa-lab-attacker:convert_currency", "hard", "dangerous"}
+	report := func(job string, fs ...finding) string {
+		b, err := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+			"job_id": job, "verdict": "dangerous", "findings": fs,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return writeTemp(t, "report.json", string(b))
+	}
+	if got, _ := runLib(t, lib, `exp4_tool_findings "$1" "$2"`, report("job-1", sum, cur), "job-1"); got != "ok" {
+		t.Fatalf("both poisoned findings = %q, want ok", got)
+	}
+	for name, fs := range map[string][]finding{
+		"summarize_text dropped":     {cur},
+		"convert_currency dropped":   {sum},
+		"summarize_text soft only":   {cur, {"tpa-lab-attacker:summarize_text", "soft", "warning"}},
+		"convert_currency on victim": {sum, {"tpa-lab-victim:convert_currency", "hard", "dangerous"}},
+	} {
+		got, _ := runLib(t, lib, `exp4_tool_findings "$1" "$2"`, report("job-1", fs...), "job-1")
+		if !strings.HasPrefix(got, "missing:") {
+			t.Errorf("%s: exp4_tool_findings = %q, want missing:…", name, got)
+		}
+		if v, _ := runLib(t, lib, `exp4_verdict yes dangerous changed "$1"`, got); v == "HOLDS" {
+			t.Errorf("%s: exp4_verdict = HOLDS with an aggregate-dangerous report", name)
+		}
+	}
+	if got, _ := runLib(t, lib, `exp4_tool_findings "$1" "$2"`, report("job-0", sum, cur), "job-1"); got != "stale-report" {
+		t.Errorf("another job's report = %q, want stale-report", got)
 	}
 }
 

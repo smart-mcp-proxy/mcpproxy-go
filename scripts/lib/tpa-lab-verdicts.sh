@@ -101,7 +101,28 @@ exp3_verdict() {
 # the renamed sink (M06 translate_text) each carry at least one finding.
 # Otherwise prints "stale-report", "unknown" or "missing:<tool>=<what>,...".
 exp3_tool_findings() {
-  python3 - "$1" "${2:-}" <<'PY'
+  report_tool_findings "$1" "${2:-}" "mutant_override_env,mutant_exfil_combo" \
+    "mutant_reveal_prompt,mutant_german_override,translate_text"
+}
+
+# exp4_tool_findings <report.json> <job_id> — per-tool check of the stored
+# EXP-4 report (Sol r16 P2): the toctou fixture serves TWO poisoned
+# contracts to discovery (summarize_text and convert_currency,
+# tests/tpa-attack-lab/profiles.go), so an aggregate "dangerous" verdict
+# masks an RT-06 export regression that drops either one. Prints "ok" only
+# when the report belongs to <job_id> and each carries a hard-tier dangerous
+# finding; otherwise "stale-report", "unknown" or "missing:<tool>=<what>,...".
+exp4_tool_findings() {
+  report_tool_findings "$1" "${2:-}" "summarize_text,convert_currency" ""
+}
+
+# report_tool_findings <report.json> <job_id> <hard-tools> <any-tools> —
+# shared per-tool check of a stored "security report -o json" document for
+# tpa-lab-attacker: every tool in the comma-separated <hard-tools> must carry
+# a hard-tier dangerous finding and every tool in <any-tools> at least one
+# finding. Prints "ok", "stale-report", "unknown" or "missing:…".
+report_tool_findings() {
+  python3 - "$1" "${2:-}" "$3" "$4" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -115,11 +136,13 @@ if not isinstance(findings, list):
     print("unknown"); raise SystemExit
 def of(tool):
     return [f for f in findings if isinstance(f, dict) and f.get("location") == "tpa-lab-attacker:" + tool]
+def names(arg):
+    return [t for t in arg.split(",") if t]
 missing = []
-for tool in ("mutant_override_env", "mutant_exfil_combo"):
+for tool in names(sys.argv[3]):
     if not any(f.get("tier") == "hard" and f.get("threat_level") == "dangerous" for f in of(tool)):
         missing.append(tool + "=no-hard-finding")
-for tool in ("mutant_reveal_prompt", "mutant_german_override", "translate_text"):
+for tool in names(sys.argv[4]):
     if not of(tool):
         missing.append(tool + "=no-finding")
 print("missing:" + ",".join(missing) if missing else "ok")
@@ -259,21 +282,29 @@ print("no")
 PY
 }
 
-# exp4_verdict <poison_ingested> <scan_verdict> <stored_status> — EXP-4
+# exp4_verdict <poison_ingested> <scan_verdict> <stored_status> <tool_findings> — EXP-4
 # (TOCTOU: poisoned contract to discovery, clean contract to the scan's own
 # tools/list). The experiment only means something when discovery verifiably
 # ingested the poisoned contract (exp4_poison_recorded = yes); otherwise it
 # is INCONCLUSIVE, never a pass (Sol r7 P2). With the precondition met, a
 # dangerous scan HOLDS (RT-06: the scan analyses what was ingested); a
 # non-dangerous scan is a HOLE, PARTIAL-HOLE when the flap itself was held
-# (changed). A failed, stale or unreadable scan is INCONCLUSIVE.
+# (changed). A failed, stale or unreadable scan is INCONCLUSIVE. Sol r16
+# P2: "dangerous" HOLDS only with <tool_findings> (exp4_tool_findings) "ok";
+# a "missing:…" result is a HOLE (one poisoned contract escaped the scan)
+# and any other result is INCONCLUSIVE.
 exp4_verdict() {
-  local ingested="$1" scan="$2" stored="$3"
+  local ingested="$1" scan="$2" stored="$3" tools="${4:-}"
   if [[ "$ingested" != "yes" ]]; then
     echo INCONCLUSIVE; return
   fi
   case "$scan" in
-    dangerous) echo HOLDS ;;
+    dangerous)
+      case "$tools" in
+        ok) echo HOLDS ;;
+        missing:*) echo HOLE ;;
+        *) echo INCONCLUSIVE ;;
+      esac ;;
     clean | warnings)
       if is_pulled "$stored"; then echo PARTIAL-HOLE; else echo HOLE; fi ;;
     *) echo INCONCLUSIVE ;;
