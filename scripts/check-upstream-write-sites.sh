@@ -13,7 +13,8 @@
 # the AsyncManager queue writers (SaveServerAsync, DeleteServerAsync,
 # EnableServerAsync, QuarantineServerAsync), which write rows from a worker.
 # A selector split across lines (`st.` then `SaveUpstreamServer(sc)`) is
-# matched too. Comments and string literals are ignored; block comments are
+# matched too, as is a comment or blanks between the dot and the method name.
+# Comments and string literals are ignored; block comments are
 # tracked across lines, so a code line starting with `*` (`*save = ...`) is
 # still scanned.
 #
@@ -47,6 +48,10 @@ done
 #    `run(st.SaveServerAsync, x)`, `(*BoltDB).SaveUpstreamServer`) that writes
 #    the row when it is called later (review round 7). A longer identifier such
 #    as `.SaveUpstreamServerCount` does not match.
+#  - blanks may separate the dot from the method name: Go allows them, and the
+#    lexer turns a comment there into a blank, so `st. /* x */
+#    SaveUpstreamServer(sc)` reaches the matcher as `st.   SaveUpstreamServer(sc)`
+#    (review round 10).
 #  - a selector split across lines is valid Go and gofmt keeps it split:
 #    `return st.` then `SaveUpstreamServer(sc)` (review round 8). A code line
 #    ending in `.` joined with the next code line (lines that are blank or only
@@ -59,7 +64,7 @@ hits=""
 if [[ -n "$files" ]]; then
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
   hits="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 awk \
-    -v sel="[.](${methods})([^A-Za-z0-9_]|\$)" \
+    -v sel="[.][ \t]*(${methods})([^A-Za-z0-9_]|\$)" \
     -v head="^(${methods})([^A-Za-z0-9_]|\$)" '
     function strip(line,    out, i, n, c, nx, q, d) {
       out = ""; n = length(line); i = 1

@@ -9,7 +9,8 @@
 # method value such as `save := st.SaveUpstreamServer` (exit 1), a selector
 # split across lines (exit 1), a code line starting with `*` such as
 # `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
-# (exit 1), and whole-line, block and string-literal mentions (must exit 0). Then runs the real script on the repository (must exit 0).
+# (exit 1), a block comment or blanks between the dot and the method name on
+# one line or across lines (exit 1), and whole-line, block and string-literal mentions (must exit 0). Then runs the real script on the repository (must exit 0).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +105,23 @@ strslash="$(mkroot planted-after-string-opener)"
 printf '\tpat := "/*"\n\t_ = st.SaveUpstreamServer(sc)\n' > "$strslash/internal/server/a.go"
 expect "planted call after a string containing /* (not a comment opener)" 1 "$strslash"
 
+# A comment between the dot and the method name is valid, gofmt-stable Go
+# (review round 10): `return st. /* bypass */ SaveUpstreamServer(sc)`. The
+# lexer turns the comment into whitespace, so the selector must allow blanks
+# between its tokens, on one line and across lines.
+dotcomment="$(mkroot planted-dot-comment)"
+printf '\treturn st. /* projection bypass */ SaveUpstreamServer(sc)\n' > "$dotcomment/internal/server/a.go"
+expect "planted call with a block comment between the dot and the method" 1 "$dotcomment"
+dotcommentml="$(mkroot planted-dot-comment-multiline)"
+printf '\treturn st. /* projection\n\t   bypass */ SaveUpstreamServer(sc)\n' > "$dotcommentml/internal/server/a.go"
+expect "planted call with a multi-line block comment between the dot and the method" 1 "$dotcommentml"
+dotcommentboth="$(mkroot planted-comment-around-dot)"
+printf '\tsave := st /* a */ . /* b */ QuarantineServerAsync\n' > "$dotcommentboth/internal/server/a.go"
+expect "planted method value with block comments around the dot" 1 "$dotcommentboth"
+dotspace="$(mkroot planted-dot-space)"
+printf '\t_ = st.\t SaveServerAsync(sc)\n' > "$dotspace/internal/server/a.go"
+expect "planted call with blanks between the dot and the method" 1 "$dotspace"
+
 allowed="$(mkroot allowed)"
 echo '	_ = m.SaveUpstreamServer(sc)' > "$allowed/internal/storage/manager.go"
 echo '	save := m.SaveUpstreamServer' > "$allowed/internal/storage/value.go"
@@ -118,6 +136,7 @@ echo '	// a direct SaveUpstreamServer( here would be a second source' > "$allowe
 printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/storage/multi.go"
 printf '\treturn st.\n\t\tSaveUpstreamServer(sc)\n' > "$allowed/internal/server/multi_test.go"
 printf '\tx := st.\n\t\tSaveUpstreamServerCount\n' > "$allowed/internal/server/multi_longer.go"
+printf '\tx := st. /* c */ SaveUpstreamServerCount\n' > "$allowed/internal/server/comment_longer.go"
 printf '\t// ends with a dot.\n\tSaveUpstreamServer := 1\n' > "$allowed/internal/server/not_selector.go"
 printf '/*\n * a direct st.SaveUpstreamServer(sc) here would be a second source\n *save = st.SaveUpstreamServer\n */\n' > "$allowed/internal/server/block.go"
 printf '\t/* st.SaveUpstreamServer(sc) */\n' > "$allowed/internal/server/block_inline.go"
