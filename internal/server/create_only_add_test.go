@@ -151,7 +151,8 @@ func TestServerAddServer_DeleteThenReaddSucceeds(t *testing.T) {
 
 	// The removal door shared by Server.RemoveServer and the MCP remove
 	// operation (Spec 116: one config commit).
-	require.NoError(t, srv.removeServerFromConfig("cycle"))
+	_, removeErr := srv.removeServerFromConfig("cycle")
+	require.NoError(t, removeErr)
 	for _, s := range srv.runtime.Config().Servers {
 		require.NotEqual(t, "cycle", s.Name, "removal must drop the runtime config entry synchronously")
 	}

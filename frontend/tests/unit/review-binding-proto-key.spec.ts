@@ -39,7 +39,7 @@ describe('approval requests carry a __proto__ binding', () => {
 
   it('server approval (security/approve)', async () => {
     const api = await freshApi()
-    await api.securityApprove('evil', false, [], expectedHashes([tool('__proto__', 'rv1-p'), tool('ok', 'rv1-o')]))
+    await api.securityApprove('evil', false, [], undefined, expectedHashes([tool('__proto__', 'rv1-p'), tool('ok', 'rv1-o')]))
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/v1/servers/evil/security/approve')
     expect(hashesOf(opts.body)).toEqual(Object.fromEntries([['__proto__', 'rv1-p'], ['ok', 'rv1-o']]))
@@ -49,7 +49,7 @@ describe('approval requests carry a __proto__ binding', () => {
   it('per-tool approval (tools/approve)', async () => {
     const api = await freshApi()
     const all = [tool('__proto__', 'rv1-p'), tool('ok', 'rv1-o')]
-    await api.approveTools('evil', ['__proto__'], expectedHashes(all.filter(t => t.name === '__proto__'), all))
+    await api.approveTools('evil', ['__proto__'], undefined, expectedHashes(all.filter(t => t.name === '__proto__'), all))
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/v1/servers/evil/tools/approve')
     expect(JSON.parse(opts.body).tools).toEqual(['__proto__'])

@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
@@ -164,4 +165,31 @@ func TestApproveTools_StaleReview409(t *testing.T) {
 		requireStaleBody(t, w, []string{"t1"}, nil, nil)
 		assert.Nil(t, ctrl.approvedTools, "nothing approved")
 	}
+}
+
+// Spec 116 x Spec 117 PR-2: one request carries both bindings; each reaches
+// the controller, and server_replaced stays distinct from review_out_of_date.
+func TestApprove_BothBindingsReachTheController(t *testing.T) {
+	sec := &mockSecurityController{}
+	w := postJSON(t, newTestServerWithSecurity(t, sec), "/api/v1/servers/my-server/security/approve", `{"expected_hashes":{"a":"rv1-a"},"expected_incarnation":9}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, map[string]string{"a": "rv1-a"}, sec.reviewedExpected)
+	assert.EqualValues(t, 9, sec.reviewedInc)
+
+	ctrl := &mockToolQuarantineController{approvals: []*storage.ToolApprovalRecord{{ServerName: "github", ToolName: "t1", Status: storage.ToolApprovalStatusPending}}}
+	w = postJSON(t, toolApproveServer(t, ctrl), "/api/v1/servers/github/tools/approve", `{"tools":["t1"],"expected_hashes":{"t1":"rv1-a"},"expected_incarnation":9}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, map[string]string{"t1": "rv1-a"}, ctrl.reviewedExpected)
+	assert.EqualValues(t, 9, ctrl.reviewedInc)
+
+	ctrl = &mockToolQuarantineController{reviewedErr: &commitview.ServerReplacedError{Name: "github"}}
+	w = postJSON(t, toolApproveServer(t, ctrl), "/api/v1/servers/github/tools/approve", `{"approve_all":true,"expected_hashes":{},"expected_incarnation":9}`)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "server_replaced")
+	assert.NotContains(t, w.Body.String(), "review_out_of_date")
+
+	sec = &mockSecurityController{approveErr: &commitview.ServerReplacedError{Name: "my-server"}}
+	w = postJSON(t, newTestServerWithSecurity(t, sec), "/api/v1/servers/my-server/security/approve", `{"expected_hashes":{},"expected_incarnation":9}`)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "server_replaced")
 }

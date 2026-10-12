@@ -882,6 +882,25 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
 }
 
+// EmitActivityServerRemoved records a server removal as a config change. purged
+// is the removal's purge summary ({bucket: count}, Spec 116 PR2); the activity
+// record carries it in metadata["purged"] (additive).
+func (r *Runtime) EmitActivityServerRemoved(name, source string, purged map[string]int) {
+	payload := map[string]any{
+		"action":          "server_removed",
+		"affected_entity": name,
+		"source":          source,
+	}
+	if len(purged) > 0 {
+		summary := make(map[string]any, len(purged))
+		for bucket, n := range purged {
+			summary[bucket] = n
+		}
+		payload["purged"] = summary
+	}
+	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
+}
+
 // EmitSensitiveDataDetected emits an event when sensitive data is detected in a tool call (Spec 026).
 // activityID is the ID of the activity record where sensitive data was detected.
 // detectionCount is the number of sensitive data detections found.

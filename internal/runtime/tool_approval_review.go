@@ -61,11 +61,26 @@ func (r *Runtime) staleReviewError(serverName string, changed, unreviewed, missi
 // approved). A bound request validates, writes and counts each name once;
 // expected == nil is exactly ApproveTools (duplicates included).
 func (r *Runtime) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {
+	return r.ApproveToolsReviewedAt(serverName, toolNames, expected, approvedBy, 0)
+}
+
+// ApproveToolsReviewedAt is ApproveToolsReviewed bound to expectedIncarnation,
+// the server identity the client reviewed (Spec 116 FR-014; 0 binds to the
+// incarnation current when the call starts). The two bindings are independent
+// and both enforced under the approval lock: a replaced server answers
+// ErrServerReplaced (server_replaced), changed definitions answer
+// *toolreview.StaleToolReviewError (review_out_of_date); the incarnation is
+// checked first because a replaced server's records are not the reviewed ones.
+func (r *Runtime) ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
 	if expected == nil {
-		return r.approveToolsAndNotify(serverName, toolNames, approvedBy, false)
+		return r.approveToolsAndNotify(serverName, toolNames, approvedBy, false, expectedIncarnation)
 	}
 	if r.storageManager == nil {
 		return 0, nil
+	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
 	}
 	names := make([]string, 0, len(toolNames))
 	seen := make(map[string]struct{}, len(toolNames))
@@ -78,6 +93,10 @@ func (r *Runtime) ApproveToolsReviewed(serverName string, toolNames []string, ex
 	}
 
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	candidates := make([]*storage.ToolApprovalRecord, 0, len(names))
 	for _, name := range names {
 		rec, err := r.storageManager.GetToolApproval(serverName, name)
@@ -108,13 +127,27 @@ func (r *Runtime) ApproveToolsReviewed(serverName string, toolNames []string, ex
 // them still matches its reviewed fingerprint (FR-006). expected == nil is
 // exactly ApproveAllTools.
 func (r *Runtime) ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error) {
+	return r.ApproveAllToolsReviewedAt(serverName, expected, approvedBy, 0)
+}
+
+// ApproveAllToolsReviewedAt is ApproveAllToolsReviewed bound to
+// expectedIncarnation (see ApproveToolsReviewedAt).
+func (r *Runtime) ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
 	if expected == nil {
-		return r.ApproveAllTools(serverName, approvedBy)
+		return r.ApproveAllToolsAt(serverName, approvedBy, expectedIncarnation)
 	}
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()
@@ -216,6 +249,20 @@ const serverApprovalPromotedBy = "system:server-approval-baseline"
 // stays quarantined: those are fail-safe (a quarantined server exposes no
 // tool, and a retry validates the same fingerprints, which ignore status).
 func (r *Runtime) CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	return r.commitServerApproval(serverName, 0, false, blocks, expected, by, commit)
+}
+
+// CommitServerApprovalAt is CommitServerApproval bound to a server
+// incarnation (Spec 116 FR-014): under the approval lock, before the
+// fingerprints are validated or the marker is written, the stored row must
+// still carry inc, else ErrServerReplaced and nothing is recorded or
+// committed (the server stays quarantined). The removal commit purges the
+// marker under the same lock.
+func (r *Runtime) CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	return r.commitServerApproval(serverName, inc, true, blocks, expected, by, commit)
+}
+
+func (r *Runtime) commitServerApproval(serverName string, inc int64, bound bool, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
 	if by == "" {
 		by = "unknown"
 	}
@@ -226,6 +273,11 @@ func (r *Runtime) CommitServerApproval(serverName string, blocks []string, expec
 			return err
 		}
 		return tx.UnderApprovalLock(serverName, func() error {
+			if bound {
+				if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+					return err
+				}
+			}
 			n, err := r.commitServerApprovalHeld(serverName, blocks, expected, by, commit)
 			promoted = n
 			return err

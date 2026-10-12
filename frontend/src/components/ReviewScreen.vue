@@ -76,6 +76,7 @@
         <p class="text-sm text-base-content/70" data-test="review-range" aria-live="polite">{{ rangeText }}</p>
       </div>
       <p v-if="notice && !review.server.quarantined" class="text-sm text-warning" role="status" data-test="review-stale-notice">{{ notice }}</p>
+      <p v-if="toolNotice" class="text-sm text-error" role="alert" data-test="review-tool-notice">{{ toolNotice }}</p>
       <div v-if="review.tools.length > 0 && filteredTools.length === 0" class="rounded border border-base-300 p-4 text-sm" data-test="review-no-match">
         No tools match. <button type="button" class="link" @click="clearFilters">Clear filters</button>
       </div>
@@ -134,6 +135,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
@@ -147,6 +149,10 @@ const review = ref<ServerReviewResponse | null>(null)
 // block list is the complement of what is on screen, so approval waits for the newest load to settle.
 const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Review the updated list and approve again.'
 const notice = ref('')
+// A failed per-tool approve or reject (e.g. 409 server_replaced). Rendered above
+// the tool list on every server, quarantined or not: `notice` lives in the
+// decision bar, which only a quarantined server shows.
+const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
@@ -216,11 +222,12 @@ function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
 // A force retry is bound to the snapshot its failed attempt reviewed. Once the review is replaced the block list no longer describes it, so the retry is dropped and a fresh approval decision is required.
 function invalidateForceRetry() { if (lastBlock.value === null) return; lastBlock.value = null; if (forceDialog.value?.open) { forceDialog.value.close?.(); notice.value = STALE_FORCE_NOTICE } }
+// Explicit choices are bound to the reviewed incarnation (Spec 116 FR-017, review round 2): a refresh onto a same-name replacement drops them, so the replacement starts from its own defaults.
 // Each load takes a generation; only the newest response may replace the review, so an older refresh that resolves late cannot resurrect an allow the newer definitions invalidated.
 let loadGeneration = 0
 // Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
 let visitGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) choices.clear(); review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
@@ -276,8 +283,11 @@ async function approve(force: boolean, block?: string[]) {
   const expected = retry ? lastExpected : expectedHashes(tools)
   lastBlock.value = blocked
   lastExpected = expected
-  // An unbound request (a review without fingerprints, i.e. an older core) keeps the legacy call shape.
-  const res = expected ? await api.securityApprove(server, force, blocked, expected) : await api.securityApprove(server, force, blocked)
+  // Both bindings travel together: the incarnation of the review on screen (Spec 116 FR-017: a remove and
+  // re-add of the name since it rendered answers 409 server_replaced) and, unless the review has no
+  // fingerprints (an older core), the reviewed definitions (Spec 117 PR-2: 409 review_out_of_date).
+  const inc = review.value?.server.incarnation
+  const res = expected ? await api.securityApprove(server, force, blocked, inc, expected) : await api.securityApprove(server, force, blocked, ...incarnationArgs(inc))
   if (!isCurrent(server, visit)) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
@@ -301,21 +311,26 @@ async function rejectServer() {
   approving.value = false
   if (!res.success) error.value = res.error || 'Reject failed'; else await load()
 }
+// Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017) and, for an approve,
+// to that tool's fingerprint (Spec 117 PR-2). A stale review (409 review_out_of_date) reloads and says why in the
+// stale notice; any other refusal (409 server_replaced) reloads and says why beside the tool list.
 async function approveTool(name: string) {
-  const server = props.serverName; const visit = visitGeneration
+  const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''
   const tools = review.value?.tools ?? []
-  // Spec 117 PR-2: a per-tool approve sends that tool's fingerprint ({} when it has none in a fingerprinted review).
+  const inc = review.value?.server.incarnation
+  // A per-tool approve sends that tool's fingerprint ({} when it has none in a fingerprinted review).
   const expected = expectedHashes(tools.filter(t => t.name === name), tools)
-  const res = expected ? await api.approveTools(server, [name], expected) : await api.approveTools(server, [name])
+  const res = expected ? await api.approveTools(server, [name], inc, expected) : await api.approveTools(server, [name], ...incarnationArgs(inc))
   if (!isCurrent(server, visit)) return
   if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
   await load()
+  if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'
 }
 async function reloadAfterStaleReview(server: string, visit: number, message: string) {
   await load()
   if (isCurrent(server, visit)) notice.value = message
 }
-async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.blockTools(server, [name]); if (isCurrent(server, visit)) await load() }
+async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
@@ -325,7 +340,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

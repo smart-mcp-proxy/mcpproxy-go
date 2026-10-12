@@ -2061,6 +2061,12 @@ components:
       properties:
         count:
           type: integer
+        incarnation:
+          description: |-
+            Incarnation is the committed incarnation of the server the tools were
+            read for (Spec 116 FR-017), captured before they were fetched; omitted
+            when unknown.
+          type: integer
         server_name:
           type: string
         tools:
@@ -2951,6 +2957,11 @@ components:
             type: string
           type: array
           uniqueItems: false
+        generation:
+          description: |-
+            Generation is the server's committed config generation (Spec 116
+            FR-017): it changes whenever the server's configuration changes.
+          type: integer
         headers:
           additionalProperties:
             type: string
@@ -2959,6 +2970,12 @@ components:
           $ref: '#/components/schemas/contracts.HealthStatus'
         id:
           type: string
+        incarnation:
+          description: |-
+            Incarnation changes only when the name is removed and created again
+            (Spec 116 FR-017). Approval endpoints accept it back as
+            expected_incarnation and answer 409 server_replaced on a mismatch.
+          type: integer
         init_timeout:
           description: |-
             InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
@@ -3247,6 +3264,14 @@ components:
           - TierUnknown
         schema:
           type: object
+        server_incarnation:
+          description: |-
+            ServerIncarnation is the committed incarnation of the server this row
+            was read for (Spec 116 FR-017), captured before the tools were fetched.
+            A client echoes it as expected_incarnation on a per-tool decision, so a
+            stale row is refused (409 server_replaced) after a same-name re-add.
+            Omitted when the server has no committed incarnation.
+          type: integer
         server_name:
           type: string
         tier:
@@ -4638,6 +4663,12 @@ components:
           type:
           - object
           - "null"
+        expected_incarnation:
+          description: |-
+            ExpectedIncarnation binds the approval to the server the client
+            reviewed (Spec 116 FR-017); 409 server_replaced on a mismatch. It is
+            independent of ExpectedHashes and the two may be sent together.
+          type: integer
         tools:
           items:
             type: string
@@ -4764,6 +4795,11 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.expectedIncarnationBody:
+      properties:
+        expected_incarnation:
+          type: integer
+      type: object
     httpapi.securityApproveRequest:
       properties:
         block:
@@ -4778,9 +4814,17 @@ components:
             ExpectedHashes binds the approval to the reviewed definitions (Spec
             117 PR-2, #1566): tool name -> the review's current_hash. Absent or
             null is an unbound (legacy) request; {} binds to the empty snapshot.
+            Independent of ExpectedIncarnation: a request may carry both, and the
+            two refusals stay distinct (review_out_of_date vs server_replaced).
           type:
           - object
           - "null"
+        expected_incarnation:
+          description: |-
+            ExpectedIncarnation binds the approval to the server the client
+            reviewed (Spec 116 FR-017): a remove and re-add since then is refused
+            with 409 server_replaced and the replacement stays quarantined.
+          type: integer
         force:
           type: boolean
       type: object
@@ -9512,13 +9556,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid request or unknown tool block target
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not configured
         "409":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.StaleReviewErrorResponse'
-          description: Dangerous scan verdict requires force, the review is out of
-            date (error_code review_out_of_date), or approval failed
+          description: Dangerous scan verdict requires force, approval failed, the
+            review is out of date (error_code review_out_of_date), or server_replaced
+            (the server was removed or re-added since expected_incarnation)
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -9608,6 +9659,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server kept being removed or replaced
+            while its tools were read'
         "500":
           content:
             application/json:
@@ -9668,10 +9726,12 @@ paths:
       - servers
   /api/v1/servers/{id}/tools/block:
     post:
-      description: Atomically approves AND disables the given tools (or all pending/changed
+      description: 'Atomically approves AND disables the given tools (or all pending/changed
         tools when block_all=true) for a server. The approve and disable land in a
         single write per tool, so a tool is never left in the approved+enabled state.
-        The "blocked" field counts tools actually blocked.
+        The "blocked" field counts tools actually blocked. An optional expected_incarnation
+        binds the write to the reviewed server (Spec 116): a remove and re-add since
+        then answers 409 server_replaced and writes nothing.'
       parameters:
       - description: Server ID or name
         in: path
@@ -9703,6 +9763,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate servers)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server was removed or re-added since
+            expected_incarnation'
         "500":
           content:
             application/json:
@@ -9729,7 +9802,8 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/httpapi.expectedIncarnationBody'
+        description: Optional incarnation of the reviewed server (Spec 116)
       responses:
         "200":
           content:
@@ -9743,6 +9817,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server was removed or re-added since
+            expected_incarnation'
         "500":
           content:
             application/json:
@@ -9769,7 +9856,8 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/httpapi.expectedIncarnationBody'
+        description: Optional incarnation of the reviewed server (Spec 116)
       responses:
         "200":
           content:
@@ -9783,6 +9871,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server was removed or re-added since
+            expected_incarnation'
         "500":
           content:
             application/json:
@@ -9806,6 +9907,12 @@ paths:
         required: true
         schema:
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.expectedIncarnationBody'
+        description: Optional incarnation of the reviewed server (Spec 116)
       responses:
         "200":
           content:
@@ -9831,6 +9938,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server was removed or re-added since
+            expected_incarnation'
         "500":
           content:
             application/json:

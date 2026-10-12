@@ -13,7 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -261,6 +263,9 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "already in progress") {
 			s.writeError(w, r, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "server is not configured") {
+			// Spec 116 FR-014a: the committed view does not know the server.
+			s.writeError(w, r, http.StatusNotFound, err.Error())
 		} else {
 			s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		}
@@ -338,13 +343,20 @@ type securityApproveRequest struct {
 	// ExpectedHashes binds the approval to the reviewed definitions (Spec
 	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
 	// null is an unbound (legacy) request; {} binds to the empty snapshot.
+	// Independent of ExpectedIncarnation: a request may carry both, and the
+	// two refusals stay distinct (review_out_of_date vs server_replaced).
 	ExpectedHashes map[string]string `json:"expected_hashes,omitempty" extensions:"x-nullable"`
+	// ExpectedIncarnation binds the approval to the server the client
+	// reviewed (Spec 116 FR-017): a remove and re-add since then is refused
+	// with 409 server_replaced and the replacement stays quarantined.
+	ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
 }
 
 // reviewedSecurityApprover is the review-bound server approval of the
-// security controller (scanner.Service implements it).
+// security controller (scanner.Service implements it). It carries the
+// expected incarnation too (0 = the incarnation current at the call).
 type reviewedSecurityApprover interface {
-	ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error
+	ApproveServerReviewedAt(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error
 }
 
 // handleSecurityApprove godoc
@@ -359,7 +371,8 @@ type reviewedSecurityApprover interface {
 // @Param body body securityApproveRequest false "Force approval and tool names to keep disabled"
 // @Success 200 {object} contracts.SuccessResponse "Server approved"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
-// @Failure 409 {object} StaleReviewErrorResponse "Dangerous scan verdict requires force, the review is out of date (error_code review_out_of_date), or approval failed"
+// @Failure 409 {object} StaleReviewErrorResponse "Dangerous scan verdict requires force, approval failed, the review is out of date (error_code review_out_of_date), or server_replaced (the server was removed or re-added since expected_incarnation)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not configured"
 // @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
@@ -387,7 +400,11 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusServiceUnavailable, "Review-bound security approval is unavailable")
 			return
 		}
-		approveErr = reviewed.ApproveServerReviewed(r.Context(), name, req.Force, "api", req.Block, req.ExpectedHashes)
+		approveErr = reviewed.ApproveServerReviewedAt(r.Context(), name, req.Force, "api", req.Block, req.ExpectedHashes, req.ExpectedIncarnation)
+	} else if boundApprover, ok := s.securityController.(interface {
+		ApproveServerAt(context.Context, string, bool, string, []string, int64) error
+	}); ok {
+		approveErr = boundApprover.ApproveServerAt(r.Context(), name, req.Force, "api", req.Block, req.ExpectedIncarnation)
 	} else if len(req.Block) > 0 {
 		blockApprover, ok := s.securityController.(interface {
 			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
@@ -406,6 +423,12 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(approveErr, scanner.ErrToolApprovalBlockNotFound) {
 			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
+			return
+		}
+		if errors.Is(approveErr, commitview.ErrServerReplaced) || errors.Is(approveErr, internalRuntime.ErrServerNotFound) {
+			// 409 server_replaced; 404 for a server that is not configured
+			// (documented, review round 4).
+			s.writeApprovalWriteError(w, r, approveErr, "Failed to approve server")
 			return
 		}
 		s.writeError(w, r, http.StatusConflict, approveErr.Error())

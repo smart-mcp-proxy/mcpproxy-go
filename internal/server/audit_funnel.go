@@ -517,7 +517,11 @@ func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport)
 	if o.toolCaller != nil {
 		startedAt := time.Now()
 		refusal := errors.New(report.Message)
-		o.toolCaller.storeToolCallInHistory(report.ServerName, report.ToolName, report.Arguments, nil, refusal, startedAt, 0)
+		var inc int64
+		if o.toolCaller.proxy != nil {
+			inc = o.toolCaller.proxy.toolCallIncarnation(report.ServerName)
+		}
+		o.toolCaller.storeToolCallInHistory(report.ServerName, report.ToolName, report.Arguments, nil, refusal, startedAt, 0, inc)
 		o.toolCaller.emitSubCallRefused(report.Ctx, report.ServerName, report.ToolName,
 			mintCorrelationID(report.ServerName, report.ToolName), report.Arguments, refusal, startedAt, 0, report.BlockReason)
 	}

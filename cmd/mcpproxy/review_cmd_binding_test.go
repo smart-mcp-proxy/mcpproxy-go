@@ -41,7 +41,7 @@ func (d *bindingDaemon) setReview(server string, quarantined bool, tools ...[3]s
 		parts = append(parts, fmt.Sprintf(`{"name":%q,"tier":"read","approval_status":%q,"description":"Does %s\nsecond line","default_allowed":true,"current_hash":%q}`, t[0], t[1], t[0], t[2]))
 		d.hashes[server][t[0]] = t[2]
 	}
-	d.reviews[server] = fmt.Sprintf(`{"server":{"name":%q,"quarantined":%t,"definitions_captured":%t},"tools":[%s]}`, server, quarantined, len(tools) > 0, strings.Join(parts, ","))
+	d.reviews[server] = fmt.Sprintf(`{"server":{"name":%q,"quarantined":%t,"incarnation":7,"definitions_captured":%t},"tools":[%s]}`, server, quarantined, len(tools) > 0, strings.Join(parts, ","))
 }
 
 func (d *bindingDaemon) posts() []reviewRequest {
@@ -135,6 +135,7 @@ func TestReviewApproveBinding_QuarantinedSendsAllReviewedHashes(t *testing.T) {
 	require.NoError(t, err)
 	body := lastBody(t, d)
 	assert.Equal(t, map[string]any{"read_note": "rv1-h1", "wipe": "rv1-w1"}, body["expected_hashes"])
+	assert.EqualValues(t, 7, body["expected_incarnation"], "the reviewed server incarnation travels next to the hashes (Spec 116 FR-017)")
 }
 
 func TestReviewApproveBinding_EmptyReviewBindsEmptySnapshot(t *testing.T) {
@@ -157,6 +158,7 @@ func TestReviewApproveBinding_TrustedPaths(t *testing.T) {
 	body := lastBody(t, d)
 	assert.Equal(t, []any{"a"}, body["tools"])
 	assert.Equal(t, map[string]any{"a": "rv1-a"}, body["expected_hashes"])
+	assert.EqualValues(t, 7, body["expected_incarnation"])
 
 	_, err = runReviewApprove(t, "table", nil, "trusted2", "--yes")
 	require.NoError(t, err)

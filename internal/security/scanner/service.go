@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
@@ -141,6 +142,37 @@ type ServerUnquarantiner interface {
 	UnquarantineServer(serverName string) error
 }
 
+// ApprovalIncarnationBinder is an OPTIONAL capability of the
+// ServerUnquarantiner (Spec 116 FR-014, FR-015): bind a scanner approval to
+// the incarnation of the server it reviewed. The approval captures the
+// incarnation when it starts, saves the baseline and blocks under the
+// server's approval lock only while the stored row still carries it, and
+// unquarantines through a commit that expects it — so a remove and re-add of
+// the name in between can never release, or hand a baseline to, the
+// replacement.
+type ApprovalIncarnationBinder interface {
+	// CaptureApprovalIncarnation returns expected when it is > 0 (the
+	// incarnation the caller reviewed), otherwise the server's current one.
+	CaptureApprovalIncarnation(serverName string, expected int64) (int64, error)
+	WithServerApprovalLockAt(serverName string, inc int64, fn func() error) error
+	UnquarantineServerAt(serverName string, inc int64) error
+}
+
+// ServerIncarnationProvider is an OPTIONAL capability of the
+// ServerUnquarantiner: the server's current incarnation, recorded on scan
+// jobs and reports (Spec 116 FR-014a).
+type ServerIncarnationProvider interface {
+	ServerIncarnation(serverName string) (int64, bool)
+}
+
+// IncarnationStorage is an OPTIONAL capability of the Storage: scan job and
+// report saves conditional on the server's stored row carrying the job's
+// incarnation, in one transaction (Spec 116 FR-014a, research D12).
+type IncarnationStorage interface {
+	SaveScanJobIfIncarnation(job *ScanJob, inc int64) (bool, error)
+	SaveScanReportIfIncarnation(report *ScanReport, inc int64) (bool, error)
+}
+
 type ToolBlockRecorder interface {
 	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
 }
@@ -184,6 +216,16 @@ type ReviewedServerApprover interface {
 	FinishServerApproval(serverName string) error
 }
 
+// IncarnationServerApprovalCommitter extends ServerApprovalCommitter with the
+// Spec 116 incarnation binding: CommitServerApprovalAt runs the same locked
+// section but first checks (under the approval lock) that the stored row
+// still carries incarnation inc, returning ErrServerReplaced otherwise
+// without recording the marker or running commit.
+type IncarnationServerApprovalCommitter interface {
+	ServerApprovalCommitter
+	CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
 // Service coordinates scanner management, scan execution, and approval workflow
 type Service struct {
 	storage        Storage
@@ -214,9 +256,33 @@ type Service struct {
 	// by the in-flight reader storing the pre-scan summary — leaving a stale
 	// "clean" verdict cached for a server whose scan is running. The reader
 	// samples the generation on the cache miss and refuses to store if it moved.
+	//
+	// summaryCacheInc records the server incarnation each entry was computed
+	// for (Spec 116 PR2 review round 3): the purge observer that invalidates
+	// a removed server's entry runs after the commit, so a same-name
+	// replacement committed in between must not be served the old entry.
 	summaryCache    map[string]*ScanSummary
 	summaryCacheGen map[string]uint64
+	summaryCacheInc map[string]int64
 	summaryCacheMu  sync.RWMutex
+
+	// approvalHooks are Spec 116 PR2 test seams (plan.md §Test seams), nil
+	// in production.
+	approvalHooks scannerApprovalHooks
+}
+
+// scannerApprovalHooks are the scanner's Spec 116 test seams.
+type scannerApprovalHooks struct {
+	// afterBaselineBeforeUnquarantine runs in approveServer after its
+	// approval-lock section (baseline and blocks) has exited and before the
+	// unquarantine commit, with the captured incarnation (T2.5, review R5.6).
+	afterBaselineBeforeUnquarantine func(serverName string, incarnation int64)
+}
+
+// SetAfterBaselineBeforeUnquarantineHookForTest installs the
+// afterBaselineBeforeUnquarantine seam. Test-only.
+func (s *Service) SetAfterBaselineBeforeUnquarantineHookForTest(fn func(serverName string, incarnation int64)) {
+	s.approvalHooks.afterBaselineBeforeUnquarantine = fn
 }
 
 // NewService creates a new SecurityService
@@ -231,10 +297,14 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		queue:           NewScanQueue(logger),
 		summaryCache:    make(map[string]*ScanSummary),
 		summaryCacheGen: make(map[string]uint64),
+		summaryCacheInc: make(map[string]int64),
 		logger:          logger,
 	}
 	var noop EventEmitter = &NoopEmitter{}
 	svc.emitter.Store(&noop)
+	// A job prepared for an incarnation that is no longer current never takes
+	// the active slot (Spec 116 FR-014a, review round 2).
+	engine.registrationCheck = svc.incarnationIsCurrent
 	svc.pulls = newPullManager(docker, storage, registry, logger, svc.emit)
 	// Restore installed scanner state from storage (survives restart)
 	svc.syncRegistryFromStorage()
@@ -931,31 +1001,126 @@ func (a *scanCallbackAdapter) countsForTelemetry(job *ScanJob) bool {
 	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun
 }
 
+// saveJob persists job, conditionally on its incarnation when both the job
+// and the storage support it (Spec 116 FR-014a). A job of a server that was
+// removed or replaced since the scan started is dropped.
+func (s *Service) saveJob(job *ScanJob) {
+	if job == nil {
+		return
+	}
+	// Every save goes through the conditional writer when the storage has
+	// one, an unbound (zero) incarnation included: the storage refuses an
+	// unbound write once a config commit exists (review round 1).
+	if cs, ok := s.storage.(IncarnationStorage); ok {
+		written, err := cs.SaveScanJobIfIncarnation(job, job.Incarnation)
+		if err == nil && !written {
+			s.logger.Debug("Scan job dropped: the server was removed or replaced since the scan started",
+				zap.String("server", job.ServerName), zap.String("job", job.ID), zap.Int64("incarnation", job.Incarnation))
+		}
+		return
+	}
+	_ = s.storage.SaveScanJob(job)
+}
+
+// saveReport persists report for job's incarnation (see saveJob).
+func (s *Service) saveReport(job *ScanJob, report *ScanReport) {
+	if report == nil {
+		return
+	}
+	if job != nil && report.Incarnation == 0 {
+		report.Incarnation = job.Incarnation
+	}
+	if cs, ok := s.storage.(IncarnationStorage); ok {
+		written, err := cs.SaveScanReportIfIncarnation(report, report.Incarnation)
+		if err == nil && !written {
+			s.logger.Debug("Scan report dropped: the server was removed or replaced since the scan started",
+				zap.String("server", report.ServerName), zap.String("report", report.ID), zap.Int64("incarnation", report.Incarnation))
+		}
+		return
+	}
+	_ = s.storage.SaveScanReport(report)
+}
+
+// currentIncarnation returns the server's current incarnation. configured is
+// false only when a committed-view provider is installed and does not know
+// the server; without a provider it returns (0, true): an unbound scan.
+func (s *Service) currentIncarnation(serverName string) (inc int64, configured bool) {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return 0, true
+	}
+	return p.ServerIncarnation(serverName)
+}
+
+// scanIncarnation is the incarnation a new scan of serverName binds to. With
+// a committed-view provider installed, a server it does not know is refused
+// (review round 1, FR-014a): an unbound job started in a remove/re-add gap
+// would persist evidence the later same-name server inherits.
+func (s *Service) scanIncarnation(serverName string) (int64, error) {
+	inc, configured := s.currentIncarnation(serverName)
+	if !configured {
+		return 0, fmt.Errorf("cannot scan server %s: server is not configured", serverName)
+	}
+	return inc, nil
+}
+
+// incarnationIsCurrent reports whether inc is still serverName's incarnation
+// (always true without a provider, or for an unbound inc of 0 there).
+func (s *Service) incarnationIsCurrent(serverName string, inc int64) bool {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return true
+	}
+	cur, found := p.ServerIncarnation(serverName)
+	return found && cur == inc
+}
+
+// InvalidateServerState drops the scan state of a server whose stored scan
+// state was purged (Spec 116 FR-014a: a removal), so a re-added server never
+// shows the old server's verdict: the cached summary, and the engine's active
+// job when it belongs to an incarnation that is no longer current (review
+// round 1). A job of the current incarnation — a re-added server's own scan
+// that started before this observer ran — is kept; the engine's identity-
+// checked cleanup keeps the detached job's goroutine from evicting it.
+func (s *Service) InvalidateServerState(serverName string) {
+	if s.engine != nil {
+		// The incarnation is read inside the predicate, under the engine
+		// lock that registration also takes (review round 3): a value read
+		// before it could predate a re-add whose own scan registered in
+		// between, and that scan would be detached as obsolete.
+		s.engine.DetachObsoleteJob(serverName, func(job *ScanJob) bool {
+			cur, configured := s.currentIncarnation(serverName)
+			return !configured || job.Incarnation != cur
+		})
+	}
+	s.invalidateScanSummaryCache(serverName)
+}
+
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
 	// Invalidate cached summary so server list shows "scanning"
 	a.service.invalidateScanSummaryCache(job.ServerName)
 }
 
 func (a *scanCallbackAdapter) OnScannerStarted(job *ScanJob, scannerID string) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusRunning, 0)
 }
 
 func (a *scanCallbackAdapter) OnScannerCompleted(job *ScanJob, scannerID string, report *ScanReport) {
-	_ = a.service.storage.SaveScanReport(report)
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveReport(job, report)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusCompleted, 100)
 }
 
 func (a *scanCallbackAdapter) OnScannerFailed(job *ScanJob, scannerID string, err error) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanFailed(job.ServerName, scannerID, err.Error())
 }
 
 func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanReport) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	// Invalidate cached summary so next read gets fresh results
 	a.service.invalidateScanSummaryCache(job.ServerName)
 	// Aggregate findings summary for event
@@ -986,13 +1151,16 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
-			go a.service.startPass2(job.ServerName, a.serverInfo)
+			// The ORIGINATING job's incarnation (review round 1): a late
+			// Pass 1 of a removed server must not bind Pass 2 to a
+			// same-name replacement.
+			go a.service.startPass2(job.ServerName, a.serverInfo, job.Incarnation)
 		}
 	}
 }
 
 func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	// Invalidate cached summary
 	a.service.invalidateScanSummaryCache(job.ServerName)
 	// Anonymous telemetry (schema v8): a FAILED job counts once here. The
@@ -1011,8 +1179,13 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 // StartScan triggers a security scan for a server (Pass 1: fast security scan).
 // After Pass 1 completes, Pass 2 (supply chain audit) is auto-started in the background.
 func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
 	req := ScanRequest{
 		ServerName:    serverName,
+		Incarnation:   inc,
 		DryRun:        dryRun,
 		ScannerIDs:    scannerIDs,
 		SourceDir:     sourceDir,
@@ -1276,7 +1449,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 // startPass2 starts the background supply chain audit (Pass 2) for a server.
 // It re-resolves source WITHOUT filtering (full container filesystem including deps)
 // and runs only Trivy-compatible scanners for deep CVE analysis.
-func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
+//
+// inc is the incarnation of the Pass 1 job that scheduled it: Pass 2 and its
+// failed-source placeholder bind to it, and Pass 2 does not start at all once
+// that incarnation is no longer current (Spec 116 FR-014a, review round 1).
+func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int64) {
+	if !s.incarnationIsCurrent(serverName, inc) {
+		s.logger.Info("Pass 2 skipped: the server was removed or replaced since Pass 1 started",
+			zap.String("server", serverName), zap.Int64("incarnation", inc))
+		return
+	}
 	s.logger.Info("Starting Pass 2 (supply chain audit) in background",
 		zap.String("server", serverName),
 	)
@@ -1285,6 +1467,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 
 	req := ScanRequest{
 		ServerName:    serverName,
+		Incarnation:   inc,
 		DryRun:        false,
 		ScanPass:      ScanPassSupplyChainAudit,
 		IsolationMode: s.resolveIsolationMode(serverName),
@@ -1308,7 +1491,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 				zap.Error(err),
 			)
 			// Fall back to a failed pass 2 job so the UI knows it was attempted
-			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error())
+			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error(), inc)
 			return
 		}
 		req.SourceDir = resolved.SourceDir
@@ -1383,7 +1566,8 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 }
 
 // saveFailedPass2Job creates a failed ScanJob for Pass 2 so the UI knows it was attempted.
-func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
+// It is bound to inc, the originating Pass 1 job's incarnation.
+func (s *Service) saveFailedPass2Job(serverName, errMsg string, inc int64) {
 	job := &ScanJob{
 		ID:          fmt.Sprintf("scan-%s-pass2-%d", serverName, time.Now().UnixNano()),
 		ServerName:  serverName,
@@ -1392,8 +1576,9 @@ func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
 		StartedAt:   time.Now(),
 		CompletedAt: time.Now(),
 		Error:       errMsg,
+		Incarnation: inc,
 	}
-	_ = s.storage.SaveScanJob(job)
+	s.saveJob(job)
 }
 
 // GetScanStatus returns the current scan status for a server.
@@ -1527,6 +1712,29 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 // CleanupStaleJobs marks any running/pending scan jobs as failed.
 // Called on startup to clean up jobs that were interrupted by a process crash.
 func (s *Service) CleanupStaleJobs() {
+	// Spec 116 FR-014a (review round 2): the config watcher can remove a
+	// server while this runs, so every save goes through the
+	// incarnation-conditional writer (saveJob) and a purge between the list
+	// and the save is never undone. A legacy job with no incarnation is bound
+	// to the server's incarnation read BEFORE the list: if a remove and re-add
+	// happened after that read, the conditional write refuses it; if it
+	// happened before, the list no longer holds the purged job.
+	_, conditional := s.storage.(IncarnationStorage)
+	type incView struct {
+		inc        int64
+		configured bool
+	}
+	incarnations := map[string]incView{}
+	if conditional {
+		if names, err := s.storage.ListScanJobs(""); err == nil {
+			for _, job := range names {
+				if _, seen := incarnations[job.ServerName]; !seen {
+					inc, configured := s.currentIncarnation(job.ServerName)
+					incarnations[job.ServerName] = incView{inc, configured}
+				}
+			}
+		}
+	}
 	jobs, err := s.storage.ListScanJobs("")
 	if err != nil {
 		s.logger.Warn("failed to list scan jobs for stale cleanup", zap.Error(err))
@@ -1535,10 +1743,13 @@ func (s *Service) CleanupStaleJobs() {
 
 	cleaned := 0
 	for _, job := range jobs {
-		if job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending {
-			job.Status = ScanJobStatusFailed
-			job.Error = "interrupted by server restart"
-			job.CompletedAt = time.Now()
+		if job.Status != ScanJobStatusRunning && job.Status != ScanJobStatusPending {
+			continue
+		}
+		job.Status = ScanJobStatusFailed
+		job.Error = "interrupted by server restart"
+		job.CompletedAt = time.Now()
+		if !conditional {
 			if err := s.storage.SaveScanJob(job); err != nil {
 				s.logger.Warn("failed to clean up stale scan job",
 					zap.String("job_id", job.ID),
@@ -1547,6 +1758,24 @@ func (s *Service) CleanupStaleJobs() {
 			} else {
 				cleaned++
 			}
+			continue
+		}
+		if job.Incarnation == 0 {
+			v, ok := incarnations[job.ServerName]
+			if !ok || !v.configured {
+				continue // not configured (or appeared after the read): leave it to the purge
+			}
+			job.Incarnation = v.inc
+		}
+		written, err := s.storage.(IncarnationStorage).SaveScanJobIfIncarnation(job, job.Incarnation)
+		switch {
+		case err != nil:
+			s.logger.Warn("failed to clean up stale scan job",
+				zap.String("job_id", job.ID),
+				zap.Error(err),
+			)
+		case written:
+			cleaned++
 		}
 	}
 
@@ -1792,7 +2021,7 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
-	return s.ApproveServerReviewed(ctx, serverName, force, approvedBy, nil, nil)
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, nil, nil, 0)
 }
 
 // ApproveServerReviewed approves a scanned server bound to the review the
@@ -1803,14 +2032,37 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 // a stale binding returns *toolreview.StaleToolReviewError unchanged, with
 // nothing written and the server still quarantined.
 func (s *Service) ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	return s.ApproveServerReviewedAt(ctx, serverName, force, approvedBy, blocks, expected, 0)
+}
+
+// ApproveServerReviewedAt is ApproveServerReviewed also bound to
+// expectedIncarnation, the incarnation of the server the caller reviewed
+// (Spec 116 FR-017). The two bindings are independent: a remove and re-add
+// since the review fails with server_replaced (the replacement stays
+// quarantined), changed definitions with the stale-review error. 0 binds to
+// the incarnation current when the call starts.
+func (s *Service) ApproveServerReviewedAt(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, blocks, expected, expectedIncarnation)
+}
+
+func (s *Service) approveServerBlocks(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
 	if len(blocks) == 0 {
-		return s.approveServer(ctx, serverName, force, approvedBy, nil, expected)
+		return s.approveServer(ctx, serverName, force, approvedBy, nil, expected, expectedIncarnation)
 	}
 	approvalBlocks, err := toolApprovalBlocks(blocks, approvedBy)
 	if err != nil {
 		return err
 	}
-	return s.approveServer(ctx, serverName, force, approvedBy, approvalBlocks, expected)
+	return s.approveServer(ctx, serverName, force, approvedBy, approvalBlocks, expected, expectedIncarnation)
+}
+
+// ApproveServerAt is ApproveServerWithBlocks (toolNames may be empty) bound
+// to expectedIncarnation, the incarnation of the server the caller reviewed
+// (Spec 116 FR-017). A remove and re-add since then fails it with
+// server_replaced and leaves the replacement quarantined. 0 binds to the
+// incarnation current when the call starts.
+func (s *Service) ApproveServerAt(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string, expectedIncarnation int64) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, toolNames, nil, expectedIncarnation)
 }
 
 // ApproveServerWithBlocks approves a scanned server and atomically records the
@@ -1821,7 +2073,7 @@ func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string
 	if err != nil {
 		return err
 	}
-	return s.approveServer(ctx, serverName, force, approvedBy, blocks, nil)
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks, nil, 0)
 }
 
 // toolApprovalBlocks validates and deduplicates block names.
@@ -1841,9 +2093,24 @@ func toolApprovalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBl
 	return blocks, nil
 }
 
-func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string) error {
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, expectedIncarnation int64) error {
+	// Spec 116 FR-014: bind the approval to the server identity it reviews.
+	binder, bound := s.unquarantiner.(ApprovalIncarnationBinder)
+	var inc int64
+	if bound {
+		var err error
+		if inc, err = binder.CaptureApprovalIncarnation(serverName, expectedIncarnation); err != nil {
+			return err
+		}
+	}
+
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
+	if err == nil && aggReport != nil && inc != 0 && !s.reportIsForIncarnation(aggReport, inc) {
+		// A scan of an earlier server with this name (FR-014a): it does not
+		// describe the server being approved.
+		aggReport, err = nil, fmt.Errorf("scan results belong to a removed server")
+	}
 	if err != nil {
 		if !force {
 			return fmt.Errorf("no scan results found; run a scan first or use --force")
@@ -1905,7 +2172,7 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
 	}
 	if approver, ok := s.unquarantiner.(ReviewedServerApprover); ok {
-		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save)
+		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save, bound, inc)
 	}
 	if expected != nil {
 		// Never drop a binding silently: without the reviewed capability the
@@ -1913,23 +2180,43 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		return fmt.Errorf("review-bound approval is not supported for server %q by this core", serverName)
 	}
 	var saveErr error
-	if committer, ok := s.unquarantiner.(ServerApprovalCommitter); ok {
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	switch committer := s.unquarantiner.(type) {
+	case IncarnationServerApprovalCommitter:
+		// Spec 117 PR-1 (FR-023) + Spec 116 FR-014: record the tool baseline
+		// decision and commit the baseline (+ blocks) in the runtime's locked
+		// section, only while the stored row still carries the reviewed
+		// incarnation. A removal purges the baseline, blocks and the marker
+		// under the same lock, so either this commit ran first (and was
+		// purged) or it sees the replacement and records nothing.
+		if bound {
+			_, saveErr = committer.CommitServerApprovalAt(serverName, inc, blockNames, nil, approvedBy, save)
+		} else {
+			_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+		}
+	case ServerApprovalCommitter:
 		// Spec 117 PR-1 (FR-023): both branches commit inside the runtime's
 		// locked section, which first records the server's tool baseline
-		// decision — also for an empty or blind review, so tools the server
-		// lists later wait for review instead of being auto-baselined.
-		blockNames := make([]string, 0, len(blocks))
-		for _, block := range blocks {
-			blockNames = append(blockNames, block.ToolName)
-		}
+		// decision, also for an empty or blind review.
 		_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
-	} else if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok && len(blocks) > 0 {
-		saveErr = locker.WithToolApprovalLock(serverName, save)
-	} else {
-		saveErr = save()
+	default:
+		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok && len(blocks) > 0 {
+			saveErr = locker.WithToolApprovalLock(serverName, save)
+		} else {
+			saveErr = save()
+		}
 	}
 	if saveErr != nil {
+		if errors.Is(saveErr, commitview.ErrServerReplaced) {
+			return saveErr
+		}
 		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
+	}
+	if h := s.approvalHooks.afterBaselineBeforeUnquarantine; h != nil {
+		h(serverName, inc)
 	}
 	if len(blocks) > 0 {
 		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
@@ -1947,7 +2234,17 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	// approval — without it, the server stays quarantined forever and the
 	// approval is cosmetic.
 	if s.unquarantiner != nil {
-		if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
+		unquarantine := s.unquarantiner.UnquarantineServer
+		if bound {
+			// One commit that expects the reviewed incarnation (FR-015).
+			unquarantine = func(name string) error { return binder.UnquarantineServerAt(name, inc) }
+		}
+		if err := unquarantine(serverName); err != nil {
+			if errors.Is(err, commitview.ErrServerReplaced) {
+				s.logger.Info("Scanner approval not applied: the server was removed or replaced since it was reviewed",
+					zap.String("server", serverName), zap.Int64("incarnation", inc))
+				return &commitview.ServerReplacedError{Name: serverName}
+			}
 			// Report the error to the caller but keep the baseline we just
 			// saved — the caller can retry via the normal unquarantine path.
 			s.logger.Error("Failed to unquarantine server after approval",
@@ -1974,12 +2271,25 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 // commit section (validate, baseline marker, integrity baseline + blocks,
 // promotion of the pending tools present, storage/config unquarantine), then
 // the block audit events and the unlocked finish.
-func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error) error {
+func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error, bound bool, inc int64) error {
 	blockNames := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		blockNames = append(blockNames, block.ToolName)
 	}
-	if _, err := approver.CommitServerApproval(serverName, blockNames, expected, approvedBy, save); err != nil {
+	var commitErr error
+	if ic, ok := approver.(IncarnationServerApprovalCommitter); ok && bound {
+		// Spec 116 FR-014 + Spec 117 FR-011: the incarnation is checked
+		// first, under the approval lock, then the fingerprints.
+		_, commitErr = ic.CommitServerApprovalAt(serverName, inc, blockNames, expected, approvedBy, save)
+	} else {
+		_, commitErr = approver.CommitServerApproval(serverName, blockNames, expected, approvedBy, save)
+	}
+	if err := commitErr; err != nil {
+		if errors.Is(err, commitview.ErrServerReplaced) {
+			s.logger.Info("Scanner approval not applied: the server was removed or replaced since it was reviewed",
+				zap.String("server", serverName), zap.Int64("incarnation", inc))
+			return &commitview.ServerReplacedError{Name: serverName}
+		}
 		var stale *toolreview.StaleToolReviewError
 		if errors.As(err, &stale) {
 			return stale
@@ -2002,6 +2312,24 @@ func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverN
 		zap.Bool("review_bound", expected != nil),
 	)
 	return nil
+}
+
+// reportIsForIncarnation reports whether an aggregated report describes the
+// server incarnation inc: its job carries inc, or carries none (a job saved
+// before Spec 116 PR2, which can only belong to the current server because a
+// removal purges every job of the name). A zero-incarnation job cannot be
+// written AFTER a commit (review round 1): StartScan refuses a server the
+// committed view does not know, and storage refuses an unbound job or report
+// once a config commit exists, so a remove/re-add gap cannot mint one.
+func (s *Service) reportIsForIncarnation(agg *AggregatedReport, inc int64) bool {
+	if agg == nil || agg.JobID == "" {
+		return true
+	}
+	job, err := s.storage.GetScanJob(agg.JobID)
+	if err != nil || job == nil {
+		return true
+	}
+	return job.Incarnation == 0 || job.Incarnation == inc
 }
 
 // RejectServer rejects a server, cleaning up all artifacts
@@ -2210,9 +2538,13 @@ type IntegrityViolation struct {
 // Returns nil if no scans have been run for this server.
 // Considers both Pass 1 and Pass 2 results when computing status.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+	// The entry must belong to the server's current incarnation: a removed
+	// server's entry is dropped by the purge observer only after the commit,
+	// and a same-name re-add may already be live (review round 3).
+	inc, _ := s.currentIncarnation(serverName)
 	// Check cache first (avoids expensive BBolt reads for every server)
 	s.summaryCacheMu.RLock()
-	if cached, ok := s.summaryCache[serverName]; ok {
+	if cached, ok := s.summaryCache[serverName]; ok && s.summaryCacheInc[serverName] == inc {
 		s.summaryCacheMu.RUnlock()
 		return cached
 	}
@@ -2220,7 +2552,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// miss. Everything below reads BBolt with no lock held, so this is the
 	// token that lets cacheScanSummary tell "still current" from "a scan
 	// started while I was computing".
-	cacheGen := s.summaryCacheGen[serverName]
+	cacheGen := summaryCacheToken{gen: s.summaryCacheGen[serverName], inc: inc}
 	s.summaryCacheMu.RUnlock()
 
 	// Check for active scan (Pass 1 takes priority in status display)
@@ -2489,8 +2821,17 @@ type FindingCounts struct {
 func (s *Service) invalidateScanSummaryCache(serverName string) {
 	s.summaryCacheMu.Lock()
 	delete(s.summaryCache, serverName)
+	delete(s.summaryCacheInc, serverName)
 	s.summaryCacheGen[serverName]++
 	s.summaryCacheMu.Unlock()
+}
+
+// summaryCacheToken is what GetScanSummary samples on a cache miss: the
+// server's invalidation generation and the incarnation the summary is
+// computed for.
+type summaryCacheToken struct {
+	gen uint64
+	inc int64
 }
 
 // cacheScanSummary stores a computed scan summary in the cache. A nil summary
@@ -2498,20 +2839,22 @@ func (s *Service) invalidateScanSummaryCache(serverName string) {
 // scans" — used by spec 047 to avoid re-scanning the BBolt scan-job bucket on
 // every poll for untouched servers.
 //
-// gen is the generation sampled when the caller missed the cache. If the server
+// tok carries the generation sampled when the caller missed the cache and the
+// incarnation the summary was computed for. If the server
 // was invalidated since (a scan started, progressed or finished while this
 // summary was being computed) the result describes a superseded state, so it is
 // dropped rather than published: a resurrected pre-scan summary would report a
 // stale "clean" verdict for a server that is being scanned right now, and
 // quarantine_security's scan_server/get_scan_report hand that verdict straight
 // to an agent.
-func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, gen uint64) {
+func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, tok summaryCacheToken) {
 	s.summaryCacheMu.Lock()
 	defer s.summaryCacheMu.Unlock()
-	if s.summaryCacheGen[serverName] != gen {
+	if s.summaryCacheGen[serverName] != tok.gen {
 		return
 	}
 	s.summaryCache[serverName] = summary
+	s.summaryCacheInc[serverName] = tok.inc
 }
 
 // waitForConnection polls IsConnected until the server connects or the timeout expires.

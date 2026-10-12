@@ -75,6 +75,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 			if expected := reviewExpectedHashes(state.tools, reachable); expected != nil {
 				body["expected_hashes"] = expected
 			}
+			if state.incarnation > 0 {
+				body["expected_incarnation"] = state.incarnation
+			}
 			if !yes {
 				printReviewReachable(server, reachable)
 				confirmed, err := confirm(fmt.Sprintf("Approve review for server '%s'?", server))
@@ -89,6 +92,9 @@ func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 		// extra names are ignored by the core), {} for an empty review.
 		if expected := reviewExpectedHashes(state.tools, state.tools); expected != nil {
 			body["expected_hashes"] = expected
+		}
+		if state.incarnation > 0 {
+			body["expected_incarnation"] = state.incarnation
 		}
 		// Spec 117 FR-026: the approval records the server's tool baseline,
 		// so nothing it lists later is auto-approved.
@@ -292,6 +298,11 @@ type reviewToolState struct {
 
 type reviewServerStateResult struct {
 	quarantined bool
+	// incarnation is the reviewed server's incarnation (Spec 116 FR-017); 0
+	// when the core predates it. The approval sends it as expected_incarnation
+	// next to expected_hashes: the two refusals (server_replaced,
+	// review_out_of_date) stay distinct.
+	incarnation int64
 	tools       []reviewToolState
 }
 
@@ -449,6 +460,7 @@ func reviewStateFromFile(path, server string) (reviewServerStateResult, error) {
 		Server *struct {
 			Name        string `json:"name"`
 			Quarantined bool   `json:"quarantined"`
+			Incarnation int64  `json:"incarnation"`
 		} `json:"server"`
 		Tools *[]reviewToolState `json:"tools"`
 	}
@@ -458,7 +470,7 @@ func reviewStateFromFile(path, server string) (reviewServerStateResult, error) {
 	if review.Server.Name != server {
 		return reviewServerStateResult{}, newFlagValidationError("--from-review %s is the review of server '%s', not '%s'", path, review.Server.Name, server)
 	}
-	return reviewServerStateResult{quarantined: review.Server.Quarantined, tools: *review.Tools}, nil
+	return reviewServerStateResult{quarantined: review.Server.Quarantined, incarnation: review.Server.Incarnation, tools: *review.Tools}, nil
 }
 
 func reviewServerState(server string) (reviewServerStateResult, error) {
@@ -483,7 +495,8 @@ func reviewServerState(server string) (reviewServerStateResult, error) {
 	var envelope struct {
 		Data struct {
 			Server struct {
-				Quarantined bool `json:"quarantined"`
+				Quarantined bool  `json:"quarantined"`
+				Incarnation int64 `json:"incarnation"`
 			} `json:"server"`
 			Tools []reviewToolState `json:"tools"`
 		} `json:"data"`
@@ -491,7 +504,7 @@ func reviewServerState(server string) (reviewServerStateResult, error) {
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return reviewServerStateResult{}, err
 	}
-	return reviewServerStateResult{quarantined: envelope.Data.Server.Quarantined, tools: envelope.Data.Tools}, nil
+	return reviewServerStateResult{quarantined: envelope.Data.Server.Quarantined, incarnation: envelope.Data.Server.Incarnation, tools: envelope.Data.Tools}, nil
 }
 
 // reviewApproveSelection resolves which tools a quarantined-server approval

@@ -238,6 +238,8 @@ a prompt-injected agent could otherwise read another upstream's PAT via
         "connected": true,
         "quarantined": false,
         "tool_count": 15,
+        "generation": 42,
+        "incarnation": 17,
         "health": {
           "level": "healthy",
           "admin_state": "enabled",
@@ -412,7 +414,9 @@ Place a server in quarantine to prevent tool execution. No request body required
 
 #### POST /api/v1/servers/{name}/unquarantine
 
-Remove a server from quarantine to allow tool execution. No request body required.
+Remove a server from quarantine to allow tool execution. No request body
+required; an optional `{"expected_incarnation": 17}` binds the call to the
+server you reviewed (see [Removal and incarnation](#removal-and-incarnation)).
 
 #### POST /api/v1/servers/{name}/restart
 
@@ -494,6 +498,73 @@ OAuth errors return structured error responses for better debugging:
 
 Clear OAuth tokens and disconnect a server.
 
+#### Removal and incarnation
+
+Removing a server (`DELETE /api/v1/servers/{id}`, MCP `upstream_servers remove`,
+the Web UI delete, or a config edit that drops it) is one config commit: the server
+leaves the live config, the file and storage together, and **everything stored
+under its name is deleted in the same storage transaction** — tool and prompt
+approvals, OAuth tokens and DCR client registration (exact key match, so
+removing `foo` never touches `foo_bar`), scan reports and jobs, the integrity
+baseline, tool-call history and identities, and tool hashes — together with its
+search-index entries, refresh schedule and cached scan verdict. A server added
+again under the same name inherits none of those records: no approval, no
+stored OAuth token, no scan result. Admission policy still applies to it as to
+any new server. Under the default manual trust it starts quarantined with
+nothing approved; with `trust_mode: "auto"` or an explicit
+`"quarantined": false` it is admitted per that setting, and its tool discovery
+can record a fresh approved baseline. Only the inherited records are purged. Activity log removal records carry the per-bucket counts in
+`metadata.purged`.
+
+Known limitation: OAuth credential writes are not yet bound to the server's
+incarnation. A token save or DCR registration that the removed server's
+connection had already started can still land after the removal and be found
+by a same-name server added right after it. Signing out (`POST
+/api/v1/servers/{id}/logout`) clears it. Binding OAuth writes to the
+incarnation is planned as a follow-up (Spec 116 PR2b).
+
+Every server payload (`GET /api/v1/servers`, the single-server routes and the
+review payload) carries two committed identifiers:
+
+- `generation` (int64) changes whenever the server's configuration changes.
+- `incarnation` (int64) changes only when the name is removed and created
+  again; ordinary edits keep it.
+
+The displayed configuration and these identifiers always come from the same
+committed state, so a payload never shows one server's command or URL with
+another server's `incarnation`. The tool listings carry the identity of the
+server their rows were read for: `GET /api/v1/servers/{id}/tools` and
+`GET /api/v1/servers/{id}/tools/export` add `incarnation` at the top level,
+and the tool rows of `GET /api/v1/servers/{id}/tools` and `GET /api/v1/tools`
+add `server_incarnation` (export rows carry none: they all belong to the one
+exported server). Echo the value of the rows you acted on as
+`expected_incarnation`. A server that was removed and not yet re-added is not
+listed: `GET /api/v1/servers` and `GET /api/v1/tools` omit it and its
+`/tools` answers 404. If the server is removed or replaced while a listing
+reads its rows, the listing reads them again; if it keeps changing,
+`/tools` and `/tools/export` answer `409 server_replaced` and
+`GET /api/v1/tools` lists it under `failed_servers`.
+
+The approval writes — `tools/approve`, `tools/block`, `tools/{tool}/enabled`,
+`tools/enable_all`, `tools/disable_all`, `unquarantine` and
+`security/approve` — accept an optional `"expected_incarnation"`: the
+`incarnation` of the server the decision was made on. If the server was
+removed (and possibly re-added) since, nothing is written and the call answers:
+
+```http
+HTTP/1.1 409 Conflict
+
+{"success": false, "error": "server_replaced: server 'github' was removed or replaced since it was reviewed"}
+```
+
+Without the field the call is bound to the incarnation current when it
+arrives, so a removal that lands while the call is in flight still refuses it.
+A call for a server that is not configured answers `404`. An unrelated edit of
+the server (for example `disabled_tools`) never refuses an approval. A security
+scan (`POST /api/v1/servers/{id}/scan`) of a server that is not configured
+answers `404` as well, so a scan started while a name is being removed and
+re-added never leaves evidence for the next server of that name.
+
 ### Tool Quarantine
 
 #### POST /api/v1/servers/{name}/tools/approve
@@ -519,12 +590,18 @@ client showed (see [Review-bound approvals](#review-bound-approvals)):
 ```json
 {
   "tools": ["create_issue"],
-  "expected_hashes": {"create_issue": "rv2-3f1c..."}
+  "expected_hashes": {"create_issue": "rv2-3f1c..."},
+  "expected_incarnation": 17
 }
 ```
 With `tools`, every requested tool that has a record must still match its
 fingerprint; with `approve_all`, every pending and changed tool must. A
 mismatch answers `409 review_out_of_date` and approves nothing.
+Either form also takes an optional `"expected_incarnation"`
+([Removal and incarnation](#removal-and-incarnation)). The two bindings are
+independent and may be sent together: a server removed and re-added since the
+review answers `409 server_replaced`, changed definitions answer
+`409 review_out_of_date`, and neither writes anything.
 
 **Response:**
 ```json
@@ -1006,6 +1083,7 @@ The review payload of one server: a summary of the server (secrets in the URL, h
   "success": true,
   "data": {
     "server": {"name": "filesystem", "transport": "stdio", "quarantined": true, "trust_mode": "manual",
+               "generation": 42, "incarnation": 17,
                "scan": {"verdict": "clean", "risk_score": 0, "coverage": "current", "tools_scanned": 2},
                "definitions_captured": true},
     "tools": [
@@ -1029,12 +1107,13 @@ The review payload of one server: a summary of the server (secrets in the URL, h
 - `definitions_captured: false` returns `tools: []`; `POST /api/v1/servers/{id}/discover-tools` captures the definitions without indexing them. After a baseline scan has listed a still-quarantined server's tools, MCPProxy runs the same capture itself.
 - `current_hash` is the tool's **review fingerprint** (`rv2-` + 64 hex): an opaque value over the server, the tool, its definition (description, input and output schema) and its four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Send it back in `expected_hashes` to bind an approval to what you showed. It is not the storage hash: the `current_hash` of `GET /api/v1/servers/{id}/tools/{tool}/diff` is a different value. Compare it only with a later review.
 - Descriptions are returned verbatim and must be rendered as inert text.
+- `generation` and `incarnation` identify the reviewed server; send `incarnation` back as `expected_incarnation` with the decision ([Removal and incarnation](#removal-and-incarnation)).
 
 The review decisions use these routes (all existing):
 
 | Decision | Route |
 |---|---|
-| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...], "expected_hashes": {...}}`; the `block` tools are blocked in the same locked step that records the integrity baseline, promotes the reviewed pending tools and clears the quarantine |
+| Approve server | `POST /api/v1/servers/{id}/security/approve` with an optional `{"force": true, "block": ["tool", ...], "expected_hashes": {...}, "expected_incarnation": 17}`; the `block` tools are blocked in the same locked step that records the integrity baseline, promotes the reviewed pending tools and clears the quarantine. A remove and re-add since the review answers `409 server_replaced` (the replacement stays quarantined); changed definitions answer `409 review_out_of_date` |
 | Reject server | `POST /api/v1/servers/{id}/security/reject` |
 | Approve tools | `POST /api/v1/servers/{id}/tools/approve` |
 | Reject (block) tools | `POST /api/v1/servers/{id}/tools/block` |

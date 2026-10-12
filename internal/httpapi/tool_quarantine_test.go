@@ -51,6 +51,19 @@ type mockToolQuarantineController struct {
 	reviewedTools    []string
 	reviewedAll      bool
 	reviewedErr      error
+	reviewedInc      int64
+}
+
+// The incarnation-carrying forms (Spec 116 x Spec 117 PR-2) record the
+// incarnation and delegate to the plain reviewed forms.
+func (m *mockToolQuarantineController) ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveToolsReviewed(serverName, toolNames, expected, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveAllToolsReviewed(serverName, expected, approvedBy)
 }
 
 func (m *mockToolQuarantineController) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {

@@ -692,21 +692,44 @@ func TestPreflightWait_PollEvaluationsAreBoundedByTheWaitDeadline(t *testing.T) 
 	srv := newPreflightServer(t, ctrl)
 	srv.preflightPollOverride = 5 * time.Millisecond
 
-	const waitMS = 60
-	start := time.Now()
+	// Capture the wait start the server itself used, not the test's wall
+	// clock: the server starts its budget only after the first evaluation, so a
+	// test-side start drifts by however long a loaded runner takes to get there.
+	var (
+		startMu   sync.Mutex
+		waitStart time.Time
+	)
+	srv.preflightNowOverride = func() time.Time {
+		now := time.Now()
+		startMu.Lock()
+		defer startMu.Unlock()
+		if waitStart.IsZero() {
+			waitStart = now
+		}
+		return now
+	}
+
+	// A generous budget keeps the poll count independent of runner load; the
+	// bound below is exact (no slack), so a larger budget does not loosen it.
+	const waitMS = 500
 	w := doPreflight(t, srv, contracts.PreflightRequest{
 		Tools:  []contracts.PreflightToolRef{{ID: "ctl:echo"}},
 		WaitMS: waitMS,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
+	startMu.Lock()
+	started := waitStart
+	startMu.Unlock()
+	require.False(t, started.IsZero(), "the wait loop must have read its clock")
+	budgetEnd := started.Add(waitMS * time.Millisecond)
+
 	deadlines := ctrl.capturedDeadlines()
-	require.Greater(t, len(deadlines), 2, "the loop must have polled")
-	budgetEnd := start.Add(waitMS * time.Millisecond)
+	require.Greater(t, len(deadlines), 1, "the loop must have re-evaluated at least once while waiting")
 	for i, deadline := range deadlines[1:] {
 		require.False(t, deadline.IsZero(), "poll %d ran on an unbounded context", i+1)
-		assert.False(t, deadline.After(budgetEnd.Add(20*time.Millisecond)),
-			"poll %d may not outlive the wait budget", i+1)
+		assert.False(t, deadline.After(budgetEnd),
+			"poll %d may not outlive the wait budget (deadline %s, budget end %s)", i+1, deadline, budgetEnd)
 	}
 }
 

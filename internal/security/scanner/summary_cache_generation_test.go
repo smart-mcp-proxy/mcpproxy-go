@@ -33,7 +33,7 @@ func TestCacheScanSummary_DropsWriteInvalidatedMidComputation(t *testing.T) {
 
 	// The in-flight reader now tries to publish its pre-scan summary.
 	stale := &ScanSummary{Status: "clean"}
-	svc.cacheScanSummary(server, stale, gen)
+	svc.cacheScanSummary(server, stale, summaryCacheToken{gen: gen})
 
 	svc.summaryCacheMu.RLock()
 	cached, ok := svc.summaryCache[server]
@@ -55,7 +55,7 @@ func TestCacheScanSummary_StoresWhenGenerationUnchanged(t *testing.T) {
 	svc.summaryCacheMu.RUnlock()
 
 	summary := &ScanSummary{Status: "clean"}
-	svc.cacheScanSummary(server, summary, gen)
+	svc.cacheScanSummary(server, summary, summaryCacheToken{gen: gen})
 
 	svc.summaryCacheMu.RLock()
 	cached, ok := svc.summaryCache[server]
@@ -69,7 +69,7 @@ func TestCacheScanSummary_StoresWhenGenerationUnchanged(t *testing.T) {
 	svc.summaryCacheMu.RLock()
 	emptyGen := svc.summaryCacheGen[empty]
 	svc.summaryCacheMu.RUnlock()
-	svc.cacheScanSummary(empty, nil, emptyGen)
+	svc.cacheScanSummary(empty, nil, summaryCacheToken{gen: emptyGen})
 
 	svc.summaryCacheMu.RLock()
 	sentinel, sentinelOK := svc.summaryCache[empty]
@@ -100,7 +100,7 @@ func TestInvalidateScanSummaryCache_AdvancesGeneration(t *testing.T) {
 	assert.Equal(t, start+2, end, "each invalidation must advance the generation")
 
 	// A reader holding the pre-invalidation token is still refused.
-	svc.cacheScanSummary(server, &ScanSummary{Status: "clean"}, start)
+	svc.cacheScanSummary(server, &ScanSummary{Status: "clean"}, summaryCacheToken{gen: start})
 	svc.summaryCacheMu.RLock()
 	_, ok := svc.summaryCache[server]
 	svc.summaryCacheMu.RUnlock()

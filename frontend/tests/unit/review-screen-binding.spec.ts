@@ -46,7 +46,7 @@ describe('ReviewScreen review binding (Spec 117 PR-2)', () => {
     ;(api.securityApprove as any).mockResolvedValue({ success: true })
     const w = await mountOn()
     await approveBtn(w).trigger('click'); await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('notes2', false, ['wipe'], { read_note: 'rv1-r', wipe: 'rv1-w' })
+    expect(api.securityApprove).toHaveBeenCalledWith('notes2', false, ['wipe'], undefined, { read_note: 'rv1-r', wipe: 'rv1-w' })
   })
 
   it('a not-captured (blind) review binds to the empty snapshot', async () => {
@@ -56,7 +56,7 @@ describe('ReviewScreen review binding (Spec 117 PR-2)', () => {
     const dlg = w.findAll('dialog')[0].element as HTMLDialogElement; dlg.showModal = vi.fn()
     await approveBtn(w).trigger('click')
     await w.findAll('dialog')[0].get('button.btn-warning').trigger('click'); await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('notes2', false, [], {})
+    expect(api.securityApprove).toHaveBeenCalledWith('notes2', false, [], undefined, {})
   })
 
   it('a review without fingerprints (older core) sends an unbound request', async () => {
@@ -76,7 +76,7 @@ describe('ReviewScreen review binding (Spec 117 PR-2)', () => {
     await approveBtn(w).trigger('click'); await flushPromises()
     expect(force.showModal).toHaveBeenCalled()
     await w.findAll('dialog')[1].get('button.btn-error').trigger('click'); await flushPromises()
-    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'notes2', true, [], { read_note: 'rv1-r' })
+    expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'notes2', true, [], undefined, { read_note: 'rv1-r' })
   })
 
   it('a 409 out of date reloads the review, shows the notice and never opens the force dialog', async () => {
@@ -97,7 +97,7 @@ describe('ReviewScreen review binding (Spec 117 PR-2)', () => {
     // The next approval binds to the reloaded review.
     ;(api.securityApprove as any).mockResolvedValue({ success: true })
     await approveBtn(w).trigger('click'); await flushPromises()
-    expect(api.securityApprove).toHaveBeenLastCalledWith('notes2', false, ['read_note'], { read_note: 'rv1-r2', write_note: 'rv1-w' })
+    expect(api.securityApprove).toHaveBeenLastCalledWith('notes2', false, ['read_note'], undefined, { read_note: 'rv1-r2', write_note: 'rv1-w' })
   })
 
   it('a per-tool approve sends that tool\'s fingerprint and reloads with the notice on 409', async () => {
@@ -107,14 +107,37 @@ describe('ReviewScreen review binding (Spec 117 PR-2)', () => {
     const w = await mountOn()
     const approveButtons = w.findAll('button').filter((b: any) => b.text() === 'Approve')
     await approveButtons[0].trigger('click'); await flushPromises()
-    expect(api.approveTools).toHaveBeenCalledWith('notes2', ['t'], { t: 'rv1-t' })
+    expect(api.approveTools).toHaveBeenCalledWith('notes2', ['t'], undefined, { t: 'rv1-t' })
     await approveButtons[1].trigger('click'); await flushPromises()
-    expect(api.approveTools).toHaveBeenLastCalledWith('notes2', ['u'], {})
+    expect(api.approveTools).toHaveBeenLastCalledWith('notes2', ['u'], undefined, {})
 
     ;(api.approveTools as any).mockResolvedValue({ success: false, error: STALE })
     const loads = (api.getServerReview as any).mock.calls.length
     await w.findAll('button').filter((b: any) => b.text() === 'Approve')[0].trigger('click'); await flushPromises()
     expect((api.getServerReview as any).mock.calls.length).toBe(loads + 1)
     expect(w.get('[data-test="review-stale-notice"]').text()).toContain('out of date')
+  })
+  // Spec 116 x Spec 117 PR-2: the two bindings coexist and stay distinct.
+  it('sends BOTH expected_incarnation and the hashes on a server approval and a per-tool approve', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review([tool('read_note', 'rv1-r')], { incarnation: 7 }))
+    ;(api.securityApprove as any).mockResolvedValue({ success: true })
+    let w = await mountOn()
+    await approveBtn(w).trigger('click'); await flushPromises()
+    expect(api.securityApprove).toHaveBeenCalledWith('notes2', false, [], 7, { read_note: 'rv1-r' })
+
+    ;(api.getServerReview as any).mockResolvedValue(review([tool('t', 'rv1-t', { approval_status: 'changed' })], { quarantined: false, incarnation: 7 }))
+    ;(api.approveTools as any).mockResolvedValue({ success: true })
+    w = await mountOn()
+    await w.findAll('button').filter((b: any) => b.text() === 'Approve')[0].trigger('click'); await flushPromises()
+    expect(api.approveTools).toHaveBeenLastCalledWith('notes2', ['t'], 7, { t: 'rv1-t' })
+  })
+
+  it('shows a server_replaced refusal beside the tools, not as the stale-review notice', async () => {
+    ;(api.getServerReview as any).mockResolvedValue(review([tool('t', 'rv1-t', { approval_status: 'changed' })], { quarantined: false, incarnation: 7 }))
+    ;(api.approveTools as any).mockResolvedValue({ success: false, error: "server_replaced: server 'notes2' was removed or replaced since it was reviewed" })
+    const w = await mountOn()
+    await w.findAll('button').filter((b: any) => b.text() === 'Approve')[0].trigger('click'); await flushPromises()
+    expect(w.get('[data-test="review-tool-notice"]').text()).toContain('server_replaced')
+    expect(w.find('[data-test="review-stale-notice"]').exists()).toBe(false)
   })
 })
