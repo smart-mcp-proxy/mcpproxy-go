@@ -213,3 +213,41 @@ func TestConnect_ReconnectTeardownSupersedesADialingAttempt(t *testing.T) {
 	_, err = mc.ListTools(ctx)
 	require.NoError(t, err, "the client must be usable, not Ready over a closed transport")
 }
+
+// TestConnect_AttemptAdmittedAfterReconnectTeardownOwnsTheClient covers a
+// Connect from another caller (ConnectAll, the supervisor) admitted after the
+// reconnect helper's teardown and before its replacement Connect. The
+// teardown is one mc.mu section, so that attempt dials a fresh transport and
+// its Ready is real: whichever attempt wins, the client ends up usable, never
+// Ready over the transport the teardown closed.
+func TestConnect_AttemptAdmittedAfterReconnectTeardownOwnsTheClient(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
+	ts := servertest.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(ts.Close)
+
+	cfg := &config.ServerConfig{Name: "race-admitted", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
+	mc, err := NewClient("race-admitted", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mc.Disconnect() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, mc.Connect(ctx))
+	mc.StateManager.SetError(errors.New("simulated health-check failure"))
+
+	var otherErr error
+	afterTeardown := func() { otherErr = mc.Connect(ctx) }
+	mc.reconnectAfterTeardown.Store(&afterTeardown)
+	t.Cleanup(func() { mc.reconnectAfterTeardown.Store(nil) })
+
+	helperErr := mc.TryReconnectSync(ctx)
+	require.NoError(t, otherErr, "the attempt admitted after the teardown dials a fresh transport")
+	if helperErr != nil {
+		require.ErrorIs(t, helperErr, ErrConnectAlreadyActive)
+	}
+	require.True(t, mc.IsConnected())
+	_, err = mc.ListTools(ctx)
+	require.NoError(t, err, "the client must be usable, not Ready over the closed transport")
+}
