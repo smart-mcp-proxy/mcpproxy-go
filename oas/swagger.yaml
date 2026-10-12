@@ -4635,7 +4635,9 @@ components:
             ExpectedHashes binds the approval to the reviewed definitions (Spec
             117 PR-2, #1566): tool name -> the review's current_hash. Absent or
             null is an unbound (legacy) request; {} is bound.
-          type: object
+          type:
+          - object
+          - "null"
         tools:
           items:
             type: string
@@ -4776,7 +4778,9 @@ components:
             ExpectedHashes binds the approval to the reviewed definitions (Spec
             117 PR-2, #1566): tool name -> the review's current_hash. Absent or
             null is an unbound (legacy) request; {} binds to the empty snapshot.
-          type: object
+          type:
+          - object
+          - "null"
         force:
           type: boolean
       type: object

@@ -44,6 +44,8 @@ Request:
 | `{}` | bound to the empty snapshot: any reachable record fails the approval |
 | `{name: fp, …}` | bound: the reachable set (pending + enabled approved − block) must equal-match |
 
+OpenAPI: both request schemas declare `expected_hashes` as `type: [object, "null"]` with string values, so a schema-validating client accepts an explicit `null` and rejects a string or an array. swag cannot emit a type union, so the field is tagged `extensions:"x-nullable"` and `make swagger` rewrites the marker with `cmd/oas-nullable` (Sol r3).
+
 Order of checks:
 1. `requireSecurity`.
 2. Body decode → 400.

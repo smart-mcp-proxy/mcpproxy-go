@@ -32,8 +32,9 @@ func TestOAS_UpdateFailureDocumentsTheClosedStageEnum(t *testing.T) {
 		Components struct {
 			Schemas map[string]struct {
 				Properties map[string]struct {
-					Type string   `yaml:"type"`
-					Enum []string `yaml:"enum"`
+					// OAS 3.1 allows a type union (e.g. [object, "null"]).
+					Type interface{} `yaml:"type"`
+					Enum []string    `yaml:"enum"`
 				} `yaml:"properties"`
 			} `yaml:"schemas"`
 		} `yaml:"components"`

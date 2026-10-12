@@ -338,7 +338,7 @@ type securityApproveRequest struct {
 	// ExpectedHashes binds the approval to the reviewed definitions (Spec
 	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
 	// null is an unbound (legacy) request; {} binds to the empty snapshot.
-	ExpectedHashes map[string]string `json:"expected_hashes,omitempty"`
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty" extensions:"x-nullable"`
 }
 
 // reviewedSecurityApprover is the review-bound server approval of the
