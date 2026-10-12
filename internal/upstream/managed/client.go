@@ -81,6 +81,24 @@ type Client struct {
 	// reading its call's result, instead of sleeping. Nil in production.
 	listToolsObserver         atomic.Pointer[func(ListToolsEvent)]
 	listToolsBeforeWaiterRead atomic.Pointer[func(seq uint64)]
+	// connectAfterDial is a test seam run by Connect after the transport
+	// connected and before Connect re-acquires mc.mu, the window in which a
+	// concurrent Disconnect can land. Nil in production.
+	connectAfterDial atomic.Pointer[func()]
+
+	// connectSeq identifies the current connect attempt. Guarded by mu. Every
+	// Connect takes a new value when it starts and every Disconnect advances
+	// it, so a Connect that re-acquires mu after its unlocked dial and finds
+	// a different value knows a Disconnect, or a newer attempt, superseded it
+	// and must not publish its result.
+	connectSeq uint64
+	// reconnectAfterTeardown is a test seam run by tryReconnect and
+	// TryReconnectSync after they tore the connection down and before their
+	// replacement Connect starts. Nil in production.
+	reconnectAfterTeardown atomic.Pointer[func()]
+	// reconnectMidTeardown is a test seam run inside teardownForReconnect
+	// between the transport close and the state reset. Nil in production.
+	reconnectMidTeardown atomic.Pointer[func()]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -446,6 +464,12 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// ErrConnectAborted is returned by Connect when a Disconnect, or a newer
+// connect attempt, ran while the transport was being established. The dial's
+// result (success or failure) is discarded; the client keeps the state the
+// superseding operation left.
+var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnect or a newer attempt")
+
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
@@ -502,6 +526,8 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	// Transition to connecting state
+	mc.connectSeq++
+	attempt := mc.connectSeq
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
 	// Release lock BEFORE the slow coreClient.Connect() call
@@ -524,10 +550,38 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Invoking core client Connect for managed client",
 		zap.String("server", serverName))
 	connectErr := mc.coreClient.Connect(connectCtx)
+	if hook := mc.connectAfterDial.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Phase 4: Re-acquire lock to update state based on result
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// A Disconnect, or a newer attempt, that ran while this attempt was
+	// dialing (mc.mu is not held in phase 3) owns the client's state now.
+	// Publishing this attempt's result would undo it: reporting Ready over
+	// the transport the Disconnect closed (the stuck re-enable after Spec 116
+	// PR1: every call fails with "client not connected", and since the client
+	// looks connected nothing reconnects it), or overwriting the reset state
+	// with Error/PendingAuth for a dial the Disconnect cancelled.
+	if mc.connectSeq != attempt {
+		// Only Disconnects ran since (a newer attempt would have left
+		// Connecting, Ready or a failure state): close what this dial opened,
+		// because a Disconnect that landed before connectCancel was
+		// registered could not abort it. A newer attempt shares the core
+		// client, so its transport is left alone.
+		if connectErr == nil && mc.coreClient != nil && mc.StateManager.GetState() == types.StateDisconnected {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.logger.Info("Connect superseded by a concurrent disconnect or a newer attempt; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		if connectErr != nil {
+			return fmt.Errorf("%w: %v", ErrConnectAborted, connectErr)
+		}
+		return ErrConnectAborted
+	}
 
 	if connectErr != nil {
 		// A rate-limited upstream (429, or 503 with a hint) told us when to come
@@ -673,6 +727,9 @@ func (mc *Client) Disconnect() error {
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.GetConfig().Name))
+
+	// Supersede any connect attempt still dialing (see connectSeq).
+	mc.connectSeq++
 
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
@@ -1665,6 +1722,32 @@ func (mc *Client) cancelInFlightListTools() {
 		zap.String("server", mc.GetConfig().Name))
 }
 
+// teardownForReconnect closes the transport and resets the state for the
+// reconnect helpers (tryReconnect, TryReconnectSync), which then start their
+// own Connect. The sequence bump, the transport close and the reset form one
+// mc.mu section, as in Disconnect, so Connect admission (phase 1, under mc.mu)
+// is ordered against the whole teardown: an attempt admitted before it is
+// superseded (see connectSeq) and discards its result instead of publishing
+// Ready over the closed transport; an attempt admitted after it dials a fresh
+// transport. The caller must not hold mc.mu.
+func (mc *Client) teardownForReconnect(reset func()) error {
+	mc.cancelInFlightConnect()
+	mc.cancelInFlightListTools()
+
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.connectSeq++
+	var err error
+	if mc.coreClient != nil {
+		err = mc.coreClient.Disconnect()
+	}
+	if hook := mc.reconnectMidTeardown.Load(); hook != nil {
+		(*hook)()
+	}
+	reset()
+	return err
+}
+
 // cancelInFlightConnect cancels any in-flight Connect() operation.
 // This is called from Disconnect() BEFORE acquiring mc.mu, so Disconnect()
 // doesn't block on a Connect() that holds mc.mu during slow OAuth flows.
@@ -2209,18 +2292,17 @@ func (mc *Client) tryReconnect() {
 		return
 	}
 
-	// First, disconnect the current client to clean up any broken connections
-	// Cancel any in-flight connect/listTools before attempting reconnection
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// First, disconnect the current client to clean up any broken connections,
+	// cancelling any in-flight connect/listTools, and transition to
+	// disconnected for reconnect, preserving retryCount for backoff.
+	if err := mc.teardownForReconnect(mc.StateManager.ResetForReconnect); err != nil {
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 	}
-
-	// Transition to disconnected for reconnect, preserving retryCount for backoff
-	mc.StateManager.ResetForReconnect()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
@@ -2329,17 +2411,16 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 		return fmt.Errorf("reconnect deferred: a tool call is still in flight")
 	}
 
-	// Disconnect stale state first
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// Disconnect stale state first and reset state to disconnected (one
+	// mc.mu section, see teardownForReconnect).
+	if err := mc.teardownForReconnect(mc.StateManager.Reset); err != nil {
 		mc.logger.Warn("TryReconnectSync: disconnect during reconnect returned error",
 			zap.String("server", serverName),
 			zap.Error(err))
 	}
-
-	// Reset state to disconnected
-	mc.StateManager.Reset()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt synchronous connect with the provided context
 	if err := mc.Connect(ctx); err != nil {
