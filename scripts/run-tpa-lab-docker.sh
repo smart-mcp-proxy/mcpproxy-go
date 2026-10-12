@@ -25,6 +25,13 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # TPA_LAB_CONFIG overrides the config for the preflight tests
 # (tests/tpa-attack-lab/scripts_test.go); it is validated like the default.
 CONFIG="${TPA_LAB_CONFIG:-$PROJECT_DIR/tests/tpa-lab-config-docker.json}"
+# Resolve a relative override against the caller's cwd NOW, before any check:
+# the script later cds to the project root, and the file it validated must be
+# the file the daemon runs (Sol r8 P2).
+[[ "$CONFIG" == /* ]] || CONFIG="$PWD/$CONFIG"
+# TPA_LAB_BINARY replaces the mcpproxy binary (tests only, with SKIP_BUILD=1).
+BINARY="${TPA_LAB_BINARY:-$PROJECT_DIR/mcpproxy}"
+LISTEN="127.0.0.1:8081"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
 DATA_DIR="$PROJECT_DIR/test-data-tpa-lab-docker"
 API_KEY="tpa-lab-key"
@@ -36,6 +43,12 @@ log() { echo "[tpa-lab] $*"; }
 
 # shellcheck source=lib/tpa-lab-verdicts.sh
 source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
+
+# Inherited MCPPROXY_DATA / MCPPROXY_LISTEN / MCPPROXY_API_KEY (and every
+# other MCPPROXY_* override) would beat the checked config's data_dir and
+# listen address; drop them before anything runs (Sol r8 P1). The daemon is
+# also started with --data-dir and --listen pinned below.
+lab_scrub_mcpproxy_env
 
 # Every upstream must be Docker-isolated with network_mode none: the
 # malicious lab server never runs bare or with network access (Sol r5 P2).
@@ -67,7 +80,7 @@ if [[ "$cfg_data_dir" != "$DATA_DIR" ]]; then
 fi
 # Test hook: stop after the preflight checks, before building or starting
 # anything (tests/tpa-attack-lab/scripts_test.go).
-[[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok (cwd=$PWD data_dir=$cfg_data_dir)"; exit 0; }
+[[ "${TPA_LAB_PREFLIGHT_ONLY:-0}" == "1" ]] && { log "preflight ok (cwd=$PWD data_dir=$cfg_data_dir config=$CONFIG)"; exit 0; }
 
 mkdir -p "$DATA_DIR"
 export MCPPROXY_TRAY_ENDPOINT="unix://$DATA_DIR/mcpproxy.sock"
@@ -87,7 +100,7 @@ if curl -sf -o /dev/null -H "X-API-Key: $API_KEY" "$BASE_URL/api/v1/servers"; th
 fi
 
 log "starting mcpproxy (log: $LOG_DIR/mcpproxy.log)"
-"$PROJECT_DIR/mcpproxy" serve --config "$CONFIG" --log-level=info >"$LOG_DIR/mcpproxy.log" 2>&1 &
+"$BINARY" serve --config "$CONFIG" --data-dir "$DATA_DIR" --listen "$LISTEN" --log-level=info >"$LOG_DIR/mcpproxy.log" 2>&1 &
 DAEMON_PID=$!
 
 cleanup() {
@@ -152,7 +165,7 @@ done
 log "running TPA scan on tpa-lab-attacker (expect verdict: dangerous)"
 scan_ok=0
 for attempt in 1 2 3; do
-  if "$PROJECT_DIR/mcpproxy" security scan tpa-lab-attacker --config "$CONFIG" 2>&1 | tee "$LOG_DIR/scan.txt"; then
+  if "$BINARY" security scan tpa-lab-attacker --config "$CONFIG" 2>&1 | tee "$LOG_DIR/scan.txt"; then
     scan_ok=1
     break
   fi
@@ -162,11 +175,11 @@ done
 [[ "$scan_ok" == "1" ]] || { echo "ERROR: scan failed after retries — daemon log: $LOG_DIR/mcpproxy.log" >&2; exit 1; }
 
 log "scan report for tpa-lab-attacker"
-"$PROJECT_DIR/mcpproxy" security report tpa-lab-attacker --config "$CONFIG"
+"$BINARY" security report tpa-lab-attacker --config "$CONFIG"
 
 # A completed scan is not a passing baseline: the full attack catalog must
 # scan dangerous, and the verdict must come from THIS scan's job (Sol r7 P2).
-"$PROJECT_DIR/mcpproxy" security report tpa-lab-attacker -o json --config "$CONFIG" >"$LOG_DIR/report.json" 2>/dev/null || true
+"$BINARY" security report tpa-lab-attacker -o json --config "$CONFIG" >"$LOG_DIR/report.json" 2>/dev/null || true
 if ! baseline_verdict="$(baseline_scan_verdict_ok "$LOG_DIR/scan.txt" "$LOG_DIR/report.json")"; then
   echo "ERROR: baseline scan verdict is '$baseline_verdict', expected dangerous for job $(scan_job_id "$LOG_DIR/scan.txt") — report: $LOG_DIR/report.json, daemon log: $LOG_DIR/mcpproxy.log" >&2
   exit 1

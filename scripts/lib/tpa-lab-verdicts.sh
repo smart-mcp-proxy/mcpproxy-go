@@ -390,3 +390,22 @@ for s in servers:
 json.dump(cfg, open(path, "w"), indent=2)
 PY
 }
+
+# lab_scrub_mcpproxy_env — unsets every inherited MCPPROXY_* variable and
+# prints the names it removed (one per line, to stderr). mcpproxy applies
+# MCPPROXY_DATA, MCPPROXY_LISTEN, MCPPROXY_API_KEY and friends over the
+# config file (internal/config/loader.go), so an inherited override would
+# move the lab daemon onto the real ~/.mcpproxy database, a non-loopback
+# listener or another API key, bypassing the checked config (Sol r8 P1).
+# Both lab scripts call it before any preflight; variables the scripts need
+# (MCPPROXY_TRAY_ENDPOINT) are set again afterwards.
+lab_scrub_mcpproxy_env() {
+  local v
+  while IFS= read -r v; do
+    if [[ "$v" == MCPPROXY_* ]]; then
+      unset "$v"
+      echo "[tpa-lab] ignoring inherited $v" >&2
+    fi
+  done < <(compgen -e)
+  return 0
+}

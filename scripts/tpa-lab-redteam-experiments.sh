@@ -11,6 +11,8 @@
 # Experiments:
 #   EXP-1 control   — baseline scan of the full attack catalog  → expect dangerous
 #   EXP-2 control   — rug pull via restart (stage 1→2)          → expect changed+blocked
+#                     (2a re-quarantined, 2b after unquarantine, 2c manual
+#                     mode trusted throughout: schema-only stock_quote held)
 #   EXP-3 hole A    — served detector-evasion mutants           → expect NOT dangerous
 #   EXP-4 hole B    — TOCTOU: poisoned discovery, clean scan    → probe
 #   EXP-5 hole C    — annotation-only flip after approval       → probe (hash blindness)
@@ -45,6 +47,12 @@ IMAGE="${IMAGE:-tpa-attack-lab:lab}"
 RUN_ROOT="${TPA_LAB_RUN_ROOT:-$PROJECT_DIR/test-data-tpa-lab-docker}"
 # shellcheck source=lib/tpa-lab-verdicts.sh
 source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
+# Inherited MCPPROXY_DATA / MCPPROXY_LISTEN / MCPPROXY_API_KEY (and every
+# other MCPPROXY_* override) would beat each generated config's data_dir and
+# listen address for the daemon AND the CLI calls; drop them before anything
+# runs (Sol r8 P1). start_daemon also pins --data-dir and --listen.
+lab_scrub_mcpproxy_env
+LISTEN="127.0.0.1:8081"
 ONLY="${ONLY:-}"
 DAEMON_PID=""
 CURRENT_CONFIG=""
@@ -102,8 +110,10 @@ config_failed() {
 start_daemon() {
   local cfg="$1" logf="$2"
   lab_config_require "$cfg" || { echo "refusing to start the daemon without a checked lab config"; return 1; }
-  export MCPPROXY_TRAY_ENDPOINT="unix://$(python3 -c "import json;print(json.load(open('$cfg'))['data_dir'])")/mcpproxy.sock"
-  "$BINARY" serve --config "$cfg" --log-level=info >"$logf" 2>&1 &
+  local ddir
+  ddir="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["data_dir"])' "$cfg")" || return 1
+  export MCPPROXY_TRAY_ENDPOINT="unix://$ddir/mcpproxy.sock"
+  "$BINARY" serve --config "$cfg" --data-dir "$ddir" --listen "$LISTEN" --log-level=info >"$logf" 2>&1 &
   DAEMON_PID=$!
   for i in $(seq 1 60); do
     curl -sf -o /dev/null -H "X-API-Key: $API_KEY" "$API_URL/servers" && break
@@ -366,7 +376,12 @@ if want_only EXP-2; then
   if [[ $baseline_ok != 1 ]]; then
     record "EXP-2a INCONCLUSIVE: stage-1 baseline was not approved"
     record "EXP-2b INCONCLUSIVE: stage-1 baseline was not approved"
+    record "EXP-2c INCONCLUSIVE: stage-1 baseline was not approved"
   else
+  # Keep a pristine copy of the approved baseline for EXP-2c: EXP-2a/2b move
+  # the records to changed, so they cannot show a trusted server's gate
+  # holding a fresh schema-only pull (Sol r8 P2).
+  copy_data_dir "$RUN_DIR/exp2-data" "$RUN_DIR/exp2c-data"
   # Phase 2a: restart with the armed contract while config re-quarantines the
   # server (config templates keep quarantined:true). Discovery is skipped for
   # quarantined servers, so the change gate may never see the new contract.
@@ -414,6 +429,33 @@ if want_only EXP-2; then
       record "EXP-2b HOLE: calendar=$cal (indexed=$cal_idx) stock=$stock (indexed=$stock_idx)" ;;
     *)
       record "EXP-2b INCONCLUSIVE: unquarantine ok=$unq_ok quarantined=$quarantined discovered=$discovered calendar=$cal stock=$stock" ;;
+  esac
+  stop_daemon
+
+  # EXP-2c: the stage-2 pull reaches a manual-mode (default trust_mode)
+  # server that stays TRUSTED throughout — the restart never re-quarantines
+  # it — starting from the approved baseline. Only the trusted server's
+  # discovery gate can hold the schema-only stock_quote change, so a
+  # re-introduced approved→changed fallback (RT-01) shows up here as an
+  # approved or indexed stock_quote (Sol r8 P2).
+  cfg="$(make_config exp2c facade 2 "$RUN_DIR/exp2c-data" "" noquarantine)" || config_failed EXP-2c; CURRENT_CONFIG="$cfg"
+  start_daemon "$cfg" "$RUN_DIR/exp2c.log" || { record "EXP-2c: INCONCLUSIVE (restart)"; exit 1; }
+  q="$(server_quarantined)"
+  stock="$(wait_status_not stock_quote approved 90)"
+  cal="$(wait_status_not calendar_get_events approved 30)"
+  stock_idx="$(tool_indexed stock_quote)"
+  cal_idx="$(tool_indexed calendar_get_events)"
+  proof="$(gate_held_logged "$RUN_DIR/exp2c.log" stock_quote calendar_get_events)"
+  log "EXP-2c (manual mode, trusted throughout, quarantined=$q gate=$proof): stock=$stock (indexed=$stock_idx) calendar=$cal (indexed=$cal_idx)"
+  case "$(held_unquarantined_verdict 1 "$q" "$proof" "$stock" "$stock_idx" "$cal" "$cal_idx")" in
+    HOLDS)
+      pass "EXP-2c schema-only pull held on a trusted manual-mode server (stock=$stock, not discovered)"
+      record "EXP-2c HOLDS: stock=$stock calendar=$cal (manual mode, trusted throughout, gate held them, not indexed)" ;;
+    HOLE)
+      hole "EXP-2c schema-only pull NOT held on a trusted manual-mode server (stock=$stock/$stock_idx calendar=$cal/$cal_idx)"
+      record "EXP-2c HOLE: stock=$stock (indexed=$stock_idx) calendar=$cal (indexed=$cal_idx)" ;;
+    *)
+      record "EXP-2c INCONCLUSIVE: quarantined=$q gate=$proof stock=$stock calendar=$cal" ;;
   esac
   stop_daemon
   fi

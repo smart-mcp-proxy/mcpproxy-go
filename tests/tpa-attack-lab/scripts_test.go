@@ -737,3 +737,152 @@ func TestRunLabDockerValidatesBaselineVerdict(t *testing.T) {
 		t.Fatal("run-tpa-lab-docker.sh must validate the job-bound baseline verdict")
 	}
 }
+
+// inheritedOverrides are MCPPROXY_* variables a caller's shell may carry;
+// mcpproxy applies them over the config file (internal/config/loader.go).
+var inheritedOverrides = []string{
+	"MCPPROXY_DATA=" + filepath.Join(os.TempDir(), "not-the-lab-data-dir"),
+	"MCPPROXY_LISTEN=0.0.0.0:8080",
+	"MCPPROXY_API_KEY=inherited-key",
+}
+
+// recordingStub writes an mcpproxy stand-in that appends its arguments and
+// MCPPROXY_* environment to a log, then exits non-zero (the daemon "exits
+// early", so nothing ever listens).
+func recordingStub(t *testing.T) (stub, record string) {
+	t.Helper()
+	dir := t.TempDir()
+	record = filepath.Join(dir, "invocations.log")
+	stub = filepath.Join(dir, "mcpproxy-stub")
+	script := "#!/bin/sh\n{ echo \"ARGS $*\"; env | grep '^MCPPROXY_' | sed 's/^/ENV /'; } >> '" + record + "'\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return stub, record
+}
+
+func skipIfLabPortBusy(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("lsof"); err == nil {
+		if out, _ := exec.Command("lsof", "-ti", ":8081").Output(); len(strings.TrimSpace(string(out))) > 0 {
+			t.Skip("port 8081 is in use; the script's preflight would act on it")
+		}
+	}
+}
+
+// assertPinnedInvocation checks that the daemon ran with pinned --data-dir
+// and loopback --listen and that no inherited override reached it.
+func assertPinnedInvocation(t *testing.T, record, wantDataDir string) {
+	t.Helper()
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("the stub never ran: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "ARGS serve ") {
+		t.Fatalf("no serve invocation recorded:\n%s", log)
+	}
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.HasPrefix(line, "ARGS serve ") {
+			continue
+		}
+		if !strings.Contains(line, "--data-dir "+wantDataDir) {
+			t.Errorf("serve must pin --data-dir %s: %s", wantDataDir, line)
+		}
+		if !strings.Contains(line, "--listen 127.0.0.1:8081") {
+			t.Errorf("serve must pin a loopback --listen: %s", line)
+		}
+	}
+	for _, kv := range inheritedOverrides {
+		name := strings.SplitN(kv, "=", 2)[0]
+		if strings.Contains(log, "ENV "+name+"=") {
+			t.Errorf("inherited %s reached the daemon:\n%s", name, log)
+		}
+	}
+}
+
+// TestRunLabDockerIgnoresInheritedOverrides (Sol r8 P1): inherited
+// MCPPROXY_DATA / MCPPROXY_LISTEN / MCPPROXY_API_KEY must never reach the
+// lab daemon, which runs with --data-dir and --listen pinned.
+func TestRunLabDockerIgnoresInheritedOverrides(t *testing.T) {
+	verdictsLib(t)
+	skipIfLabPortBusy(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub, record := recordingStub(t)
+	cmd := exec.Command("bash", filepath.Join(project, "scripts", "run-tpa-lab-docker.sh"))
+	cmd.Env = append(append(os.Environ(), inheritedOverrides...),
+		"IMAGE=tpa-attack-lab:lab", "SKIP_BUILD=1", "TPA_LAB_BINARY="+stub)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the stub daemon exits, so the run must fail:\n%s", out)
+	}
+	if !strings.Contains(string(out), "ignoring inherited MCPPROXY_DATA") {
+		t.Errorf("the scrub must be reported:\n%s", out)
+	}
+	assertPinnedInvocation(t, record, filepath.Join(project, "test-data-tpa-lab-docker"))
+}
+
+// TestRedteamSuiteIgnoresInheritedOverrides (Sol r8 P1): the same guarantee
+// for the experiment suite's daemon.
+func TestRedteamSuiteIgnoresInheritedOverrides(t *testing.T) {
+	verdictsLib(t)
+	skipIfLabPortBusy(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "tpa-lab-redteam-experiments.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub, record := recordingStub(t)
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	runDir := filepath.Join(runRoot, "r")
+	cmd := exec.Command("bash", script)
+	cmd.Env = append(append(os.Environ(), inheritedOverrides...),
+		"SKIP_BUILD=1", "ONLY=EXP-1", "TPA_LAB_BINARY="+stub, "TPA_LAB_RUN_ROOT="+runRoot, "RUN_DIR="+runDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the stub daemon exits, so the suite must fail:\n%s", out)
+	}
+	assertPinnedInvocation(t, record, filepath.Join(runDir, "exp1-data"))
+}
+
+// TestRunLabDockerResolvesRelativeConfigBeforeChecks (Sol r8 P2): a relative
+// TPA_LAB_CONFIG is resolved against the caller's cwd before any check, so
+// the file that was validated is the file that runs after the script cds to
+// the project root.
+func TestRunLabDockerResolvesRelativeConfigBeforeChecks(t *testing.T) {
+	verdictsLib(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := filepath.EvalSymlinks(t.TempDir()) // the shell's $PWD is the resolved path
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(project, "tests", "tpa-lab-config-docker.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	// The relative data_dir would resolve into cwd; pin it to the project's.
+	cfg["data_dir"] = filepath.Join(project, "test-data-tpa-lab-docker")
+	out, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(cwd, "lab.json"), out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(project, "scripts", "run-tpa-lab-docker.sh"))
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "IMAGE=tpa-attack-lab:lab", "TPA_LAB_PREFLIGHT_ONLY=1", "TPA_LAB_CONFIG=lab.json")
+	got, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("preflight failed (%v):\n%s", err, got)
+	}
+	if want := "config=" + filepath.Join(cwd, "lab.json") + ")"; !strings.Contains(string(got), want) {
+		t.Fatalf("want %q in preflight output:\n%s", want, got)
+	}
+}
