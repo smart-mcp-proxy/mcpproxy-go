@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -2258,7 +2259,7 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 		// First time we've seen this tool: synthesize the record the
 		// discovery producer would have filed for it under this server's
 		// gate (see the function comment).
-		record = r.newToggleSynthesizedRecord(serverName, toolName, updatedBy)
+		record = r.newToggleSynthesizedRecord(serverName, toolName, updatedBy, inc)
 	default:
 		// Real read error — refuse to write. See comment above for rationale.
 		return false, fmt.Errorf("read tool approval %s:%s: %w", serverName, toolName, err)
@@ -2294,13 +2295,13 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 // a record-less tool (see its function comment): pending under an active
 // tool-level quarantine gate, approved and baselined to the snapshot's current
 // contract under a lifted one. The caller sets Disabled.
-func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy string) *storage.ToolApprovalRecord {
+func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy string, inc int64) *storage.ToolApprovalRecord {
 	record := &storage.ToolApprovalRecord{
 		ServerName: serverName,
 		ToolName:   toolName,
 	}
 	// The snapshot's current contract, when the StateView lists the raw name.
-	if tool := r.snapshotToolMetadata(serverName, toolName); tool != nil {
+	if tool := r.snapshotToolMetadata(serverName, toolName, inc); tool != nil {
 		schemaJSON := tool.ParamsJSON
 		if schemaJSON == "" {
 			schemaJSON = "{}"
@@ -2329,11 +2330,15 @@ func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy str
 	return record
 }
 
-// snapshotToolMetadata returns the StateView's current contract for a raw
-// tool name on a server — the same fields the discovery producer hashes —
-// or nil when the snapshot does not list the exact name. The StateView holds
-// raw names verbatim (Spec 105 FR-009), so only the exact name matches.
-func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.ToolMetadata {
+// viewToolsAt returns the StateView's tools for serverName when the view was
+// reconciled from incarnation inc, and nil otherwise (Spec 116 PR2 review
+// round 8, FR-014/FR-017). The StateView lags the commit: after a remove and
+// same-name re-add it can still hold the removed server's tools under the
+// removed incarnation, and an approval writer bound to the replacement must
+// never persist those definitions as the replacement's records. inc == 0 is
+// an unbound capture (a database no Spec 116 commit has written) and accepts
+// the view as before.
+func (r *Runtime) viewToolsAt(serverName string, inc int64) []stateview.ToolInfo {
 	if r.supervisor == nil {
 		return nil
 	}
@@ -2345,8 +2350,26 @@ func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.Tool
 	if !ok || status == nil {
 		return nil
 	}
-	for i := range status.Tools {
-		info := status.Tools[i]
+	if inc != 0 && status.Incarnation != inc {
+		r.logger.Debug("StateView lags the bound incarnation; not reading its tools for an approval write",
+			zap.String("server", serverName),
+			zap.Int64("view_incarnation", status.Incarnation),
+			zap.Int64("bound_incarnation", inc))
+		return nil
+	}
+	return status.Tools
+}
+
+// snapshotToolMetadata returns the StateView's current contract for a raw
+// tool name on a server — the same fields the discovery producer hashes —
+// or nil when the snapshot does not list the exact name. The StateView holds
+// raw names verbatim (Spec 105 FR-009), so only the exact name matches.
+// inc is the incarnation the writer is bound to: a view reconciled from any
+// other incarnation is not consulted (see viewToolsAt).
+func (r *Runtime) snapshotToolMetadata(serverName, toolName string, inc int64) *config.ToolMetadata {
+	viewTools := r.viewToolsAt(serverName, inc)
+	for i := range viewTools {
+		info := viewTools[i]
 		if info.Name != toolName {
 			continue
 		}
@@ -2450,7 +2473,7 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 		return 0, err
 	}
 
-	toolNames, err := r.collectKnownToolNames(serverName)
+	toolNames, err := r.collectKnownToolNames(serverName, inc)
 	if err != nil {
 		return 0, err
 	}
@@ -2517,7 +2540,13 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 // already exist for the server. Stripping everything before the first colon
 // here would collapse a namespaced tool onto its sibling's key and leave the
 // namespaced tool itself untoggled by disable_all / block_all.
-func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
+//
+// inc is the incarnation the bulk writer is bound to (Spec 116 FR-014): the
+// StateView lags the commit, so after a remove + same-name re-add it can
+// still list the removed server's tools; it is consulted only when it was
+// reconciled from inc (review round 8). The index and the approval records
+// need no such check — the removal commit purged both.
+func (r *Runtime) collectKnownToolNames(serverName string, inc int64) ([]string, error) {
 	seen := make(map[string]struct{})
 	add := func(name string) {
 		if name == "" {
@@ -2526,13 +2555,8 @@ func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 		seen[name] = struct{}{}
 	}
 
-	if r.supervisor != nil {
-		snapshot := r.supervisor.StateView().Snapshot()
-		if status, ok := snapshot.Servers[serverName]; ok {
-			for _, tool := range status.Tools {
-				add(tool.Name)
-			}
-		}
+	for _, tool := range r.viewToolsAt(serverName, inc) {
+		add(tool.Name)
 	}
 
 	if r.indexManager != nil {

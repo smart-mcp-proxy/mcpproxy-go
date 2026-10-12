@@ -172,6 +172,13 @@ in PR2.
 
 ---
 
+### Review round 8 (Sol) design notes
+
+- Approval writers that read tool definitions from the StateView (the bulk enable/disable inventory `collectKnownToolNames` and the record the toggle synthesizes for a record-less tool, `snapshotToolMetadata`) read it only when the view was reconciled from the incarnation the writer is bound to (`viewToolsAt`; 0 = unbound fixture database, unchanged). A view lagging a remove + same-name re-add therefore never has the removed server's descriptions, schemas or hashes persisted as the replacement's approval records; the index and approval-record fallbacks need no check because the removal commit purged both (`TestToolToggle_R8_LaggingViewNotPersistedUnderReplacementIncarnation`).
+- The global tool listing applies the #1064 quarantine exclusion to the server whose rows it served: when the settled tool read moved to a replacement incarnation, the replacement's `GetAllServers` row is re-read and a quarantined replacement contributes no rows or statistics; a row that moved again is reported in `failed_servers` (`TestGlobalTools_R8_*`).
+- Web UI: `getToolApprovals` joins the inventory's hold evidence onto the export's records only when both envelopes name the same incarnation; otherwise the records are returned without evidence, as for a failed enrichment fetch.
+- Test oracle: `purgetest.Counts` finds `server_<id>_tool_calls` history buckets independently of surviving identity records (a bucket holding a record of the server counts), so a purge that drops an identity but keeps its history is reported.
+
 ### Review round 7 (Sol) design notes
 
 - Between a removal and a same-name re-add the committed snapshot has no such server, so there is no incarnation a decision could bind to. A snapshot a commit published (it carries server generations) is authoritative for absence: `Runtime.GetServerTools` answers "server not found" (REST 404) for a server it does not configure, and `GetAllServers` skips such a server's lagging StateView row, so neither the per-server nor the global listing serves the removed server's rows unbound (`TestServerTools_R7_RemovedServerNotServedFromLaggingView`). A snapshot without generations (fixture or pre-boot) is not authoritative and keeps the old behavior.

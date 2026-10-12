@@ -4200,6 +4200,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 		// reported as a failed fetch rather than served under a stale stamp
 		// or none.
 		serverInc := incarnationField(srv)
+		rowInc := serverInc
 		var generic []map[string]interface{}
 		var terr error
 		if _, reads := s.controller.(serverIncarnationReader); reads {
@@ -4210,6 +4211,24 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			})
 		} else {
 			generic, terr = getTools(name)
+		}
+		// Review round 8 (#1064 + FR-017): the quarantine exclusion above
+		// came from the enumeration row, read before the tools. When the
+		// settled read moved to a replacement incarnation, that row
+		// describes the removed server, not the one whose rows were read —
+		// a quarantined replacement would contribute its inspection
+		// definitions under its own valid stamp. Re-read the replacement's
+		// row and apply the exclusion to it.
+		if terr == nil && rowInc != 0 && serverInc != rowInc {
+			current, found, lerr := s.serverRowAt(name, serverInc)
+			switch {
+			case lerr != nil || !found:
+				terr = errIncarnationUnsettled
+			default:
+				if quarantined, _ := current["quarantined"].(bool); quarantined {
+					continue
+				}
+			}
 		}
 		if terr != nil {
 			// Spec edge case: a genuine fetch error — still return every tool

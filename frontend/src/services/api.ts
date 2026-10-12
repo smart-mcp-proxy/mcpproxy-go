@@ -539,12 +539,14 @@ class APIService {
   // index is empty. That payload carries no held_* evidence, so the inventory
   // endpoint `/tools` is fetched in parallel purely as ENRICHMENT and joined by
   // tool name. The enrichment call is caught individually and degrades to null —
-  // a failed evidence fetch must never drop a durable approval record.
+  // a failed evidence fetch must never drop a durable approval record. The
+  // enrichment is joined only when both reads name the same server incarnation
+  // (Spec 116 FR-017).
   async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number, incarnation?: number }>> {
     const encoded = encodeURIComponent(serverName)
     const [response, enrichment] = await Promise.all([
       this.request<{ tools: ToolApproval[], count: number, incarnation?: number }>(`/api/v1/servers/${encoded}/tools/export`),
-      this.request<{ tools: HoldEvidenceSource[] }>(`/api/v1/servers/${encoded}/tools`)
+      this.request<{ tools: HoldEvidenceSource[]; incarnation?: number }>(`/api/v1/servers/${encoded}/tools`)
         .catch(() => null),
     ])
 
@@ -559,7 +561,13 @@ class APIService {
           enabled: !disabled,
         }
       })
-      const evidence = enrichment?.success ? enrichment.data?.tools ?? null : null
+      // Spec 116 PR2 review round 8 (FR-017): the two reads are independent,
+      // so a remove + same-name re-add between them pairs the replacement's
+      // records with the removed server's hold verdict and signals. Enrich
+      // only when both envelopes name the same incarnation; otherwise the
+      // records are returned without evidence (the degraded path above).
+      const sameServer = (enrichment?.data?.incarnation ?? null) === (response.data.incarnation ?? null)
+      const evidence = enrichment?.success && sameServer ? enrichment.data?.tools ?? null : null
       response.data.tools = joinHoldEvidence(normalized, evidence)
     }
     return response

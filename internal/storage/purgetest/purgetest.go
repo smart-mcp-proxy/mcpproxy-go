@@ -7,6 +7,7 @@ package purgetest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -85,6 +86,9 @@ func Seed(t *testing.T, mgr *storage.Manager, name string) {
 	}), "tool call")
 }
 
+// errStopScan ends a bucket scan early once a match is found.
+var errStopScan = errors.New("stop scan")
+
 var oauthSuffix = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 func oauthKeyIsFor(key, name string) bool {
@@ -119,11 +123,35 @@ func Counts(t *testing.T, mgr *storage.Manager, name string) map[string]int {
 				ids = append(ids, id.ID)
 			}
 		})
+		// History buckets are hash-keyed (server_<identity id>_tool_calls).
+		// They are found independently of the surviving identity records
+		// (Spec 116 PR2 review round 8): a removal that deleted the identity
+		// but left its history bucket must still be reported. A bucket is
+		// the server's when a surviving identity of name keys it, or when
+		// any record in it names the server.
+		idSet := map[string]bool{}
 		for _, id := range ids {
-			if tx.Bucket([]byte(fmt.Sprintf("server_%s_tool_calls", id))) != nil {
-				out[ToolCalls]++
-			}
+			idSet[fmt.Sprintf("server_%s_tool_calls", id)] = true
 		}
+		_ = tx.ForEach(func(bucketName []byte, b *bbolt.Bucket) error {
+			bn := string(bucketName)
+			if !strings.HasPrefix(bn, "server_") || !strings.HasSuffix(bn, "_tool_calls") {
+				return nil
+			}
+			if idSet[bn] {
+				out[ToolCalls]++
+				return nil
+			}
+			_ = b.ForEach(func(_, v []byte) error {
+				var rec storage.ToolCallRecord
+				if json.Unmarshal(v, &rec) == nil && rec.ServerName == name {
+					out[ToolCalls]++
+					return errStopScan
+				}
+				return nil
+			})
+			return nil
+		})
 		each(storage.ToolApprovalBucket, func(k, _ []byte) {
 			if bytes.HasPrefix(k, prefix) {
 				out[ToolApprovals]++

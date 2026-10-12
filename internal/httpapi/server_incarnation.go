@@ -139,3 +139,24 @@ func (s *Server) readAtSettledIncarnation(name string, read func() error) (int64
 	}
 	return 0, errIncarnationUnsettled
 }
+
+// serverRowAt returns name's GetAllServers row when it carries incarnation
+// inc. found is false when name is absent or its row names another
+// incarnation (the identity moved again). Spec 116 PR2 review round 8: the
+// global tools listing re-reads the row whose quarantine exclusion applies
+// once its tool read settled on a replacement incarnation.
+func (s *Server) serverRowAt(name string, inc int64) (row map[string]interface{}, found bool, err error) {
+	rows, err := s.controller.GetAllServers()
+	if err != nil {
+		return nil, false, err
+	}
+	for _, r := range rows {
+		if n, _ := r["name"].(string); n == name {
+			if incarnationField(r) != inc {
+				return nil, false, nil
+			}
+			return r, true, nil
+		}
+	}
+	return nil, false, nil
+}
