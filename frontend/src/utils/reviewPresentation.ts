@@ -224,7 +224,9 @@ export function formatLaunchCommand(command: string, args: string[] = []): strin
 // fingerprint, i.e. the core predates it; an empty review binds to the empty snapshot {}.
 export function expectedHashes(tools: ReviewTool[], review: ReviewTool[] = tools): Record<string, string> | undefined {
   if (review.length > 0 && !review.some(t => !!t.current_hash)) return undefined
-  const out: Record<string, string> = {}
+  // Null prototype: tool names are upstream-controlled, and a tool named "__proto__" written into
+  // a plain {} hits the inherited setter and silently drops out of the JSON (Sol review r1).
+  const out: Record<string, string> = Object.create(null)
   for (const tool of tools) if (tool.current_hash) out[tool.name] = tool.current_hash
   return out
 }

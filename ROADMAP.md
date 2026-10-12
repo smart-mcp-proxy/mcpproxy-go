@@ -1043,4 +1043,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [113-upstream-resilience](./specs/113-upstream-resilience/) | `drafted` | 0/100 (0%) |
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
 | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `drafted` | 0/123 (0%) |
-| [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 32/49 (65%) |
+| [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 31/49 (63%) |

@@ -170,7 +170,7 @@ Not in scope: Tools.vue, `security approve` CLI, MCP operations, `native/`.
 
 ### Docs, verify, ship
 - [x] T217 [PR-2] docs: `docs/api/rest-api.md` (review field, both approve bodies, 409, compatibility matrix), `docs/cli/review-commands.md`, `docs/features/security-quarantine.md`; CLAUDE.md Recent Changes.
-- [x] T218 [PR-2] Full lanes, both lints, `make build`. Live check **L2** (all 8 steps; step 8 only once #1572 is merged), evidence under `evidence/s117-pr2/`. Playwright review sweep per `docs/development/web-ui-verification.md`.
+- [ ] T218 [PR-2] Full lanes, both lints, `make build`. Live check **L2** (all 8 steps; step 8 only once #1572 is merged), evidence under `docs/qa/0.70.0-ux-2026-10-10/remediation/evidence/117pr2/` (the remediation evidence tree, not `evidence/s117-pr2/`). Playwright review sweep per `docs/development/web-ui-verification.md`. Status (Sol r1): lanes, lints, `make build`, L2 steps 1-7 and the Web Playwright stale/force sweep are done. Step 8 ran live against the fixed core through the merged tray client's own code (`APIClient`, review decoding, `ReviewPresentation.approvalDecision`/`toolApprovalExpected`/`staleReviewMessage`, the calls `ReviewQueueView.approve`/`approveTool` make; `L2-8-tray-fix.txt`): 409 out of date, nothing approved, reload shows the new definition, the reloaded binding approves. **Open:** the step-8 run on the rendered review sheet itself (a dev tray bundle swapped in for the production tray), left to the lead because it quits the operator's running tray and its managed core.
 - [ ] T219 [PR-2] Open the PR (`Closes #1566`; note that #1572 becomes effective) and run an opencode Sol 6.1 review. This is a security PR: escalate to codex Sol only if Sol misses a defect twice.
 
 ---
