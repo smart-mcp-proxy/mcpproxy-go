@@ -234,6 +234,21 @@ func genericInt(v interface{}) (int, bool) {
 	}
 }
 
+// genericInt64 is genericInt for int64 values (generations exceed no int
+// range in practice, but they are int64 end to end).
+func genericInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
 // ConvertGenericServersToTyped converts []map[string]interface{} to []Server
 func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Server {
 	servers := make([]Server, 0, len(genericServers))
@@ -262,6 +277,13 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		}
 		if quarantined, ok := generic["quarantined"].(bool); ok {
 			server.Quarantined = quarantined
+		}
+		// Spec 116 FR-017: committed generation and incarnation.
+		if v, ok := genericInt64(generic["generation"]); ok {
+			server.Generation = v
+		}
+		if v, ok := genericInt64(generic["incarnation"]); ok {
+			server.Incarnation = v
 		}
 		// MCP-2940: tri-state *bool — only set the pointer when the key is
 		// present so an unset flag stays nil (the Web UI distinguishes unset

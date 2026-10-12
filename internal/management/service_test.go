@@ -164,6 +164,28 @@ func TestListServers(t *testing.T) {
 		assert.Empty(t, byName["manual"].SourceRegistryProvenance)
 	})
 
+	// Spec 116 FR-017: the committed generation and incarnation are projected
+	// onto contracts.Server, so GET /api/v1/servers and the SSE embed carry
+	// the identity a client echoes back as expected_incarnation.
+	t.Run("generation and incarnation projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "acme", "name": "acme", "enabled": true, "generation": int64(42), "incarnation": int64(17)},
+			{"id": "legacy", "name": "legacy", "enabled": true},
+		}
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "acme")
+		assert.Equal(t, int64(42), byName["acme"].Generation)
+		assert.Equal(t, int64(17), byName["acme"].Incarnation)
+		assert.Zero(t, byName["legacy"].Incarnation)
+	})
+
 	// MCP-2940: auto_approve_tool_changes must be projected onto contracts.Server
 	// so the Web UI toggle (MCP-2932) can reflect the persisted per-server value.
 	t.Run("auto_approve_tool_changes projected", func(t *testing.T) {

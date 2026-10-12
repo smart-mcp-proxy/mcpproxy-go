@@ -112,7 +112,10 @@ func NewEngine(docker *DockerRunner, registry *Registry, dataDir string, logger 
 
 // ScanRequest describes a scan to execute
 type ScanRequest struct {
-	ServerName     string
+	ServerName string
+	// Incarnation is the scanned server's incarnation when the scan was
+	// requested (Spec 116 FR-014a); the job carries it.
+	Incarnation    int64
 	SourceDir      string            // Path to server source files (for "source" input)
 	ContainerImage string            // Docker image reference (for "container_image" input)
 	DryRun         bool              // If true, don't affect quarantine state
@@ -201,6 +204,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		StartedAt:   time.Now(),
 		DryRun:      req.DryRun,
 		ScanContext: req.ScanContext,
+		Incarnation: req.Incarnation,
 	}
 	for i, rs := range resolved {
 		job.Scanners[i] = rs.plugin.ID

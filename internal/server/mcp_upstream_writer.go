@@ -6,6 +6,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // upstreamWriter is how the MCP `upstream_servers` and `quarantine_security`
@@ -21,7 +22,9 @@ type upstreamWriter interface {
 	// replacement may still be connecting: review round 7) — or 0 when the
 	// writer has none.
 	updateServer(name string, fn func(cur *config.ServerConfig) error) (int64, error)
-	removeServer(name string) error
+	// removeServer removes the server in one commit and returns what the
+	// purge deleted (Spec 116 PR2).
+	removeServer(name string) (storage.PurgeReport, error)
 	quarantineServer(name string) error
 }
 
@@ -75,7 +78,7 @@ func (w commitUpstreamWriter) updateServer(name string, fn func(cur *config.Serv
 	return baseGen, nil
 }
 
-func (w commitUpstreamWriter) removeServer(name string) error {
+func (w commitUpstreamWriter) removeServer(name string) (storage.PurgeReport, error) {
 	return w.s.removeServerFromConfig(name)
 }
 

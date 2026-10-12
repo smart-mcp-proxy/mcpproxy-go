@@ -82,6 +82,13 @@ type Server struct {
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// Generation is the server's committed config generation (Spec 116
+	// FR-017): it changes whenever the server's configuration changes.
+	Generation int64 `json:"generation,omitempty"`
+	// Incarnation changes only when the name is removed and created again
+	// (Spec 116 FR-017). Approval endpoints accept it back as
+	// expected_incarnation and answer 409 server_replaced on a mismatch.
+	Incarnation int64 `json:"incarnation,omitempty"`
 	// TrustMode mirrors config.ServerConfig.TrustMode (spec 086): the per-server
 	// trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
 	// read back the persisted mode; PATCH/POST accept it via AddServerRequest.

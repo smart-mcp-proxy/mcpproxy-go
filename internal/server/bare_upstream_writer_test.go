@@ -55,18 +55,18 @@ func (w bareStorageWriter) updateServer(name string, fn func(cur *config.ServerC
 	return 0, nil
 }
 
-func (w bareStorageWriter) removeServer(name string) error {
+func (w bareStorageWriter) removeServer(name string) (storage.PurgeReport, error) {
 	if _, err := w.find(name); err != nil {
-		return err
+		return storage.PurgeReport{}, err
 	}
 	if err := w.p.storage.RemoveUpstream(name); err != nil {
-		return err
+		return storage.PurgeReport{}, err
 	}
 	w.p.upstreamManager.RemoveServer(name)
 	if w.p.index != nil {
 		_ = w.p.index.DeleteServerTools(name)
 	}
-	return nil
+	return storage.PurgeReport{Server: name}, nil
 }
 
 func (w bareStorageWriter) quarantineServer(name string) error {

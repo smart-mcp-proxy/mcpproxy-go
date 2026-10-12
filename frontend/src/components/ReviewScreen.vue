@@ -133,6 +133,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
@@ -267,7 +268,9 @@ async function approve(force: boolean, block?: string[]) {
   const all = review.value?.tools.map(t => t.name) ?? []
   const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
   lastBlock.value = blocked
-  const res = await api.securityApprove(server, force, blocked)
+  // Bound to the incarnation of the review on screen (Spec 116 FR-017): a
+  // remove and re-add of the name since it rendered answers 409 server_replaced.
+  const res = await api.securityApprove(server, force, blocked, ...incarnationArgs(review.value?.server.incarnation))
   if (!isCurrent(server, visit)) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
@@ -288,8 +291,9 @@ async function rejectServer() {
   approving.value = false
   if (!res.success) error.value = res.error || 'Reject failed'; else await load()
 }
-async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.approveTools(server, [name]); if (isCurrent(server, visit)) await load() }
-async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.blockTools(server, [name]); if (isCurrent(server, visit)) await load() }
+// Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017); a refusal (409 server_replaced) reloads the review and says why beside it.
+async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; const res = await api.approveTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) notice.value = res.error || 'Approval failed' }
+async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) notice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name

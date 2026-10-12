@@ -3324,6 +3324,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
+	// Spec 116 FR-014c: the history write is bound to the incarnation the
+	// call started on, so a call that outlives a removal leaves no history
+	// for the removed server or its replacement.
+	callInc := p.toolCallIncarnation(serverName)
 	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
@@ -3404,7 +3408,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if limitErr, isShed := asShed(err); isShed {
 			shedMsg := shedMessage(limitErr)
 			toolCallRecord.Error = shedMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
 			}
 			p.logger.Info("Tool call shed by concurrency limiter",
@@ -3439,7 +3443,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, false)
 			toolCallRecord.Error = errMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record refused tool call", zap.Error(storeErr))
 			}
 			p.logger.Debug("handleCallToolVariant: refusing dispatch, connection generation changed since the identity was certified",
@@ -3467,7 +3471,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("error_type", "upstream_failure"))
 
 		// Store error tool call
-		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+		if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
 		}
 
@@ -3603,7 +3607,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Store successful tool call in history
-	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+	if err := p.recordToolCallAt(toolCallRecord, callInc); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
 
@@ -3854,6 +3858,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
+	callInc := p.toolCallIncarnation(serverName) // Spec 116 FR-014c
 	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
@@ -3944,7 +3949,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		if limitErr, isShed := asShed(err); isShed {
 			shedMsg := shedMessage(limitErr)
 			toolCallRecord.Error = shedMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
 			}
 			recordShed(ctx, limitErr)
@@ -3971,7 +3976,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("actual_tool", actualToolName))
 
 		// Store error tool call
-		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+		if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
 		}
 
@@ -4075,7 +4080,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Store successful tool call in history
-	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+	if err := p.recordToolCallAt(toolCallRecord, callInc); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
 
@@ -4091,6 +4096,28 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
+}
+
+// toolCallIncarnation returns serverName's committed incarnation when a call
+// starts (0 when unbound: no runtime, or the server is not configured).
+func (p *MCPProxyServer) toolCallIncarnation(serverName string) int64 {
+	if rt := p.promptApprovalRuntime(); rt != nil {
+		if inc, ok := rt.ServerIncarnation(serverName); ok {
+			return inc
+		}
+	}
+	return 0
+}
+
+// recordToolCallAt records a call's history only while its server still has
+// the incarnation the call started on (Spec 116 FR-014c).
+func (p *MCPProxyServer) recordToolCallAt(rec *storage.ToolCallRecord, inc int64) error {
+	written, err := p.storage.RecordToolCallIfIncarnation(rec, inc)
+	if err == nil && !written {
+		p.logger.Debug("Tool call history dropped: the server was removed or replaced during the call",
+			zap.String("server", rec.ServerName), zap.String("tool", rec.ToolName))
+	}
+	return err
 }
 
 // handleQuarantinedToolCall handles tool calls to quarantined servers with security analysis
@@ -6059,7 +6086,8 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 	if w == nil {
 		return mcp.NewToolResultError(errNoUpstreamWriter.Error()), nil
 	}
-	if err := w.removeServer(name); err != nil {
+	purged, err := w.removeServer(name)
+	if err != nil {
 		if errors.Is(err, errUpstreamNotFound) {
 			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 		}
@@ -6069,8 +6097,9 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 	if p.mainServer != nil {
 		p.mainServer.OnUpstreamServerChange()
 
-		// Spec 024: Emit config change activity for server removal
-		p.mainServer.runtime.EmitActivityConfigChange("server_removed", name, "mcp", nil, nil, nil)
+		// Spec 024: Emit config change activity for server removal. Spec 116
+		// PR2: the record carries what the removal purged ({bucket: count}).
+		p.mainServer.runtime.EmitActivityServerRemoved(name, "mcp", purged.Deleted)
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{

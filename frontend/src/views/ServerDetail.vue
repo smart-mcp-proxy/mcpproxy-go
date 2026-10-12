@@ -1598,6 +1598,7 @@ import ReviewScreen from '@/components/ReviewScreen.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { refName } from '@/utils/secretRef'
@@ -2609,7 +2610,7 @@ async function blockTool(toolName: string) {
   if (!server.value) return
   approvalLoading.value = true
   try {
-    const response = await api.blockTools(server.value.name, [toolName])
+    const response = await api.blockTools(server.value.name, [toolName], ...incarnationArgs(server.value.incarnation))
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2644,7 +2645,9 @@ async function blockAllTools() {
   if (!server.value) return
   approvalLoading.value = true
   try {
-    const response = await api.blockTools(server.value.name)
+    const response = await (server.value.incarnation
+      ? api.blockTools(server.value.name, undefined, server.value.incarnation)
+      : api.blockTools(server.value.name))
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2699,7 +2702,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   bumpStoreBlockedCount(enabled ? -1 : 1)
 
   try {
-    const response = await api.setToolEnabled(server.value.name, toolName, enabled)
+    const response = await api.setToolEnabled(server.value.name, toolName, enabled, ...incarnationArgs(server.value.incarnation))
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2819,7 +2822,7 @@ async function bulkToggleAllTools(enabled: boolean) {
   })
 
   try {
-    const response = await api.setAllToolsEnabled(server.value.name, enabled)
+    const response = await api.setAllToolsEnabled(server.value.name, enabled, ...incarnationArgs(server.value.incarnation))
     if (response.success && response.data) {
       const changed = response.data.changed ?? 0
       // "Enable All" intentionally skips tools the server config denies

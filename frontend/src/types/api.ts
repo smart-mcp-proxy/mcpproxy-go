@@ -254,6 +254,13 @@ export interface ServerIsolationDefaults {
 
 export interface Server {
   name: string
+  /**
+   * Committed config generation and incarnation (Spec 116 FR-017). The
+   * incarnation changes only when the name is removed and created again; the
+   * approval calls echo it back as `expected_incarnation`.
+   */
+  generation?: number
+  incarnation?: number
   /** Catalog provenance, used only to resolve an already-added catalog card. */
   source_registry_id?: string
   // Human-friendly display label from the source registry (MCP-1112). When
@@ -1497,6 +1504,8 @@ export interface ServerReviewResponse {
     args?: string[]; working_dir?: string
     quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
     definitions_captured: boolean
+    /** Spec 116 FR-017: the reviewed server's identity; sent back as expected_incarnation. */
+    generation?: number; incarnation?: number
   }
   tools: ReviewTool[]
 }
