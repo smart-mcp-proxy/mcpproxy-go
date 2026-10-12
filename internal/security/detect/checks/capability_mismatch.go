@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -184,7 +186,7 @@ func unexplainedSinkParam(tool detect.ToolView) (string, bool) {
 		}
 		// "Explained" = the description references the param name. Checked against
 		// the description only (NOT the schema, which always contains the name).
-		if strings.Contains(desc, strings.ToLower(name)) {
+		if mentionsParam(desc, name) {
 			continue
 		}
 		return name, true
@@ -197,7 +199,7 @@ func unexplainedSinkParam(tool detect.ToolView) (string, bool) {
 	// the operation itself.
 	normDesc := detect.Normalize(tool.Description)
 	for _, name := range names {
-		if strings.Contains(desc, strings.ToLower(name)) {
+		if mentionsParam(desc, name) {
 			continue
 		}
 		var prop struct {
@@ -227,6 +229,35 @@ func unexplainedSinkParam(tool detect.ToolView) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// mentionsParam reports whether the lowercased tool description names the
+// parameter as a whole word, i.e. not glued to a letter, digit or underscore
+// on either side (Sol r17 P2): a short name such as "a" or "ext" occurring
+// inside an ordinary word ("Translate", "text") does not explain it.
+func mentionsParam(descLower, name string) bool {
+	n := strings.ToLower(name)
+	if n == "" {
+		return false
+	}
+	for off := 0; ; {
+		i := strings.Index(descLower[off:], n)
+		if i < 0 {
+			return false
+		}
+		i += off
+		end := i + len(n)
+		before, _ := utf8.DecodeLastRuneInString(descLower[:i])
+		after, _ := utf8.DecodeRuneInString(descLower[end:])
+		if (i == 0 || !isParamNameRune(before)) && (end == len(descLower) || !isParamNameRune(after)) {
+			return true
+		}
+		off = i + 1
+	}
+}
+
+func isParamNameRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // sinkSideChannel matches a parameter description asking for data to be
