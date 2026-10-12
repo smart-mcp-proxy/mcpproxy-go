@@ -641,6 +641,46 @@ ok = {s.get("name") for s in servers
 print("yes" if want and want <= ok else "no")' "$@"
 }
 
+# lab_upstreams_settled <daemon-log> <name>... — reads a GET /api/v1/servers
+# response on stdin and prints "yes" only when EVERY named upstream is either
+# connected, or quarantined with no error after it completed an MCP connect
+# in this daemon (the daemon log shows "Successfully connected to upstream
+# MCP server" for it). Since Spec 116 the supervisor disconnects a
+# quarantined upstream within about a second of its boot connect (only a
+# security scan's inspection exemption reconnects it), so "connected on 3
+# consecutive polls" never holds for a quarantined lab; the log line still
+# proves its container started and answered MCP initialize, and the boot
+# connect is when the quarantined-contract verification (RT-05) runs.
+lab_upstreams_settled() {
+  local logf="$1"
+  shift
+  python3 -c '
+import json, re, sys
+logf, want = sys.argv[1], set(sys.argv[2:])
+try:
+    servers = (json.load(sys.stdin).get("data") or {}).get("servers") or []
+except Exception:
+    servers = []
+try:
+    log = open(logf, encoding="utf-8", errors="replace").read()
+except OSError:
+    log = ""
+def booted(name):
+    return any("Successfully connected to upstream MCP server" in line and
+               re.search(r"\"server\": \"" + re.escape(name) + r"\"", line)
+               for line in log.splitlines())
+ok = set()
+for s in servers:
+    if not isinstance(s, dict) or s.get("name") not in want:
+        continue
+    if s.get("status") in ("connected", "Ready", "ready"):
+        ok.add(s["name"])
+    elif (s.get("quarantined") is True and not s.get("last_error")
+          and s.get("status") not in ("error", "Error") and booted(s["name"])):
+        ok.add(s["name"])
+print("yes" if want and want <= ok else "no")' "$logf" "$@"
+}
+
 # lab_wait_stable <need> <polls> <interval> <probe-cmd>... — runs the probe
 # up to <polls> times, <interval> seconds apart, and returns 0 once it has
 # succeeded <need> times in a row; non-zero when polling is exhausted

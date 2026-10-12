@@ -126,17 +126,19 @@ start_daemon() {
   # on 3 consecutive polls. A readiness/stability timeout fails the start
   # (the caller records INCONCLUSIVE) instead of scanning a half-connected
   # lab (Sol r9 P2).
-  if ! lab_wait_stable 3 "$READY_POLLS" 2 upstreams_ready; then
+  if ! lab_wait_stable 3 "$READY_POLLS" 2 upstreams_ready "$logf"; then
     echo "ERROR: tpa-lab-attacker and tpa-lab-victim did not both connect stably; log tail:"
     tail -10 "$logf"
     return 1
   fi
 }
 
-# upstreams_ready — 0 when both lab upstreams are listed as connected.
+# upstreams_ready <daemon-log> — 0 when both lab upstreams are connected, or
+# quarantined after a clean boot connect (lab_upstreams_settled: the
+# supervisor holds a quarantined upstream disconnected).
 upstreams_ready() {
   [[ "$(curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" 2>/dev/null |
-    lab_upstreams_connected tpa-lab-attacker tpa-lab-victim)" == yes ]]
+    lab_upstreams_settled "$1" tpa-lab-attacker tpa-lab-victim)" == yes ]]
 }
 
 stop_daemon() {

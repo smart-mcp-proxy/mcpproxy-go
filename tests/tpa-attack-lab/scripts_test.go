@@ -1045,6 +1045,56 @@ func TestLabUpstreamsConnectedRequiresBothNamed(t *testing.T) {
 	}
 }
 
+// TestLabUpstreamsSettledAcceptsQuarantinedAfterBootConnect (Spec 116
+// resync): the supervisor disconnects a quarantined upstream right after its
+// boot connect, so readiness accepts a quarantined, error-free upstream whose
+// MCP connect is in this daemon's log, and still refuses one that never
+// connected, one in error, or a non-quarantined one that is disconnected.
+func TestLabUpstreamsSettledAcceptsQuarantinedAfterBootConnect(t *testing.T) {
+	lib := verdictsLib(t)
+	connectedLine := func(name string) string {
+		return "2026-10-12 19:35:44\tINFO\tmanaged/client.go:526\tSuccessfully connected to upstream MCP server\t" +
+			`{"upstream_id": "` + name + `", "upstream_name": "` + name + `", "server": "` + name + `", "transport": "stdio"}` + "\n"
+	}
+	bothLog := writeTemp(t, "both.log", connectedLine("tpa-lab-attacker")+connectedLine("tpa-lab-victim"))
+	attackerLog := writeTemp(t, "attacker.log", connectedLine("tpa-lab-attacker"))
+	emptyLog := writeTemp(t, "empty.log", "")
+	server := func(name, status string, quarantined bool, lastErr string) map[string]interface{} {
+		m := map[string]interface{}{"name": name, "status": status, "quarantined": quarantined}
+		if lastErr != "" {
+			m["last_error"] = lastErr
+		}
+		return m
+	}
+	body := func(servers ...map[string]interface{}) string {
+		b, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"servers": servers}})
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, log, body, want string
+	}{
+		{"both connected", emptyLog, body(server("tpa-lab-attacker", "connected", false, ""), server("tpa-lab-victim", "ready", false, "")), "yes"},
+		{"both quarantined after a boot connect", bothLog, body(server("tpa-lab-attacker", "disconnected", true, ""), server("tpa-lab-victim", "disconnected", true, "")), "yes"},
+		{"one connected, one quarantined after a boot connect", bothLog, body(server("tpa-lab-attacker", "connected", true, ""), server("tpa-lab-victim", "disconnected", true, "")), "yes"},
+		{"quarantined victim never connected", attackerLog, body(server("tpa-lab-attacker", "disconnected", true, ""), server("tpa-lab-victim", "disconnected", true, "")), "no"},
+		{"quarantined, no connect in the log", emptyLog, body(server("tpa-lab-attacker", "disconnected", true, ""), server("tpa-lab-victim", "disconnected", true, "")), "no"},
+		{"quarantined with an error", bothLog, body(server("tpa-lab-attacker", "disconnected", true, ""), server("tpa-lab-victim", "error", true, "container exited")), "no"},
+		{"trusted but disconnected", bothLog, body(server("tpa-lab-attacker", "disconnected", false, ""), server("tpa-lab-victim", "connected", false, "")), "no"},
+		{"victim not listed", bothLog, body(server("tpa-lab-attacker", "disconnected", true, "")), "no"},
+		{"unreadable response", bothLog, "not json", "no"},
+	} {
+		cmd := exec.Command("bash", "-c", `source "$0"; lab_upstreams_settled "$1" tpa-lab-attacker tpa-lab-victim`, lib, tc.log)
+		cmd.Stdin = strings.NewReader(tc.body)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Errorf("%s: lab_upstreams_settled = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestLabWaitStable (Sol r9 P2): exhausted polling fails, and a flap resets
 // the streak of consecutive successes.
 func TestLabWaitStable(t *testing.T) {

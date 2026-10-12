@@ -134,9 +134,12 @@ done
 # A timeout on either wait fails the run: a dangerous scan of the attacker
 # alone proves nothing about a lab whose victim never connected (Sol r9 P2).
 READY_POLLS="${TPA_LAB_READY_POLLS:-60}"
+# A quarantined upstream counts once it completed a clean boot connect: the
+# supervisor holds it disconnected until the scan's inspection exemption
+# (lab_upstreams_settled).
 upstreams_ready() {
   [[ "$(curl -sf -H "X-API-Key: $API_KEY" "$BASE_URL/api/v1/servers" 2>/dev/null |
-    lab_upstreams_connected tpa-lab-attacker tpa-lab-victim)" == yes ]]
+    lab_upstreams_settled "$LOG_DIR/mcpproxy.log" tpa-lab-attacker tpa-lab-victim)" == yes ]]
 }
 
 log "waiting for tpa-lab-attacker and tpa-lab-victim to connect"
