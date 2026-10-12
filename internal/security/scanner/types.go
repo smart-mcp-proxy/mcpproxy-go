@@ -274,9 +274,16 @@ type ScanContext struct {
 	ToolsExportedAt time.Time         `json:"tools_exported_at,omitzero"` // When the exported definitions were read; a definition changed after this was not analysed
 	ToolNames       []string          `json:"tool_names,omitempty"`       // Sorted, de-duplicated names of the exported tool definitions (Pass 1)
 	ToolHashes      map[string]string `json:"tool_hashes,omitempty"`      // Exported tool name -> hash.ToolDefinitionDigest of the definition analysed; absent on legacy scans
-	ScannedFiles    []string          `json:"scanned_files,omitempty"`    // List of files that were scanned (capped at MaxScannedFiles)
-	TotalFiles      int               `json:"total_files"`                // Total file count (may be > len(ScannedFiles) if capped)
-	TotalSizeBytes  int64             `json:"total_size_bytes"`           // Total size of scanned source
+	// ToolContractDigests maps each analysed tool name to the
+	// hash.ToolContractDigest (description, input AND output schema) of EVERY
+	// contract the scan analysed under that name — the live export and each
+	// divergent ingested contract (RT-06). Absent on scans recorded before
+	// output schemas were exported; review then treats ToolHashes as
+	// output-unaware.
+	ToolContractDigests map[string][]string `json:"tool_contract_digests,omitempty"`
+	ScannedFiles        []string            `json:"scanned_files,omitempty"` // List of files that were scanned (capped at MaxScannedFiles)
+	TotalFiles          int                 `json:"total_files"`             // Total file count (may be > len(ScannedFiles) if capped)
+	TotalSizeBytes      int64               `json:"total_size_bytes"`        // Total size of scanned source
 }
 
 // ScannerJobStatus tracks a single scanner's execution within a scan job

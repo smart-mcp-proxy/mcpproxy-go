@@ -102,25 +102,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 			// upstream connect. Monotonic; cheap; safe to call on every event.
 			r.MarkFirstConnectedServerForActivation()
 
-			// Deduplication: Check if discovery is already in progress for this server
-			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
-				r.logger.Debug("Tool discovery already in progress for server, skipping duplicate",
-					zap.String("server", serverName))
-				return
-			}
-
-			// Ensure we clean up the in-progress marker
-			defer r.discoveryInProgress.Delete(serverName)
-
-			ctx, cancel := context.WithTimeout(r.AppContext(), 30*time.Second)
-			defer cancel()
-
-			r.logger.Info("Reactive tool discovery triggered", zap.String("server", serverName))
-			if err := r.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
-				r.logger.Error("Failed to discover tools for connected server",
-					zap.String("server", serverName),
-					zap.Error(err))
-			}
+			r.onServerConnectedDiscovery(serverName)
 		})
 		r.logger.Info("Reactive tool discovery callback registered")
 
@@ -131,20 +113,7 @@ func (r *Runtime) StartBackgroundInitialization() {
 	// Set up tool discovery callback on upstream manager for notifications/tools/list_changed
 	// This enables reactive tool re-indexing when upstream servers change their available tools
 	if r.upstreamManager != nil {
-		r.upstreamManager.SetToolDiscoveryCallback(func(ctx context.Context, serverName string) error {
-			// Deduplication: Check if discovery is already in progress for this server
-			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
-				r.logger.Debug("Tool discovery already in progress for server (notification), skipping duplicate",
-					zap.String("server", serverName))
-				return nil
-			}
-
-			// Ensure we clean up the in-progress marker
-			defer r.discoveryInProgress.Delete(serverName)
-
-			r.logger.Info("Tool discovery triggered by notification", zap.String("server", serverName))
-			return r.DiscoverAndIndexToolsForServer(ctx, serverName)
-		})
+		r.upstreamManager.SetToolDiscoveryCallback(r.onUpstreamToolsListChanged)
 		r.logger.Info("Tool discovery callback registered on upstream manager")
 
 		// F13: keep the aggregated prompt list fresh when an upstream adds/removes
@@ -604,7 +573,9 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 			// flight, replacing the managed client. Capturing an old client's
 			// untrusted definition under the replacement connection would make
 			// the review record lie about what is currently offered.
-			if tools, err := client.ListTools(ctx); err == nil {
+			// A fresh list: an explicit inspection must not reuse a
+			// tools/list that was already in flight (Sol r5 P2).
+			if tools, err := client.ListToolsFresh(ctx); err == nil {
 				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
 					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
@@ -633,6 +604,291 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 		}
 	}
 	return fmt.Errorf("list tools for quarantined server %s: %w", serverName, lastErr)
+}
+
+// onUpstreamToolsListChanged is the upstream manager's tool-discovery
+// callback for notifications/tools/list_changed: it re-runs single-server
+// discovery (which, for a quarantined server with an approved baseline,
+// verifies its contracts without indexing them — RT-05), deduplicated against
+// a discovery already in flight for the same server. A notification that
+// arrives during an in-flight discovery is coalesced into a follow-up run of
+// that discovery (Sol r3 P2): the in-flight run may already have listed the
+// tools the notification announces as replaced, and periodic discovery skips
+// quarantined servers, so dropping it could leave a stale approval in place
+// indefinitely.
+//
+// The returned error is that of the notification's own run only. Follow-ups
+// may run in a deferred worker after this handler returned, so they never
+// write the handler's state: their failures are logged where they run
+// (Sol r5 P2, data race).
+func (r *Runtime) onUpstreamToolsListChanged(ctx context.Context, serverName string) error {
+	var ownErr error
+	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
+		runCtx := ctx
+		if followUp {
+			// A follow-up runs after the notification's own run and may
+			// outlive the notification's 30s deadline: give it a fresh
+			// runtime-scoped timeout, as connect-owned discovery does, so an
+			// expired notification context never turns the follow-up into a
+			// silent no-op (Sol r4 P2). It derives from the lifetime context
+			// so a follow-up started after shutdown is already cancelled.
+			var cancel context.CancelFunc
+			runCtx, cancel = context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
+			defer cancel()
+		}
+		r.logger.Info("Tool discovery triggered by notification",
+			zap.String("server", serverName), zap.Bool("follow_up", followUp))
+		discover := r.DiscoverAndIndexToolsForServer
+		if r.notificationDiscoverHook != nil {
+			discover = r.notificationDiscoverHook
+		}
+		runErr := discover(runCtx, serverName)
+		if followUp {
+			if runErr != nil {
+				r.logger.Warn("Coalesced tool discovery follow-up failed",
+					zap.String("server", serverName), zap.Error(runErr))
+			}
+			return runErr
+		}
+		ownErr = runErr
+		return runErr
+	})
+	return ownErr
+}
+
+// onServerConnectedDiscovery runs connect-owned reactive tool discovery,
+// deduplicated against a discovery already in flight for this server; a
+// trigger arriving meanwhile is coalesced into one follow-up run rather than
+// dropped (Sol r3 P2).
+//
+// Every run derives its context from the lifetime context, not AppContext:
+// Close replaces the app context with context.Background(), so a follow-up
+// that starts after shutdown would otherwise run uncancelled (Sol r7 P2).
+func (r *Runtime) onServerConnectedDiscovery(serverName string) {
+	r.runCoalescedDiscovery(serverName, func(followUp bool) error {
+		ctx, cancel := context.WithTimeout(r.lifetimeContext(), discoveryRunTimeout)
+		defer cancel()
+
+		r.logger.Info("Reactive tool discovery triggered",
+			zap.String("server", serverName), zap.Bool("follow_up", followUp))
+		discover := r.DiscoverAndIndexToolsForServer
+		if r.connectDiscoverHook != nil {
+			discover = r.connectDiscoverHook
+		}
+		if err := discover(ctx, serverName); err != nil {
+			r.logger.Error("Failed to discover tools for connected server",
+				zap.String("server", serverName),
+				zap.Error(err))
+			return err
+		}
+		return nil
+	})
+}
+
+// discoveryRunTimeout bounds one coalesced discovery run that owns its context.
+const discoveryRunTimeout = 30 * time.Second
+
+// maxCoalescedDiscoveryFollowUps bounds how many follow-up runs one owner
+// performs back to back for triggers coalesced while it ran, so a server that
+// signals tools/list_changed continuously cannot pin a discovery goroutine.
+const maxCoalescedDiscoveryFollowUps = 4
+
+// defaultCoalescedDiscoveryContinuationDelay is how long an owner that reached
+// the follow-up limit waits before a fresh worker takes the still-pending
+// trigger (Runtime.coalescedDiscoveryContinuationDelay overrides it in tests).
+const defaultCoalescedDiscoveryContinuationDelay = 2 * time.Second
+
+func (r *Runtime) coalescedContinuationDelay() time.Duration {
+	if r.coalescedDiscoveryContinuationDelay > 0 {
+		return r.coalescedDiscoveryContinuationDelay
+	}
+	return defaultCoalescedDiscoveryContinuationDelay
+}
+
+// runCoalescedDiscovery runs run under the per-server discovery marker. When
+// a discovery for serverName is already in flight, the trigger is recorded as
+// pending and this call returns immediately; the in-flight owner then re-runs
+// once after it finishes (several coalesced triggers collapse into one
+// follow-up), so a trigger that raced the owner's tools/list is never lost
+// (Sol r3 P2). run is told whether it is such a follow-up (it must then not
+// rely on a context the original trigger owned — Sol r4 P2).
+//
+// Ordering: a trigger records the pending flag BEFORE it tries to take the
+// marker, and the owner checks the flag AFTER it releases the marker. Either
+// the trigger saw the marker held — then its flag was stored before the
+// owner's check — or it took the marker itself and runs.
+//
+// Bounded, never lossy: after maxCoalescedDiscoveryFollowUps follow-ups the
+// owner returns, and a still-pending trigger is handed to a fresh worker after
+// coalescedContinuationDelay instead of being left to a future
+// connect or notification. Periodic discovery skips quarantined servers, so a
+// burst that ends with an armed contract would otherwise stay unverified
+// (Sol r4 P2). The continuation stops when the runtime shuts down.
+func (r *Runtime) runCoalescedDiscovery(serverName string, run func(followUp bool) error) {
+	r.discoveryRerunPending.Store(serverName, struct{}{})
+	if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+		r.logger.Debug("Tool discovery already in progress for server; coalescing this trigger into a follow-up run",
+			zap.String("server", serverName))
+		return
+	}
+	r.ownCoalescedDiscovery(serverName, run, false)
+}
+
+// ownCoalescedDiscovery is the owner loop of runCoalescedDiscovery; the caller
+// holds the discovery marker. continued marks a deferred continuation, whose
+// every run is a follow-up.
+func (r *Runtime) ownCoalescedDiscovery(serverName string, run func(followUp bool) error, continued bool) {
+	for followUps := 0; ; followUps++ {
+		// Clear before running: a trigger recorded from here on is either
+		// covered by this run's tools/list or re-arms the flag.
+		r.discoveryRerunPending.Delete(serverName)
+		_ = run(continued || followUps > 0)
+		r.discoveryInProgress.Delete(serverName)
+		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
+			return
+		}
+		if r.lifetimeContext().Err() != nil {
+			// The runtime shut down: no further follow-ups (Sol r5 P2).
+			return
+		}
+		if followUps >= maxCoalescedDiscoveryFollowUps {
+			r.logger.Warn("Tool discovery follow-up limit reached; deferring the coalesced trigger to a fresh worker",
+				zap.String("server", serverName),
+				zap.Duration("delay", r.coalescedContinuationDelay()))
+			r.scheduleCoalescedDiscoveryContinuation(serverName, run)
+			return
+		}
+		if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+			// Another trigger took ownership; it runs for the pending flag.
+			return
+		}
+		r.logger.Info("Re-running tool discovery for a trigger that arrived while it was in flight",
+			zap.String("server", serverName))
+	}
+}
+
+// scheduleCoalescedDiscoveryContinuation runs a pending coalesced trigger in a
+// fresh, bounded worker after coalescedContinuationDelay. If another
+// owner holds the marker by then, that owner covers the pending flag.
+//
+// It waits on the lifetime context, not AppContext: Close replaces the app
+// context with context.Background(), so an owner that reaches the cap after
+// shutdown started would otherwise schedule an uncancellable continuation
+// (Sol r5 P2).
+func (r *Runtime) scheduleCoalescedDiscoveryContinuation(serverName string, run func(followUp bool) error) {
+	lifetime := r.lifetimeContext()
+	if lifetime.Err() != nil {
+		return
+	}
+	gate := r.coalescedDiscoveryContinuationGate
+	go func() {
+		if gate != nil {
+			select {
+			case <-lifetime.Done():
+				return
+			case <-gate:
+			}
+		} else {
+			timer := time.NewTimer(r.coalescedContinuationDelay())
+			defer timer.Stop()
+			select {
+			case <-lifetime.Done():
+				return
+			case <-timer.C:
+			}
+		}
+		if lifetime.Err() != nil {
+			return
+		}
+		if _, pending := r.discoveryRerunPending.Load(serverName); !pending {
+			return
+		}
+		if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
+			return
+		}
+		r.ownCoalescedDiscovery(serverName, run, true)
+	}()
+}
+
+// verifyQuarantinedServerContracts runs the tool-approval gate over a
+// connected quarantined server's live tools/list WITHOUT indexing it (RT-05),
+// when the server has an approved baseline to protect:
+// approved contracts that changed are marked changed, new tools are filed
+// pending, and nothing reaches the search index or routing surfaces. Unlike
+// the explicit review refresh it never requests an inspection exemption or a
+// connection — it only uses a connection the supervisor already keeps — and
+// it is best effort: a disconnected client or a failed list is skipped (the
+// next connect or tools/list_changed re-runs it).
+//
+// It reports superseded=true when the list was captured under a connection
+// that was replaced before the gate ran. The caller's stale-generation retry
+// must then re-verify under the replacement: that connection's own connect
+// callback may have been dropped by the in-progress dedup, and periodic
+// discovery skips quarantined servers, so nothing else would verify it
+// (Sol r2 P2).
+func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverName string) (superseded bool) {
+	if r.upstreamManager == nil || r.storageManager == nil || r.skipQuarantinedContractVerify {
+		return false
+	}
+	// Only a server with an approved baseline has contracts that can go
+	// stale (a re-quarantined, previously trusted server — EXP-2a). A server
+	// that was never approved keeps its review uncaptured until an operator
+	// or scan explicitly inspects it (UX-02 review snapshot semantics).
+	if !r.serverHasApprovedBaseline(serverName) {
+		return false
+	}
+	capture := r.discoveryGeneration(serverName)
+	client, ok := r.upstreamManager.GetClient(serverName)
+	if !ok || client == nil || !client.IsConnected() {
+		return false
+	}
+	// The commit generation of the config this instance runs, taken before
+	// the list (Spec 116 FR-008a): a capture from an instance a commit has
+	// since superseded is dropped, not persisted.
+	instanceGen := client.Generation()
+	// A fresh list (Sol r5 P2): joining a tools/list already in flight
+	// when tools/list_changed arrived could verify the contract as it was
+	// BEFORE the change, and periodic discovery never re-verifies a
+	// quarantined server.
+	tools, err := client.ListToolsFresh(ctx)
+	if err != nil {
+		r.logger.Debug("Quarantined contract verification: tools/list failed",
+			zap.String("server", serverName), zap.Error(err))
+		return false
+	}
+	if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
+		return true
+	}
+	if len(tools) == 0 {
+		return false
+	}
+	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools)
+	if err != nil {
+		r.logger.Warn("Quarantined contract verification failed",
+			zap.String("server", serverName), zap.Error(err))
+		return false
+	}
+	if !published {
+		return true
+	}
+	r.logger.Info("Verified quarantined server tool contracts against approvals (not indexed)",
+		zap.String("server", serverName), zap.Int("tools", len(tools)))
+	return false
+}
+
+// serverHasApprovedBaseline reports whether any of the server's tool-approval
+// records is approved or changed (changed implies it was approved once).
+func (r *Runtime) serverHasApprovedBaseline(serverName string) bool {
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return false
+	}
+	for _, rec := range records {
+		if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
+			return true
+		}
+	}
+	return false
 }
 
 // quarantinedCaptureIsCurrent confirms that the tools/list response belongs to
@@ -908,6 +1164,18 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// full sweep (HandleUpstreamServerChange → DiscoverAndIndexTools), not this
 	// single-server path, so the guard does not strand a newly-trusted server.
 	if !r.serverEligibleForIndexing(serverName) {
+		// RT-05 (red-team 2026-10-11): a quarantined server is kept connected
+		// for inspection, and a restart re-quarantined by config used to leave
+		// its stale APPROVED contracts unchecked for the whole quarantine
+		// window while the (possibly armed) upstream ran. Hash-compare its
+		// live contracts now, without indexing anything, so a rug pull is
+		// recorded as changed before an unquarantine can serve it.
+		if r.serverIsQuarantined(serverName) && r.verifyQuarantinedServerContracts(ctx, serverName) {
+			// Superseded: report unpublished so the stale-generation
+			// retry in discoverAndIndexToolsForServer re-verifies the
+			// replacement connection.
+			return false, nil
+		}
 		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return true, nil
@@ -951,8 +1219,14 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			}
 		}
 
-		// Discover tools from this server
-		tools, err = client.ListTools(ctx)
+		// Discover tools from this server with a fresh list (Sol r6 P2):
+		// this path serves connect and notifications/tools/list_changed, so
+		// joining a tools/list that was already in flight when the trigger
+		// fired (e.g. a tool-count refresh) could hash the contract as it was
+		// BEFORE the change and keep a stale approval — which persists when
+		// periodic discovery is disabled. ListToolsFresh waits for such a
+		// request and lists again.
+		tools, err = client.ListToolsFresh(ctx)
 		if err == nil {
 			break // Success!
 		}

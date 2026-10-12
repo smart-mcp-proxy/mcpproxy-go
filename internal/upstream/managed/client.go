@@ -65,9 +65,22 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
-	listToolsWaitCh     chan struct{}
-	listToolsLastResult []*config.ToolMetadata
-	listToolsLastErr    error
+	// listToolsCur is the in-flight upstream tools/list request, or nil.
+	// Waiters keep the pointer they waited on and read the result from it, so
+	// a later leader replacing listToolsCur can never hand them its (nil,
+	// not-yet-published) result (RT-05, Sol r6 P1).
+	listToolsCur *listToolsCall
+	// listToolsLeaderSeq numbers ListTools leaders (incremented each time
+	// acquireListToolsContext grants one) so ListToolsFresh can tell an
+	// in-flight upstream call that started before it from one that started
+	// after it.
+	listToolsLeaderSeq uint64
+	// listToolsObserver and listToolsBeforeWaiterRead are test seams that
+	// let coalescing tests synchronize on a leader election, a waiter
+	// attaching to a call, and the window between a waiter waking and
+	// reading its call's result, instead of sleeping. Nil in production.
+	listToolsObserver         atomic.Pointer[func(ListToolsEvent)]
+	listToolsBeforeWaiterRead atomic.Pointer[func(seq uint64)]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -1023,13 +1036,48 @@ func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
 	mc.promptsChangedCallback = callback
 }
 
+// ListToolsEvent reports one step of ListTools coalescing to a test observer:
+// Leader is true when the caller became the leader of call Seq, false when
+// it attached to call Seq as a waiter. Fresh marks a ListToolsFresh caller.
+type ListToolsEvent struct {
+	Seq    uint64
+	Leader bool
+	Fresh  bool
+}
+
+// SetListToolsObserver installs a test observer for ListTools coalescing
+// (nil removes it). It lets cross-package tests acknowledge that a caller has
+// attached to an in-flight tools/list before releasing it. Tests only.
+func (mc *Client) SetListToolsObserver(fn func(ListToolsEvent)) {
+	if fn == nil {
+		mc.listToolsObserver.Store(nil)
+		return
+	}
+	mc.listToolsObserver.Store(&fn)
+}
+
+func (mc *Client) observeListTools(ev ListToolsEvent) {
+	if fn := mc.listToolsObserver.Load(); fn != nil {
+		(*fn)(ev)
+	}
+}
+
+// listToolsCall is one upstream tools/list request owned by a leader. The
+// leader publishes into it before release() closes done; waiters read the
+// result of the exact request they waited on.
+type listToolsCall struct {
+	done      chan struct{}
+	seq       uint64
+	tools     []*config.ToolMetadata
+	err       error
+	published bool
+}
+
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools
-// call. When successful it also allocates listToolsWaitCh and resets the cached
-// last-result, so any concurrent ListTools waiter can safely block on the
-// channel and read the published result regardless of which caller is the
-// leader. release() must be called exactly once; it cancels the timeout,
-// publishes any result via publishListToolsResult (if the caller wrote one),
-// and closes the wait channel so coalesced waiters wake up.
+// call. When successful it allocates a fresh listToolsCall, so any concurrent
+// ListTools waiter can block on its done channel and read the result that this
+// leader publishes into it. release() must be called exactly once; it cancels
+// the timeout and closes the call's done channel so coalesced waiters wake up.
 func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
 	mc.listToolsMu.Lock()
 	if mc.listToolsInProgress {
@@ -1038,9 +1086,9 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	}
 
 	mc.listToolsInProgress = true
-	mc.listToolsWaitCh = make(chan struct{})
-	mc.listToolsLastResult = nil
-	mc.listToolsLastErr = nil
+	mc.listToolsLeaderSeq++
+	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	mc.listToolsCur = call
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
 	mc.listToolsMu.Unlock()
@@ -1050,10 +1098,10 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 		mc.listToolsMu.Lock()
 		mc.listToolsCancel = nil
 		mc.listToolsInProgress = false
-		if mc.listToolsWaitCh != nil {
-			close(mc.listToolsWaitCh)
-			mc.listToolsWaitCh = nil
+		if mc.listToolsCur == call {
+			mc.listToolsCur = nil
 		}
+		close(call.done)
 		mc.listToolsMu.Unlock()
 		return mc.IsConnected()
 	}
@@ -1061,21 +1109,46 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	return listCtx, release, true
 }
 
-// publishListToolsResult records the outcome of an upstream ListTools call so
-// that coalesced waiters in ListTools() can read it once the wait channel is
-// closed. All call sites that go through acquireListToolsContext (ListTools,
-// the health check, and the tool-count refresh) must publish their result so
-// that an arriving ListTools waiter never reads stale or zero data.
+// publishListToolsResult records the outcome of the in-flight upstream
+// ListTools call so that coalesced waiters in ListTools() can read it once the
+// call's done channel is closed. All call sites that go through
+// acquireListToolsContext (ListTools and the tool-count refresh) must publish
+// their result; a waiter that finds no published result lists again rather
+// than treating it as an empty tool list.
 func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error) {
 	mc.listToolsMu.Lock()
-	mc.listToolsLastResult = tools
-	mc.listToolsLastErr = err
+	if call := mc.listToolsCur; call != nil {
+		call.tools = tools
+		call.err = err
+		call.published = true
+	}
 	mc.listToolsMu.Unlock()
 }
 
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	return mc.listTools(ctx, false, 0)
+}
+
+// ListToolsFresh is ListTools for a caller that must see the tools as they
+// are AFTER the call was made — a contract verification triggered by
+// notifications/tools/list_changed (RT-05, Sol r5 P2). It never joins an
+// upstream tools/list that was already in flight when it was called (that
+// request may have been answered before the change the notification
+// announces): it waits for such a request to finish and then lists again,
+// joining only a request that started after the call.
+func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, error) {
+	mc.listToolsMu.Lock()
+	entrySeq := mc.listToolsLeaderSeq
+	mc.listToolsMu.Unlock()
+	return mc.listTools(ctx, true, entrySeq)
+}
+
+// listTools implements ListTools and ListToolsFresh. With fresh set, an
+// in-flight leader numbered at or below entrySeq started before the caller,
+// so its result is not accepted.
+func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1091,11 +1164,17 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 	for {
 		listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
 		if ok {
+			if mc.listToolsObserver.Load() != nil {
+				mc.listToolsMu.Lock()
+				seq := mc.listToolsLeaderSeq
+				mc.listToolsMu.Unlock()
+				mc.observeListTools(ListToolsEvent{Seq: seq, Leader: true, Fresh: fresh})
+			}
 			return mc.runListToolsAsLeader(listCtx, release)
 		}
 
 		mc.listToolsMu.Lock()
-		waitCh := mc.listToolsWaitCh
+		call := mc.listToolsCur
 		inProgress := mc.listToolsInProgress
 		mc.listToolsMu.Unlock()
 
@@ -1104,24 +1183,36 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			// Try to become the leader again.
 			continue
 		}
-		if waitCh == nil {
+		if call == nil {
 			// Defensive fallback: every leader path is supposed to allocate a
-			// wait channel via acquireListToolsContext, so this should be
-			// unreachable. Fail fast rather than block forever on a nil channel.
+			// call via acquireListToolsContext, so this should be unreachable.
+			// Fail fast rather than block forever.
 			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
 			zap.String("server", mc.GetConfig().Name))
+		mc.observeListTools(ListToolsEvent{Seq: call.seq, Fresh: fresh})
 
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-waitCh:
+		case <-call.done:
+			if fresh && call.seq <= entrySeq {
+				// That request predates the caller: list again.
+				continue
+			}
+			if hook := mc.listToolsBeforeWaiterRead.Load(); hook != nil {
+				(*hook)(call.seq)
+			}
 			mc.listToolsMu.Lock()
-			res := mc.listToolsLastResult
-			err := mc.listToolsLastErr
+			res, err, published := call.tools, call.err, call.published
 			mc.listToolsMu.Unlock()
+			if !published {
+				// The leader ended without a result (it never reached the
+				// upstream call): that is not an empty tool list. List again.
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("ListTools failed: %w", err)
 			}

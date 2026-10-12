@@ -3716,6 +3716,14 @@ func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
 
 // GetServerTools returns tools for a specific server
 func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	return s.serverToolMaps(serverName, false)
+}
+
+// serverToolMaps is GetServerTools with an opt-in "outputSchema" member. Only
+// the scanner-facing provider asks for it (RT-06, Sol r1): the TPA scan
+// covers output schemas (Spec 076 FR-001), while the REST/CLI tool listings
+// keep their existing shape.
+func (s *Server) serverToolMaps(serverName string, includeOutputSchema bool) ([]map[string]interface{}, error) {
 	s.logger.Debug("GetServerTools called (Phase 7.1: using StateView)", zap.String("server", serverName))
 
 	// Phase 7.1: Use StateView for lock-free cached tool reads
@@ -3742,6 +3750,9 @@ func (s *Server) GetServerTools(serverName string) ([]map[string]interface{}, er
 			"description": tool.Description,
 			"inputSchema": tool.InputSchema,
 			"server_name": serverName,
+		}
+		if includeOutputSchema {
+			addScanOutputSchema(toolMap, tool.OutputSchemaJSON)
 		}
 
 		// Include annotations if present
@@ -4628,7 +4639,7 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 		cachedErr error
 	)
 	if p.server != nil {
-		cached, cachedErr = p.server.GetServerTools(serverName)
+		cached, cachedErr = p.server.serverToolMaps(serverName, true)
 		if cachedErr == nil && len(cached) > 0 {
 			return cached, nil
 		}
@@ -4649,6 +4660,14 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 
 	if cachedErr != nil {
 		return nil, cachedErr
+	}
+	if len(cached) == 0 && liveErr != nil {
+		// The StateView says connected but holds no tools, and the live
+		// tools/list failed: there is no usable definition. Report the live
+		// failure so the scanner fails closed instead of exporting an empty
+		// snapshot that a source-only scan could turn into a clean baseline
+		// (Sol r8 P2).
+		return nil, fmt.Errorf("live tool export for %s failed and no cached tools are available: %w", serverName, liveErr)
 	}
 	return cached, nil
 }
@@ -4729,6 +4748,7 @@ func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[str
 		"inputSchema": inputSchema,
 		"server_name": serverName,
 	}
+	addScanOutputSchema(toolMap, tool.OutputSchemaJSON)
 	if tool.Annotations != nil {
 		annotations := map[string]interface{}{}
 		if tool.Annotations.Title != "" {
@@ -4751,6 +4771,61 @@ func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[str
 		}
 	}
 	return toolMap
+}
+
+// addScanOutputSchema sets toolMap["outputSchema"] from a tool's raw output
+// schema JSON, when it declares one. A schema that does not parse as JSON is
+// kept as its raw string so the scanner still sees its text.
+func addScanOutputSchema(toolMap map[string]interface{}, outputSchemaJSON string) {
+	if strings.TrimSpace(outputSchemaJSON) == "" {
+		return
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(outputSchemaJSON), &parsed); err == nil {
+		toolMap["outputSchema"] = parsed
+		return
+	}
+	toolMap["outputSchema"] = outputSchemaJSON
+}
+
+// GetIngestedToolContracts implements scanner's optional
+// ingestedToolContractsProvider (RT-06): the tool contracts discovery actually
+// ingested for serverName, read from its tool-approval records — each record's
+// current contract and, for a changed (rug-pull) record, the approved contract
+// it changed from. The scan unions these with its live export so a server that
+// answers the scan's tools/list differently from discovery's cannot launder a
+// poisoned contract through a clean export.
+func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) ([]map[string]interface{}, error) {
+	if p.server == nil || p.server.runtime == nil {
+		return nil, nil
+	}
+	sm := p.server.runtime.StorageManager()
+	if sm == nil {
+		return nil, nil
+	}
+	records, err := sm.ListToolApprovals(serverName)
+	if err != nil {
+		return nil, err
+	}
+	contracts := make([]map[string]interface{}, 0, len(records))
+	for _, rec := range records {
+		if rec == nil || rec.ToolName == "" {
+			continue
+		}
+		if rec.CurrentDescription != "" || rec.CurrentSchema != "" || rec.CurrentOutputSchema != "" {
+			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+				Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema,
+				OutputSchemaJSON: rec.CurrentOutputSchema, Annotations: rec.CurrentAnnotations,
+			}))
+		}
+		if rec.Status == storage.ToolApprovalStatusChanged && (rec.PreviousDescription != "" || rec.PreviousSchema != "" || rec.PreviousOutputSchema != "") {
+			contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+				Name: rec.ToolName, Description: rec.PreviousDescription, ParamsJSON: rec.PreviousSchema,
+				OutputSchemaJSON: rec.PreviousOutputSchema, Annotations: rec.PreviousAnnotations,
+			}))
+		}
+	}
+	return contracts, nil
 }
 
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it

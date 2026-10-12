@@ -39,11 +39,9 @@ func TestListTools_CoalescesWaiters(t *testing.T) {
 	}
 
 	mc.listToolsInProgress = true
-	mc.listToolsWaitCh = make(chan struct{})
-	mc.listToolsLastResult = shared
-	mc.listToolsLastErr = nil
+	mc.listToolsCur = &listToolsCall{done: make(chan struct{}), tools: shared, published: true}
 
-	close(mc.listToolsWaitCh)
+	close(mc.listToolsCur.done)
 
 	tools, err := mc.ListTools(context.Background())
 	require.NoError(t, err)
@@ -56,10 +54,9 @@ func TestListTools_CoalescesWaitersError(t *testing.T) {
 	mc := newTestReadyClient(t)
 
 	mc.listToolsInProgress = true
-	mc.listToolsWaitCh = make(chan struct{})
-	mc.listToolsLastErr = assert.AnError
+	mc.listToolsCur = &listToolsCall{done: make(chan struct{}), err: assert.AnError, published: true}
 
-	close(mc.listToolsWaitCh)
+	close(mc.listToolsCur.done)
 
 	tools, err := mc.ListTools(context.Background())
 	require.Error(t, err)
@@ -128,7 +125,7 @@ func TestListTools_HealthCheckLeaderDoesNotDeadlockWaiters(t *testing.T) {
 	require.True(t, ok)
 
 	mc.listToolsMu.Lock()
-	require.NotNil(t, mc.listToolsWaitCh, "acquireListToolsContext must allocate a wait channel")
+	require.NotNil(t, mc.listToolsCur, "acquireListToolsContext must allocate a call to wait on")
 	mc.listToolsMu.Unlock()
 
 	done := make(chan struct{})
@@ -194,14 +191,16 @@ func TestListTools_LeaderErrorPropagatedToWaiters(t *testing.T) {
 	}
 }
 
-// TestListTools_AcquireContextResetsCachedResult ensures stale results from a
-// previous call are cleared when a new leader is elected, so any waiter that
-// arrives can never observe a result from an earlier round.
+// TestListTools_AcquireContextResetsCachedResult ensures results from a
+// previous call are never visible through a new leader's call, so any waiter
+// that arrives can never observe a result from an earlier round.
 func TestListTools_AcquireContextResetsCachedResult(t *testing.T) {
 	mc := newTestReadyClient(t)
 
-	mc.listToolsLastResult = []*config.ToolMetadata{{ServerName: "test-server", Name: "stale"}}
-	mc.listToolsLastErr = errors.New("stale error")
+	_, release1, ok := mc.acquireListToolsContext(context.Background(), time.Second)
+	require.True(t, ok)
+	mc.publishListToolsResult([]*config.ToolMetadata{{ServerName: "test-server", Name: "stale"}}, errors.New("stale error"))
+	release1()
 
 	_, release, ok := mc.acquireListToolsContext(context.Background(), time.Second)
 	require.True(t, ok)
@@ -209,6 +208,257 @@ func TestListTools_AcquireContextResetsCachedResult(t *testing.T) {
 
 	mc.listToolsMu.Lock()
 	defer mc.listToolsMu.Unlock()
-	assert.Nil(t, mc.listToolsLastResult, "leader acquisition must clear stale results")
-	assert.Nil(t, mc.listToolsLastErr, "leader acquisition must clear stale error")
+	require.NotNil(t, mc.listToolsCur)
+	assert.Nil(t, mc.listToolsCur.tools, "leader acquisition must not carry stale results")
+	assert.Nil(t, mc.listToolsCur.err, "leader acquisition must not carry a stale error")
+	assert.False(t, mc.listToolsCur.published)
+}
+
+// observeListToolsEvents installs a buffered ListTools observer and returns
+// its event channel.
+func observeListToolsEvents(t *testing.T, mc *Client) <-chan ListToolsEvent {
+	t.Helper()
+	events := make(chan ListToolsEvent, 64)
+	mc.SetListToolsObserver(func(ev ListToolsEvent) { events <- ev })
+	t.Cleanup(func() { mc.SetListToolsObserver(nil) })
+	return events
+}
+
+// awaitListToolsEvent waits for the observer to report want.
+func awaitListToolsEvent(t *testing.T, events <-chan ListToolsEvent, want ListToolsEvent) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if ev == want {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("ListTools event %+v never observed", want)
+		}
+	}
+}
+
+// currentListToolsSeq returns the seq of the in-flight call.
+func currentListToolsSeq(t *testing.T, mc *Client) (*listToolsCall, uint64) {
+	t.Helper()
+	mc.listToolsMu.Lock()
+	defer mc.listToolsMu.Unlock()
+	require.NotNil(t, mc.listToolsCur)
+	return mc.listToolsCur, mc.listToolsCur.seq
+}
+
+// TestListTools_WaiterReadsItsOwnLeadersResultAfterReplacement (Sol r6 P1,
+// Sol r7 P2): a real ListTools waiter woken by leader 1 must read leader 1's
+// result even when leader 2 is elected — with no result yet — between the
+// waiter waking and reading. A waiter reading shared or current-call state
+// would see leader 2's unpublished slot and never return (nil, nil) or block.
+// The waiter is held at the read boundary, so the interleaving is forced.
+func TestListTools_WaiterReadsItsOwnLeadersResultAfterReplacement(t *testing.T) {
+	mc := newTestReadyClient(t)
+	want := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a"}}
+	events := observeListToolsEvents(t, mc)
+
+	_, release1, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok)
+	_, seq1 := currentListToolsSeq(t, mc)
+
+	woke := make(chan struct{})
+	proceed := make(chan struct{})
+	hook := func(seq uint64) {
+		if seq == seq1 {
+			close(woke)
+			<-proceed
+		}
+	}
+	mc.listToolsBeforeWaiterRead.Store(&hook)
+	t.Cleanup(func() { mc.listToolsBeforeWaiterRead.Store(nil) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		tools []*config.ToolMetadata
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		tools, err := mc.ListTools(ctx)
+		done <- result{tools, err}
+	}()
+	awaitListToolsEvent(t, events, ListToolsEvent{Seq: seq1})
+
+	// Leader 1 publishes and releases; the waiter wakes and is held before
+	// it reads. Leader 2 is elected in that window, with no result yet.
+	mc.publishListToolsResult(want, nil)
+	release1()
+	select {
+	case <-woke:
+	case <-ctx.Done():
+		t.Fatal("the waiter never woke on leader 1")
+	}
+	_, release2, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok, "leader 2 is elected while the waiter is held")
+	defer release2()
+	close(proceed)
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		assert.Equal(t, want, got.tools, "a waiter on call 1 reads call 1's result, not leader 2's empty slot")
+	case <-ctx.Done():
+		t.Fatal("the waiter did not return leader 1's result")
+	}
+}
+
+// TestListTools_UnpublishedLeaderIsNotAnEmptySuccess: a leader that releases
+// without publishing must not hand its waiters (nil, nil) — they list again
+// and take the next leader's real result.
+func TestListTools_UnpublishedLeaderIsNotAnEmptySuccess(t *testing.T) {
+	mc := newTestReadyClient(t)
+	want := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a"}}
+	events := observeListToolsEvents(t, mc)
+
+	_, release1, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok)
+	call1, seq1 := currentListToolsSeq(t, mc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan []*config.ToolMetadata, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		tools, err := mc.ListTools(ctx)
+		errCh <- err
+		done <- tools
+	}()
+	awaitListToolsEvent(t, events, ListToolsEvent{Seq: seq1})
+
+	// Hand off atomically from unpublished leader 1 to leader 2, so the
+	// waiter cannot become a leader itself.
+	mc.listToolsMu.Lock()
+	mc.listToolsLeaderSeq++
+	call2 := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	mc.listToolsCur = call2
+	close(call1.done)
+	mc.listToolsMu.Unlock()
+	_ = release1 // leader 1 was handed off by hand above
+
+	// The waiter re-attaches to leader 2 instead of returning: proven by
+	// the observer, not by a sleep.
+	awaitListToolsEvent(t, events, ListToolsEvent{Seq: call2.seq})
+	select {
+	case got := <-done:
+		t.Fatalf("waiter returned for an unpublished leader: %v (err %v)", got, <-errCh)
+	default:
+	}
+
+	mc.publishListToolsResult(want, nil)
+	mc.listToolsMu.Lock()
+	mc.listToolsCur = nil
+	mc.listToolsInProgress = false
+	close(call2.done)
+	mc.listToolsMu.Unlock()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+		assert.Equal(t, want, <-done)
+	case <-ctx.Done():
+		t.Fatal("waiter did not return")
+	}
+}
+
+// TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall (Sol r5 P2): a
+// tools/list_changed verification must not join a tools/list that was already
+// in flight when it was called — that request may have been answered before
+// the change. It waits for that request and accepts only a request that
+// started after the call. Every step is acknowledged by the ListTools
+// observer (Sol r7 P3): no sleeps.
+func TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall(t *testing.T) {
+	mc := newTestReadyClient(t)
+	stale := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a", Description: "pre-change"}}
+	fresh := []*config.ToolMetadata{{ServerName: "test-server", Name: "tool_a", Description: "post-change"}}
+	events := observeListToolsEvents(t, mc)
+
+	// Leader 1 is in flight before the verification is called.
+	_, release1, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok)
+	mc.publishListToolsResult(stale, nil)
+	call1, seq1 := currentListToolsSeq(t, mc)
+	mc.listToolsMu.Lock()
+	entrySeq := mc.listToolsLeaderSeq
+	mc.listToolsMu.Unlock()
+
+	// Hold the fresh waiter between waking on call 2 and reading it.
+	var seq2 uint64
+	woke := make(chan struct{})
+	proceed := make(chan struct{})
+	var seq2Set sync.WaitGroup
+	seq2Set.Add(1)
+	hook := func(seq uint64) {
+		seq2Set.Wait()
+		if seq == seq2 {
+			close(woke)
+			<-proceed
+		}
+	}
+	mc.listToolsBeforeWaiterRead.Store(&hook)
+	t.Cleanup(func() { mc.listToolsBeforeWaiterRead.Store(nil) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	freshDone := make(chan []*config.ToolMetadata, 1)
+	go func() {
+		tools, err := mc.listTools(ctx, true, entrySeq)
+		assert.NoError(t, err)
+		freshDone <- tools
+	}()
+	awaitListToolsEvent(t, events, ListToolsEvent{Seq: seq1, Fresh: true})
+
+	// Hand off atomically from leader 1 to leader 2 (started after the call),
+	// so the fresh caller cannot become a leader itself.
+	mc.listToolsMu.Lock()
+	mc.listToolsLeaderSeq++
+	call2 := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	seq2 = call2.seq
+	mc.listToolsCur = call2
+	close(call1.done)
+	mc.listToolsMu.Unlock()
+	seq2Set.Done()
+	_ = release1 // leader 1 was handed off by hand above
+
+	// The fresh caller rejected leader 1 and attached to leader 2.
+	awaitListToolsEvent(t, events, ListToolsEvent{Seq: seq2, Fresh: true})
+	select {
+	case got := <-freshDone:
+		t.Fatalf("fresh list returned the pre-call leader's result: %v", got)
+	default:
+	}
+
+	mc.publishListToolsResult(fresh, nil)
+	mc.listToolsMu.Lock()
+	mc.listToolsCur = nil
+	mc.listToolsInProgress = false
+	close(call2.done)
+	mc.listToolsMu.Unlock()
+
+	// A third leader is elected after the waiter woke on call 2 and before
+	// it reads (the Sol r6 P1 window): it must still get call 2's result.
+	select {
+	case <-woke:
+	case <-ctx.Done():
+		t.Fatal("the fresh waiter never woke on leader 2")
+	}
+	_, release3, ok := mc.acquireListToolsContext(context.Background(), 5*time.Second)
+	require.True(t, ok, "leader 3 is elected while the fresh waiter is held")
+	defer release3()
+	close(proceed)
+
+	select {
+	case got := <-freshDone:
+		assert.Equal(t, fresh, got, "the fresh list takes the result of the request started after the call it waited on")
+	case <-ctx.Done():
+		t.Fatal("fresh ListTools did not return")
+	}
 }
