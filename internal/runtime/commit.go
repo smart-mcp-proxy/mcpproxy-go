@@ -110,9 +110,13 @@ type CommitTx struct {
 	removed   map[string]bool // present in base and removed in this tx
 	replaced  map[string]bool // removed and re-created in this tx (review R8.2)
 	// quarantineDecided: servers an UpdateServer or SetQuarantined in this tx
-	// explicitly quarantined while the entry was not already an explicit
-	// quarantine (#1561): the index purge covers them even when the admission
-	// gate had quarantined the entry implicitly.
+	// left explicitly quarantined (#1561): the index purge covers them even
+	// when the admission gate had quarantined the entry implicitly, and even
+	// when the entry already was an explicit quarantine (Sol round 12): a
+	// repeated quarantine removes residual descriptions a failed purge or an
+	// older install left behind, as Server.UpdateServer did on main. A
+	// quarantined server has nothing indexed legitimately, so the purge is
+	// idempotent.
 	quarantineDecided map[string]bool
 
 	hooks []approvalHook
@@ -247,7 +251,7 @@ func (tx *CommitTx) UpdateServer(name string, fn func(cur *config.ServerConfig) 
 	if cp.Name != name {
 		return fmt.Errorf("%w: UpdateServer cannot rename %q to %q", ErrCommitInvariant, name, cp.Name)
 	}
-	if prev := tx.next.Servers[i]; cp.Quarantined && cp.QuarantineExplicitlySet() && (!prev.Quarantined || !prev.QuarantineExplicitlySet()) {
+	if cp.Quarantined && cp.QuarantineExplicitlySet() {
 		if tx.quarantineDecided == nil {
 			tx.quarantineDecided = map[string]bool{}
 		}
@@ -720,8 +724,19 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	// content, would make the next reload fail or import that content.
 	diskNeeded := path != "" && !tx.skipDisk && (configChanged || pathChanged || tx.forceDisk || tx.disk != nil)
 
+	// An explicit quarantine of a server that is still quarantined purges its
+	// index entries even when nothing else changed (Sol round 12): the
+	// commit then takes the server's approval lock, purges and publishes
+	// nothing.
+	var purgeOnly []string
+	for name := range tx.quarantineDecided {
+		if sc := tx.entry(name); sc != nil && sc.Quarantined {
+			purgeOnly = append(purgeOnly, name)
+		}
+	}
+
 	// Skip rule (FR-001a): nothing to do unless something changed or was forced.
-	if !configChanged && !storageNeeded && !diskNeeded && !tx.bootstrap && !pathChanged && len(tx.hooks) == 0 {
+	if !configChanged && !storageNeeded && !diskNeeded && !tx.bootstrap && !pathChanged && len(tx.hooks) == 0 && len(purgeOnly) == 0 {
 		if tx.reconcile {
 			if h := hooks.reconcileExit; h != nil {
 				h()
@@ -746,6 +761,9 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	}
 	for _, h := range tx.hooks {
 		lockSet[h.name] = true
+	}
+	for _, n := range purgeOnly {
+		lockSet[n] = true
 	}
 	if batch != nil {
 		for _, n := range batch.Removes {
@@ -1008,21 +1026,25 @@ func (r *Runtime) commitIndexPurge(tx *CommitTx, changes map[string]ServerChange
 			targets[sc.Name] = true
 		}
 	}
+	// An explicit quarantine made in this commit purges too, even when the
+	// entry was already quarantined, implicitly by the admission gate (#1561)
+	// or explicitly by an earlier decision (Sol round 12), and even when the
+	// commit changes nothing else: a REST PATCH {"quarantined":true}, the
+	// quarantine endpoints and MCP quarantine_server are the operator's
+	// quarantine and must leave no description indexed. A whole-config
+	// replacement (ApplyConfig, a reload) is not such a decision: a JSON round
+	// trip marks every present flag explicit.
+	for name := range tx.quarantineDecided {
+		if sc := tx.entry(name); sc != nil && sc.Quarantined {
+			targets[name] = true
+		}
+	}
 	for name, ch := range changes {
 		switch ch.Kind {
 		case configsvc.ChangeRemoved, configsvc.ChangeReplaced:
 			targets[name] = true
 		default:
 			if ch.QuarantineRaised {
-				targets[name] = true
-			}
-			// An explicit quarantine decision made in this commit purges too,
-			// even when the entry was already quarantined implicitly by the
-			// admission gate (#1561): a REST PATCH {"quarantined":true} is the
-			// operator's quarantine and must leave no description indexed. A
-			// whole-config replacement (ApplyConfig, a reload) is not such a
-			// decision: a JSON round trip marks every present flag explicit.
-			if sc := tx.entry(name); sc != nil && sc.Quarantined && tx.quarantineDecided[name] {
 				targets[name] = true
 			}
 			if sc := tx.entry(name); sc != nil && !sc.Enabled {
