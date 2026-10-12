@@ -1,0 +1,7 @@
+ID                          SRC  TYPE          SERVER  TOOL       CLIENT  PROFILE  INTENT  SENSITIVE  STATUS         DURATION  TIME
+01M4Q796MQGH37YST8W9RCZMB9  MCP  policy_decis  fx      leak_read  -       -        -       -          blocked        0ms       just now
+01M4Q78R8X80HN3PEM3DSSE6Q6  MCP  policy_decis  fx      leak_read  -       -        -       -          blocked        0ms       just now
+01M4Q78G6706EVCJHNQQGJ5EAZ  MCP  quarantine_c  fx                 -       -        -       -          enabled        0ms       just now
+01M4Q78G5JXXRDRFYDXPA1QQ43  MCP  tool_quarant  fx      pem_read   -       -        -       -          tool_approved  0ms       just now
+
+Showing 4 of 13 records (page 1)
