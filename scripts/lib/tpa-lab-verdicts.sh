@@ -90,9 +90,10 @@ scan_job_id() {
 
 # scan_report_verdict <report.json> <job_id> — the verdict of the stored
 # "security report -o json" document, bound to the scan job that produced
-# it: dangerous|warnings|clean, "stale-report" when the report belongs to
-# another job (or no job id is known), "unknown" when it is unreadable or
-# carries no recognised verdict.
+# it: dangerous|warnings|clean (the report's top-level aggregate verdict
+# only), "stale-report" when the report belongs to another job (or no job id
+# is known), "unknown" when it is unreadable or its top-level verdict is
+# missing or unrecognised — nested findings never stand in for it.
 scan_report_verdict() {
   python3 - "$1" "${2:-}" <<'PY'
 import json, sys
@@ -103,22 +104,13 @@ except Exception:
 data = d.get("data") if isinstance(d, dict) else None
 if not sys.argv[2] or not isinstance(data, dict) or data.get("job_id") != sys.argv[2]:
     print("stale-report"); raise SystemExit
+# Only the recognised top-level aggregate verdict counts (AggregateReports /
+# deriveBaselineVerdict, internal/security/scanner/service.go): a nested
+# finding's threat_level is NOT the report verdict — a tierless or soft
+# finding at threat_level "dangerous" never makes the aggregate dangerous
+# (Sol r9 P2), so a missing or unrecognised verdict is "unknown".
 if data.get("verdict") in ("dangerous", "warnings", "clean"):
     print(data["verdict"]); raise SystemExit
-found = set()
-def walk(o):
-    if isinstance(o, dict):
-        for k, v in o.items():
-            if isinstance(v, str) and v in ("dangerous", "warnings", "clean") and (
-                "verdict" in k.lower() or "threat" in k.lower() or "status" in k.lower()):
-                found.add(v)
-            walk(v)
-    elif isinstance(o, list):
-        for v in o: walk(v)
-walk(data)
-for want in ("dangerous", "warnings", "clean"):
-    if want in found:
-        print(want); raise SystemExit
 print("unknown")
 PY
 }
@@ -408,4 +400,57 @@ lab_scrub_mcpproxy_env() {
     fi
   done < <(compgen -e)
   return 0
+}
+
+# lab_upstreams_connected <name>... — reads a GET /api/v1/servers response on
+# stdin and prints "yes" only when EVERY named upstream is listed with a
+# connected status, else "no" (Sol r9 P2: a count of connected servers let
+# the attacker alone satisfy readiness while the victim never connected).
+lab_upstreams_connected() {
+  python3 -c '
+import json, sys
+want = set(sys.argv[1:])
+try:
+    servers = (json.load(sys.stdin).get("data") or {}).get("servers") or []
+except Exception:
+    servers = []
+ok = {s.get("name") for s in servers
+      if isinstance(s, dict) and s.get("status") in ("connected", "Ready", "ready")}
+print("yes" if want and want <= ok else "no")' "$@"
+}
+
+# lab_wait_stable <need> <polls> <interval> <probe-cmd>... — runs the probe
+# up to <polls> times, <interval> seconds apart, and returns 0 once it has
+# succeeded <need> times in a row; non-zero when polling is exhausted
+# (Sol r9 P2: the lab scripts must fail on a readiness or stability timeout
+# instead of scanning an unsettled or half-connected lab).
+lab_wait_stable() {
+  local need="$1" polls="$2" interval="$3" i streak=0
+  shift 3
+  for ((i = 1; i <= polls; i++)); do
+    if "$@"; then
+      streak=$((streak + 1))
+      [[ $streak -ge $need ]] && return 0
+    else
+      streak=0
+    fi
+    [[ $i -lt $polls ]] && sleep "$interval"
+  done
+  return 1
+}
+
+# lab_port_busy <port> — 0 when something listens on 127.0.0.1:<port>.
+# The lab scripts REFUSE a busy port and never kill anything to free it
+# (Sol r9 P2: a machine-wide pkill by command-line pattern could hit lab
+# daemons that neither own the port nor belong to this invocation).
+lab_port_busy() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN -t >/dev/null 2>&1
+  else
+    python3 -c '
+import socket, sys
+s = socket.socket()
+s.settimeout(1)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1"
+  fi
 }

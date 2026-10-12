@@ -124,43 +124,31 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# Wait for both dockerized upstreams to connect, then wait for the startup
+# Wait for BOTH named dockerized upstreams to connect, then for the startup
 # config-reload bounce to settle (the daemon normalizes and re-saves the
 # config on start, which the watcher treats as a change and reconnects the
 # upstreams — scanning during that window fails with "returned 0 tools").
-connected_count() {
-  curl -sf -H "X-API-Key: $API_KEY" "$BASE_URL/api/v1/servers" 2>/dev/null | python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    servers=d.get("data",{}).get("servers",[])
-    print(sum(1 for s in servers if s.get("status") in ("connected","Ready","ready")))
-except Exception:
-    print(0)' || echo 0
+# A timeout on either wait fails the run: a dangerous scan of the attacker
+# alone proves nothing about a lab whose victim never connected (Sol r9 P2).
+READY_POLLS="${TPA_LAB_READY_POLLS:-60}"
+upstreams_ready() {
+  [[ "$(curl -sf -H "X-API-Key: $API_KEY" "$BASE_URL/api/v1/servers" 2>/dev/null |
+    lab_upstreams_connected tpa-lab-attacker tpa-lab-victim)" == yes ]]
 }
 
-log "waiting for both isolated upstreams to connect"
-for i in $(seq 1 60); do
-  connected=$(connected_count)
-  [[ "$connected" -ge 2 ]] && break
-  sleep 1
-done
-if [[ "${connected:-0}" -lt 2 ]]; then
-  echo "WARNING: only $connected/2 upstreams connected — continuing; log tail:" >&2
+log "waiting for tpa-lab-attacker and tpa-lab-victim to connect"
+if ! lab_wait_stable 1 "$READY_POLLS" 1 upstreams_ready; then
+  echo "ERROR: tpa-lab-attacker and tpa-lab-victim did not both connect; log tail:" >&2
   tail -20 "$LOG_DIR/mcpproxy.log" >&2
+  exit 1
 fi
 
-log "waiting for upstream connections to stabilize (2 consecutive stable polls)"
-stable=0
-for i in $(seq 1 60); do
-  a=$(connected_count); sleep 2; b=$(connected_count)
-  if [[ "$a" -ge 2 && "$b" -ge 2 ]]; then
-    stable=$((stable+1))
-    [[ "$stable" -ge 2 ]] && break
-  else
-    stable=0
-  fi
-done
+log "waiting for upstream connections to stabilize (3 consecutive connected polls)"
+if ! lab_wait_stable 3 "$READY_POLLS" 2 upstreams_ready; then
+  echo "ERROR: the upstream connections never stabilized; log tail:" >&2
+  tail -20 "$LOG_DIR/mcpproxy.log" >&2
+  exit 1
+fi
 
 log "running TPA scan on tpa-lab-attacker (expect verdict: dangerous)"
 scan_ok=0

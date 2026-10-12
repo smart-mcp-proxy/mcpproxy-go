@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The red-team scripts' verdict predicates live in
@@ -884,5 +887,258 @@ func TestRunLabDockerResolvesRelativeConfigBeforeChecks(t *testing.T) {
 	}
 	if want := "config=" + filepath.Join(cwd, "lab.json") + ")"; !strings.Contains(string(got), want) {
 		t.Fatalf("want %q in preflight output:\n%s", want, got)
+	}
+}
+
+// TestScanReportVerdictRequiresTopLevelVerdict (Sol r9 P2): only the
+// report's recognised top-level aggregate verdict counts. A nested finding's
+// threat_level "dangerous" (tierless or soft — neither makes the aggregate
+// dangerous, internal/security/scanner/service.go deriveBaselineVerdict)
+// must not be promoted to the report verdict when the top-level one is
+// missing or unrecognised.
+func TestScanReportVerdictRequiresTopLevelVerdict(t *testing.T) {
+	lib := verdictsLib(t)
+	scanOut := writeTemp(t, "scan.txt", "Scan completed for tpa-lab-attacker (job scan-tpa-lab-attacker-123)\n")
+	const job = "scan-tpa-lab-attacker-123"
+	report := func(verdict interface{}, findings []map[string]interface{}) string {
+		data := map[string]interface{}{"job_id": job, "server_name": "tpa-lab-attacker", "findings": findings,
+			"reports": []map[string]interface{}{{"status": "dangerous", "findings": findings}}}
+		if verdict != nil {
+			data["verdict"] = verdict
+		}
+		b, _ := json.Marshal(map[string]interface{}{"success": true, "data": data})
+		return writeTemp(t, "report.json", string(b))
+	}
+	tierless := []map[string]interface{}{{"rule_id": "x", "threat_level": "dangerous"}}
+	soft := []map[string]interface{}{{"rule_id": "y", "threat_level": "dangerous", "tier": "soft"}}
+	for _, tc := range []struct {
+		name    string
+		verdict interface{}
+		finds   []map[string]interface{}
+	}{
+		{"missing verdict, tierless dangerous finding", nil, tierless},
+		{"missing verdict, soft dangerous finding", nil, soft},
+		{"unknown verdict, tierless dangerous finding", "unknown", tierless},
+		{"unknown verdict, soft dangerous finding", "unknown", soft},
+		{"empty verdict, soft dangerous finding", "", soft},
+		{"non-string verdict", map[string]string{"level": "dangerous"}, soft},
+	} {
+		r := report(tc.verdict, tc.finds)
+		if got, _ := runLib(t, lib, `scan_report_verdict "$1" "$2"`, r, job); got != "unknown" {
+			t.Errorf("%s: scan_report_verdict = %q, want unknown", tc.name, got)
+		}
+		if got, code := runLib(t, lib, `baseline_scan_verdict_ok "$1" "$2"`, scanOut, r); code == 0 || got != "unknown" {
+			t.Errorf("%s: baseline_scan_verdict_ok = %q (exit %d), want unknown and a failure", tc.name, got, code)
+		}
+	}
+	// A recognised top-level verdict still wins over nested statuses.
+	if got, _ := runLib(t, lib, `scan_report_verdict "$1" "$2"`, report("warnings", tierless), job); got != "warnings" {
+		t.Errorf("top-level warnings with a tierless dangerous finding = %q, want warnings", got)
+	}
+}
+
+func serversJSON(servers ...[2]string) string {
+	list := []map[string]string{}
+	for _, s := range servers {
+		list = append(list, map[string]string{"name": s[0], "status": s[1]})
+	}
+	b, _ := json.Marshal(map[string]interface{}{"success": true, "data": map[string]interface{}{"servers": list}})
+	return string(b)
+}
+
+// TestLabUpstreamsConnectedRequiresBothNamed (Sol r9 P2): readiness needs
+// every named upstream connected, not a count of connected servers.
+func TestLabUpstreamsConnectedRequiresBothNamed(t *testing.T) {
+	lib := verdictsLib(t)
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"both connected", serversJSON([2]string{"tpa-lab-attacker", "connected"}, [2]string{"tpa-lab-victim", "ready"}), "yes"},
+		{"only the attacker connected", serversJSON([2]string{"tpa-lab-attacker", "connected"}, [2]string{"tpa-lab-victim", "connecting"}), "no"},
+		{"only the attacker listed", serversJSON([2]string{"tpa-lab-attacker", "connected"}), "no"},
+		{"two connected, victim not among them", serversJSON([2]string{"tpa-lab-attacker", "connected"}, [2]string{"other", "connected"}, [2]string{"tpa-lab-victim", "error"}), "no"},
+		{"unreadable response", "not json", "no"},
+		{"empty response", "", "no"},
+	} {
+		cmd := exec.Command("bash", "-c", `source "$0"; lab_upstreams_connected tpa-lab-attacker tpa-lab-victim`, lib)
+		cmd.Stdin = strings.NewReader(tc.body)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Errorf("%s: lab_upstreams_connected = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLabWaitStable (Sol r9 P2): exhausted polling fails, and a flap resets
+// the streak of consecutive successes.
+func TestLabWaitStable(t *testing.T) {
+	lib := verdictsLib(t)
+	if _, code := runLib(t, lib, `lab_wait_stable 1 3 0 false`); code == 0 {
+		t.Error("a probe that never succeeds must exhaust polling and fail")
+	}
+	if _, code := runLib(t, lib, `lab_wait_stable 3 3 0 true`); code != 0 {
+		t.Error("three consecutive successes within three polls must pass")
+	}
+	// Probe outcomes per poll: ok, ok, fail, ok, ok — never 3 in a row.
+	seq := writeTemp(t, "seq", "0\n0\n1\n0\n0\n")
+	flap := `probe() { local r; r="$(head -1 "$1")"; sed -i.bak 1d "$1"; return "${r:-1}"; }; lab_wait_stable 3 5 0 probe "$1"`
+	if _, code := runLib(t, lib, flap, seq); code == 0 {
+		t.Error("a flapping upstream must not count as stable")
+	}
+}
+
+// lab8081Listener listens on 127.0.0.1:8081 and serves body for every
+// request until the test ends.
+func lab8081Listener(t *testing.T, body string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:8081")
+	if err != nil {
+		t.Skipf("cannot bind 127.0.0.1:8081: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+}
+
+// gatedServeStub writes an mcpproxy stand-in whose "serve" blocks until
+// killed (the fake API is served by the test) and whose every other command
+// is recorded and fails.
+func gatedServeStub(t *testing.T) (stub, record string) {
+	t.Helper()
+	dir := t.TempDir()
+	record = filepath.Join(dir, "invocations.log")
+	stub = filepath.Join(dir, "mcpproxy-stub")
+	script := "#!/bin/sh\necho \"ARGS $*\" >> '" + record + "'\n[ \"$1\" = serve ] && exec sleep 300\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return stub, record
+}
+
+func assertNoScan(t *testing.T, record string) {
+	t.Helper()
+	data, _ := os.ReadFile(record)
+	if strings.Contains(string(data), "security scan") {
+		t.Fatalf("a scan ran although only one upstream connected:\n%s", data)
+	}
+}
+
+// TestRunLabDockerFailsWhenOnlyOneUpstreamConnects (Sol r9 P2): the baseline
+// runner must fail on a readiness timeout instead of scanning a lab whose
+// victim never connected.
+func TestRunLabDockerFailsWhenOnlyOneUpstreamConnects(t *testing.T) {
+	verdictsLib(t)
+	skipIfLabPortBusy(t)
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub, record := gatedServeStub(t)
+	cmd := exec.Command("bash", filepath.Join(project, "scripts", "run-tpa-lab-docker.sh"))
+	cmd.Env = append(os.Environ(), "IMAGE=tpa-attack-lab:lab", "SKIP_BUILD=1",
+		"TPA_LAB_BINARY="+stub, "TPA_LAB_READY_POLLS=2")
+	// The double-start probe runs before the daemon starts; bring the fake
+	// API up only after it, once the stub "serve" has been recorded.
+	go func() {
+		for i := 0; i < 200; i++ {
+			if data, _ := os.ReadFile(record); strings.Contains(string(data), "ARGS serve ") {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		lab8081Listener(t, serversJSON([2]string{"tpa-lab-attacker", "connected"}, [2]string{"tpa-lab-victim", "connecting"}))
+	}()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("one connected upstream must fail the run:\n%s", out)
+	}
+	if !strings.Contains(string(out), "did not both connect") {
+		t.Errorf("expected a readiness failure:\n%s", out)
+	}
+	assertNoScan(t, record)
+}
+
+// TestRedteamSuiteFailsWhenOnlyOneUpstreamConnects (Sol r9 P2): the suite's
+// start_daemon fails on exhausted polling, so the suite fails and nothing is
+// scanned.
+func TestRedteamSuiteFailsWhenOnlyOneUpstreamConnects(t *testing.T) {
+	verdictsLib(t)
+	skipIfLabPortBusy(t)
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "tpa-lab-redteam-experiments.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub, record := gatedServeStub(t)
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	cmd := exec.Command("bash", script)
+	cmd.Env = append(os.Environ(), "SKIP_BUILD=1", "ONLY=EXP-1", "TPA_LAB_BINARY="+stub,
+		"TPA_LAB_RUN_ROOT="+runRoot, "RUN_DIR="+filepath.Join(runRoot, "r"), "TPA_LAB_READY_POLLS=2")
+	go func() {
+		for i := 0; i < 200; i++ {
+			if data, _ := os.ReadFile(record); strings.Contains(string(data), "ARGS serve ") {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		lab8081Listener(t, serversJSON([2]string{"tpa-lab-attacker", "connected"}))
+	}()
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("one connected upstream must fail the suite:\n%s", out)
+	}
+	if !strings.Contains(string(out), "did not both connect stably") {
+		t.Errorf("expected a readiness failure:\n%s", out)
+	}
+	assertNoScan(t, record)
+}
+
+// TestRedteamSuiteRefusesBusyPortWithoutKilling (Sol r9 P2): an unrelated
+// listener on 8081 makes the suite refuse to run, and it kills nothing —
+// in particular not another lab daemon whose command line matches the old
+// pkill pattern but which does not own the port.
+func TestRedteamSuiteRefusesBusyPortWithoutKilling(t *testing.T) {
+	verdictsLib(t)
+	skipIfLabPortBusy(t)
+	lab8081Listener(t, "{}")
+	// A decoy "lab daemon" on another port: its command line matches the
+	// pattern the old preflight pkill'd machine-wide.
+	decoy := exec.Command("python3", "-c", "import time; time.sleep(120)",
+		"mcpproxy serve --listen 127.0.0.1:18081 --data-dir /x/test-data-tpa-lab-docker/other")
+	if err := decoy.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = decoy.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = decoy.Process.Kill(); <-exited })
+
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "tpa-lab-redteam-experiments.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub, record := gatedServeStub(t)
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	cmd := exec.Command("bash", script)
+	cmd.Env = append(os.Environ(), "SKIP_BUILD=1", "ONLY=EXP-1", "TPA_LAB_BINARY="+stub,
+		"TPA_LAB_RUN_ROOT="+runRoot, "RUN_DIR="+filepath.Join(runRoot, "r"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("a busy port 8081 must make the suite refuse:\n%s", out)
+	}
+	if !strings.Contains(string(out), "port 8081 is already in use") {
+		t.Errorf("expected the busy-port refusal:\n%s", out)
+	}
+	select {
+	case <-exited:
+		t.Fatal("the preflight killed an unrelated lab process")
+	case <-time.After(500 * time.Millisecond):
+	}
+	if data, _ := os.ReadFile(record); len(data) > 0 {
+		t.Fatalf("the binary ran despite the busy port:\n%s", data)
 	}
 }

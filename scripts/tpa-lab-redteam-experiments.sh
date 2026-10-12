@@ -53,6 +53,8 @@ source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
 # runs (Sol r8 P1). start_daemon also pins --data-dir and --listen.
 lab_scrub_mcpproxy_env
 LISTEN="127.0.0.1:8081"
+# Upstream readiness polls (2s apart); tests lower it to exercise a timeout.
+READY_POLLS="${TPA_LAB_READY_POLLS:-60}"
 ONLY="${ONLY:-}"
 DAEMON_PID=""
 CURRENT_CONFIG=""
@@ -120,22 +122,21 @@ start_daemon() {
     kill -0 "$DAEMON_PID" 2>/dev/null || { echo "daemon exited — log tail:"; tail -20 "$logf"; return 1; }
     sleep 1
   done
-  # settle the startup config-reload bounce (2 consecutive stable polls)
-  local a b
-  for i in $(seq 1 60); do
-    a=$(connected); sleep 2; b=$(connected)
-    [[ "$a" -ge 2 && "$b" -ge 2 ]] && return 0
-  done
-  echo "WARNING: upstreams not stable (a=$a b=$b); log tail:"; tail -10 "$logf"
+  # Settle the startup config-reload bounce: BOTH named upstreams connected
+  # on 3 consecutive polls. A readiness/stability timeout fails the start
+  # (the caller records INCONCLUSIVE) instead of scanning a half-connected
+  # lab (Sol r9 P2).
+  if ! lab_wait_stable 3 "$READY_POLLS" 2 upstreams_ready; then
+    echo "ERROR: tpa-lab-attacker and tpa-lab-victim did not both connect stably; log tail:"
+    tail -10 "$logf"
+    return 1
+  fi
 }
 
-connected() {
-  curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" 2>/dev/null | python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin); s=d.get("data",{}).get("servers",[])
-    print(sum(1 for x in s if x.get("status") in ("connected","Ready","ready")))
-except Exception: print(0)' || echo 0
+# upstreams_ready — 0 when both lab upstreams are listed as connected.
+upstreams_ready() {
+  [[ "$(curl -sf -H "X-API-Key: $API_KEY" "$API_URL/servers" 2>/dev/null |
+    lab_upstreams_connected tpa-lab-attacker tpa-lab-victim)" == yes ]]
 }
 
 stop_daemon() {
@@ -336,12 +337,12 @@ record() { RESULTS+=("$1"); echo "----------------------------------------"; }
 
 # Preflight: a leftover daemon on our port would silently receive our API
 # calls while CLI reads a different DB — refuse to run until it is gone.
-if lsof -ti :8081 >/dev/null 2>&1; then
-  pkill -f "mcpproxy serve.*test-data-tpa-lab-docker" 2>/dev/null && sleep 2
-  if lsof -ti :8081 >/dev/null 2>&1; then
-    echo "ERROR: port 8081 is still in use by a non-lab process — free it first." >&2
-    exit 1
-  fi
+# Nothing is killed here: a pattern-matched pkill could hit lab daemons that
+# neither own the port nor belong to this invocation (Sol r9 P2).
+if lab_port_busy 8081; then
+  echo "ERROR: port 8081 is already in use; refusing to run (nothing was stopped)." >&2
+  echo "Inspect the listener with 'lsof -nP -iTCP:8081 -sTCP:LISTEN' and stop it yourself if it is a stale lab daemon." >&2
+  exit 1
 fi
 
 # ==================================================================== EXP-1
