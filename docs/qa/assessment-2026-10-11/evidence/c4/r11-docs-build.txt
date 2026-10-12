@@ -1,0 +1,15 @@
+[WARNING] The `siteConfig.onBrokenMarkdownLinks` config option is deprecated and will be removed in Docusaurus v4.
+Please migrate and move this option to `siteConfig.markdown.hooks.onBrokenMarkdownLinks` instead.
+[webpackbar] ℹ Compiling Client
+[webpackbar] ℹ Compiling Server
+[webpackbar] ✔ Server: Compiled successfully in 2.71s
+[webpackbar] ✔ Client: Compiled successfully in 8.39s
+[docusaurus-plugin-llms] Generating LLM-friendly documentation...
+[docusaurus-plugin-llms] Warning: Description for "Implementing OAuth Authentication for Model Context Protocol Servers in Go: Security, Implementation, and Best Practices" is very long (776 characters)
+[docusaurus-plugin-llms] Warning: Description for "macOS Tray UX + Settings-Parity Audit — 2026-08" is very long (731 characters)
+[docusaurus-plugin-llms] Generated: /Users/user/repos/mcpproxy-go/.claude/worktrees/a-c4/website/build/llms.txt
+[docusaurus-plugin-llms] Generated: /Users/user/repos/mcpproxy-go/.claude/worktrees/a-c4/website/build/llms-full.txt
+[docusaurus-plugin-llms] No custom LLM files configured. Skipping.
+[docusaurus-plugin-llms] Stats: 195 documents processed
+[SUCCESS] Generated static files in "build".
+[INFO] Use `npm run serve` command to test your build locally.

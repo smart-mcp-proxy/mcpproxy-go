@@ -88,7 +88,7 @@ The following is **never** collected:
 - Tool names or descriptions
 - API keys, tokens, or credentials
 - File paths or environment variables
-- IP addresses (stripped by our server before storage)
+- Your raw IP address is not part of the payload. The receiver's handling of the connection IP changed in a receiver update that is rolling out separately; see [Data handling](#data-handling) for what it does and does not keep
 - User identity, email, or account information
 - Server-edition IdP issuer URLs, tenant ids, client ids, or group names (only the provider family and a bucketed member count are sent — schema v13)
 - Tool call content, arguments, or responses
@@ -142,7 +142,9 @@ The onboarding connect-step status (a v4 field) gains a fourth value in v7:
 | `previous_shutdown` | fixed enum `clean` \| `crash` | How the **previous** process instance ended: `clean` = the graceful-shutdown path ran; `crash` = it didn't (SIGKILL, panic, power loss). Absent on a first-ever run — a fresh install is never reported as a crash. Stable across all heartbeats of the current instance | One enum value about our own process lifecycle; no stack traces, no session timing |
 | `last_error_code` | fixed enum (`MCPX_*`) | The most recently observed stable diagnostic code (same fixed set as `diagnostics.error_code_counts_24h`), persisted across restarts so a post-crash heartbeat carries the pre-crash code. Absent when no error was ever recorded | Only the enum code is stored and sent — **never** error messages, server names, paths, or stack traces. The scanner rejects any value outside the fixed diagnostics catalog |
 
-Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` + `last_error_code` let the final heartbeat before an install goes silent distinguish "crashed and never came back" from "exited cleanly and never returned".
+Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` records how the **previous** run of an install ended, and `last_error_code` the latest persisted diagnostic.
+
+**How to read churn with these fields.** `previous_shutdown` is prior-session evidence: it is fixed at startup, so every heartbeat of a run reports how the run before it ended. `last_error_code` is different: it is re-read on every heartbeat as the latest persisted diagnostic code, so it can reflect an error from the current run and has no reliable session attribution. Neither can explain why an install goes silent, because a terminal crash would be reported by a later heartbeat that, for a churned install, never arrives. Silence has competing explanations that these fields cannot separate (the user went offline, opted out, uninstalled, or simply stopped using the app). Use `previous_shutdown` to ask whether installs with a crashed previous run return less often than others, as a correlation, not as the cause of churn for any one install.
 
 ### Activation: `first_real_tool_call_ever`
 
@@ -165,7 +167,14 @@ The `activation` block gains one additive boolean:
 
 **Eligible cohort (corrected success measurement).** Filtering heartbeats on `schema_version >= 14` is **not** enough: an install that stamped the flag on a v13 build after a failed upstream call reports that same `true` in its first v14 heartbeat with no successful call. Treat the flag as *unknown* for any install whose **earliest observed heartbeat** has `schema_version < 14`; the corrected measurement covers only installs first seen at v14 or later (compute `min(schema_version)` per `anonymous_id`). A fresh v14 install is eligible. The historical flag is deliberately not rewritten or split into a second field, so no receiver change is needed.
 
-**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`, within the eligible cohort above. Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
+**Guidance for consumers**: two different questions need two different definitions, and dividing flag totals answers neither.
+
+- **Prevalence (two independent rates).** Of eligible installs, the share with `first_retrieve_tools_call_ever = true`, and separately the share with `first_real_tool_call_ever = true`. These are unconditional rates over the same eligible denominator; do not divide one by the other.
+- **Conditional conversion (retrieve to real call).** Restrict to eligible installs with `first_retrieve_tools_call_ever = true`, then take the share of those with `first_real_tool_call_ever = true`. Example: three installs report (retrieve, real call) as (true, true), (true, false), (false, true). Dividing flag totals gives 2/2 = 100%, but conversion among retrieve users is 1/2 = 50%; the third install's success happened without any `retrieve_tools` call and must not sit in the numerator.
+- **Direct routing is a separate activation path.** Direct routing exposes upstream tools without `retrieve_tools`, so a successful call there stamps `first_real_tool_call_ever` with no retrieve flag. Report that group (`first_real_tool_call_ever = true` and `first_retrieve_tools_call_ever = false`) as its own count, never as a retrieve-to-call conversion.
+- **Eligible and unknown counts.** Use only the eligible cohort above. Installs whose earliest observed heartbeat has `schema_version < 14` have an unknown flag: exclude them from both numerator and denominator, and report the eligible count and the unknown count next to every rate so the coverage is visible.
+
+Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
 
 ### `launch_source` = `tray`
 
@@ -337,7 +346,9 @@ Development builds (a version that is not a release number) never send telemetry
 ## Data handling
 
 - Telemetry data is sent to a Cloudflare Worker over HTTPS
-- Source IP addresses are stripped before storage
+- Cloudflare's edge sees the connection's IP address in order to deliver the request, as it does for any HTTPS request.
+- **Rollout dependency.** The receiver update (`fix/assess-ip-minimization` in `smart-mcp-proxy/mcpproxy-telemetry`) stops persisting the raw source IP: the Worker then keeps only the heartbeat payload fields described on this page, a server-assigned timestamp, and coarse geography derived by Cloudflare. Until that update is deployed, the previously deployed receiver may still store the IP address with each heartbeat. This page describes the target contract; treat the deployed receiver revision, not this page, as the source of truth until the rollout is confirmed.
+- Heartbeats stored before the receiver stopped keeping IP addresses may still hold one; the change does not rewrite or delete historical rows. Clearing or pseudonymizing historical values is a separate operation.
 - Data is stored in Cloudflare D1 (EU region)
 - Used only for aggregate product analytics
 - No third-party analytics services receive the data

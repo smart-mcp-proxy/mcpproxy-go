@@ -156,3 +156,22 @@ func TestApplyOutputSanitisation_StripControlChars(t *testing.T) {
 		t.Fatalf("bidi override not stripped: %q", got)
 	}
 }
+
+// An upstream result that is itself an error (IsError:true) is forwarded
+// untouched even under redact/block; the docs state this exclusion.
+func TestApplyOutputSanitisation_UpstreamIsErrorBypassed(t *testing.T) {
+	for _, action := range []string{"redact", "block"} {
+		cfg := config.DefaultOutputSanitisationConfig()
+		cfg.ResponseAction = action
+		p := newSanProxy(t, cfg, true)
+		fwd := textResult(mcp.TextContent{Type: "text", Text: "failed " + awsKeyFixture})
+		fwd.IsError = true
+		block := p.applyOutputSanitisation(context.Background(), "srv", "tool", "req-test", contracts.ContentTrustUntrusted, fwd)
+		if block != nil {
+			t.Fatalf("%s: upstream isError result must not be blocked", action)
+		}
+		if !strings.Contains(firstText(fwd), awsKeyFixture) {
+			t.Fatalf("%s: upstream isError result is documented as untouched, got %q", action, firstText(fwd))
+		}
+	}
+}
