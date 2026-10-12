@@ -524,6 +524,68 @@ of the main checkout. They include `suite.log` (full build), `suite2.log`,
 `run-tpa-lab-docker.log` and the per-experiment daemon logs of both full runs
 (`run-dir-full1`, `run-dir-full2`).
 
+### Review round 7 follow-ups
+
+A seventh review (Sol 6.1, REQUEST_CHANGES at `9dc25bfdd`, seven chunked
+transcripts `rt-r7a` to `rt-r7g`) raised ten items with no duplicates. All ten
+were in scope (RT-05, RT-03, RT-06 and the lab scripts) and all ten were fixed;
+none was rebutted. Each code fix has a regression test that was checked to
+fail without it (by reverting or mutating the fix). RT-04 and RT-07 (detect
+engine) stay deferred to the concurrent SEC-01 PR, so EXP-3 still shows HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P2 RT-05: the connect-owned coalesced discovery closure derived its context from `AppContext()`, which `Close` replaces with `context.Background()`, so a follow-up started after shutdown ran uncancelled | Fixed in `runtime/lifecycle.go`. The connect callback is now `onServerConnectedDiscovery`, and every run derives its context from `lifetimeContext()`. Test: `TestConnectDiscoveryFollowUp_StartedAfterClose_GetsCancelledContext` drives the connect path, with `Close` landing between the owner's follow-up decision and the follow-up. Reverting to `AppContext()` fails it |
+| P2 RT-03: `newToggleSynthesizedRecord` stamped a hint-aware hash without `CurrentAnnotations`. After approval, a non-default to default hint flip re-hashed the stored contract (nil hints) equal to the live one and the formula-migration branch approved it silently | Fixed in `runtime/tool_quarantine.go`. The synthesized record captures the snapshot's annotations. Test: `TestSetToolEnabled_SynthesizedRecordCapturesAnnotations` (active gate approved by name, and lifted gate then switched to manual) drops a `readOnlyHint` and asserts `changed` and blocked over two discovery passes. Without the fix both passes approved the flip |
+| P2 RT-05 test: the replaced-client verification test stored the discovery marker after a `!busy` check, so a background connect callback could own discovery, return the old contract and later panic in `waitQuarantinedCaptureBound` after the test ended | Fixed. The test takes the marker atomically with `LoadOrStore` and holds it for the whole call. Its interleaving hook acts only while armed for the test's own call. 5 runs under `-race` pass |
+| P2 RT-05 test: `TestListTools_WaiterReadsItsOwnLeadersResultAfterReplacement` read `call1.tools` directly and never exercised a waiter | Fixed. A test seam (`listToolsBeforeWaiterRead`) holds a real `ListTools` waiter between waking on leader 1 and reading. Leader 2 is elected in that window, then the waiter is released and must return leader 1's result. A mutation that reads the current call instead of the waited one fails it |
+| P3 RT-05 tests: freshness tests relied on sleeps | Fixed. `managed.Client.SetListToolsObserver` reports leader elections and waiter attachments. `TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall`, `TestListTools_UnpublishedLeaderIsNotAnEmptySuccess` and `TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList` now wait for explicit acknowledgements, so there are no sleeps. The fresh test holds the waiter at the read boundary while leader 3 is elected. Swapping `ListToolsFresh` back to `ListTools` in discovery fails the runtime test |
+| P2 RT-06: scan coverage recorded only the live export. An ingested contract that the live response omitted or answered differently was judged uncovered, and its dangerous findings were dropped from the per-tool verdict | Fixed in `security/scanner/service.go`, `runtime/review.go` and `hash/hash.go`. `ScanContext.ToolContractDigests` records a digest per tool name for every analysed contract, live and divergent ingested. Review covers a record when any of those digests equals its current contract. Tests: `TestRT06_ExportCoversEveryAnalysedContract` (scanner) and `TestReviewCoverage_ScannerRecordsIngestedContracts`, which takes the scanner's own digests into review and asserts `dangerous` for a divergent and an omitted ingested tool |
+| P2 RT-06: output schemas are scanned, but the coverage digest covered only the description and input schema, so a pre-upgrade scan matched a contract with an output schema it never saw | Fixed. The new digest, `hash.ToolContractDigest`, covers the description, input schema and output schema, and is version-tagged. A historical scan that has only `ToolHashes` does not cover a record that has an output schema. Test: `TestReviewToolCovered_OutputAwareDigests` |
+| P2 suite: the isolation preflight accepted missing or empty `extra_args`, and the launcher only appends them | Fixed in `scripts/lib/tpa-lab-verdicts.sh`. The effective global plus per-server arguments must include `--read-only`, `--cap-drop=ALL` and `--security-opt no-new-privileges`. Tests: seven new refusal variants, run through both preflights, and `TestLabConfigCheckIsolationRequiresHardening`, which checks each flag on its own, both argument forms, and global-only hardening |
+| P2 suite: EXP-4 scored the scan even when the fixture's first `tools/list` went to a caller that does not ingest contracts | Fixed. Before scanning, the suite proves the precondition from the stored records: either the stored export holds the poisoned `summarize_text`, or the change diff's previous description does. If neither does, it retries with a fresh process and data dir (`EXP4_ATTEMPTS`, default 4). If the precondition is never met, the result is INCONCLUSIVE and is never scored. Tests: `TestExp4PoisonRecorded` (including the non-ingesting-caller case) and `TestExp4Verdict` |
+| P2 suite: `run-tpa-lab-docker.sh` exited 0 on any completed scan | Fixed. It now requires that this scan's job report says `dangerous` (`baseline_scan_verdict_ok`). The report parsing is shared with the suite through `scan_report_verdict`. Tests: `TestBaselineScanVerdictOK` rejects clean, warnings, unknown, unreadable and stale reports, and a report from a scan with no job id. `TestRunLabDockerValidatesBaselineVerdict` checks that the runner gates on it |
+
+Verification on the branch head after the round-7 follow-ups:
+
+```sh
+go build ./... && go vet ./internal/runtime/ ./internal/upstream/managed/ ./internal/security/scanner/ ./tests/tpa-attack-lab/
+go test -count=1 -timeout 25m ./internal/... ./tests/tpa-attack-lab/
+#   73 packages ok; internal/server FAIL (unfiltered run): TestBinaryHealthAndRecovery and
+#   TestPreflightIncidentDiagnosisE2E (binary/E2E, excluded by the CI skip regex), plus
+#   TestSearchServers_CatalogOrderMatchesTheRESTGolden (registry ranking order, untouched by this
+#   branch, passes 3/3 when run alone), then the 25m timeout
+go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/server/...
+#   ok internal/server 1099.1s (CI subset, all packages ok)
+go test -race ./internal/runtime/... ./internal/upstream/managed/... ./internal/security/scanner/...
+#   ok (internal/runtime 363.4s), no DATA RACE
+golangci-lint run --config .github/.golangci.yml ./...                       # 15 issues, none in a file this branch touched
+golangci-lint run --config .github/.golangci.yml --build-tags server ./...   # 18 issues, none in a file this branch touched
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   [exp] attempt 1: poisoned list-1 contract ingested by discovery: yes
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: ingested=yes (attempt 1), scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh
+#   Risk Score: 93/100; baseline verdict: dangerous (job-bound);
+#   both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r7/`
+of the main checkout. They include `suite.log`, `unit.log`, `server-ci.log`,
+`race.log`, `lint.log`, `lint-server.log`, `run-tpa-lab-docker.log` and the
+per-experiment daemon logs (`run-dir-full1`).
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
@@ -572,3 +634,13 @@ of the main checkout. They include `suite.log` (full build), `suite2.log`,
   trigger. It no longer joins a list that was already in flight. This can add
   one upstream `tools/list` per trigger when another list is running (review
   round 6).
+- Scan jobs record `tool_contract_digests`: an output-aware digest for every
+  contract the scan analysed under each tool name, live and divergent
+  ingested. Review applies a scan's findings to a tool whose current
+  contract matches any of them. A scan recorded before this change does not
+  cover a tool whose current contract has an output schema, so it shows that
+  tool as not scanned until the next scan (review round 7).
+- The lab's isolation preflight now requires `--read-only`, `--cap-drop=ALL`
+  and `--security-opt no-new-privileges` on every wrapped `docker run`.
+  `run-tpa-lab-docker.sh` fails unless the baseline scan's own report is
+  `dangerous` (review round 7).
