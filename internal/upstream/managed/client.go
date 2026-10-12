@@ -43,8 +43,22 @@ type Client struct {
 	// Spec 116: the config and the commit generation it belongs to are one
 	// atomic pair, so a reader never sees a config with another commit's
 	// generation (Generation, SetConfigAt).
-	cfg          atomic.Pointer[stampedConfig]
-	coreClient   *core.Client
+	cfg        atomic.Pointer[stampedConfig]
+	coreClient *core.Client
+
+	// instanceID identifies this instance (Spec 116 PR3, review R5.2): a
+	// process-wide counter assigned at construction and never reused. A
+	// commit generation identifies a config; a restart, ForceReconnectAll or
+	// Docker recovery installs a new instance at the SAME generation, so an
+	// action that targets an existing instance binds to its InstanceID too.
+	instanceID InstanceID
+	// unregistered is set by upstream.Manager when it removes this instance
+	// from its registry (unregisterLocked, under the manager's locks). From
+	// then on Connect refuses (ErrInstanceUnregistered), so a worker, the
+	// reconnect loop or a sweep that still holds the pointer cannot bring an
+	// instance the manager no longer serves back online. Spec 116 PR4
+	// extends this to a byte-level retirement barrier (dial gate).
+	unregistered atomic.Bool
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
 
@@ -376,8 +390,16 @@ const ambiguousProbeTimeout = 5 * time.Second
 // request doesn't paint the UI red and clear the tools list.
 const healthCheckFailureThreshold = 3
 
-// NewClient creates a new managed client with state management
+// NewClient creates a new managed client with state management. The instance
+// holds no commit generation (0); the daemon builds instances with
+// NewClientAt.
 func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
+	return NewClientAt(id, serverConfig, 0, logger, logConfig, globalConfig, storage, secretResolver)
+}
+
+// NewClientAt creates a managed client stamped, from construction, with the
+// Spec 116 commit generation gen of serverConfig (Generation).
+func NewClientAt(id string, serverConfig *config.ServerConfig, gen int64, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
 	// Create core client
 	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage, secretResolver)
 	if err != nil {
@@ -396,7 +418,8 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		healthProbe:    coreClient,
 		toolInvoker:    coreClient,
 	}
-	mc.cfg.Store(&stampedConfig{cfg: serverConfig})
+	mc.instanceID = InstanceID(instanceIDCounter.Add(1))
+	mc.cfg.Store(&stampedConfig{cfg: serverConfig, gen: gen})
 	mc.globalConfig.Store(globalConfig)
 
 	// Spec 112 R6: coreClient is created once and never replaced, so installing
@@ -464,6 +487,11 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// ErrInstanceUnregistered is returned by Connect on an instance the upstream
+// manager has unregistered (Spec 116 PR3): a newer config commit, a removal or
+// a same-generation replacement superseded it, so it must not connect.
+var ErrInstanceUnregistered = errors.New("instance unregistered: superseded by a newer config commit or replacement")
+
 // ErrConnectAborted is returned by Connect when a Disconnect, or a newer
 // connect attempt, ran while the transport was being established. The dial's
 // result (success or failure) is discarded; the client keeps the state the
@@ -477,6 +505,13 @@ var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnec
 func (mc *Client) Connect(ctx context.Context) error {
 	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
+
+	// An instance the manager unregistered never connects again: whoever
+	// still holds this pointer acts for a superseded config or instance.
+	if mc.unregistered.Load() {
+		mc.mu.Unlock()
+		return ErrInstanceUnregistered
+	}
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
@@ -565,6 +600,19 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// PR1: every call fails with "client not connected", and since the client
 	// looks connected nothing reconnects it), or overwriting the reset state
 	// with Error/PendingAuth for a dial the Disconnect cancelled.
+	// Unregistered while dialing, before the manager's asynchronous
+	// Disconnect landed: discard the result and close what this dial opened.
+	if mc.connectSeq == attempt && mc.unregistered.Load() {
+		mc.connectSeq++
+		if connectErr == nil && mc.coreClient != nil {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.StateManager.Reset()
+		mc.logger.Info("Connect finished on an unregistered instance; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		return ErrInstanceUnregistered
+	}
 	if mc.connectSeq != attempt {
 		// Only Disconnects ran since (a newer attempt would have left
 		// Connecting, Ready or a failure state): close what this dial opened,
@@ -2853,6 +2901,27 @@ func (mc *Client) setToolCountCache(count int) {
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.GetConfig().Command, "docker")
 }
+
+// InstanceID identifies one managed client instance (Spec 116 PR3). Zero is
+// never assigned by NewClient.
+type InstanceID uint64
+
+// instanceIDCounter hands out instance ids to every managed client in the
+// process; an id is never reused.
+var instanceIDCounter atomic.Uint64
+
+// InstanceID returns this instance's process-unique id (0 for a client that
+// was not built by NewClient).
+func (mc *Client) InstanceID() InstanceID { return mc.instanceID }
+
+// MarkUnregistered records that the upstream manager removed this instance
+// from its registry. Called only by upstream.Manager, under its registry
+// locks; from then on Connect refuses with ErrInstanceUnregistered.
+func (mc *Client) MarkUnregistered() { mc.unregistered.Store(true) }
+
+// Unregistered reports whether the upstream manager removed this instance
+// from its registry.
+func (mc *Client) Unregistered() bool { return mc.unregistered.Load() }
 
 // connectionEpochCounter hands out connection epochs to every managed client
 // in the process. It is process-wide so an epoch never repeats across client

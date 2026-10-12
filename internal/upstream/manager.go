@@ -103,6 +103,12 @@ func getDockerRetryInterval(attempt int) time.Duration {
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
 	clients map[string]*managed.Client
+	// desired is the committed generation of every server name (Spec 116
+	// PR3): written by AdvanceGenerations (commit step 7) and the unbound
+	// legacy methods, under captureMu W + mu W; read under mu. A bound (*At)
+	// action acts only when its generation matches. Removed names keep a
+	// tombstone (present=false).
+	desired map[string]desiredGen
 	mu      sync.RWMutex
 	// captureMu serializes a bounded quarantined-review persistence against
 	// client replacement/removal. It is deliberately separate from mu: approval
@@ -157,6 +163,11 @@ type Manager struct {
 	dockerRecoveryState  *storage.DockerRecoveryState
 	dockerRecoveryCancel context.CancelFunc
 	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
+
+	// forceReconnectBeforeReplace is a Spec 116 PR3 test seam (T3.8): it runs
+	// in ForceReconnectAll after the clients were captured and before the
+	// captured instance is replaced. Nil in production.
+	forceReconnectBeforeReplace atomic.Pointer[func(id string)]
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
@@ -227,6 +238,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:           make(map[string]*managed.Client),
+		desired:           make(map[string]desiredGen),
 		logger:            logger,
 		storage:           boltStorage,
 		notificationMgr:   NewNotificationManager(),
@@ -437,318 +449,6 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 	defer m.mu.Unlock()
 	m.promptsChangedCallback = callback
 	m.logger.Debug("Prompts-changed callback set on manager")
-}
-
-// AddServerConfig adds a server configuration without connecting
-func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
-	return m.AddServerConfigAt(id, serverConfig, 0)
-}
-
-// AddServerConfigAt is AddServerConfig for a config committed at Spec 116
-// commit generation gen: a new instance is stamped with gen, and a retained
-// instance is restamped with it (SetConfigAt, only forward). gen 0 means
-// "unknown" and leaves the stamp as it is. PR3 of Spec 116 adds the
-// execution-time generation check; this method does not refuse anything.
-func (m *Manager) AddServerConfigAt(id string, serverConfig *config.ServerConfig, gen int64) error {
-	m.captureMu.Lock()
-	m.mu.Lock()
-
-	// Check if existing client exists and if config has changed
-	var clientToDisconnect *managed.Client
-	if existingClient, exists := m.clients[id]; exists {
-		existingConfig := existingClient.GetConfig()
-
-		// Compare configurations to determine if reconnection is needed. The
-		// predicate is the one the config commit uses to mark a change as
-		// Reconnect (config.ConnectionEquivalent): a narrower set here would
-		// keep a running instance on its old isolation, OAuth, working_dir or
-		// init timeout after a commit that asked for a reconnect (Spec 116
-		// review round 1; the MCP update/patch handlers used to cover this
-		// with an unconditional RemoveServer).
-		configChanged := !config.ConnectionEquivalent(existingConfig, serverConfig)
-
-		if configChanged {
-			m.logger.Info("Server configuration changed, disconnecting existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-
-			// Remove from map immediately to prevent new operations
-			delete(m.clients, id)
-			// Spec 113-d FR-066: the replacement connects to a different
-			// endpoint/command/credentials, so the old client's failure
-			// history must not degrade it. Same critical section as the
-			// delete, mirroring RemoveServer.
-			statsName := id
-			if existingConfig != nil && existingConfig.Name != "" {
-				statsName = existingConfig.Name
-			}
-			m.callStats.Drop(statsName)
-			m.dropCallHealth(statsName)
-			// Save reference to disconnect outside lock
-			clientToDisconnect = existingClient
-		} else {
-			m.logger.Debug("Server configuration unchanged, keeping existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-			// Update the client's config reference to the new config but don't recreate the client
-			// Use thread-safe setter to avoid race with GetServerState()
-			m.mu.Unlock()
-			m.captureMu.Unlock()
-			if gen > 0 {
-				if !existingClient.SetConfigAt(serverConfig, gen) {
-					// The instance already holds this or a newer commit's
-					// config; a late worker must not roll it back.
-					return nil
-				}
-			} else {
-				existingClient.SetConfig(serverConfig)
-			}
-			// Spec 093: the per-server limits may have changed even though the
-			// transport config did not.
-			m.applyServerConcurrency(serverConfig)
-			return nil
-		}
-	}
-
-	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
-	if err != nil {
-		m.mu.Unlock()
-		m.captureMu.Unlock()
-		// Disconnect old client if we failed to create new one
-		if clientToDisconnect != nil {
-			_ = clientToDisconnect.Disconnect()
-		}
-		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
-	}
-
-	// Set up notification callback for state changes
-	if m.notificationMgr != nil {
-		notifierCallback := StateChangeNotifier(m.notificationMgr, serverConfig.Name)
-		// Combine with existing callback if present
-		existingCallback := client.StateManager.GetStateChangeCallback()
-		client.StateManager.SetStateChangeCallback(func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
-			// Call existing callback first (for logging)
-			if existingCallback != nil {
-				existingCallback(oldState, newState, info)
-			}
-			// Then call notification callback
-			notifierCallback(oldState, newState, info)
-		})
-	}
-
-	// Set up tool discovery callback for notifications/tools/list_changed handling
-	if m.toolDiscoveryCallback != nil {
-		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
-	}
-
-	// Set up prompts-changed callback for notifications/prompts/list_changed (F13)
-	if m.promptsChangedCallback != nil {
-		client.SetPromptsChangedCallback(m.promptsChangedCallback)
-	}
-
-	// Spec 093: install admission control before the client becomes reachable,
-	// so no dispatch can ever see a client without its limiter wiring.
-	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())
-	if gen > 0 {
-		client.SetConfigAt(serverConfig, gen)
-	}
-
-	m.clients[id] = client
-	m.logger.Info("Added upstream server configuration",
-		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
-
-	// IMPORTANT: Release lock before disconnecting to prevent deadlock
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093: publish this server's limits (or retire them when the server is
-	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
-	// callers.
-	m.applyServerConcurrency(serverConfig)
-
-	// Disconnect old client outside lock to avoid blocking other operations
-	if clientToDisconnect != nil {
-		_ = clientToDisconnect.Disconnect()
-	}
-
-	return nil
-}
-
-// AddServer adds a new upstream server and connects to it (legacy method)
-func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
-	return m.AddServerAt(id, serverConfig, 0)
-}
-
-// AddServerAt is AddServer for a config committed at Spec 116 generation gen
-// (see AddServerConfigAt).
-func (m *Manager) AddServerAt(id string, serverConfig *config.ServerConfig, gen int64) error {
-	if err := m.AddServerConfigAt(id, serverConfig, gen); err != nil {
-		return err
-	}
-
-	if !serverConfig.Enabled {
-		m.logger.Debug("Skipping connection for disabled server",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-		return nil
-	}
-
-	// Check if client exists and is already connected
-	if client, exists := m.GetClient(id); exists {
-		if client.IsConnected() {
-			m.logger.Debug("Server is already connected, skipping connection attempt",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name))
-			return nil
-		}
-
-		// Connect to server with the resolved init_timeout (MCP-3322) to prevent
-		// hanging while still honoring a per-server/global handshake deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
-		defer cancel()
-		if err := client.Connect(ctx); err != nil {
-			// The supervisor's reconcile usually owns the connect at startup;
-			// LoadConfiguredServers' AddServer for the same unchanged server then
-			// hits the in-flight guard. Nothing failed.
-			if errors.Is(err, managed.ErrConnectAlreadyActive) {
-				m.logger.Debug("Connect already in progress or established, not starting another",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.String("state", client.GetState().String()))
-				return nil
-			}
-			// A concurrent disconnect (removal, or a newer commit replacing or
-			// disabling this server) superseded the dial. The disconnect owns
-			// the outcome; nothing failed.
-			if errors.Is(err, managed.ErrConnectAborted) {
-				m.logger.Debug("Connect superseded by a concurrent disconnect",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name))
-				return nil
-			}
-			// Check if this is an OAuth error - don't fail AddServer for OAuth
-			errStr := err.Error()
-			isOAuthError := strings.Contains(errStr, "OAuth") ||
-				strings.Contains(errStr, "oauth") ||
-				strings.Contains(errStr, "authorization required")
-
-			if isOAuthError {
-				m.logger.Info("Server requires OAuth authorization - connection will complete after OAuth login",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.Error(err))
-				// Don't return error - server is added successfully, just needs OAuth
-				return nil
-			}
-
-			// For non-OAuth errors, still return error
-			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
-		}
-	} else {
-		m.logger.Error("Client not found after AddServerConfig - this should not happen",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-	}
-
-	return nil
-}
-
-// RestampRequest is one retained instance's new committed config.
-type RestampRequest struct {
-	Name   string
-	Config *config.ServerConfig
-	Gen    int64
-}
-
-// RestampRetained gives every registered instance named in reqs its new config
-// and commit generation as one atomic pair (Spec 116 commit step 7, review
-// R9.1). It is for changes that keep the connection (config.ConnectionEquivalent
-// holds): the instance is not replaced and does not reconnect. A request whose
-// generation is not newer than the instance's is ignored, so a late legacy
-// worker cannot roll a config back. It returns the names it restamped.
-//
-// Takes captureMu for writing and then mu (lock order L3 → L4); the caller
-// must hold no approval lock (Spec 116 plan §Lock order). The limiter update
-// runs after both are released, as on the AddServerConfig path.
-func (m *Manager) RestampRetained(reqs []RestampRequest) []string {
-	if len(reqs) == 0 {
-		return nil
-	}
-	m.captureMu.Lock()
-	m.mu.Lock()
-	var applied []RestampRequest
-	for _, req := range reqs {
-		client, ok := m.clients[req.Name]
-		if !ok || client == nil || req.Config == nil {
-			continue
-		}
-		if client.SetConfigAt(req.Config, req.Gen) {
-			applied = append(applied, req)
-		}
-	}
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	names := make([]string, 0, len(applied))
-	for _, req := range applied {
-		m.applyServerConcurrency(req.Config)
-		names = append(names, req.Name)
-	}
-	return names
-}
-
-// RemoveServer removes an upstream server
-func (m *Manager) RemoveServer(id string) {
-	// Get client reference while holding lock briefly
-	m.captureMu.Lock()
-	m.mu.Lock()
-	client, exists := m.clients[id]
-	callStatsName := id
-	if exists {
-		// Remove from map immediately to prevent new operations
-		delete(m.clients, id)
-		if client != nil {
-			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-				callStatsName = cfg.Name
-			}
-		}
-	}
-	// Spec 113-d FR-066: a removed (or renamed — remove + add) server must not
-	// carry its failure history into whatever reuses the name. Dropped in the
-	// SAME critical section as the delete: RecordClientCallOutcome records
-	// under m.mu.RLock, so a replacement registered after this unlock cannot
-	// have its first samples wiped by a late drop, and the old client's
-	// in-flight completions fail the registered check.
-	m.callStats.Drop(callStatsName)
-	m.dropCallHealth(callStatsName)
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
-	// immediately with the server-unavailable semantics instead of waiting out
-	// their queue deadline against a server that no longer exists.
-	name := id
-	if exists && client != nil {
-		if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-			name = cfg.Name
-		}
-	}
-	m.retireServerConcurrency(name)
-
-	// Disconnect outside the lock to avoid blocking other operations
-	if exists {
-		m.logger.Info("Removing upstream server",
-			zap.String("id", id),
-			zap.String("state", client.GetState().String()))
-		_ = client.Disconnect()
-		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
-	}
 }
 
 // ShutdownAll disconnects all clients and ensures all Docker containers are stopped
@@ -1918,6 +1618,12 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	clients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
+		// Spec 116 PR3 (FR-020): connect only an instance that runs its
+		// server's committed generation. An instance a commit has not
+		// restamped or replaced yet is left to that commit's worker.
+		if d, ok := m.desired[id]; ok && (!d.present || (d.gen != 0 && client.Generation() != d.gen)) {
+			continue
+		}
 		clients[id] = client
 	}
 	m.mu.RUnlock()
@@ -2020,7 +1726,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.DependsOnDocker()))
 			defer cancel()
 
-			if err := c.Connect(connectCtx); err != nil {
+			if err := c.Connect(connectCtx); errors.Is(err, managed.ErrInstanceUnregistered) || errors.Is(err, managed.ErrConnectAborted) {
+				m.logger.Debug("Connect skipped: the instance was superseded while ConnectAll ran",
+					zap.String("id", id), zap.Error(err))
+			} else if err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
 					zap.String("name", c.GetConfig().Name),
@@ -2662,12 +2371,29 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			zap.String("id", id),
 			zap.String("reason", reason))
 
-		m.RemoveServer(id)
+		if hook := m.forceReconnectBeforeReplace.Load(); hook != nil {
+			(*hook)(id)
+		}
+		// Spec 116 PR3 (review R4.1, R5.4): replace exactly the instance
+		// captured above, at its generation. A server a commit removed or
+		// replaced since the capture is left alone (ErrStaleGeneration): a
+		// removed one is not re-created and a replacement is not torn down.
+		fresh, err := m.ReplaceInstanceAt(id, client.Generation(), client, cfg)
+		if errors.Is(err, ErrStaleGeneration) {
+			result.AttemptedServers--
+			result.SkippedServers[id] = "replaced or removed since the reconnect started"
+			m.logger.Debug("ForceReconnectAll: skipping a server a newer commit or replacement superseded",
+				zap.String("server", cfg.Name))
+			continue
+		}
 
 		// Small delay to allow container/process cleanup before restart
 		time.Sleep(200 * time.Millisecond)
 
-		if err := m.AddServer(id, cfg); err != nil {
+		if err == nil {
+			err = m.connectInstance(id, fresh)
+		}
+		if err != nil {
 			result.FailedServers[id] = err
 			m.logger.Error("ForceReconnectAll: failed to rebuild client",
 				zap.String("server", cfg.Name),

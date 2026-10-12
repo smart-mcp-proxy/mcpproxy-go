@@ -52,7 +52,7 @@ type pr3WorkerPark struct {
 func installPR3WorkerPark(rt *Runtime, name string) *pr3WorkerPark {
 	p := &pr3WorkerPark{parked: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{}), finished: map[int64]chan struct{}{}}
 	parkedGoroutine := atomic.Int64{}
-	rt.testHooks.beforeWorkerAct = func(n string, gen int64) {
+	before := func(n string, gen int64) {
 		if n != name {
 			return
 		}
@@ -66,7 +66,7 @@ func installPR3WorkerPark(rt *Runtime, name string) *pr3WorkerPark {
 		close(p.parked)
 		<-p.release
 	}
-	rt.testHooks.afterWorkerAct = func(n string, gen int64) {
+	after := func(n string, gen int64) {
 		if n != name {
 			return
 		}
@@ -87,6 +87,7 @@ func installPR3WorkerPark(rt *Runtime, name string) *pr3WorkerPark {
 		}
 		p.mu.Unlock()
 	}
+	rt.SetWorkerActHooksForTest(before, after)
 	return p
 }
 
@@ -428,7 +429,14 @@ func TestSpec116_T3_7_LastGoodSnapshotOfOldGenerationIsNotReapplied(t *testing.T
 		got = append(got, config.RawToolName(tool))
 	}
 	assert.NotContains(t, got, "first_tool", "the old generation's snapshot must not be reapplied")
-	assert.Contains(t, got, "second_tool", "the current instance is re-listed")
+	// The current instance was re-listed: its (new, so pending review on a
+	// trusted server, Spec 032) tool now has a record, and the last-good
+	// snapshot is the current endpoint's.
+	_, err = rt.storageManager.GetToolApproval("s", "second_tool")
+	assert.NoError(t, err, "the current instance is re-listed")
+	snap := rt.lastGoodToolsSnapshot("s")
+	require.Len(t, snap, 1)
+	assert.Equal(t, "second_tool", config.RawToolName(snap[0]))
 }
 
 // T3.5 (b): a quarantined capture holding the capture section (inside

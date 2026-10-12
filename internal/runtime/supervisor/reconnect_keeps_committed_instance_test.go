@@ -10,6 +10,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // instanceUpstream models the manager's registration semantics that matter to
@@ -143,7 +144,7 @@ func TestReconnect_DoesNotDisconnectTheCommittedInstance(t *testing.T) {
 	plan := sup.computeReconcilePlan(snap, up.GetAllStates(), map[string]bool{})
 	require.Equal(t, ActionReconnect, plan.Actions["s"], "scenario precondition: the stale supervisor snapshot plans a reconnect")
 
-	require.NoError(t, sup.executeAction("s", ActionReconnect, snap))
+	require.NoError(t, sup.executeAction("s", plannedAction{Action: ActionReconnect}, snap))
 
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -175,7 +176,7 @@ func TestReconnect_ReplacesAnInstanceWithAnOldConnectionConfig(t *testing.T) {
 	sup.actionWg.Wait()
 
 	require.NoError(t, svc.Update(&config.Config{Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{newCfg}}, configsvc.UpdateTypeModify, "test_edit"))
-	require.NoError(t, sup.executeAction("s", ActionReconnect, svc.Current()))
+	require.NoError(t, sup.executeAction("s", plannedAction{Action: ActionReconnect}, svc.Current()))
 
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -183,4 +184,17 @@ func TestReconnect_ReplacesAnInstanceWithAnOldConnectionConfig(t *testing.T) {
 	require.NotEqual(t, old, up.current["s"].id, "the old-config instance must be replaced")
 	require.Equal(t, "http://127.0.0.1:1/new", up.current["s"].cfg.URL)
 	require.True(t, up.current["s"].connected, "the replacement must connect")
+}
+
+// Spec 116 PR3 generation-bound adapter methods: this fixture has no
+// generations, so they delegate to the unbound methods above.
+func (u *instanceUpstream) AddServerAt(name string, cfg *config.ServerConfig, _ int64) error {
+	return u.AddServer(name, cfg)
+}
+func (u *instanceUpstream) RemoveServerAt(name string, _ int64) error { return u.RemoveServer(name) }
+func (u *instanceUpstream) ConnectServerAt(ctx context.Context, name string, _ int64) error {
+	return u.ConnectServer(ctx, name)
+}
+func (u *instanceUpstream) DisconnectServerAt(name string, _ int64, _ managed.InstanceID) error {
+	return u.DisconnectServer(name)
 }

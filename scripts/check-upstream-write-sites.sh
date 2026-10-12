@@ -61,26 +61,10 @@ done
 # An operational failure (file discovery or the scanner itself) exits 2: a scan
 # that could not run proves nothing, so it never reports a clean tree (review
 # rounds 18-20).
-if ! listing="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go')"; then
-  echo "upstream write sites: file discovery failed" >&2
-  exit 2
-fi
-files=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] || continue
-  case "$f" in
-    internal/storage/*) continue ;;
-  esac
-  [[ "$f" =~ ^internal/runtime/commit[^/]*\.go$ ]] && continue
-  files+=("$f")
-done <<<"$listing"
-hits=""
-if [[ ${#files[@]} -gt 0 ]]; then
-  # awk is called directly (no xargs) so its own exit status is the one seen.
-  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
-  hits="$(awk \
-    -v sel="[.][ \t]*(${methods})([^A-Za-z0-9_]|\$)" \
-    -v head="^(${methods})([^A-Za-z0-9_]|\$)" '
+# The Go-code lexer shared by both scans below (strips comments and string
+# literals, tracking block comments and raw strings across lines).
+# shellcheck disable=SC2016 # awk source, single-quoted on purpose
+STRIP_AWK='
     function strip(line,    out, i, n, c, nx, q, d) {
       out = ""; n = length(line); i = 1
       while (i <= n) {
@@ -110,6 +94,29 @@ if [[ ${#files[@]} -gt 0 ]]; then
       }
       return out
     }
+'
+
+if ! listing="$(find "${dirs[@]}" -type f -name '*.go' ! -name '*_test.go')"; then
+  echo "upstream write sites: file discovery failed" >&2
+  exit 2
+fi
+files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/storage/*) continue ;;
+  esac
+  [[ "$f" =~ ^internal/runtime/commit[^/]*\.go$ ]] && continue
+  files+=("$f")
+done <<<"$listing"
+hits=""
+if [[ ${#files[@]} -gt 0 ]]; then
+  # awk is called directly (no xargs) so its own exit status is the one seen.
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits="$(awk \
+    -v sel="[.][ \t]*(${methods})([^A-Za-z0-9_]|\$)" \
+    -v head="^(${methods})([^A-Za-z0-9_]|\$)" '
+'"$STRIP_AWK"'
     FNR == 1 { prev = ""; inblock = 0; inraw = 0 }
     {
       code = strip($0)
@@ -125,10 +132,68 @@ if [[ ${#files[@]} -gt 0 ]]; then
   fi
 fi
 
+# Spec 116 PR3 (FR-020, FR-020a, T076): the upstream manager's registry is
+# changed only by generation-bound calls.
+#  - internal/runtime and internal/server (non-test) never call the unbound
+#    legacy mutators AddServerConfig / AddServer / RemoveServer /
+#    DisconnectServer on the manager (a receiver named upstreamManager,
+#    UpstreamManager(), manager or upstream); they use the *At forms.
+#  - internal/upstream/*.go (non-test) never calls them internally (m.X(...)),
+#    and only unregisterLocked / installLocked delete from or assign into
+#    m.clients.
+pr3_files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/runtime/*|internal/server/*|internal/upstream/*) pr3_files+=("$f") ;;
+  esac
+done <<<"$listing"
+hits2=""
+if [[ ${#pr3_files[@]} -gt 0 ]]; then
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits2="$(awk '
+'"$STRIP_AWK"'
+    FNR == 1 { inblock = 0; inraw = 0; fn = "" }
+    {
+      raw = $0
+      if (raw ~ /^func /) {
+        fn = raw
+        sub(/^func (\([^)]*\) )?/, "", fn)
+        sub(/[^A-Za-z0-9_].*$/, "", fn)
+      }
+      code = strip(raw)
+      if (code ~ /^[ \t]*$/) next
+      legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)[ \t]*[(]"
+      if (FILENAME ~ /^internal\/(runtime|server)\//) {
+        if (code ~ ("(^|[^A-Za-z0-9_])(upstreamManager|manager|upstream)[ \t]*" legacy) || code ~ ("UpstreamManager[(][)][ \t]*" legacy))
+          print FILENAME ":" FNR ":" raw
+        next
+      }
+      if (FILENAME !~ /^internal\/upstream\/[^\/]*\.go$/) next
+      if (code ~ ("(^|[^A-Za-z0-9_])m[ \t]*" legacy)) { print FILENAME ":" FNR ":" raw; next }
+      if (fn != "unregisterLocked" && fn != "installLocked" && (code ~ /delete[(][ \t]*m[.]clients[ \t]*,/ || code ~ /m[.]clients[ \t]*\[[^]]*\][ \t]*=[^=]/ || code ~ /m[.]clients[ \t]*=[^=]/))
+        print FILENAME ":" FNR ":" raw
+    }' "${pr3_files[@]}")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "upstream write sites: registry scanner failed (awk exit $rc)" >&2
+    exit 2
+  fi
+fi
+
+status=0
 if [[ -n "$hits" ]]; then
   echo "Spec 116 FR-009: upstreams rows written outside the config commit (use runtime.Commit):"
   echo "$hits"
-  exit 1
+  status=1
+else
+  echo "Spec 116 FR-009: every upstreams row write goes through the config commit"
 fi
-echo "Spec 116 FR-009: every upstreams row write goes through the config commit"
-exit 0
+if [[ -n "$hits2" ]]; then
+  echo "Spec 116 FR-020: unbound upstream manager registry mutations (use the generation-bound *At methods; only unregisterLocked/installLocked touch m.clients):"
+  echo "$hits2"
+  status=1
+else
+  echo "Spec 116 FR-020: every upstream manager registry mutation is generation-bound"
+fi
+exit $status

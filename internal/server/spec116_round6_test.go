@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,9 +18,14 @@ import (
 // Review round 6 (finding 2, tasks.md T029): the MCP update reports the
 // connection of the instance the commit installed, never the previous one.
 // The commit reconnects after it returns; while the replacement is held back
-// (here: the manager's capture read section is held, so AddServerConfig
-// cannot swap the entry), the old instance's error state describes the old
-// settings and must not end the monitoring.
+// (here: the commit's connect worker is parked at its Spec 116 PR3 seam), the
+// old instance's error state describes the old settings and must not end the
+// monitoring.
+//
+// Spec 116 PR3: the commit itself unregisters the old instance (its
+// connection settings changed), and a commit waits for a capture section in
+// progress instead of publishing past it, so the replacement is held back at
+// the worker, not by holding the capture section across the commit.
 func TestMCPUpdate_R6_StatusIgnoresPreviousInstance(t *testing.T) {
 	srv, _ := newSpec116Server(t, &config.ServerConfig{
 		Name: "flaky", URL: "http://127.0.0.1:9/mcp", Protocol: "http", Enabled: true,
@@ -33,25 +39,17 @@ func TestMCPUpdate_R6_StatusIgnoresPreviousInstance(t *testing.T) {
 	require.Eventually(t, old, 30*time.Second, 10*time.Millisecond, "the old instance never reached its error state")
 	oldClient, _ := mgr.GetClient("flaky")
 
-	held := make(chan struct{})
 	release := make(chan struct{})
-	holdDone := make(chan struct{})
-	go func() {
-		defer close(holdDone)
-		_, _ = mgr.WithCurrentClientOnEpoch("flaky", oldClient, oldClient.ConnectionEpoch(), func() error {
-			close(held)
+	var releaseOnce sync.Once
+	releaseWorkers := func() { releaseOnce.Do(func() { close(release) }) }
+	srv.runtime.SetWorkerActHooksForTest(func(name string, _ int64) {
+		if name == "flaky" {
 			<-release
-			return nil
-		})
-	}()
-	awaitSignal(t, held, "the capture read section")
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
 		}
-		<-holdDone
+	}, nil)
+	defer func() {
+		releaseWorkers()
+		srv.runtime.SetWorkerActHooksForTest(nil, nil)
 	}()
 	require.Equal(t, types.StateError, oldClient.GetConnectionInfo().State, "precondition: old instance is in error")
 
@@ -65,8 +63,10 @@ func TestMCPUpdate_R6_StatusIgnoresPreviousInstance(t *testing.T) {
 
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &body))
-	cur, _ := mgr.GetClient("flaky")
-	assert.Same(t, oldClient, cur, "the replacement must still be held back")
+	if cur, registered := mgr.GetClient("flaky"); registered {
+		assert.NotSame(t, oldClient, cur, "the commit unregistered the previous instance")
+	}
+	assert.True(t, oldClient.Unregistered(), "the previous instance never serves again")
 	assert.NotEqual(t, "error", body["connection_status"],
 		"the previous instance's error was reported as the update's outcome: %v", body["connection_message"])
 	assert.Equal(t, statusCancelled, body["connection_status"],
@@ -92,11 +92,8 @@ func TestMCPUpdate_R6_StatusIgnoresPreviousInstance(t *testing.T) {
 
 	// Released, the committed instance's own outcome is what the next update
 	// reports: the bounded wait still ends on the replacement's state.
-	close(release)
-	<-holdDone
-	// Let the held worker install its instance and finish its connect first:
-	// a worker that overlaps a later commit's worker (and can connect or
-	// replace the newer instance) is PR3's stale-worker case (#1562).
+	releaseWorkers()
+	// Let the held worker install its instance and finish its connect first.
 	require.Eventually(t, func() bool {
 		c, ok := mgr.GetClient("flaky")
 		return ok && c.GetConfig().URL == "http://127.0.0.1:10/mcp" &&

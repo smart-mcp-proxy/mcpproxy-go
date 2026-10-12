@@ -305,6 +305,7 @@ in place. This is the guard against the rejected branch's scope creep.
 - **Failing-first tests**: T3.1-T3.10.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
 - **Size estimate**: about 500 LOC production code and 700 LOC tests.
+- **As shipped (2026-10-13)**: everything above. `unregisterLocked` also marks the instance unregistered so `Connect` on it refuses (a connect-level latch ahead of PR4's `Retire`); `AdvanceGenerations` takes the whole committed server set so the desired view is complete after the boot commit; `ReplaceInstanceAt` returns the new instance and callers connect that exact instance; the OAuth logout disconnect is instance-bound. Deviations are listed in tasks.md (PR3 implementation note).
 
 ### PR4: Retirement barrier, OAuth included (#1564)
 

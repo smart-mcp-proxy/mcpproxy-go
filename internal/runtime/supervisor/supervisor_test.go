@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -1863,4 +1864,38 @@ func TestSupervisor_ReconcileRepublishesRetainedToolsWhileNotConnected(t *testin
 	assert.False(t, st.ToolsDiscovered, "no pass has run on the next connection")
 	assert.Zero(t, st.DiscoveryEpoch, "an unstamped entry carries no generation")
 	assert.Len(t, st.Tools, 1, "the retained tools are republished while not connected: a listed name is NOT a certified one")
+}
+
+// Spec 116 PR3 generation-bound adapter methods: this fixture has no
+// generations, so they delegate to the unbound methods above.
+func (m *MockUpstreamAdapter) AddServerAt(name string, cfg *config.ServerConfig, _ int64) error {
+	return m.AddServer(name, cfg)
+}
+func (m *MockUpstreamAdapter) RemoveServerAt(name string, _ int64) error { return m.RemoveServer(name) }
+func (m *MockUpstreamAdapter) ConnectServerAt(ctx context.Context, name string, _ int64) error {
+	return m.ConnectServer(ctx, name)
+}
+func (m *MockUpstreamAdapter) DisconnectServerAt(name string, _ int64, _ managed.InstanceID) error {
+	return m.DisconnectServer(name)
+}
+
+// Spec 116 PR3 generation-bound adapter methods: this fixture has no
+// generations, so they delegate to the unbound methods above.
+func (b *barrierUpstreamAdapter) AddServerAt(name string, cfg *config.ServerConfig, _ int64) error {
+	return b.AddServer(name, cfg)
+}
+func (b *barrierUpstreamAdapter) RemoveServerAt(name string, _ int64) error {
+	return b.RemoveServer(name)
+}
+func (b *barrierUpstreamAdapter) ConnectServerAt(ctx context.Context, name string, _ int64) error {
+	return b.ConnectServer(ctx, name)
+}
+func (b *barrierUpstreamAdapter) DisconnectServerAt(name string, _ int64, _ managed.InstanceID) error {
+	return b.DisconnectServer(name)
+}
+
+// Spec 116 PR3 generation-bound adapter methods: this fixture has no
+// generations, so they delegate to the unbound methods above.
+func (b *blockingUpstreamAdapter) AddServerAt(name string, cfg *config.ServerConfig, _ int64) error {
+	return b.AddServer(name, cfg)
 }

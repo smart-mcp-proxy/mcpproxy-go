@@ -68,7 +68,7 @@ func closeBaselineRuntime(rt *Runtime) {
 
 func commitTools(t *testing.T, rt *Runtime, tools ...*config.ToolMetadata) error {
 	t.Helper()
-	_, err := rt.commitDiscoveredTools(context.Background(), baselineServer, tools, 0)
+	_, err := rt.commitDiscoveredTools(context.Background(), baselineServer, tools, rt.committedGenForTest(baselineServer))
 	return err
 }
 

@@ -146,6 +146,61 @@ printf '\t/* st.SaveUpstreamServer(sc) */\n' > "$allowed/internal/server/block_i
 printf '\tmsg := "st.SaveUpstreamServer(sc)"\n\tdoc := `\n st.QuarantineServerAsync(name, true)\n`\n' > "$allowed/internal/server/strings.go"
 expect "storage, commit.go, tests and comments are allowed" 0 "$allowed"
 
+# Spec 116 PR3 (FR-020, T076): unbound manager registry mutations.
+for line in '	r.upstreamManager.RemoveServer(name)' '	_ = r.upstreamManager.AddServer(name, cfg)' \
+            '	_ = p.manager.AddServerConfig(name, cfg)' '	_ = rt.UpstreamManager().DisconnectServer(name)'; do
+  r="$(mkroot "pr3-runtime-$RANDOM")"
+  echo "$line" > "$r/internal/runtime/lifecycle.go"
+  expect "planted unbound manager mutation in internal/runtime: ${line#	}" 1 "$r"
+done
+r="$(mkroot pr3-server)"
+echo '	s.runtime.UpstreamManager().RemoveServer(name)' > "$r/internal/server/a.go"
+expect "planted unbound manager mutation in internal/server" 1 "$r"
+r="$(mkroot pr3-bound-ok)"
+printf '	_ = r.upstreamManager.AddServerAt(name, cfg, gen)
+	_ = tx.RemoveServer(name)
+	s.stateView.RemoveServer(name)
+	// r.upstreamManager.RemoveServer(name)
+' > "$r/internal/runtime/lifecycle.go"
+expect "bound calls, other receivers and comments are allowed in internal/runtime" 0 "$r"
+r="$(mkroot pr3-manager-internal)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) ForceReconnectAll() {
+	m.RemoveServer(id)
+}
+' > "$r/internal/upstream/manager.go"
+expect "planted internal legacy call in internal/upstream/manager.go" 1 "$r"
+r="$(mkroot pr3-manager-delete)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(id string) {
+	delete(m.clients, id)
+}
+' > "$r/internal/upstream/manager.go"
+expect "planted delete(m.clients) outside unregisterLocked" 1 "$r"
+r="$(mkroot pr3-manager-assign)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(id string, c *managed.Client) {
+	m.clients[id] = c
+}
+' > "$r/internal/upstream/manager.go"
+expect "planted m.clients[id] = outside installLocked" 1 "$r"
+r="$(mkroot pr3-manager-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {
+	delete(m.clients, name)
+	return nil
+}
+
+func (m *Manager) installLocked(name string, c *managed.Client) {
+	m.clients[name] = c
+}
+
+func (m *Manager) read(name string) bool {
+	return m.clients[name] == nil
+}
+' > "$r/internal/upstream/manager_generation.go"
+expect "unregisterLocked/installLocked and reads are allowed in internal/upstream" 0 "$r"
+
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
 # PATH or by an exported shell function.

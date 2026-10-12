@@ -51,6 +51,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Status captures high-level state for API consumers.
@@ -278,6 +279,12 @@ type Runtime struct {
 	// the approval lock — the lock the purge runs under — so a snapshot
 	// selected before a remove and re-add is never applied to the replacement.
 	lastGoodPurgeSeq map[string]uint64
+	// lastGoodGen (guarded by lastGoodToolsMu) is the Spec 116 commit
+	// generation of the instance each last-good snapshot was listed from
+	// (PR3, FR-021b). A local reindex hands it to the final D15 check, so a
+	// snapshot from an instance an endpoint change superseded is never
+	// reapplied; the caller re-lists the current instance instead.
+	lastGoodGen map[string]int64
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
 	// captureSnapMu makes "records persisted + pruned + stamp published" one
@@ -3436,14 +3443,25 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 		return fmt.Errorf("upstream manager not available")
 	}
 
-	// IMPORTANT: Set user logged out flag FIRST before any other operations
-	// This prevents race conditions where reconnection logic kicks in
-	// during ClearOAuthToken or DisconnectServer operations
-	if err := r.upstreamManager.SetUserLoggedOut(serverName, true); err != nil {
+	// Spec 116 PR3 (#1563): resolve the instance ONCE and run the logged-out
+	// flag and the disconnect against that instance, bound to its
+	// (generation, instance). A replacement installed in between (an
+	// OAuth-config change, a remove and re-add, a restart) is not touched by
+	// a logout aimed at the instance it replaced.
+	client, hasClient := r.upstreamManager.GetClient(serverName)
+	var gen int64
+	var inst managed.InstanceID
+	if hasClient && client != nil {
+		gen, inst = client.Generation(), client.InstanceID()
+		// IMPORTANT: Set user logged out flag FIRST before any other
+		// operations. This prevents race conditions where reconnection
+		// logic kicks in during ClearOAuthToken or the disconnect.
+		client.SetUserLoggedOut(true)
+	} else {
 		r.logger.Warn("Failed to set user logged out state",
 			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - still try to clear token and disconnect
+			zap.Error(fmt.Errorf("server not found: %s", serverName)))
+		// Continue - still try to clear token
 	}
 
 	// Clear OAuth token from persistent storage
@@ -3459,12 +3477,17 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 		r.refreshManager.OnTokenCleared(serverName)
 	}
 
-	// Disconnect the server to force re-authentication
-	if err := r.upstreamManager.DisconnectServer(serverName); err != nil {
-		r.logger.Warn("Failed to disconnect server after OAuth logout",
-			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - token was cleared which is the primary goal
+	// Disconnect the instance logged out above to force re-authentication.
+	if hasClient && client != nil {
+		if err := r.upstreamManager.DisconnectServerAt(serverName, gen, inst); errors.Is(err, upstream.ErrStaleGeneration) {
+			r.logger.Debug("OAuth logout: the instance was replaced meanwhile; not disconnecting its replacement",
+				zap.String("server", serverName))
+		} else if err != nil {
+			r.logger.Warn("Failed to disconnect server after OAuth logout",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue - token was cleared which is the primary goal
+		}
 	}
 
 	return nil

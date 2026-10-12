@@ -17,9 +17,11 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Spec 116 PR1: one config commit section.
@@ -40,11 +42,14 @@ import (
 //     the index purge and the in-memory purge; release L1. On
 //     failure the raw file of step 5 is restored and nothing is
 //     published.
-//  7. Advance  restamp retained instances (RestampRetained).
+//  7. Advance  AdvanceGenerations: record every server's committed
+//     generation in the manager, unregister the instances this
+//     commit supersedes, restamp the retained ones.
 //  8. Publish  configsvc.Publish and the legacy r.cfg / desiredCfg swap.
 //
-// After the lock is released: manager removals, connect workers, discovery
-// requests, events and telemetry, at most once per commit.
+// After the lock is released: disconnects of the unregistered instances,
+// generation-bound connect workers, discovery requests, events and telemetry,
+// at most once per commit.
 //
 // Lock order (plan.md §Lock order): L0 configCommitMu → L1 approval locks
 // (sorted; released before step 7) → L2 storage; L0 → L3 captureMu (W) → L4
@@ -74,6 +79,9 @@ type CommitResult struct {
 	// exemptionsDropped reports whether the commit revoked an inspection
 	// exemption of a purged server (the supervisor reconciles after unlock).
 	exemptionsDropped bool
+	// unregistered are the instances step 7 removed from the manager; they
+	// are disconnected after the commit lock is released.
+	unregistered []*managed.Client
 }
 
 // ServerNotFoundError reports a server that is not in the live configuration.
@@ -921,21 +929,17 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		return res, r.afterCommitFunc(tx, res, nil, purged), nil
 	}
 
-	// Step 7: advance the manager (PR1: restamp retained instances).
-	var restamped []string
+	// Step 7: advance the manager (Spec 116 PR3). AdvanceGenerations records
+	// every configured server's committed generation (and a tombstone for a
+	// removed one), unregisters the instances that must not survive this
+	// commit and restamps the retained ones, under captureMu W + Manager.mu,
+	// before the snapshot is published. Approval locks were released in step
+	// 6 (lock rule 2).
+	var advanced upstream.AdvanceResult
 	if r.upstreamManager != nil && !hooks.skipAdvance {
-		var reqs []upstream.RestampRequest
-		for name, ch := range changes {
-			if ch.Kind != configsvc.ChangeUpdated || ch.Reconnect {
-				continue
-			}
-			if sc := tx.entry(name); sc != nil {
-				reqs = append(reqs, upstream.RestampRequest{Name: name, Config: sc, Gen: ch.New.Gen})
-			}
-		}
-		sort.Slice(reqs, func(i, j int) bool { return reqs[i].Name < reqs[j].Name })
-		restamped = r.upstreamManager.RestampRetained(reqs)
+		advanced = r.upstreamManager.AdvanceGenerations(generationChanges(tx, changes, prepared.Snapshot()))
 	}
+	restamped := advanced.Restamped
 	if h := hooks.afterAdvance; h != nil {
 		h(reason)
 	}
@@ -979,6 +983,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		Purged:      purgeReports,
 
 		exemptionsDropped: exemptionsDropped,
+		unregistered:      advanced.Unregistered,
 	}
 	return res, r.afterCommitFunc(tx, res, snap, purged), nil
 }
@@ -1256,20 +1261,53 @@ func (r *Runtime) notifyTelemetryInOrder(gen int64, cfg *config.Config) {
 	r.telemetryService.NotifyConfigChanged(cfg)
 }
 
-// runCommitWorkers is the after-unlock scheduling (T025). Removed and replaced
-// servers are unregistered synchronously, so a following commit's worker can
-// never be undone by this one's removal. Created, replaced and reconnecting
-// servers get a connect (enabled) or disconnect (disabled) worker; the boot
-// commit schedules every server. Restamped connected servers get one
-// discovery pass (review R9.1). PR3 binds the workers to their generation.
+// generationChanges is commit step 7's input: every server of the new
+// configuration with its generation in the prepared snapshot, plus every
+// server the commit removed. Sorted by name for a deterministic order.
+func generationChanges(tx *CommitTx, changes map[string]ServerChange, snap *configsvc.Snapshot) []upstream.GenerationChange {
+	out := make([]upstream.GenerationChange, 0, len(tx.next.Servers)+len(changes))
+	seen := make(map[string]bool, len(tx.next.Servers))
+	for _, sc := range tx.next.Servers {
+		if sc == nil || seen[sc.Name] {
+			continue
+		}
+		seen[sc.Name] = true
+		sg, _ := snap.ServerGeneration(sc.Name)
+		ch := changes[sc.Name]
+		out = append(out, upstream.GenerationChange{
+			Name:      sc.Name,
+			Gen:       sg.Gen,
+			Present:   true,
+			Reconnect: ch.Reconnect,
+			Replaced:  ch.Kind == configsvc.ChangeReplaced,
+			Config:    sc,
+		})
+	}
+	for name, ch := range changes {
+		if ch.Kind == configsvc.ChangeRemoved && !seen[name] {
+			out = append(out, upstream.GenerationChange{Name: name})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// runCommitWorkers is the after-unlock scheduling (T025, Spec 116 PR3 T072).
+// The instances step 7 unregistered are disconnected first. Created, replaced
+// and reconnecting servers then get a connect (enabled) or disconnect
+// (disabled) worker bound to (name, generation): the manager re-checks that
+// generation under its own lock when the worker acts, so a worker that a
+// newer commit superseded is inert (#1563). The boot commit schedules every
+// server. Restamped connected servers get one discovery pass (review R9.1).
 func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *configsvc.Snapshot) {
-	if r.upstreamManager == nil || tx.suppressWorkers {
+	if r.upstreamManager == nil {
 		return
 	}
-	for name, ch := range res.Changes {
-		if ch.Kind == configsvc.ChangeRemoved || ch.Kind == configsvc.ChangeReplaced {
-			r.upstreamManager.RemoveServer(name)
-		}
+	for _, old := range res.unregistered {
+		go func(c *managed.Client) { _ = c.Disconnect() }(old)
+	}
+	if tx.suppressWorkers {
+		return
 	}
 	schedule := map[string]bool{}
 	for name, ch := range res.Changes {
@@ -1292,42 +1330,9 @@ func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *config
 		}
 		sg, _ := snap.ServerGeneration(sc.Name)
 		if sc.Enabled {
-			go func(cfg *config.ServerConfig, gen, inc int64) {
-				if h := r.testHooks.afterWorkerAct; h != nil {
-					defer h(cfg.Name, gen)
-				}
-				if h := r.testHooks.beforeWorkerAct; h != nil {
-					h(cfg.Name, gen)
-				}
-				if err := r.upstreamManager.AddServerAt(cfg.Name, cfg, gen); err != nil {
-					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
-					return
-				}
-				if r.storageManager != nil {
-					if h := r.testHooks.beforeRegisterIdentity; h != nil {
-						h(cfg.Name)
-					}
-					// Incarnation-conditional (FR-014c): a worker that
-					// outlives a removal registers nothing for the
-					// removed server or its replacement.
-					if _, written, err := r.storageManager.RegisterServerIdentityIfIncarnation(cfg, cfgPath, inc); err != nil {
-						r.logger.Warn("Failed to register server identity", zap.Error(err), zap.String("server", cfg.Name))
-					} else if !written {
-						r.logger.Debug("Server identity not registered: the server was removed or replaced",
-							zap.String("server", cfg.Name), zap.Int64("incarnation", inc))
-					}
-				}
-			}(sc, sg.Gen, sg.Incarnation)
+			go r.connectWorker(sc, sg.Gen, sg.Incarnation, cfgPath)
 		} else {
-			go func(name string, gen int64) {
-				if h := r.testHooks.afterWorkerAct; h != nil {
-					defer h(name, gen)
-				}
-				if h := r.testHooks.beforeWorkerAct; h != nil {
-					h(name, gen)
-				}
-				r.upstreamManager.RemoveServer(name)
-			}(sc.Name, sg.Gen)
+			go r.disconnectWorker(sc.Name, sg.Gen)
 		}
 	}
 	ctx := r.AppContext()
@@ -1339,6 +1344,53 @@ func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *config
 				}
 			}(name)
 		}
+	}
+}
+
+// connectWorker installs and connects the instance serving cfg at commit
+// generation gen. It is inert (ErrStaleGeneration, debug log) once a newer
+// commit changed, removed or re-created the server.
+func (r *Runtime) connectWorker(cfg *config.ServerConfig, gen, inc int64, cfgPath string) {
+	defer r.workerActEnter(cfg.Name, gen)()
+	if qahooks.ParkWorker != nil {
+		qahooks.ParkWorker(cfg.Name)
+	}
+	if err := r.upstreamManager.AddServerAt(cfg.Name, cfg, gen); err != nil {
+		if errors.Is(err, upstream.ErrStaleGeneration) {
+			r.logger.Debug("Connect worker superseded by a newer config commit; nothing to do",
+				zap.String("server", cfg.Name), zap.Int64("generation", gen))
+			return
+		}
+		r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
+		return
+	}
+	if r.storageManager != nil {
+		if h := r.testHooks.beforeRegisterIdentity; h != nil {
+			h(cfg.Name)
+		}
+		// Incarnation-conditional (FR-014c): a worker that outlives a
+		// removal registers nothing for the removed server or its
+		// replacement.
+		if _, written, err := r.storageManager.RegisterServerIdentityIfIncarnation(cfg, cfgPath, inc); err != nil {
+			r.logger.Warn("Failed to register server identity", zap.Error(err), zap.String("server", cfg.Name))
+		} else if !written {
+			r.logger.Debug("Server identity not registered: the server was removed or replaced",
+				zap.String("server", cfg.Name), zap.Int64("incarnation", inc))
+		}
+	}
+}
+
+// disconnectWorker removes the instance of a disabled server committed at
+// generation gen. It is inert once a newer commit re-enabled (or otherwise
+// changed) the server.
+func (r *Runtime) disconnectWorker(name string, gen int64) {
+	defer r.workerActEnter(name, gen)()
+	if qahooks.ParkWorker != nil {
+		qahooks.ParkWorker(name)
+	}
+	if err := r.upstreamManager.RemoveServerAt(name, gen); err != nil && errors.Is(err, upstream.ErrStaleGeneration) {
+		r.logger.Debug("Disconnect worker superseded by a newer config commit; nothing to do",
+			zap.String("server", name), zap.Int64("generation", gen))
 	}
 }
 

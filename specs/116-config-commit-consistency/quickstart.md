@@ -253,7 +253,13 @@ because other sessions share the harness. Evidence goes to
 
 Built with `-tags qa_hooks`, which exposes `MCPPROXY_QA_PARK_WORKER=<server>`
 so the named server's post-commit worker blocks until
-`$QA_RUN/release-<server>` appears.
+`$QA_RUN/release-<server>` appears (`MCPPROXY_QA_RELEASE_DIR=$QA_RUN`; a parked
+call writes `parked-<kind>-<server>` there, and only one call per park point is
+parked at a time). As shipped, the live script uses its own fixture copies and
+servers (`l3-target`, `l3-quar`, `l3-slow` with a slow-`initialize` fixture)
+so process counts are not confused with other runs on the shared harness, and
+step 3 parks the boot-configured quarantined `large-review` (no inspection
+exemption, so the supervisor plans the disconnect).
 1. Park `trusted-library`'s worker (enable toggle). Remove the server. Release.
    `upstream list` has no `trusted-library`, and no process with its fixture
    args is running (`pgrep -f`).

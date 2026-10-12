@@ -229,7 +229,7 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 			rt := newBaselineRuntime(t, t.TempDir(), false)
 			require.NotNil(t, rt.supervisor)
 			capture := rt.discoveryGeneration(baselineServer)
-			eligible, published, err := rt.commitDiscoveredToolsAt(context.Background(), baselineServer, []*config.ToolMetadata{readNote()}, 0, &capture)
+			eligible, published, err := rt.commitDiscoveredToolsAt(context.Background(), baselineServer, []*config.ToolMetadata{readNote()}, rt.committedGenForTest(baselineServer), &capture)
 			require.NoError(t, err)
 			require.True(t, eligible)
 			require.True(t, published, "seed capture is published")
@@ -245,7 +245,7 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 
 			failBaseline(rt, "write")
 			capture = rt.discoveryGeneration(baselineServer)
-			eligible, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, 0, &capture)
+			eligible, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, rt.committedGenForTest(baselineServer), &capture)
 			require.ErrorIs(t, err, errBaselineMarker)
 			assert.True(t, eligible)
 			assert.False(t, published, "a marker failure publishes nothing")
@@ -268,7 +268,7 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 
 			healBaseline(rt)
 			capture = rt.discoveryGeneration(baselineServer)
-			_, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, 0, &capture)
+			_, published, err = rt.commitDiscoveredToolsAt(context.Background(), baselineServer, tc.tools, rt.committedGenForTest(baselineServer), &capture)
 			require.NoError(t, err)
 			assert.True(t, published, "the healed pass publishes")
 		})
