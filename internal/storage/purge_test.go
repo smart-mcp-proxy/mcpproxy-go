@@ -129,3 +129,17 @@ func TestPurge_T046_ToolHashKeyFormat(t *testing.T) {
 	cfg.Servers = []*config.ServerConfig{{Name: "acme:evil", Command: "true", Protocol: "stdio"}}
 	require.NotEmpty(t, cfg.ValidateDetailed(), "a server name containing ':' must be rejected, or the toolhash prefix would not be exact")
 }
+
+// The startup empty-set guard: RowOnlyRemoves deletes the row and history and
+// keeps the rest of the purge set; a replacement still purges.
+func TestPurge_RowOnlyRemovesKeepsTrustState(t *testing.T) {
+	m := newPurgeTestManager(t)
+	seedRows(t, m, 1, "acme")
+	purgetest.Seed(t, m, "acme")
+	require.NoError(t, m.ApplyServerCommit(&storage.ServerCommitBatch{Generation: 2, Removes: []string{"acme"}, RowOnlyRemoves: true}))
+	c := purgetest.Counts(t, m, "acme")
+	assert.Zero(t, c[purgetest.Upstream])
+	assert.Zero(t, c[purgetest.ToolCalls])
+	assert.Equal(t, 1, c[purgetest.ToolApprovals], "approvals survive an empty startup config")
+	assert.Equal(t, 1, c[purgetest.OAuthTokens], "credentials survive an empty startup config")
+}
