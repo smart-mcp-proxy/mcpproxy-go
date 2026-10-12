@@ -81,7 +81,10 @@ func TestReviewCommandGoldens(t *testing.T) {
 
 	require.Len(t, requests, 8, "approve commands read review before writing")
 	assertReviewRequest(t, requests, "POST", "/api/v1/servers/filesystem/security/approve", map[string]any{"force": true, "block": []any{"delete_0"}})
-	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"tools": []any{"write_0"}})
+	// The trusted review is empty: the approval binds to the empty snapshot
+	// (Spec 117 PR-2); the filesystem review predates fingerprints, so it
+	// stays unbound.
+	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"tools": []any{"write_0"}, "expected_hashes": map[string]any{}})
 	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/block", map[string]any{"tools": []any{"write_0"}})
 }
 
