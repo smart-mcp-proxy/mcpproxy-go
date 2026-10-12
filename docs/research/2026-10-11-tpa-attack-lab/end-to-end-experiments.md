@@ -647,6 +647,66 @@ of the main checkout: `suite.log`, `server-ci-race.log`,
 `run-tpa-lab-docker.log` and the per-experiment daemon logs
 (`run-dir-full1`).
 
+### Review round 9 follow-ups
+
+A ninth review (Sol 6.1, REQUEST_CHANGES at `c1fe0eae3`, six chunked
+transcripts `rt-r9-a1` to `rt-r9-c2`) raised three P2 items in the lab
+scripts, with no duplicates. All three were fixed. Each new test was checked
+to fail against the round-8 scripts and to pass with the fix. No Go code
+outside `tests/tpa-attack-lab/` changed this round. RT-04 and RT-07 (detect
+engine) stay deferred to the concurrent SEC-01 PR, so EXP-3 still shows HOLE.
+
+| Finding | Outcome |
+|---|---|
+| P2 `scan_report_verdict`: a missing or unknown top-level verdict fell through to a recursive search, and a nested `threat_level: dangerous` became the report verdict | Fixed. Only the report's top-level aggregate `verdict` (`deriveBaselineVerdict`/`AggregateReports`, `internal/security/scanner/service.go`) counts. If it is missing or unrecognised the result is `unknown`, so `baseline_scan_verdict_ok` fails and EXP-1/EXP-3/EXP-4 report INCONCLUSIVE. Test: `TestScanReportVerdictRequiresTopLevelVerdict` covers missing, `unknown`, empty and non-string verdicts with tierless and soft dangerous findings |
+| P2 readiness: the stability loops ended without failing, `run-tpa-lab-docker.sh` continued with fewer than two connections, and a count could be met without the victim | Fixed. `lab_upstreams_connected` requires `tpa-lab-attacker` AND `tpa-lab-victim` by name. `lab_wait_stable` returns non-zero when polling runs out. The suite's `start_daemon` returns failure (the experiment is not run), and the baseline runner exits 1 on either the connect or the stability timeout. Tests: `TestLabUpstreamsConnectedRequiresBothNamed`, `TestLabWaitStable` (exhausted polling, flap resets the streak), and the end-to-end `TestRunLabDockerFailsWhenOnlyOneUpstreamConnects` / `TestRedteamSuiteFailsWhenOnlyOneUpstreamConnects` (a stub daemon plus a fake API that reports one connected upstream; the scripts fail and never scan) |
+| P2 preflight: any listener on 8081 triggered a machine-wide `pkill -f "mcpproxy serve.*test-data-tpa-lab-docker"` | Fixed. `lab_port_busy` detects a listener and the suite refuses to run without killing anything; the message says how to inspect the listener. Test: `TestRedteamSuiteRefusesBusyPortWithoutKilling` binds 8081, starts a decoy process whose command line matches the old pattern, and asserts the suite refuses, the decoy survives and the binary never runs |
+
+The new readiness check caught a real event on the first post-fix baseline
+run. During the startup config-reload bounce the quarantined
+`tpa-lab-attacker` disconnected at 05:23:09 and was not reconnected within
+the 60 s window (the daemon logged "Connected to 1/2 servers, retrying...").
+The runner now fails here with "did not both connect" (exit 1). The round-8
+runner would have scanned anyway. The rerun connected both upstreams and
+passed. The daemon log is kept as `run-tpa-lab-docker-1-daemon.log`.
+
+Verification on the branch head after the round-9 follow-ups:
+
+```sh
+go build ./... && go vet ./tests/tpa-attack-lab/          # ok
+go test -count=1 ./tests/tpa-attack-lab/                  # ok (21.1s)
+# the six new tests against the round-8 scripts: all six FAIL (proves they bite)
+golangci-lint run --config .github/.golangci.yml ./tests/tpa-attack-lab/...                       # 0 issues
+golangci-lint run --config .github/.golangci.yml --build-tags server ./tests/tpa-attack-lab/...   # 0 issues
+# internal/... unchanged since c1fe0eae3 (git diff --stat touches only scripts/ and
+# tests/tpa-attack-lab/scripts_test.go); the round-8 internal and race results stand
+
+# fresh run dir, FULL rebuild of image + binary (no SKIP_BUILD)
+scripts/tpa-lab-redteam-experiments.sh
+#   EXP-1 HOLDS: baseline scan → dangerous
+#   EXP-2a HOLDS: calendar=changed stock=changed
+#   EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+#   EXP-2c HOLDS: stock=changed calendar=changed (manual mode, trusted throughout, gate held them, not indexed)
+#   EXP-3 HOLE: mutants verdict=warnings          (RT-04 deferred)
+#   EXP-4 HOLDS: ingested=yes (attempt 1), scan=dangerous, stored=changed
+#   EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+#   EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+#   EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+#   EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+#   suite result: PASS, exit 0
+
+scripts/run-tpa-lab-docker.sh                  # rebuild; attempt 1
+#   ERROR: tpa-lab-attacker and tpa-lab-victim did not both connect; exit 1 (see above)
+SKIP_BUILD=1 scripts/run-tpa-lab-docker.sh     # attempt 2; no Go change since the rebuild
+#   Risk Score: 93/100; baseline verdict: dangerous (job-bound);
+#   both containers tpa-attack-lab:lab, NETWORKS none; exit 0
+```
+
+Raw logs for this round are in `docs/qa/tpa-redteam-2026-10-11/postfix-review-r9/`
+of the main checkout: `suite.log`, `run-tpa-lab-docker.log` (attempt 1),
+`run-tpa-lab-docker-1-daemon.log`, `run-tpa-lab-docker-2.log` (attempt 2) and
+the per-experiment logs (`run-dir`).
+
 ### Behavior changes to note
 
 - `trust_mode: scan` no longer auto-approves a *changed* tool. Operators confirm
