@@ -195,10 +195,10 @@ func pinToolDefinitions(s *ScannerPlugin, req ScanRequest) (os.FileInfo, error) 
 
 // toolDefinitionsReplaced reports why the tools.json in the source dir is no
 // longer the pinned file (a symlink, another file, or gone), or "" when it
-// still is. Docker lays the snapshot over the file it finds when it creates
-// the container; a symlink there is resolved to its target, so retargeting it
-// (or swapping in another file) hands the scanner unprotected content even
-// when the bytes are restored before the post-run check (Sol r20 P2).
+// still is. The scanner reads a staged copy, so a swap cannot reach it, but a
+// symlink retargeted or another file swapped in (even with the bytes restored
+// before the post-run check) is tampering, and the result is discarded
+// (Sol r20 P2).
 func toolDefinitionsReplaced(req ScanRequest, pinned os.FileInfo) string {
 	if pinned == nil {
 		return ""
@@ -247,49 +247,10 @@ func watchToolDefinitions(req ScanRequest, pinned os.FileInfo, stop <-chan struc
 	return out
 }
 
-// toolDefinitionsSnapshotMounts writes the exported tool definitions into a
-// proxy-owned, read-only snapshot file and returns the bind mounts that lay
-// it over tools.json in both source mount points of a Docker scanner. The
-// scanner therefore reads the exported contracts even if the upstream
-// rewrites (and later restores) tools.json in its own source dir while the
-// container runs — a swap the before/after integrity checks cannot see
-// (RT-06, Sol r5). Nothing is mounted for scanners independent of tool
-// metadata or when nothing was exported. The returned cleanup removes the
-// snapshot.
-func (e *Engine) toolDefinitionsSnapshotMounts(s *ScannerPlugin, req ScanRequest) ([]string, func(), error) {
-	noop := func() {}
-	if toolMetadataIndependentScanners[s.ID] || len(req.ToolDefinitions) == 0 {
-		return nil, noop, nil
-	}
-	root := filepath.Join(e.dataDir, "scanner-snapshots")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
-	}
-	// A constant pattern (Sol r6 P2): os.MkdirTemp rejects a pattern with a
-	// path separator, and jobID carries the raw server name, which holds '/'
-	// for official-registry servers (MCP-2123). The random suffix already
-	// makes the dir unique.
-	dir, err := os.MkdirTemp(root, "tools-snapshot-")
-	if err != nil {
-		return nil, noop, fmt.Errorf("prepare tool definitions snapshot: %w", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	path := filepath.Join(dir, "tools.json")
-	if err := os.WriteFile(path, req.ToolDefinitions, 0o444); err != nil {
-		cleanup()
-		return nil, noop, fmt.Errorf("write tool definitions snapshot: %w", err)
-	}
-	return []string{
-		path + ":/scan/source/tools.json:ro",
-		path + ":/src/tools.json:ro",
-	}, cleanup, nil
-}
-
 // checkToolDefinitionsIntact reports an error when the tools.json in the
 // scanned source dir no longer holds the exported snapshot (RT-06, Sol r4 P1),
-// or is not a regular file (Sol r20 P2): Docker would lay the snapshot over a
-// symlink's target, so retargeting the link mid-run would bypass it. It
-// returns the identity of the checked file (nil when nothing is checked).
+// or is not a regular file (Sol r20 P2): a symlinked tools.json in the
+// upstream's source dir is refused outright. It returns the identity of the checked file (nil when nothing is checked).
 func checkToolDefinitionsIntact(req ScanRequest) (os.FileInfo, error) {
 	if len(req.ToolDefinitions) == 0 || req.SourceDir == "" {
 		return nil, nil
@@ -856,12 +817,14 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
-	snapshotMounts, cleanupSnapshot, err := e.toolDefinitionsSnapshotMounts(s, req)
+	// A scanner that reads tool metadata mounts a proxy-owned copy of the
+	// source dir holding the exported snapshot as tools.json, never a path
+	// inside the upstream-writable source dir (RT-06, Sol r20 P2).
+	sourceDir, cleanupSource, err := e.stageScannerSource(s, req)
 	if err != nil {
 		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
-	defer cleanupSnapshot()
-	extraMounts = append(extraMounts, snapshotMounts...)
+	defer cleanupSource()
 
 	// Log which env keys are being passed (redact values for security)
 	envKeys := make([]string, 0, len(env))
@@ -880,7 +843,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		Image:                  s.EffectiveImage(),
 		Command:                effectiveScannerCommand(s, req),
 		Env:                    env,
-		SourceDir:              req.SourceDir,
+		SourceDir:              sourceDir,
 		ReportDir:              reportDir,
 		CacheDir:               cacheDir,
 		NetworkMode:            networkMode,
@@ -895,10 +858,11 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	if run == nil {
 		run = e.docker.RunScanner
 	}
-	// tools.json must stay the pinned regular file for the whole run: the
-	// snapshot is laid over whatever Docker finds there, so a symlink
-	// retargeted or a file swapped in mid-run (and restored before the end)
-	// would hand the scanner unprotected metadata (Sol r20 P2).
+	// The scanner reads the staged snapshot, so the upstream's tools.json
+	// cannot reach it. It must still stay the pinned regular file for the
+	// whole run: a symlink retargeted or a file swapped in mid-run (and
+	// restored before the end) is evidence of tampering, and the result is
+	// discarded (Sol r20 P2).
 	stopWatch := make(chan struct{})
 	watch := watchToolDefinitions(req, pinned, stopWatch)
 	stdout, stderr, exitCode, err := run(ctx, cfg)

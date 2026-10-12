@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,15 +11,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// snapshotMountHostPath returns the host path bound over
-// /scan/source/tools.json, or "" when none is.
-func snapshotMountHostPath(cfg ScannerRunConfig) string {
-	for _, m := range cfg.ExtraMounts {
-		if strings.HasSuffix(m, ":/scan/source/tools.json:ro") {
-			return strings.TrimSuffix(m, ":/scan/source/tools.json:ro")
-		}
+// stagedToolsJSONPath returns the host path the container sees as
+// /scan/source/tools.json when it mounts a proxy-owned staged copy of the
+// source dir, or "" when the upstream's source dir is mounted directly.
+func stagedToolsJSONPath(cfg ScannerRunConfig, upstreamSource string) string {
+	if cfg.SourceDir == "" || cfg.SourceDir == upstreamSource {
+		return ""
 	}
-	return ""
+	return filepath.Join(cfg.SourceDir, "tools.json")
 }
 
 const genericCleanReport = `{"findings":[]}`
@@ -29,7 +27,7 @@ const genericCleanReport = `{"findings":[]}`
 // High): the before/after integrity checks cannot see an upstream that
 // swaps tools.json for clean metadata while the scanner container runs and
 // restores it before the run ends. The container must read a proxy-owned,
-// read-only snapshot of the exported contracts laid over tools.json, so the
+// read-only snapshot of the exported contracts (a staged copy), so the
 // swap never reaches it.
 func TestRT06_DockerScanner_SwapDuringRunThenRestore_ReadsSnapshot(t *testing.T) {
 	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
@@ -44,9 +42,8 @@ func TestRT06_DockerScanner_SwapDuringRunThenRestore_ReadsSnapshot(t *testing.T)
 	engine.runScannerContainer = func(_ context.Context, cfg ScannerRunConfig) (string, string, int, error) {
 		// The upstream swaps its source dir while the container runs...
 		require.NoError(t, os.WriteFile(toolsPath, []byte(staleCleanToolsJSON), 0o644))
-		hostPath = snapshotMountHostPath(cfg)
-		require.NotEmpty(t, hostPath, "the exported snapshot is mounted over tools.json")
-		assert.Contains(t, cfg.ExtraMounts, hostPath+":/src/tools.json:ro")
+		hostPath = stagedToolsJSONPath(cfg, source)
+		require.NotEmpty(t, hostPath, "the scanner mounts a staged copy holding the exported snapshot")
 		assert.NotEqual(t, toolsPath, hostPath, "the snapshot is proxy-owned, not the upstream's file")
 		seen, err = os.ReadFile(hostPath)
 		require.NoError(t, err)
@@ -88,7 +85,7 @@ func TestRT06_MetadataIndependentScanner_IgnoresToolsJSONTamper(t *testing.T) {
 			logger := zap.NewNop()
 			engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), t.TempDir(), logger)
 			engine.runScannerContainer = func(_ context.Context, cfg ScannerRunConfig) (string, string, int, error) {
-				assert.Empty(t, snapshotMountHostPath(cfg), "no snapshot for a scanner that never reads tools.json")
+				assert.Equal(t, source, cfg.SourceDir, "no staged copy for a scanner that never reads tools.json")
 				require.NoError(t, tamper(toolsPath))
 				require.NoError(t, os.WriteFile(filepath.Join(cfg.ReportDir, "results.json"), []byte(genericCleanReport), 0o644))
 				return "", "", 0, nil
@@ -121,8 +118,8 @@ func TestRT06_DockerScanner_SlashNamedServer_MountsSnapshot(t *testing.T) {
 	ran := false
 	engine.runScannerContainer = func(_ context.Context, cfg ScannerRunConfig) (string, string, int, error) {
 		ran = true
-		hostPath := snapshotMountHostPath(cfg)
-		require.NotEmpty(t, hostPath, "the exported snapshot is mounted over tools.json")
+		hostPath := stagedToolsJSONPath(cfg, source)
+		require.NotEmpty(t, hostPath, "the scanner mounts a staged copy holding the exported snapshot")
 		seen, err := os.ReadFile(hostPath)
 		require.NoError(t, err)
 		assert.Equal(t, string(snapshot), string(seen))
