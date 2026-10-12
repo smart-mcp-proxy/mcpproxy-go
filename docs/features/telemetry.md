@@ -167,7 +167,14 @@ The `activation` block gains one additive boolean:
 
 **Eligible cohort (corrected success measurement).** Filtering heartbeats on `schema_version >= 14` is **not** enough: an install that stamped the flag on a v13 build after a failed upstream call reports that same `true` in its first v14 heartbeat with no successful call. Treat the flag as *unknown* for any install whose **earliest observed heartbeat** has `schema_version < 14`; the corrected measurement covers only installs first seen at v14 or later (compute `min(schema_version)` per `anonymous_id`). A fresh v14 install is eligible. The historical flag is deliberately not rewritten or split into a second field, so no receiver change is needed.
 
-**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`, within the eligible cohort above. Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
+**Guidance for consumers**: two different questions need two different definitions, and dividing flag totals answers neither.
+
+- **Prevalence (two independent rates).** Of eligible installs, the share with `first_retrieve_tools_call_ever = true`, and separately the share with `first_real_tool_call_ever = true`. These are unconditional rates over the same eligible denominator; do not divide one by the other.
+- **Conditional conversion (retrieve to real call).** Restrict to eligible installs with `first_retrieve_tools_call_ever = true`, then take the share of those with `first_real_tool_call_ever = true`. Example: three installs report (retrieve, real call) as (true, true), (true, false), (false, true). Dividing flag totals gives 2/2 = 100%, but conversion among retrieve users is 1/2 = 50%; the third install's success happened without any `retrieve_tools` call and must not sit in the numerator.
+- **Direct routing is a separate activation path.** Direct routing exposes upstream tools without `retrieve_tools`, so a successful call there stamps `first_real_tool_call_ever` with no retrieve flag. Report that group (`first_real_tool_call_ever = true` and `first_retrieve_tools_call_ever = false`) as its own count, never as a retrieve-to-call conversion.
+- **Eligible and unknown counts.** Use only the eligible cohort above. Installs whose earliest observed heartbeat has `schema_version < 14` have an unknown flag: exclude them from both numerator and denominator, and report the eligible count and the unknown count next to every rate so the coverage is visible.
+
+Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
 
 ### `launch_source` = `tray`
 
