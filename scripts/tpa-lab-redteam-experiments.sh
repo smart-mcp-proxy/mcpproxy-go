@@ -13,15 +13,15 @@
 #   EXP-2 control   — rug pull via restart (stage 1→2)          → expect changed+blocked
 #                     (2a re-quarantined, 2b after unquarantine, 2c manual
 #                     mode trusted throughout: schema-only stock_quote held)
-#   EXP-3 hole A    — served detector-evasion mutants           → expect NOT dangerous
+#   EXP-3 hole A    — served detector-evasion mutants           → expect dangerous (RT-04)
 #   EXP-4 hole B    — TOCTOU: poisoned discovery, clean scan    → probe
 #   EXP-5 hole C    — annotation-only flip after approval       → probe (hash blindness)
 #   EXP-6 hole D    — trust_mode=scan + paraphrased stage-3 pull → probe (auto-approval chain)
 #
 # Exit status: 0 only when every experiment that ran HOLDS. A HOLE, a
 # PARTIAL-HOLE or an INCONCLUSIVE result (failed baseline approval, failed
-# scan) exits 1. The EXP-3 detector-evasion hole is the one allowed failure,
-# deferred to RT-04/RT-07 (scripts/lib/tpa-lab-verdicts.sh).
+# scan) exits 1, EXP-3 included: RT-04/RT-07 closed the detector-evasion
+# hole that used to be the one allowed failure (scripts/lib/tpa-lab-verdicts.sh).
 #
 # IMAGE=<tag> builds that tag and runs it: every generated config's isolation
 # blocks are rewritten to the same image.
@@ -464,15 +464,15 @@ fi
 
 # ==================================================================== EXP-3
 if want_only EXP-3; then
-  log "EXP-3 (hole A): served evasion mutants must NOT scan dangerous"
+  log "EXP-3 (hole A): served evasion mutants must scan dangerous after RT-04"
   cfg="$(make_config exp3 mutants 1 "$RUN_DIR/exp3-data")" || config_failed EXP-3; CURRENT_CONFIG="$cfg"
   start_daemon "$cfg" "$RUN_DIR/exp3.log" || { record "EXP-3: INCONCLUSIVE (daemon)"; exit 1; }
   v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp3-scan.txt")"
   log "scan verdict: $v (full output: $RUN_DIR/exp3-scan.txt)"
-  # Only a recognised clean/warnings verdict is the deferred detector hole;
-  # an unreadable or unknown report is INCONCLUSIVE (Sol r4 P2).
+  # A recognised clean/warnings verdict is a HOLE (the RT-04 hardening
+  # regressed); an unreadable or unknown report is INCONCLUSIVE (Sol r4 P2).
   case "$(exp3_verdict "$v")" in
-    HOLDS) pass "EXP-3 mutants flagged dangerous (detector improved!)"; record "EXP-3 HOLDS: mutants → dangerous" ;;
+    HOLDS) pass "EXP-3 mutants flagged dangerous (RT-04 hard-tier detection)"; record "EXP-3 HOLDS: mutants → dangerous" ;;
     HOLE) hole "EXP-3 mutant tools scan '$v' — detection bypassed end-to-end"; record "EXP-3 HOLE: mutants verdict=$v" ;;
     *) record "EXP-3 INCONCLUSIVE: scan=$v" ;;
   esac
@@ -684,7 +684,7 @@ echo
 log "===== experiment summary ====="
 printf '%s\n' "${RESULTS[@]-}"
 if suite_exit_status "${RESULTS[@]-}"; then
-  log "suite result: PASS (every experiment holds; EXP-3 is the deferred RT-04/RT-07 hole)"
+  log "suite result: PASS (every experiment holds)"
   exit 0
 fi
 log "suite result: FAIL (a hole was confirmed or an experiment was inconclusive)"

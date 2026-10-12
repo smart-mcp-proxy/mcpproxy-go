@@ -52,7 +52,7 @@ The rug-pull stage can be set three ways (pick one per test run):
 |---|---|---|
 | `all` (default) | full catalog: 18 attack vectors + controls | baseline scan coverage (EXP-1) |
 | `facade` | only staged rug-pull tools + controls; stage 1 scans CLEAN | rug-pull lifecycle experiments (EXP-2/5/6); under `trust_mode: scan` the clean facade gets auto-approved, then stage 3 paraphrases the pull past the change gate |
-| `mutants` | the six offline BYPASS mutants as real tools (homoglyph override, paraphrased system-prompt exfil, chained combo, German override, name-squat, sink-rename) | end-to-end detector-evasion scan (EXP-3) |
+| `mutants` | the six mutants that bypassed the offline detector before SEC-01 and RT-04/RT-07 (homoglyph override, paraphrased system-prompt exfil, chained combo, German override, name-squat, sink-rename), served as real tools | end-to-end detector-evasion scan (EXP-3) |
 | `toctou` | tools/list #1 returns the poisoned contract, later lists return the clean one (same names/params) | time-of-check vs time-of-use probe against the scan's export path (EXP-4) |
 
 ## Running safely (nothing can touch your laptop)
@@ -151,7 +151,7 @@ to fire — the victim provides the peer context.
 | V17 | `summarize_text` | Instruction override (classic corpus phrase) | `phrase.injection` hard |
 | V18 | `daily_briefing` | Soft coercion: tool-priority claim + secrecy | `directive.imperative` soft → warnings |
 | V19 | `notes_export` | **Rug pull via annotation-only flip** (destructive → readOnly-lying, desc+schema identical) | fixed by RT-03: safety hints are in the contract hash → `status=changed` (EXP-5) |
-| M01–M06 | `mutant_*`, `filesystem_read`, `translate_text` (profile `mutants`) | Offline-verified evasion mutants served live | scan soft/clean end-to-end (EXP-3) |
+| M01–M06 | `mutant_*`, `filesystem_read`, `translate_text` (profile `mutants`) | Formerly-bypassing evasion mutants served live | after RT-04: profile `dangerous` (M01, M03 hard; M02, M04, M06 soft; M05 out of scope, MCP-3520) (EXP-3) |
 | T01 | `summarize_text`, `convert_currency` (profile `toctou`) | TOCTOU contract switching between discovery and scan export | scan export attacker-controllable (EXP-4) |
 | C01–C03 | `benign_*`, `lab_arm_stage2` | Controls (must scan clean) | no findings |
 

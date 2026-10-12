@@ -70,10 +70,11 @@ exp2b_verdict() {
 }
 
 # exp3_verdict <scan_verdict> — EXP-3 (served detector-evasion mutants).
-# "dangerous" HOLDS; a recognised "clean"/"warnings" verdict is the deferred
-# detector hole (RT-04/RT-07); anything else (scan-failed, stale-report, an
-# unreadable/unknown report) proves nothing and is INCONCLUSIVE — never the
-# allowed hole (Sol r4 P2).
+# "dangerous" HOLDS (since RT-04/RT-07 the homoglyph and combo mutants are
+# hard-tier); a recognised "clean"/"warnings" verdict is a HOLE (a soft-only
+# or clean verdict means the hardening regressed); anything else
+# (scan-failed, stale-report, an unreadable/unknown report) proves nothing and
+# is INCONCLUSIVE (Sol r4 P2).
 exp3_verdict() {
   case "$1" in
     dangerous) echo HOLDS ;;
@@ -198,15 +199,14 @@ PYEOF
 # suite_exit_status <result-line>... — 0 only when every recorded experiment
 # HOLDS. A HOLE, PARTIAL-HOLE, "HOLE?" or INCONCLUSIVE result (a failed
 # baseline approval, a failed scan, a confirmed bypass) fails the suite. The
-# one allowed failure is the EXP-3 detector-evasion hole, deferred to
-# RT-04/RT-07 (detect engine). No results at all also fails.
+# EXP-3 detector-evasion hole is no longer allowed: RT-04/RT-07 closed it.
+# No results at all also fails.
 suite_exit_status() {
   local line ok=0 n=0
   for line in "$@"; do
     [[ -z "$line" ]] && continue
     n=$((n + 1))
     case "$line" in
-      "EXP-3 HOLE"*) ;;                # deferred: RT-04/RT-07
       *HOLE* | *INCONCLUSIVE*) ok=1 ;;
       *HOLDS*) ;;
       *) ok=1 ;;                       # unrecognised result line

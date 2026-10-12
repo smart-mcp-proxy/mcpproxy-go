@@ -158,6 +158,14 @@ func hasRuleForTool(findings []scanner.ScanFinding, toolName, ruleID string) boo
 		if f.RuleID == ruleID || strings.Contains(f.RuleID, ruleID) {
 			return true
 		}
+		// One finding per tool: a contributing check that is not the primary
+		// is listed in Signals (RT-04 made phrase.injection the primary on
+		// some tools that also carry a tpa-db signature).
+		for _, sig := range f.Signals {
+			if sig == ruleID || strings.Contains(sig, ruleID) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -287,9 +295,10 @@ func TestFacadeStageOneScansClean(t *testing.T) {
 	}
 }
 
-// TestStageThreeParaphrasedPullScansClean pins HOLE: the stage-3 armed rug
-// pull (same intent as stage 2) is worded past the detector, so the
-// trust_mode=scan change gate auto-approves the pull itself.
+// TestStageThreeParaphrasedPullScansClean pins the EXP-6 precondition: the
+// stage-3 armed rug pull (same intent as stage 2) is worded past the
+// detector. Before RT-02 the trust_mode=scan change gate auto-approved it;
+// EXP-6 now proves the gate holds a changed contract even on a clean verdict.
 func TestStageThreeParaphrasedPullScansClean(t *testing.T) {
 	tools := buildAttackerTools("facade", 3, nil)
 	verdict, findings := scan(t, testAttackerServer, tools, nil)
@@ -299,22 +308,43 @@ func TestStageThreeParaphrasedPullScansClean(t *testing.T) {
 	}
 }
 
-// TestMutantsProfileEvadesDetector pins the offline BYPASS results as served
-// tools: the mutant profile must not produce a hard-tier verdict, and the
-// five clean-mutant tools must have zero findings even with the victim peer
-// connected (M05 name-squat).
-func TestMutantsProfileEvadesDetector(t *testing.T) {
+// TestMutantsProfileTightenedAfterRT04 pins the served mutant profile (EXP-3)
+// after the RT-04/RT-07 detect-engine hardening (on top of SEC-01):
+//
+//   - the homoglyph override (M01) and the tag-drop + paraphrase + URL-defang
+//     combo (M03) are HARD (mixed-script folding, destination-anchored and
+//     credential-file-to-argument exfiltration families), so the profile
+//     verdict is dangerous without relying on soft findings;
+//   - the system-prompt paraphrase (M02) and the German override (M04) are
+//     surfaced for review only: SEC-01 keeps paraphrase and non-English
+//     override families SOFT by design (negation and descriptive use cannot
+//     be ruled out), and a soft finding still holds a change under scan trust;
+//   - the renamed data-sink parameter (M06) is caught by parameter SHAPE;
+//   - the name-squat with a rewritten description (M05) stays out of scope:
+//     a same-name collision without a cloned description is the proxy's
+//     normal multi-server condition (owner decision MCP-3520, see
+//     internal/security/detect/checks/shadowing.go).
+func TestMutantsProfileTightenedAfterRT04(t *testing.T) {
 	tools := mutantTools()
 	verdict, findings := scan(t, testAttackerServer, tools,
 		map[string][]labTool{testVictimServer: victimTools()})
 
-	if verdict == "dangerous" {
-		t.Fatalf("mutants profile verdict = dangerous — detector improved! findings:%s", dumpFindings(findings))
+	if verdict != "dangerous" {
+		t.Fatalf("mutants profile verdict = %q, want dangerous; findings:%s", verdict, dumpFindings(findings))
 	}
-	for _, name := range []string{"mutant_override_env", "mutant_reveal_prompt", "mutant_german_override", "filesystem_read", "translate_text"} {
-		if fs := findingsFor(findings, name); len(fs) > 0 {
-			t.Errorf("mutant %q should have zero findings; got:%s", name, dumpFindings(fs))
+	for _, name := range []string{"mutant_override_env", "mutant_exfil_combo"} {
+		fs := findingsFor(findings, name)
+		if len(fs) == 0 || fs[0].ThreatLevel != "dangerous" {
+			t.Errorf("mutant %q must be hard-tier (dangerous); got:%s", name, dumpFindings(fs))
 		}
+	}
+	for _, name := range []string{"mutant_reveal_prompt", "mutant_german_override", "translate_text"} {
+		if fs := findingsFor(findings, name); len(fs) == 0 {
+			t.Errorf("mutant %q must be surfaced for review; got no findings", name)
+		}
+	}
+	if fs := findingsFor(findings, "filesystem_read"); len(fs) > 0 {
+		t.Errorf("name-squat without a cloned description is out of scope (MCP-3520) and should stay unflagged; got:%s", dumpFindings(fs))
 	}
 }
 

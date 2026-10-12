@@ -84,14 +84,15 @@ func TestSuiteExitStatusAggregatesResults(t *testing.T) {
 		want    int
 	}{
 		{"all hold", []string{"EXP-1 HOLDS: baseline scan → dangerous", "EXP-2a HOLDS: calendar=changed stock=changed", "EXP-6 HOLDS: x"}, 0},
-		{"deferred EXP-3 hole allowed", []string{"EXP-1 HOLDS: x", "EXP-3 HOLE: mutants verdict=clean"}, 0},
+		{"EXP-3 hole fails since RT-04", []string{"EXP-1 HOLDS: x", "EXP-3 HOLE: mutants verdict=warnings"}, 1},
+		{"EXP-3 holds", []string{"EXP-1 HOLDS: x", "EXP-3 HOLDS: mutants → dangerous"}, 0},
 		{"confirmed bypass", []string{"EXP-1 HOLDS: x", "EXP-6 HOLE: scan-mode auto-approved the pull"}, 1},
 		{"partial hole", []string{"EXP-4 PARTIAL-HOLE: scan=clean"}, 1},
 		{"baseline hole?", []string{"EXP-1 HOLE?: baseline verdict=clean"}, 1},
 		{"baseline approval failed", []string{"EXP-2a INCONCLUSIVE: stage-1 baseline was not approved"}, 1},
 		{"scan failed", []string{"EXP-1 INCONCLUSIVE: scan=scan-failed"}, 1},
 		{"daemon failed", []string{"EXP-3: INCONCLUSIVE (daemon)"}, 1},
-		{"EXP-3 inconclusive is not the deferred hole", []string{"EXP-3 INCONCLUSIVE: scan=scan-failed"}, 1},
+		{"EXP-3 inconclusive fails", []string{"EXP-3 INCONCLUSIVE: scan=scan-failed"}, 1},
 		{"unrecognised line", []string{"EXP-1 something else"}, 1},
 		{"nothing ran", nil, 1},
 	} {
@@ -198,11 +199,10 @@ func TestRunLabDockerRejectsImageOverride(t *testing.T) {
 	}
 }
 
-// TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole (Sol r4 P2): only a
-// recognised clean/warnings verdict may be recorded as the deferred EXP-3
-// detector hole; an unreadable or unknown report is INCONCLUSIVE and fails
-// the suite.
-func TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole(t *testing.T) {
+// TestExp3VerdictOnlyDangerousHolds (Sol r4 P2, RT-04): only a dangerous
+// verdict HOLDS; a recognised clean/warnings verdict is a HOLE and an
+// unreadable or unknown report is INCONCLUSIVE, and both fail the suite.
+func TestExp3VerdictOnlyDangerousHolds(t *testing.T) {
 	lib := verdictsLib(t)
 	for _, tc := range []struct{ in, want string }{
 		{"dangerous", "HOLDS"},
@@ -222,6 +222,10 @@ func TestExp3VerdictOnlyRecognisedVerdictsAreTheDeferredHole(t *testing.T) {
 	_, code := runLib(t, lib, `v=unknown; case "$(exp3_verdict "$v")" in HOLE) r="EXP-3 HOLE: mutants verdict=$v";; HOLDS) r="EXP-3 HOLDS";; *) r="EXP-3 INCONCLUSIVE: scan=$v";; esac; suite_exit_status "$r"`)
 	if code == 0 {
 		t.Error("an unknown EXP-3 report must fail the suite")
+	}
+	_, code = runLib(t, lib, `v=warnings; case "$(exp3_verdict "$v")" in HOLE) r="EXP-3 HOLE: mutants verdict=$v";; HOLDS) r="EXP-3 HOLDS";; *) r="EXP-3 INCONCLUSIVE: scan=$v";; esac; suite_exit_status "$r"`)
+	if code == 0 {
+		t.Error("a soft-only EXP-3 verdict must fail the suite after RT-04")
 	}
 }
 
