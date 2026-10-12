@@ -1951,6 +1951,19 @@ func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expect
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
+	// An unquarantine without an expected incarnation is bound to the one
+	// current when it arrives (FR-017, review round 4), so a remove and
+	// re-add that lands before its commit fails it with ErrServerReplaced
+	// instead of releasing the replacement. Quarantining stays unbound: it
+	// never releases anything.
+	if !quarantined && expectedIncarnation <= 0 {
+		inc, err := r.CaptureApprovalIncarnation(serverName, 0)
+		if err != nil {
+			return fmt.Errorf("failed to update quarantine state for server '%s': %w", serverName, err)
+		}
+		expectedIncarnation = inc
+	}
+
 	var baseInc int64
 	res, err := r.Commit("quarantine_toggle", func(tx *CommitTx) error {
 		if g, ok := tx.Generation(serverName); ok {

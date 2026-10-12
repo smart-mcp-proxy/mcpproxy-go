@@ -172,6 +172,13 @@ in PR2.
 
 ---
 
+### Review round 4 (Sol) design notes
+
+- Direct and nested tool calls take the history incarnation from the shared tool gate, which reads it BEFORE the persisted server record the history is built from. A remove and same-name re-add that lands after the gate leaves the call bound to the removed incarnation, so its history write is refused instead of recreating the removed server's identity and bucket (`TestToolGate_R4_IncarnationReadWithRecord`).
+- Scanner engine: a job whose incarnation is no longer current is not the name's active scan (`GetActiveJob`, `CancelScan`), and `StartScan` detaches it (as the purge observer would) instead of refusing the replacement with "already in progress"; the identity-checked cleanup still leaves the replacement's slot alone (`TestActiveJob_R4_ReplacementDoesNotInheritRemovedScan`).
+- An unquarantine without `expected_incarnation` captures the incarnation current when it arrives (`CaptureApprovalIncarnation`, the same step 1 every approval writer runs) and commits bound to it, so a remove and re-add before its commit answers `server_replaced` and leaves the replacement quarantined (`TestUnquarantine_R4_UnboundBindsAtArrival`). Quarantining stays unbound.
+- REST: unquarantine and `security/approve` map a server that is not configured to 404, as `docs/api/rest-api.md` documents (`TestApprovalWrites_R4_MissingServerIs404`).
+
 ### Review round 3 (Sol) design notes
 
 - The in-memory purge bumps a per-server last-good purge sequence (under `lastGoodToolsMu`, inside the approval lock). The two local reindex paths (`reindexFromLastGoodSnapshot`, `reapplyLastGoodSnapshot`) read the snapshot and the sequence together and re-check the sequence under the approval lock before any write, so a copy selected before a remove and same-name re-add is dropped instead of being applied to the replacement with generation 0.

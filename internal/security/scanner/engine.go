@@ -177,6 +177,12 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	// Check for existing scan
 	e.mu.Lock()
+	if existing, ok := e.activeScans[req.ServerName]; ok && e.obsoleteLocked(existing) {
+		// The slot is held by a removed server's job whose purge observer
+		// has not detached it yet (review round 4): detach it here, exactly
+		// as DetachObsoleteJob would, so the replacement can register.
+		delete(e.activeScans, req.ServerName)
+	}
 	if existing, ok := e.activeScans[req.ServerName]; ok {
 		// Snapshot: the running scan keeps writing to the live record.
 		snapshot := existing.clone()
@@ -254,7 +260,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 func (e *Engine) CancelScan(serverName string) error {
 	e.mu.Lock()
 	job, ok := e.activeScans[serverName]
-	if !ok {
+	if !ok || e.obsoleteLocked(job) {
 		e.mu.Unlock()
 		return fmt.Errorf("no active scan for server %s", serverName)
 	}
@@ -319,10 +325,21 @@ func (e *Engine) GetActiveJob(serverName string) *ScanJob {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	job, ok := e.activeScans[serverName]
-	if !ok {
+	if !ok || e.obsoleteLocked(job) {
 		return nil
 	}
 	return job.clone()
+}
+
+// obsoleteLocked reports whether job belongs to an incarnation of its server
+// that is no longer current (Spec 116 FR-014a, review round 4): a removed
+// server's job keeps the name's slot until the purge observer detaches it,
+// and in that window it is neither the active scan of a same-name
+// replacement nor a reason to refuse the replacement's own. Called with mu
+// held.
+func (e *Engine) obsoleteLocked(job *ScanJob) bool {
+	check := e.registrationCheck
+	return check != nil && job != nil && !check(job.ServerName, job.Incarnation)
 }
 
 // snapshotJob copies a job under the engine lock so it can be handed to a scan

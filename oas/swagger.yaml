@@ -9481,6 +9481,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Invalid request or unknown tool block target
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not configured
         "409":
           content:
             application/json:

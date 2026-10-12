@@ -298,6 +298,13 @@ type MCPProxyServer struct {
 	// between them answered a verdict neither read alone selects.
 	sandboxPreflightPause func(serverName, toolName string)
 
+	// toolGateAfterRecordRead, when non-nil, runs in evaluateExactToolGate
+	// right after the gate read the persisted server record. Nil in
+	// production; the only writer is a test (Spec 116 review round 4: a
+	// remove and re-add landing after the record read must leave the gate
+	// bound to the removed incarnation).
+	toolGateAfterRecordRead func(serverName string)
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64
@@ -3325,9 +3332,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
 	// Spec 116 FR-014c: the history write is bound to the incarnation the
-	// call started on, so a call that outlives a removal leaves no history
-	// for the removed server or its replacement.
-	callInc := p.toolCallIncarnation(serverName)
+	// gate read together with the record the history is built from (review
+	// round 4), so a call that outlives a removal — or a remove and re-add
+	// that lands after the gate — leaves no history for the removed server
+	// or its replacement.
+	callInc := gate.incarnation
 	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
@@ -3858,7 +3867,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
-	callInc := p.toolCallIncarnation(serverName) // Spec 116 FR-014c
+	callInc := gate.incarnation // Spec 116 FR-014c: read with the gate's record
 	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042

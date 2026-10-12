@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -358,6 +359,7 @@ type securityApproveRequest struct {
 // @Success 200 {object} contracts.SuccessResponse "Server approved"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
 // @Failure 409 {object} contracts.ErrorResponse "Dangerous scan verdict requires force, approval failed, or server_replaced (the server was removed or re-added since expected_incarnation)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not configured"
 // @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
@@ -400,7 +402,9 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
 			return
 		}
-		if errors.Is(approveErr, commitview.ErrServerReplaced) {
+		if errors.Is(approveErr, commitview.ErrServerReplaced) || errors.Is(approveErr, internalRuntime.ErrServerNotFound) {
+			// 409 server_replaced; 404 for a server that is not configured
+			// (documented, review round 4).
 			s.writeApprovalWriteError(w, r, approveErr, "Failed to approve server")
 			return
 		}

@@ -72,7 +72,7 @@ func TestInvalidateServerState_R3_KeepsReplacementScanRegisteredLate(t *testing.
 		svc.engine.mu.Unlock()
 	}
 	registered := false
-	svc.SetServerUnquarantiner(&staleOnceProvider{
+	provider := &staleOnceProvider{
 		rowUnquarantiner: &rowUnquarantiner{store: store},
 		onStale: func() {
 			if svc.engine.mu.TryLock() {
@@ -81,7 +81,8 @@ func TestInvalidateServerState_R3_KeepsReplacementScanRegisteredLate(t *testing.
 				registered = true
 			}
 		},
-	})
+	}
+	svc.SetServerUnquarantiner(provider)
 
 	svc.InvalidateServerState("acme")
 	if !registered {
@@ -89,6 +90,10 @@ func TestInvalidateServerState_R3_KeepsReplacementScanRegisteredLate(t *testing.
 		// lands after it.
 		registerB()
 	}
+	// The stale view is the delayed observer's alone: from here on the
+	// provider answers the committed view (GetActiveJob also checks the
+	// incarnation since review round 4).
+	provider.once.Do(func() {})
 	active := svc.engine.GetActiveJob("acme")
 	require.NotNil(t, active, "the replacement's scan keeps its active slot")
 	assert.Equal(t, "scan-acme-B", active.ID)

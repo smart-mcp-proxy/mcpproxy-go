@@ -67,6 +67,13 @@ type toolGate struct {
 	// r7 H1): the live check re-reads the StateView and the live client,
 	// never storage.
 	identity toolIdentity
+	// incarnation is the server's committed incarnation (Spec 116 FR-014c),
+	// read BEFORE serverConfig, so a remove and same-name re-add that lands
+	// after the record read leaves the gate bound to the removed server: a
+	// history write the dispatch makes from serverConfig is then refused
+	// instead of recreating the removed server's identity and history under
+	// the replacement's incarnation (review round 4). 0 when unbound.
+	incarnation int64
 }
 
 // serverDisabled reports the server-level disabled gate as the classifier
@@ -123,7 +130,12 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 		return gate
 	}
 
+	// Before the record read (FR-014c, review round 4): see incarnation.
+	gate.incarnation = p.toolCallIncarnation(serverName)
 	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if p.toolGateAfterRecordRead != nil {
+		p.toolGateAfterRecordRead(serverName)
+	}
 	if err != nil || serverConfig == nil {
 		// "No such upstream" is a verdict every dispatch path has always
 		// treated as not-callable. A genuine read failure is NOT that verdict:

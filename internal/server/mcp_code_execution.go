@@ -888,8 +888,10 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	startTime := time.Now()
 	// Spec 116 FR-014c: bind the nested history write to the incarnation the
 	// sub-call started on.
-	var callInc int64
-	if u.proxy != nil {
+	// The gate's incarnation was read before its record (review round 4); a
+	// bridge without a gate reads it here.
+	callInc := gate.incarnation
+	if !gated && u.proxy != nil {
 		callInc = u.proxy.toolCallIncarnation(serverName)
 	}
 	// One correlation id per sub-call: the sanitisation policy decision and

@@ -22,7 +22,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -3944,11 +3943,9 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 	}
 	if err != nil {
 		s.logger.Errorw("Failed to unquarantine server", "server", serverID, "error", err)
-		if errors.Is(err, commitview.ErrServerReplaced) {
-			s.writeApprovalWriteError(w, r, err, "Failed to unquarantine server")
-			return
-		}
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
+		// 409 server_replaced, 404 for a server that is not configured
+		// (documented, review round 4), 500 otherwise.
+		s.writeApprovalWriteError(w, r, err, "Failed to unquarantine server")
 		return
 	}
 
