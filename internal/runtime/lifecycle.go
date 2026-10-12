@@ -2481,7 +2481,14 @@ func (r *Runtime) RestartServer(serverName string) error {
 		// Server is enabled but client doesn't exist, add it asynchronously
 		r.logger.Info("Server client not found, attempting to create and connect",
 			zap.String("server", serverName))
+		restartGen, _ := r.configSvc.Current().ServerGeneration(serverName)
 		go func() {
+			if h := r.testHooks.afterWorkerAct; h != nil {
+				defer h(serverName, restartGen.Gen)
+			}
+			if h := r.testHooks.beforeWorkerAct; h != nil {
+				h(serverName, restartGen.Gen)
+			}
 			if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
 				r.logger.Error("Failed to add server during restart",
 					zap.String("server", serverName),
@@ -2513,7 +2520,14 @@ func (r *Runtime) RestartServer(serverName string) error {
 	r.upstreamManager.RemoveServer(serverName)
 
 	// Recreate the client and reindex tools asynchronously
+	restartGen, _ := r.configSvc.Current().ServerGeneration(serverName)
 	go func() {
+		if h := r.testHooks.afterWorkerAct; h != nil {
+			defer h(serverName, restartGen.Gen)
+		}
+		if h := r.testHooks.beforeWorkerAct; h != nil {
+			h(serverName, restartGen.Gen)
+		}
 		r.logger.Info("Creating new client with fresh secret resolution",
 			zap.String("server", serverName))
 

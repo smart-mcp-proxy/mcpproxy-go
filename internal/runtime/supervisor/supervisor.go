@@ -180,6 +180,21 @@ type Supervisor struct {
 	actionsInFlight   atomic.Int64
 	startupReconciled atomic.Bool
 	stopping          bool
+
+	// beforeExecuteAction is a Spec 116 PR3 test seam (plan.md §Test seams):
+	// it runs in an action goroutine before the action touches the manager.
+	// Nil in production.
+	beforeExecuteAction atomic.Pointer[func(serverName string, action ReconcileAction)]
+}
+
+// SetBeforeExecuteActionHookForTest installs the beforeExecuteAction seam
+// (T3.3, T3.6, T3.9). Test-only.
+func (s *Supervisor) SetBeforeExecuteActionHookForTest(fn func(serverName string, action ReconcileAction)) {
+	if fn == nil {
+		s.beforeExecuteAction.Store(nil)
+		return
+	}
+	s.beforeExecuteAction.Store(&fn)
 }
 
 // inspectionFailureInfo tracks inspection failures for circuit breaker pattern
@@ -570,6 +585,10 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 	s.logger.Debug("Executing action",
 		zap.String("server", serverName),
 		zap.String("action", string(action)))
+
+	if h := s.beforeExecuteAction.Load(); h != nil && action != ActionNone {
+		(*h)(serverName, action)
+	}
 
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()

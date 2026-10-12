@@ -1293,6 +1293,12 @@ func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *config
 		sg, _ := snap.ServerGeneration(sc.Name)
 		if sc.Enabled {
 			go func(cfg *config.ServerConfig, gen, inc int64) {
+				if h := r.testHooks.afterWorkerAct; h != nil {
+					defer h(cfg.Name, gen)
+				}
+				if h := r.testHooks.beforeWorkerAct; h != nil {
+					h(cfg.Name, gen)
+				}
 				if err := r.upstreamManager.AddServerAt(cfg.Name, cfg, gen); err != nil {
 					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
 					return
@@ -1313,9 +1319,15 @@ func (r *Runtime) runCommitWorkers(tx *CommitTx, res *CommitResult, snap *config
 				}
 			}(sc, sg.Gen, sg.Incarnation)
 		} else {
-			go func(name string) {
+			go func(name string, gen int64) {
+				if h := r.testHooks.afterWorkerAct; h != nil {
+					defer h(name, gen)
+				}
+				if h := r.testHooks.beforeWorkerAct; h != nil {
+					h(name, gen)
+				}
 				r.upstreamManager.RemoveServer(name)
-			}(sc.Name)
+			}(sc.Name, sg.Gen)
 		}
 	}
 	ctx := r.AppContext()

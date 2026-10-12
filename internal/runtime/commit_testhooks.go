@@ -67,6 +67,14 @@ type commitTestHooks struct {
 	// after they read the server data they display (review round 1: the
 	// displayed config and the incarnation come from one snapshot).
 	serverViewAfterRead func()
+
+	// Spec 116 PR3 worker seams (plan.md §Test seams). beforeWorkerAct runs in
+	// a post-commit connect or disconnect worker, and in RestartServer's
+	// asynchronous worker, before it acts on the manager, with the commit
+	// generation the worker is bound to (T3.1, T3.2, T3.4). afterWorkerAct
+	// runs when that worker has finished acting.
+	beforeWorkerAct func(serverName string, gen int64)
+	afterWorkerAct  func(serverName string, gen int64)
 }
 
 // commitWaitState carries the commit-lock and approval-lock waiter probes and
