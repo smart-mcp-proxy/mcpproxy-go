@@ -66,3 +66,86 @@ func TestConnect_DisconnectDuringDialDoesNotReportReady(t *testing.T) {
 	_, err = mc.ListTools(ctx)
 	require.NoError(t, err)
 }
+
+// TestConnect_DisconnectDuringFailingDialKeepsDisconnected covers a Disconnect
+// that cancels (or simply overlaps) a dial that then fails: the failure must
+// not overwrite the Disconnected state the Disconnect left with Error, which
+// would put an intentionally disconnected client on the retry ladder.
+func TestConnect_DisconnectDuringFailingDialKeepsDisconnected(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	// A port nothing listens on: the dial fails fast.
+	ts := servertest.NewTestStreamableHTTPServer(mcpserver.NewMCPServer("gone", "0.0.1"))
+	deadURL := ts.URL
+	ts.Close()
+
+	cfg := &config.ServerConfig{Name: "race-fail", Protocol: "streamable-http", URL: deadURL, Enabled: true}
+	mc, err := NewClient("race-fail", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mc.Disconnect() })
+
+	fired := false
+	hook := func() {
+		if fired {
+			return
+		}
+		fired = true
+		require.NoError(t, mc.Disconnect())
+	}
+	mc.connectAfterDial.Store(&hook)
+	t.Cleanup(func() { mc.connectAfterDial.Store(nil) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = mc.Connect(ctx)
+	require.True(t, fired, "seam did not run")
+	require.ErrorIs(t, err, ErrConnectAborted)
+	require.Equal(t, types.StateDisconnected, mc.GetState(),
+		"a superseded failing dial must not overwrite the Disconnected state")
+}
+
+// TestConnect_NewerAttemptSupersedesTheOlderOne covers a Disconnect followed by
+// a newer Connect that both complete while the first attempt is still dialing.
+// The first attempt must discard its result and leave the newer attempt's
+// connection alone: no second Ready publication, no closing of the shared
+// transport the newer attempt is using.
+func TestConnect_NewerAttemptSupersedesTheOlderOne(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
+	ts := servertest.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(ts.Close)
+
+	cfg := &config.ServerConfig{Name: "race-newer", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
+	mc, err := NewClient("race-newer", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mc.Disconnect() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fired := false
+	var newerErr error
+	var epochAfterNewer int64
+	hook := func() {
+		if fired {
+			return
+		}
+		fired = true
+		require.NoError(t, mc.Disconnect())
+		newerErr = mc.Connect(ctx)
+		epochAfterNewer = mc.ConnectionEpoch()
+	}
+	mc.connectAfterDial.Store(&hook)
+	t.Cleanup(func() { mc.connectAfterDial.Store(nil) })
+
+	err = mc.Connect(ctx)
+	require.True(t, fired, "seam did not run")
+	require.NoError(t, newerErr, "the newer attempt must connect")
+	require.ErrorIs(t, err, ErrConnectAborted, "the older attempt must report that it was superseded")
+	require.True(t, mc.IsConnected(), "the newer attempt's connection must stay Ready")
+	require.Equal(t, epochAfterNewer, mc.ConnectionEpoch(),
+		"the superseded attempt must not open another connection generation over the newer one")
+	_, err = mc.ListTools(ctx)
+	require.NoError(t, err, "the superseded attempt must not close the transport the newer attempt uses")
+}

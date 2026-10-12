@@ -86,6 +86,13 @@ type Client struct {
 	// concurrent Disconnect can land. Nil in production.
 	connectAfterDial atomic.Pointer[func()]
 
+	// connectSeq identifies the current connect attempt. Guarded by mu. Every
+	// Connect takes a new value when it starts and every Disconnect advances
+	// it, so a Connect that re-acquires mu after its unlocked dial and finds
+	// a different value knows a Disconnect, or a newer attempt, superseded it
+	// and must not publish its result.
+	connectSeq uint64
+
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
 	connectMu     sync.Mutex
@@ -450,10 +457,11 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
-// ErrConnectAborted is returned by Connect when a Disconnect ran while the
-// transport was being established. The client stays Disconnected; the dial's
-// result is discarded rather than reported as Ready over a closed transport.
-var ErrConnectAborted = errors.New("connect aborted by a concurrent disconnect")
+// ErrConnectAborted is returned by Connect when a Disconnect, or a newer
+// connect attempt, ran while the transport was being established. The dial's
+// result (success or failure) is discarded; the client keeps the state the
+// superseding operation left.
+var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnect or a newer attempt")
 
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
@@ -511,6 +519,8 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	// Transition to connecting state
+	mc.connectSeq++
+	attempt := mc.connectSeq
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
 	// Release lock BEFORE the slow coreClient.Connect() call
@@ -541,21 +551,28 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
-	// A Disconnect that ran while the transport was dialing (mc.mu is not held
-	// in phase 3) has closed the transport and reset the state to
-	// Disconnected; nothing else moves a Connecting client to Disconnected.
-	// Reporting Ready now would expose a client whose transport is closed:
-	// every call fails with "client not connected", and since the client looks
-	// connected no reconcile ever reconnects it (the stuck re-enable after
-	// Spec 116 PR1). Honour the disconnect instead. The transport is closed
-	// again because a Disconnect that landed before connectCancel was
-	// registered could not abort the dial.
-	if connectErr == nil && mc.StateManager.GetState() == types.StateDisconnected {
-		if mc.coreClient != nil {
+	// A Disconnect, or a newer attempt, that ran while this attempt was
+	// dialing (mc.mu is not held in phase 3) owns the client's state now.
+	// Publishing this attempt's result would undo it: reporting Ready over
+	// the transport the Disconnect closed (the stuck re-enable after Spec 116
+	// PR1: every call fails with "client not connected", and since the client
+	// looks connected nothing reconnects it), or overwriting the reset state
+	// with Error/PendingAuth for a dial the Disconnect cancelled.
+	if mc.connectSeq != attempt {
+		// Only Disconnects ran since (a newer attempt would have left
+		// Connecting, Ready or a failure state): close what this dial opened,
+		// because a Disconnect that landed before connectCancel was
+		// registered could not abort it. A newer attempt shares the core
+		// client, so its transport is left alone.
+		if connectErr == nil && mc.coreClient != nil && mc.StateManager.GetState() == types.StateDisconnected {
 			_ = mc.coreClient.Disconnect()
 		}
-		mc.logger.Info("Connect superseded by a concurrent disconnect; staying disconnected",
-			zap.String("server", serverName))
+		mc.logger.Info("Connect superseded by a concurrent disconnect or a newer attempt; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		if connectErr != nil {
+			return fmt.Errorf("%w: %v", ErrConnectAborted, connectErr)
+		}
 		return ErrConnectAborted
 	}
 
@@ -703,6 +720,9 @@ func (mc *Client) Disconnect() error {
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.GetConfig().Name))
+
+	// Supersede any connect attempt still dialing (see connectSeq).
+	mc.connectSeq++
 
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
