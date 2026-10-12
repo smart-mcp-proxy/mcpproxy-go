@@ -820,7 +820,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	// A scanner that reads tool metadata mounts a proxy-owned copy of the
 	// source dir holding the exported snapshot as tools.json, never a path
 	// inside the upstream-writable source dir (RT-06, Sol r20 P2).
-	sourceDir, cleanupSource, err := e.stageScannerSource(s, req)
+	sourceDir, cleanupSource, err := e.stageScannerSource(ctx, s, req)
 	if err != nil {
 		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -174,4 +175,89 @@ func TestRT06_RealDocker_SymlinkRetargetedAroundContainerStart(t *testing.T) {
 		"the container read the exported snapshot, not the retargeted clean file")
 	require.Error(t, err, "the swap is tampering evidence; the result is discarded")
 	assert.Contains(t, err.Error(), "tools.json")
+}
+
+// TestRT06_StagedSource_DirSwappedForFIFOAfterLstat (Sol r21 P2): an
+// upstream that replaces a directory with a FIFO between its Lstat and its
+// open must not block staging (a blocking open waits for a writer forever).
+func TestRT06_StagedSource_DirSwappedForFIFOAfterLstat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs on Windows")
+	}
+	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+	snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, err)
+	sub := filepath.Join(source, "sub")
+	require.NoError(t, os.Mkdir(sub, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "keep.txt"), []byte("keep"), 0o644))
+
+	stagingAfterLstat = func(rel string) {
+		if rel == "sub" {
+			require.NoError(t, os.RemoveAll(sub))
+			makeTestFIFO(t, sub)
+		}
+	}
+	t.Cleanup(func() { stagingAfterLstat = nil })
+
+	logger := zap.NewNop()
+	engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), t.TempDir(), logger)
+	type result struct {
+		dir     string
+		cleanup func()
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		dir, cleanup, err := engine.stageScannerSource(context.Background(),
+			&ScannerPlugin{ID: "mcp-scan"}, ScanRequest{ServerName: "rt06-fifo", SourceDir: source, ToolDefinitions: snapshot})
+		done <- result{dir, cleanup, err}
+	}()
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		defer r.cleanup()
+		got, err := os.ReadFile(filepath.Join(r.dir, "keep.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "keep", string(got))
+		got, err = os.ReadFile(filepath.Join(r.dir, "tools.json"))
+		require.NoError(t, err)
+		assert.Equal(t, string(snapshot), string(got))
+	case <-time.After(10 * time.Second):
+		// Unblock the stuck open so the goroutine can exit.
+		if f, err := os.OpenFile(sub, os.O_WRONLY, 0); err == nil {
+			_ = f.Close()
+		}
+		t.Fatal("staging blocked on a FIFO swapped in for a directory")
+	}
+}
+
+// TestRT06_StagedSource_SourceContainingDataDir (Sol r21 P2): a source dir
+// that contains the proxy's data dir (a stdio server whose working dir is
+// $HOME, holding ~/.mcpproxy) must not copy the staging area into itself.
+func TestRT06_StagedSource_SourceContainingDataDir(t *testing.T) {
+	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+	snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(source, "main.py"), []byte("print(1)"), 0o644))
+	dataDir := filepath.Join(source, ".mcpproxy")
+	require.NoError(t, os.Mkdir(dataDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "mcp_config.json"), []byte("{}"), 0o600))
+
+	logger := zap.NewNop()
+	engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), dataDir, logger)
+	dir, cleanup, err := engine.stageScannerSource(context.Background(),
+		&ScannerPlugin{ID: "mcp-scan"}, ScanRequest{ServerName: "rt06-home", SourceDir: source, ToolDefinitions: snapshot})
+	require.NoError(t, err)
+	defer cleanup()
+
+	got, err := os.ReadFile(filepath.Join(dir, "main.py"))
+	require.NoError(t, err)
+	assert.Equal(t, "print(1)", string(got))
+	got, err = os.ReadFile(filepath.Join(dir, "tools.json"))
+	require.NoError(t, err)
+	assert.Equal(t, string(snapshot), string(got))
+	_, err = os.Lstat(filepath.Join(dir, ".mcpproxy", "scanner-snapshots"))
+	assert.True(t, os.IsNotExist(err), "the staging area is not copied into the staged source")
+	_, err = os.Lstat(filepath.Join(dir, ".mcpproxy", "mcp_config.json"))
+	assert.NoError(t, err, "the rest of the data dir is copied as ordinary source")
 }

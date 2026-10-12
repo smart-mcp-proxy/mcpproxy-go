@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ var errStagedSourceTooLarge = errors.New("source dir is too large to stage for a
 //
 // Scanners independent of tool metadata, and scans that exported nothing,
 // mount the source dir itself as before.
-func (e *Engine) stageScannerSource(s *ScannerPlugin, req ScanRequest) (string, func(), error) {
+func (e *Engine) stageScannerSource(ctx context.Context, s *ScannerPlugin, req ScanRequest) (string, func(), error) {
 	noop := func() {}
 	if toolMetadataIndependentScanners[s.ID] || len(req.ToolDefinitions) == 0 || req.SourceDir == "" {
 		return req.SourceDir, noop, nil
@@ -52,7 +53,15 @@ func (e *Engine) stageScannerSource(s *ScannerPlugin, req ScanRequest) (string, 
 		return "", noop, fmt.Errorf("prepare scanner source: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	if err := copySourceTree(req.SourceDir, dir); err != nil {
+	// The staging area itself is never copied (Sol r21 P2): a source dir that
+	// contains the proxy's data dir (a working dir of $HOME) would otherwise
+	// copy the copy into itself.
+	baseInfo, err := os.Stat(base)
+	if err != nil {
+		cleanup()
+		return "", noop, fmt.Errorf("prepare scanner source: %w", err)
+	}
+	if err := copySourceTree(ctx, req.SourceDir, dir, baseInfo); err != nil {
 		cleanup()
 		return "", noop, fmt.Errorf("stage scanner source: %w", err)
 	}
@@ -63,10 +72,15 @@ func (e *Engine) stageScannerSource(s *ScannerPlugin, req ScanRequest) (string, 
 	return dir, cleanup, nil
 }
 
+// stagingAfterLstat, when set by a test, runs after an entry is Lstat'ed and
+// before it is opened, to simulate an upstream swapping it in that window.
+var stagingAfterLstat func(rel string)
+
 // copySourceTree copies src into the empty directory dst without following
 // any symlink out of src. The top-level tools.json is skipped: the caller
-// writes the exported snapshot in its place.
-func copySourceTree(src, dst string) error {
+// writes the exported snapshot in its place. The directory skip (the staging
+// area) is not copied. It stops when ctx is done.
+func copySourceTree(ctx context.Context, src, dst string, skip os.FileInfo) error {
 	root, err := os.OpenRoot(src)
 	if err != nil {
 		return err
@@ -81,8 +95,18 @@ func copySourceTree(src, dst string) error {
 		if name == "" {
 			name = "."
 		}
-		d, err := root.Open(name)
+		// Non-blocking, and checked after open (Sol r21 P2): a directory
+		// swapped for a FIFO after its Lstat must not block the scan.
+		d, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		dinfo, err := d.Stat()
+		if err != nil || !dinfo.IsDir() {
+			_ = d.Close()
 			return err
 		}
 		list, err := d.ReadDir(-1)
@@ -91,6 +115,9 @@ func copySourceTree(src, dst string) error {
 			return err
 		}
 		for _, de := range list {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if rel == "" && de.Name() == "tools.json" {
 				continue
 			}
@@ -107,8 +134,14 @@ func copySourceTree(src, dst string) error {
 				}
 				return err
 			}
+			if stagingAfterLstat != nil {
+				stagingAfterLstat(child)
+			}
 			switch mode := info.Mode(); {
 			case mode.IsDir():
+				if skip != nil && os.SameFile(info, skip) {
+					continue
+				}
 				if err := os.Mkdir(target, 0o755); err != nil {
 					return err
 				}
