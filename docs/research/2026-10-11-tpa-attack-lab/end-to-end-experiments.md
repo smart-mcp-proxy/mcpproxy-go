@@ -995,3 +995,74 @@ EXP-6c stored record: `held_reason=scan_findings`, `held_verdict=dangerous`,
 `held_signals=[phrase.injection, directive.imperative, secret.embedded,
 tpa.TPA-2026-0001.hidden_instruction, tpa.TPA-2026-0003.hidden_tag]`.
 `scripts/run-tpa-lab-docker.sh` gives a baseline verdict of dangerous (93/100).
+
+### Resync with main (Spec 116 PR1) and the Sol r20/r21 scanner-staging fixes (2026-10-12)
+
+`origin/main` @ `43c5dc8e5` (PR #1590, Spec 116 PR1) was merged into the
+branch at `0762871fb`. Main's changes conflicted in one file,
+`internal/runtime/tool_quarantine.go`. The resolution keeps both sides:
+
+- The gate reads trust policy from storage under the server's approval lock
+  (Spec 116 D16). Scan mode still holds changed contracts (RT-02).
+- `checkToolApprovalsHeld` serves the discovery pass under one hold of the
+  approval lock (Spec 116 D15).
+- `approveBaselineToolsForServerAt` is kept.
+
+One call site did not compile after the merge: `verifyQuarantinedServerContracts`
+(RT-05). It now takes the instance commit generation before `tools/list` and
+passes it to the capture, so a capture from a superseded instance is dropped
+(Spec 116 FR-008a).
+
+| Finding | Fix | Test |
+|---|---|---|
+| Sol r20 P2: Docker scanners got the snapshot bind-mounted over `<source>/tools.json` inside the upstream-writable source dir. A symlink there decided where the snapshot landed, so retargeting it after the container started handed the scanner other metadata | A scanner that reads tool metadata mounts a proxy-owned copy of the source dir (`scanner/source_staging.go`). The copy is made through `os.Root`: symlinks are copied as symlinks, special files are skipped, and the copy is capped at 1 GiB and 100k entries (fail closed over the cap). The exported snapshot is written into the copy as a regular `tools.json`. The pin and the 20 ms watcher stay as tamper evidence | `TestRT06_RealDocker_SymlinkRetargetedAroundContainerStart` (fails on the old overlay: the container could not read the snapshot), `TestRT06_StagedSource_UpstreamPathsCannotRedirectScanner`, `TestRT06_StagedSource_TooLargeFailsClosed` |
+| Sol r21 P2: a directory swapped for a FIFO after its Lstat blocked staging forever | Directories are opened non-blocking and checked after open. Staging stops when the scan context is cancelled | `TestRT06_StagedSource_DirSwappedForFIFOAfterLstat` (blocks without the fix) |
+| Sol r21 P2: a source dir that contains the proxy data dir (a `$HOME` working dir) copied the staging area into itself | The staging area is identified by file identity and skipped | `TestRT06_StagedSource_SourceContainingDataDir` (fails without the fix) |
+| Lab readiness after the resync: since Spec 116, the supervisor disconnects a quarantined upstream about one second after its boot connect. The "connected on 3 polls" readiness check therefore never held for a quarantined lab config, and EXP-5 or EXP-2 aborted as INCONCLUSIVE | `lab_upstreams_settled` counts an upstream as settled when it is connected, or when it is quarantined with no error and the daemon log shows its MCP connect. Both lab scripts use it | `TestLabUpstreamsSettledAcceptsQuarantinedAfterBootConnect` |
+
+The detector P2s from rounds 18-20 all re-probe as fixed. Near variants that
+still miss (`store`/`save`/`write … to`/`copy it into`, `fill <field> with
+it`, `the key itself`) are filed as follow-up issue #1601.
+
+Verification at `836b935c2`:
+
+- `go build ./...`, `go vet ./...` and `gofmt` are clean. Both golangci-lint
+  v2 runs (bare and `--build-tags server`) report nothing in files this
+  branch changes.
+- `go test ./internal/... ./tests/tpa-attack-lab/`: every package passes
+  except a bare `internal/server`, which hits the known 10-minute
+  binary/E2E timeout. The CI command (`-race -tags server` with the
+  `unit-tests.yml` `-skip` regex over serveredition, config, oauth, server,
+  httpapi and storage) passes. `go test -race` passes for
+  `internal/runtime/...` and `internal/security/...`.
+- `go run ./cmd/scan-eval --gate --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json`
+  gives recall 1.0 and fp 0.0.
+- `go run ./cmd/tpa-redteam` gives 69 blocked, 35 downgraded, 1 BYPASS
+  (MCP-3520, out of scope) and 0 baseline-miss. This is unchanged.
+
+Live suite (fresh state, full rebuild of the image and binary, no
+`SKIP_BUILD`):
+
+```
+EXP-1 HOLDS: baseline scan → dangerous
+EXP-2a HOLDS: calendar=changed stock=changed
+EXP-2b HOLDS: calendar=changed stock=changed (unquarantined, discovered, held tools not indexed)
+EXP-2c HOLDS: stock=changed calendar=changed (manual mode, trusted throughout, gate held them, not indexed)
+EXP-3 HOLDS: mutants → dangerous, per-mutant findings ok
+EXP-4 HOLDS: ingested=yes (attempt 1), scan=dangerous, findings=ok, stored=changed
+EXP-5 HOLDS: notes_export=changed (unquarantined, discovered, not indexed)
+EXP-5b HOLDS: notes_export=changed (trusted throughout, gate held it, not indexed)
+EXP-6 HOLDS: calendar=changed stock=changed (unquarantined, discovered, not indexed)
+EXP-6b HOLDS: calendar=changed stock=changed (trusted throughout, gate held them, not indexed)
+EXP-6c HOLDS: calendar=changed (scan-mode gate scanned it, non-clean verdict + signals persisted, not indexed)
+suite result: PASS (every experiment holds)
+```
+
+Two earlier runs, made before the readiness fix, aborted at daemon start with
+"did not both connect stably" (EXP-5 restart, then EXP-2 start). Every
+experiment that completed in them held.
+
+`scripts/run-tpa-lab-docker.sh` gives a baseline verdict of dangerous
+(93/100). At the end of the run, `docker ps` lists only the attacker
+container (`NETWORKS none`). The scan's inspection exemption reconnected the
+attacker, and the supervisor holds the quarantined victim disconnected.
