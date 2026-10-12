@@ -20,12 +20,15 @@ import (
 // and identity (FR-014c). The control case proves the replay records when no
 // removal intervenes, so the assertion is not vacuous.
 func TestReplay_R5_OriginalReadBeforeReplacementRecreatesNothing(t *testing.T) {
-	for _, replaced := range []bool{false, true} {
-		name := "control"
-		if replaced {
-			name = "replaced_after_read"
-		}
-		t.Run(name, func(t *testing.T) {
+	// Review round 6: "replaced_same_config" re-adds the server with the
+	// IDENTICAL configuration and registers its identity, so the replacement's
+	// identity hash equals the removed server's (GenerateServerID excludes the
+	// incarnation). The identity check alone then passes; the replay must still
+	// be refused because the original call record itself was purged.
+	for _, mode := range []string{"control", "replaced_after_read", "replaced_same_config"} {
+		replaced := mode != "control"
+		sameConfig := mode == "replaced_same_config"
+		t.Run(mode, func(t *testing.T) {
 			cfgA := explicitServer(&config.ServerConfig{Name: "acme", URL: "http://127.0.0.1:9/a", Protocol: "http", Enabled: true})
 			rt, _ := newSpec116Runtime(t, nil, cfgA)
 			idA := storage.GenerateServerID(cfgA)
@@ -41,8 +44,19 @@ func TestReplay_R5_OriginalReadBeforeReplacementRecreatesNothing(t *testing.T) {
 			hooked := false
 			if replaced {
 				rt.replayAfterOriginalRead = func() {
-					removeAndReAdd(t, rt, explicitServer(&config.ServerConfig{
-						Name: "acme", URL: "http://127.0.0.1:9/b", Protocol: "http", Enabled: true}))
+					url := "http://127.0.0.1:9/b"
+					if sameConfig {
+						url = "http://127.0.0.1:9/a"
+					}
+					cfgB := explicitServer(&config.ServerConfig{
+						Name: "acme", URL: url, Protocol: "http", Enabled: true})
+					removeAndReAdd(t, rt, cfgB)
+					if sameConfig {
+						require.Equal(t, idA, storage.GenerateServerID(cfgB), "the replacement reuses the identity hash")
+						// B's connect worker registers B's identity.
+						_, err := rt.storageManager.RegisterServerIdentity(cfgB, "")
+						require.NoError(t, err)
+					}
 					// B's client, as B's post-commit connect worker installs it.
 					require.NoError(t, rt.upstreamManager.AddServerConfigAt("acme", spec116Live(rt, "acme"), storedStamp(t, rt, "acme").Stamp.Gen))
 					hooked = true
@@ -75,6 +89,10 @@ func TestReplay_R5_OriginalReadBeforeReplacementRecreatesNothing(t *testing.T) {
 			}
 			require.True(t, hooked, "the replay read the original call")
 			assert.Empty(t, calls, "the removed server's history bucket must not be recreated")
+			if sameConfig {
+				assert.True(t, hasA, "the replacement registered its own identity under the same hash")
+				return
+			}
 			assert.False(t, hasA, "the removed server's identity must not be recreated")
 		})
 	}

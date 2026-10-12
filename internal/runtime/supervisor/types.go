@@ -51,6 +51,12 @@ type ServerState struct {
 	// which identity resolution compares with the live client's token. Zero
 	// while no discovery has been published for this connection.
 	DiscoveryEpoch int64
+	// Incarnation is the committed incarnation of Config, taken from the
+	// configuration snapshot's server generations (Spec 116 PR2 review round
+	// 6). Reconcile never carries the retained Tools across an incarnation
+	// change: a same-name replacement starts with no tools of the removed
+	// server. Mirrored to stateview.ServerStatus.Incarnation.
+	Incarnation int64
 
 	// Reconciliation metadata
 	DesiredVersion int64 // Config version that defines this desired state

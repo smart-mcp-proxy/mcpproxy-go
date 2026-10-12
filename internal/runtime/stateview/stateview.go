@@ -56,7 +56,14 @@ type ServerStatus struct {
 	// nothing for the live connection (Spec 105 FR-009; astra r2 C3). Zero
 	// when no discovery has been published for this connection.
 	DiscoveryEpoch int64
-	Metadata       map[string]interface{}
+	// Incarnation is the committed incarnation of the server configuration
+	// this status was reconciled from (Spec 116 PR2 review round 6, FR-017).
+	// A same-name replacement carries a different incarnation, so a reader
+	// that pairs this status's Tools with a committed incarnation can tell a
+	// lagging view of the removed server from the replacement's own. Zero
+	// when the configuration snapshot carries no generations.
+	Incarnation int64
+	Metadata    map[string]interface{}
 	// Diagnostic is the most recent classified failure for this server, or nil
 	// when the server is healthy (or the last failure has not yet been classified).
 	// Spec 044.

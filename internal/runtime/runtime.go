@@ -1606,8 +1606,18 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	// the replacement. A removal after this point changes the row's
 	// incarnation away from callInc, and the write below re-checks the
 	// identity in its own transaction (RecordReplayedToolCallIfIncarnation).
+	//
+	// Review round 6: the identity id is a configuration hash that excludes
+	// the incarnation, so a same-config replacement registers the SAME
+	// identity and the identity check alone passes. The original call record
+	// itself is the proof: the removal purged it with the history bucket and
+	// nothing recreates it, so the replay is refused unless the record is
+	// still there. The write re-checks both in its transaction.
 	if originalCall.ServerID != "" {
 		if identity, idErr := storageManager.GetServerIdentityByID(originalCall.ServerID); idErr != nil || identity == nil || identity.ServerName != originalCall.ServerName {
+			return nil, fmt.Errorf("tool call not found: %s", id)
+		}
+		if present, exErr := storageManager.ToolCallRecordExists(originalCall.ServerID, originalCall.ID); exErr != nil || !present {
 			return nil, fmt.Errorf("tool call not found: %s", id)
 		}
 	}
@@ -1660,7 +1670,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	}
 
 	// Store the new tool call
-	if _, err := storageManager.RecordReplayedToolCallIfIncarnation(newCall, callInc); err != nil {
+	if _, err := storageManager.RecordReplayedToolCallIfIncarnation(newCall, callInc, originalCall.ID); err != nil {
 		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
 	}
 
@@ -3167,9 +3177,26 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
+	// Spec 116 PR2 review round 6 (FR-017): the REST listings stamp these
+	// tools with the server's COMMITTED incarnation, read before this call.
+	// The StateView lags the commit, and a remove + same-name re-add leaves
+	// it holding the removed server's definitions until reconcile catches up.
+	// Its tools are served only when the view was reconciled from the
+	// committed incarnation; otherwise they belong to a server that no longer
+	// exists, and the listing falls through to the index below, which the
+	// removal commit purged and which holds only the replacement's tools.
+	viewTools := serverStatus.Tools
+	if committedInc, ok := r.ServerIncarnation(serverName); ok && serverStatus.Incarnation != committedInc {
+		r.logger.Debug("GetServerTools: StateView lags the committed incarnation; not serving its tools",
+			zap.String("server", serverName),
+			zap.Int64("view_incarnation", serverStatus.Incarnation),
+			zap.Int64("committed_incarnation", committedInc))
+		viewTools = nil
+	}
+
 	// Convert []stateview.ToolInfo to []map[string]interface{}
-	tools := make([]map[string]interface{}, 0, len(serverStatus.Tools))
-	for _, tool := range serverStatus.Tools {
+	tools := make([]map[string]interface{}, 0, len(viewTools))
+	for _, tool := range viewTools {
 		toolMap := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,

@@ -694,6 +694,9 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 			DesiredVersion: configSnapshot.Version,
 			LastReconcile:  time.Now(),
 		}
+		if g, ok := configSnapshot.ServerGeneration(srv.Name); ok {
+			state.Incarnation = g.Incarnation
+		}
 
 		// Use ACTUAL state from manager (authoritative, not dependent on events)
 		if actual, ok := actualStates[srv.Name]; ok {
@@ -703,8 +706,28 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 			state.ConnectionEpoch = actual.ConnectionEpoch
 		}
 
-		// Merge with existing snapshot for data only available from events
-		if existing, ok := existingStates[srv.Name]; ok {
+		// Merge with existing snapshot for data only available from events.
+		//
+		// Spec 116 PR2 review round 6 (FR-017): the retained state is keyed
+		// by NAME, and a same-name replacement is a different server. Its
+		// incarnation differs from the retained one, so nothing discovered
+		// for the removed server (tools, discovery stamp) is carried into
+		// it; the connection generation moves, so a discovery result
+		// captured before the replacement is dropped at publish time, and a
+		// connected replacement's discovery is kicked again (its own result
+		// may have been captured under the old generation). Incarnation zero
+		// means the snapshot carried no generations (the snapshot the config
+		// service was constructed with): that is the same server, not a
+		// replacement.
+		existing, ok := existingStates[srv.Name]
+		if ok && existing.Incarnation != 0 && state.Incarnation != 0 && existing.Incarnation != state.Incarnation {
+			state.ConnectionGeneration = existing.ConnectionGeneration + 1
+			ok = false
+			if state.Connected {
+				rediscover = append(rediscover, srv.Name)
+			}
+		}
+		if ok {
 			state.LastSeen = existing.LastSeen
 			state.Tools = existing.Tools // Tools come from background discovery
 			state.ConnectionGeneration = existing.ConnectionGeneration
@@ -798,6 +821,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		status.Quarantined = state.Quarantined
 		status.Connected = state.Connected
 		status.ToolCount = state.ToolCount
+		status.Incarnation = state.Incarnation
 
 		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
 		status.Tools = toolInfosFromMetadata(state.Tools)

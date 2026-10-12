@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,22 +117,63 @@ func (m *Manager) RegisterServerIdentityIfIncarnation(server *config.ServerConfi
 // record.ServerName carrying incarnation inc (code_execution parent records
 // are exempt: they belong to no upstream and are recorded unconditionally).
 func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64) (bool, error) {
-	return m.recordToolCallIfIncarnation(record, inc, false)
+	return m.recordToolCallIfIncarnation(record, inc, "", false)
 }
 
 // RecordReplayedToolCallIfIncarnation is RecordToolCallIfIncarnation for an
-// activity replay (Spec 116 PR2 review round 5, FR-014c). The replayed call
+// activity replay (Spec 116 PR2 review rounds 5-6, FR-014c). The replayed call
 // carries the identity of the ORIGINAL call, read from that identity's history
-// bucket before the incarnation was captured. A removal purges that identity;
-// a same-name replacement then carries a new incarnation the replay may have
-// captured. The write is therefore also conditional on the original identity
-// still existing and naming record.ServerName, checked in the write's own
-// transaction, so a replay never recreates a purged identity or its history.
-func (m *Manager) RecordReplayedToolCallIfIncarnation(record *ToolCallRecord, inc int64) (bool, error) {
-	return m.recordToolCallIfIncarnation(record, inc, true)
+// bucket before the incarnation was captured. A removal purges that identity
+// and its history; a same-name replacement then carries a new incarnation the
+// replay may have captured. The identity alone does not prove the call still
+// belongs to the server: GenerateServerID hashes the configuration and not the
+// incarnation, so a same-config replacement registers the SAME identity id
+// (review round 6). The write is therefore conditional, in its own
+// transaction, on the original call record originalCallID itself still being
+// in that identity's history bucket. A removal purged it, and nothing
+// recreates it, so a replay never records a removed server's call under the
+// replacement nor recreates a purged identity or its history.
+func (m *Manager) RecordReplayedToolCallIfIncarnation(record *ToolCallRecord, inc int64, originalCallID string) (bool, error) {
+	return m.recordToolCallIfIncarnation(record, inc, originalCallID, true)
 }
 
-func (m *Manager) recordToolCallIfIncarnation(record *ToolCallRecord, inc int64, requireIdentity bool) (bool, error) {
+// ToolCallRecordExists reports whether the history bucket of server identity
+// serverID still holds the call callID (Spec 116 PR2 review round 6). Replay
+// checks it before dispatch: a removal purged the bucket, and a same-config
+// replacement's bucket under the same identity id never holds the removed
+// server's calls.
+func (m *Manager) ToolCallRecordExists(serverID, callID string) (bool, error) {
+	found := false
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		var err error
+		found, err = toolCallRecordExistsTx(tx, serverID, callID)
+		return err
+	})
+	return found, err
+}
+
+// toolCallRecordExistsTx reports whether serverID's history bucket holds a
+// record of callID. Keys are "<unix-nano>_<id>"; the bucket is bounded by
+// tool_call_max_records, so the scan is bounded too.
+func toolCallRecordExistsTx(tx *bbolt.Tx, serverID, callID string) (bool, error) {
+	if serverID == "" || callID == "" {
+		return false, nil
+	}
+	b := tx.Bucket([]byte(toolCallsBucketName(serverID)))
+	if b == nil {
+		return false, nil
+	}
+	suffix := []byte("_" + callID)
+	c := b.Cursor()
+	for k, _ := c.First(); k != nil; k, _ = c.Next() {
+		if bytes.HasSuffix(k, suffix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *Manager) recordToolCallIfIncarnation(record *ToolCallRecord, inc int64, originalCallID string, replay bool) (bool, error) {
 	if record == nil || record.ServerID == codeExecutionServerID {
 		if err := m.RecordToolCall(record); err != nil {
 			return false, err
@@ -149,8 +191,12 @@ func (m *Manager) recordToolCallIfIncarnation(record *ToolCallRecord, inc int64,
 		if err != nil || !ok {
 			return err
 		}
-		if requireIdentity {
+		if replay {
 			present, err := identityNamesServerTx(tx, record.ServerID, record.ServerName)
+			if err != nil || !present {
+				return err
+			}
+			present, err = toolCallRecordExistsTx(tx, record.ServerID, originalCallID)
 			if err != nil || !present {
 				return err
 			}
