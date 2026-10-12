@@ -2,6 +2,8 @@ package managed
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,4 +150,66 @@ func TestConnect_NewerAttemptSupersedesTheOlderOne(t *testing.T) {
 		"the superseded attempt must not open another connection generation over the newer one")
 	_, err = mc.ListTools(ctx)
 	require.NoError(t, err, "the superseded attempt must not close the transport the newer attempt uses")
+}
+
+// TestConnect_ReconnectTeardownSupersedesADialingAttempt covers the reconnect
+// helpers (tryReconnect, TryReconnectSync), which tear the connection down
+// without mc.mu and then start their own Connect. An older attempt whose dial
+// finishes in between must not publish Ready over the transport the helper
+// just closed; otherwise the helper's Connect hits ErrConnectAlreadyActive and
+// the client is stuck Ready over a closed transport.
+func TestConnect_ReconnectTeardownSupersedesADialingAttempt(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	upstream := mcpserver.NewMCPServer("race-upstream", "0.0.1", mcpserver.WithToolCapabilities(true))
+	ts := servertest.NewTestStreamableHTTPServer(upstream)
+	t.Cleanup(ts.Close)
+
+	cfg := &config.ServerConfig{Name: "race-reconnect", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
+	mc, err := NewClient("race-reconnect", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mc.Disconnect() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Park the first attempt after its dial succeeded.
+	dialed, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	afterDial := func() {
+		once.Do(func() {
+			close(dialed)
+			<-release
+		})
+	}
+	mc.connectAfterDial.Store(&afterDial)
+	t.Cleanup(func() { mc.connectAfterDial.Store(nil) })
+
+	oldDone := make(chan error, 1)
+	go func() { oldDone <- mc.Connect(ctx) }()
+	select {
+	case <-dialed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first attempt never finished dialing")
+	}
+
+	// A concurrent failure moves the client to Error, which is what lets the
+	// reconnect helpers run while the first attempt is still out.
+	mc.StateManager.SetError(errors.New("simulated health-check failure"))
+
+	// Let the first attempt finish after the helper's teardown and before its
+	// replacement Connect starts.
+	var oldErr error
+	afterTeardown := func() {
+		close(release)
+		oldErr = <-oldDone
+	}
+	mc.reconnectAfterTeardown.Store(&afterTeardown)
+	t.Cleanup(func() { mc.reconnectAfterTeardown.Store(nil) })
+
+	require.NoError(t, mc.TryReconnectSync(ctx), "the helper's replacement connect must succeed")
+	require.ErrorIs(t, oldErr, ErrConnectAborted, "the older attempt must be superseded by the reconnect teardown")
+	require.True(t, mc.IsConnected())
+	_, err = mc.ListTools(ctx)
+	require.NoError(t, err, "the client must be usable, not Ready over a closed transport")
 }

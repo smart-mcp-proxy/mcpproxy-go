@@ -92,6 +92,10 @@ type Client struct {
 	// a different value knows a Disconnect, or a newer attempt, superseded it
 	// and must not publish its result.
 	connectSeq uint64
+	// reconnectAfterTeardown is a test seam run by tryReconnect and
+	// TryReconnectSync after they tore the connection down and before their
+	// replacement Connect starts. Nil in production.
+	reconnectAfterTeardown atomic.Pointer[func()]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -1718,6 +1722,15 @@ func (mc *Client) cancelInFlightListTools() {
 // cancelInFlightConnect cancels any in-flight Connect() operation.
 // This is called from Disconnect() BEFORE acquiring mc.mu, so Disconnect()
 // doesn't block on a Connect() that holds mc.mu during slow OAuth flows.
+// supersedeConnectAttempt invalidates a connect attempt that is still
+// dialing, so it discards its result instead of publishing it over a teardown
+// that runs without mc.mu (tryReconnect, TryReconnectSync). See connectSeq.
+func (mc *Client) supersedeConnectAttempt() {
+	mc.mu.Lock()
+	mc.connectSeq++
+	mc.mu.Unlock()
+}
+
 func (mc *Client) cancelInFlightConnect() {
 	mc.connectMu.Lock()
 	cancel := mc.connectCancel
@@ -2260,7 +2273,11 @@ func (mc *Client) tryReconnect() {
 	}
 
 	// First, disconnect the current client to clean up any broken connections
-	// Cancel any in-flight connect/listTools before attempting reconnection
+	// Cancel any in-flight connect/listTools before attempting reconnection.
+	// Supersede a still-dialing attempt first: the teardown below runs without
+	// mc.mu, and an attempt that reached phase 4 after it would otherwise
+	// publish Ready over the closed transport.
+	mc.supersedeConnectAttempt()
 	mc.cancelInFlightConnect()
 	mc.cancelInFlightListTools()
 	if err := mc.coreClient.Disconnect(); err != nil {
@@ -2271,6 +2288,9 @@ func (mc *Client) tryReconnect() {
 
 	// Transition to disconnected for reconnect, preserving retryCount for backoff
 	mc.StateManager.ResetForReconnect()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
@@ -2379,7 +2399,9 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 		return fmt.Errorf("reconnect deferred: a tool call is still in flight")
 	}
 
-	// Disconnect stale state first
+	// Disconnect stale state first (superseding a still-dialing attempt, as
+	// in tryReconnect).
+	mc.supersedeConnectAttempt()
 	mc.cancelInFlightConnect()
 	mc.cancelInFlightListTools()
 	if err := mc.coreClient.Disconnect(); err != nil {
@@ -2390,6 +2412,9 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 
 	// Reset state to disconnected
 	mc.StateManager.Reset()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt synchronous connect with the provided context
 	if err := mc.Connect(ctx); err != nil {
