@@ -186,5 +186,5 @@ cat <<EOF
   - full findings:  mcpproxy security report tpa-lab-attacker -o json --config $CONFIG
   - rug pull:       KEEP=1 $0   then approve tools, call lab_arm_stage2 (live flip),
                     or set "TPA_LAB_STAGE": "2" in the config and rerun (restart path)
-  - cleanup:        pkill -f 'mcpproxy serve.*tpa-lab-config-docker'; rm -rf $DATA_DIR; docker rmi $IMAGE
+  - cleanup:        $( [[ "$KEEP" == "1" ]] && echo "kill $DAEMON_PID; " )rm -rf $DATA_DIR; docker rmi $IMAGE
 EOF

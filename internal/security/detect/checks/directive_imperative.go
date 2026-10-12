@@ -95,8 +95,10 @@ var directiveFamilies = []directiveFamily{
 	},
 	{ // Secrecy imperative, paraphrased (RT-04/RT-07): "keep this away from the
 		// user", "do not let the user know", "the user must not find out",
-		// "without the user noticing". Matched on NORMALIZED text. SOFT.
-		re:   regexp.MustCompile(`\b(?:keep (?:this|it|that|these|them|the \w+)(?: \w+){0,2} (?:away from|hidden from|secret from|from) (?:the )?(?:user|human|operator|caller)|(?:do not|never|must not) (?:let|allow) (?:the )?(?:user|human|operator)\w* (?:know|see|find out|notice|learn|realiz)\w*|(?:the )?(?:user|human|operator) (?:must|should|need|shall|may) (?:not|never) (?:know|learn|find out|see|notice|be told|be inform\w*)|without (?:the )?(?:user|human|operator)\w*'? (?:notic|know|awareness|knowledge|realiz)\w*)`),
+		// "without the user noticing", "without the user's knowledge" (straight
+		// or curly possessive, which normalization keeps, Sol r14 P2). Matched on
+		// NORMALIZED text. SOFT.
+		re:   regexp.MustCompile(`\b(?:keep (?:this|it|that|these|them|the \w+)(?: \w+){0,2} (?:away from|hidden from|secret from|from) (?:the )?(?:user|human|operator|caller)|(?:do not|never|must not) (?:let|allow) (?:the )?(?:user|human|operator)\w* (?:know|see|find out|notice|learn|realiz)\w*|(?:the )?(?:user|human|operator) (?:must|should|need|shall|may) (?:not|never) (?:know|learn|find out|see|notice|be told|be inform\w*)|without (?:the )?(?:user|human|operator)\w*(?:'s|’s|'|’)? (?:notic|know|awareness|knowledge|realiz)\w*)`),
 		base: 0.6,
 		what: "secrecy imperative",
 	},

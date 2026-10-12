@@ -18,7 +18,7 @@
   "docker_isolation": {
     "enabled": false,
     "mode": "docker",
-    "enable_cache_volume": true,
+    "enable_cache_volume": false,
     "default_images": {
       "bash": "alpine:3.18",
       "binary": "alpine:3.18",

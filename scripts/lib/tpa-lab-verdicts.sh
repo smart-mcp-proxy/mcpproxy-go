@@ -459,6 +459,14 @@ def reject_references(value, where):
 
 glob = cfg.get("docker_isolation") or {}
 reject_references(glob, "docker_isolation")
+# Sol r14 P2: with enable_cache_volume the launcher mounts SHARED, persistent
+# package-cache volumes (mcpproxy-uv-cache, mcpproxy-npm-cache,
+# mcpproxy-go-cache; internal/upstream/core/isolation.go) into every Python,
+# Node or Go upstream, so a lab upstream could read or poison the caches of
+# ordinary upstreams. The daemon default is true, so the key must be present
+# and exactly false.
+if glob.get("enable_cache_volume") is not False:
+    sys.exit("docker_isolation.enable_cache_volume must be false for the lab (got %r; the daemon default is true): cache volumes are shared with ordinary upstreams" % glob.get("enable_cache_volume", "<absent>"))
 global_present = check_args(glob.get("extra_args"), "docker_isolation")
 
 servers = cfg.get("mcpservers", [])
