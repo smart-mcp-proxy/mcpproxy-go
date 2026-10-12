@@ -96,15 +96,19 @@ primitive (T048, T048a-e, T048g, T048i, T055b, T055d, T055e and the OAuth half
 of T055c/T055f) — is deferred to a follow-up **PR2b**. It has to thread the
 committed `ServerGen` through `upstream.Manager` → `managed` → `core` →
 `oauth` constructors, which PR3 rewrites (`AddServerConfigAt` and friends);
-landing it before PR3 would make both PRs edit the same constructors. The
-issue-level defects are closed without it: the removal purge deletes every
-OAuth record of the name in the row's transaction (exact key, B2), so a
-same-name re-add never inherits tokens or a DCR client (#1562). What PR2b
-still closes is the narrower window in which an old instance's in-flight OAuth
-write (a code exchange, a refresh or a DCR save already past its network
-round-trip) lands after the purge, or after an OAuth-config clear that keeps
-the name and URL. A same-commit replacement (T055f) runs the full purge in
-PR2; only its epoch stamp is PR2b.
+landing it before PR3 would make both PRs edit the same constructors. What PR2
+closes: the removal purge deletes every OAuth record of the name that exists
+when the removal commits, in the row's transaction (exact key, B2), so a
+same-name re-add does not inherit the tokens or DCR client the removed server
+had stored (#1562, the at-rest half). What it does NOT yet close (review round
+1): `PersistentTokenStore.SaveToken` has no incarnation check, so an old
+instance's in-flight OAuth write (a code exchange, a refresh or a DCR save
+already past its network round-trip) can land after the purge and recreate a
+record the re-added server then reads; likewise after an OAuth-config clear
+that keeps the name and URL. #1562's credential half therefore stays open
+until PR2b's parked-save test (T2.9, T048) passes; PR2 does not claim it. A
+same-commit replacement (T055f) runs the full purge in PR2; only its epoch
+stamp is PR2b.
 
 The PR2 tests live in `internal/storage/purge_test.go`,
 `internal/storage/incarnation_writes_test.go`,
@@ -161,6 +165,13 @@ instead of the per-task file names below), with the shared fixture
 are closed.
 
 ---
+
+### Review round 1 (Sol) design notes
+
+- Server views (`GetServerReview`, `GetAllServers`, both paths) read the displayed configuration and the generation/incarnation from ONE committed snapshot, so a same-name re-add can never pair the old command or URL with the new incarnation.
+- Unbound (incarnation 0) conditional writes of tool-call history, scan jobs and scan reports are refused once a config commit exists; the unbound fallback stays only for a database no commit has written. Replay captures the incarnation before resolving the client and rejects a server with no committed identity.
+- The scanner binds Pass 2 and its failed-source placeholder to the originating Pass 1 job's incarnation (Pass 2 is skipped when it is no longer current), refuses to scan a server the committed view does not know, routes every save through the conditional writer, and the purge observer detaches an active job of an obsolete incarnation (identity-checked cleanup keeps a replacement's job).
+- The tool listings carry the incarnation read before their rows (`incarnation`, `server_incarnation`); the Web UI binds global Tools batch actions and Server Detail per-tool decisions to the incarnation of the rows on screen, refuses a decision on stale rows, and the review screen shows a failed per-tool decision on every server.
 
 ## PR3: Generation-bound workers and supervisor (US3; #1563)
 

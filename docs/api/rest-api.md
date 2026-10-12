@@ -519,6 +519,14 @@ review payload) carries two committed identifiers:
 - `incarnation` (int64) changes only when the name is removed and created
   again; ordinary edits keep it.
 
+The displayed configuration and these identifiers always come from the same
+committed state, so a payload never shows one server's command or URL with
+another server's `incarnation`. The tool listings carry the identity of the
+server their rows were read for: `GET /api/v1/servers/{id}/tools` and
+`GET /api/v1/servers/{id}/tools/export` add `incarnation`, and every tool row
+(including the rows of `GET /api/v1/tools`) adds `server_incarnation`. Echo
+the value of the rows you acted on as `expected_incarnation`.
+
 The approval writes — `tools/approve`, `tools/block`, `tools/{tool}/enabled`,
 `tools/enable_all`, `tools/disable_all`, `unquarantine` and
 `security/approve` — accept an optional `"expected_incarnation"`: the
@@ -534,7 +542,10 @@ HTTP/1.1 409 Conflict
 Without the field the call is bound to the incarnation current when it
 arrives, so a removal that lands while the call is in flight still refuses it.
 A call for a server that is not configured answers `404`. An unrelated edit of
-the server (for example `disabled_tools`) never refuses an approval.
+the server (for example `disabled_tools`) never refuses an approval. A security
+scan (`POST /api/v1/servers/{id}/scan`) of a server that is not configured
+answers `404` as well, so a scan started while a name is being removed and
+re-added never leaves evidence for the next server of that name.
 
 ### Tool Quarantine
 

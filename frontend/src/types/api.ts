@@ -373,6 +373,9 @@ export interface GlobalTool {
   held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
   held_verdict?: string    // "dangerous" | "warnings" | "clean"
   held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
+  // Spec 116 FR-017: the incarnation of the server this row was read for; a
+  // per-tool decision echoes it as expected_incarnation. Omitted when unknown.
+  server_incarnation?: number
   // Spec 108 FR-032: present only in a view-as listing (`GET /tools?client=|profile=`).
   // `tier` stays the intrinsic tier; `profile_tier` is the tier under the viewed
   // subject's profile and `access` is the subject's verdict for the tool.
@@ -456,6 +459,8 @@ export interface Tool {
   description: string
   server: string
   server_name?: string
+  /** Spec 116 FR-017: incarnation of the server this row was read for. */
+  server_incarnation?: number
   input_schema?: Record<string, any>
   schema?: Record<string, any>
   annotations?: ToolAnnotation

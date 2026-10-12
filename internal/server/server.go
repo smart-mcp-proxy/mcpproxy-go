@@ -4947,3 +4947,12 @@ func (s *Server) mcpLoggingHandler(handler http.Handler) http.Handler {
 		}
 	})
 }
+
+// ServerIncarnation returns serverName's committed incarnation (Spec 116
+// FR-017); the REST tool listings stamp it on their rows.
+func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
+	if s.runtime == nil {
+		return 0, false
+	}
+	return s.runtime.ServerIncarnation(serverName)
+}

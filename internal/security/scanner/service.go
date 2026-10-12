@@ -946,7 +946,10 @@ func (s *Service) saveJob(job *ScanJob) {
 	if job == nil {
 		return
 	}
-	if cs, ok := s.storage.(IncarnationStorage); ok && job.Incarnation != 0 {
+	// Every save goes through the conditional writer when the storage has
+	// one, an unbound (zero) incarnation included: the storage refuses an
+	// unbound write once a config commit exists (review round 1).
+	if cs, ok := s.storage.(IncarnationStorage); ok {
 		written, err := cs.SaveScanJobIfIncarnation(job, job.Incarnation)
 		if err == nil && !written {
 			s.logger.Debug("Scan job dropped: the server was removed or replaced since the scan started",
@@ -965,7 +968,7 @@ func (s *Service) saveReport(job *ScanJob, report *ScanReport) {
 	if job != nil && report.Incarnation == 0 {
 		report.Incarnation = job.Incarnation
 	}
-	if cs, ok := s.storage.(IncarnationStorage); ok && report.Incarnation != 0 {
+	if cs, ok := s.storage.(IncarnationStorage); ok {
 		written, err := cs.SaveScanReportIfIncarnation(report, report.Incarnation)
 		if err == nil && !written {
 			s.logger.Debug("Scan report dropped: the server was removed or replaced since the scan started",
@@ -976,21 +979,54 @@ func (s *Service) saveReport(job *ScanJob, report *ScanReport) {
 	_ = s.storage.SaveScanReport(report)
 }
 
-// serverIncarnation returns the server's current incarnation, or 0 when the
-// wiring cannot tell (no committed view).
-func (s *Service) serverIncarnation(serverName string) int64 {
-	if p, ok := s.unquarantiner.(ServerIncarnationProvider); ok {
-		if inc, found := p.ServerIncarnation(serverName); found {
-			return inc
-		}
+// currentIncarnation returns the server's current incarnation. configured is
+// false only when a committed-view provider is installed and does not know
+// the server; without a provider it returns (0, true): an unbound scan.
+func (s *Service) currentIncarnation(serverName string) (inc int64, configured bool) {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return 0, true
 	}
-	return 0
+	return p.ServerIncarnation(serverName)
 }
 
-// InvalidateServerState drops the cached scan verdict of a server whose
-// stored scan state was purged (Spec 116 FR-014a: a removal), so a re-added
-// server never shows the old server's verdict.
+// scanIncarnation is the incarnation a new scan of serverName binds to. With
+// a committed-view provider installed, a server it does not know is refused
+// (review round 1, FR-014a): an unbound job started in a remove/re-add gap
+// would persist evidence the later same-name server inherits.
+func (s *Service) scanIncarnation(serverName string) (int64, error) {
+	inc, configured := s.currentIncarnation(serverName)
+	if !configured {
+		return 0, fmt.Errorf("cannot scan server %s: server is not configured", serverName)
+	}
+	return inc, nil
+}
+
+// incarnationIsCurrent reports whether inc is still serverName's incarnation
+// (always true without a provider, or for an unbound inc of 0 there).
+func (s *Service) incarnationIsCurrent(serverName string, inc int64) bool {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return true
+	}
+	cur, found := p.ServerIncarnation(serverName)
+	return found && cur == inc
+}
+
+// InvalidateServerState drops the scan state of a server whose stored scan
+// state was purged (Spec 116 FR-014a: a removal), so a re-added server never
+// shows the old server's verdict: the cached summary, and the engine's active
+// job when it belongs to an incarnation that is no longer current (review
+// round 1). A job of the current incarnation — a re-added server's own scan
+// that started before this observer ran — is kept; the engine's identity-
+// checked cleanup keeps the detached job's goroutine from evicting it.
 func (s *Service) InvalidateServerState(serverName string) {
+	if s.engine != nil {
+		cur, configured := s.currentIncarnation(serverName)
+		s.engine.DetachObsoleteJob(serverName, func(job *ScanJob) bool {
+			return !configured || job.Incarnation != cur
+		})
+	}
 	s.invalidateScanSummaryCache(serverName)
 }
 
@@ -1049,7 +1085,10 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
-			go a.service.startPass2(job.ServerName, a.serverInfo)
+			// The ORIGINATING job's incarnation (review round 1): a late
+			// Pass 1 of a removed server must not bind Pass 2 to a
+			// same-name replacement.
+			go a.service.startPass2(job.ServerName, a.serverInfo, job.Incarnation)
 		}
 	}
 }
@@ -1074,9 +1113,13 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 // StartScan triggers a security scan for a server (Pass 1: fast security scan).
 // After Pass 1 completes, Pass 2 (supply chain audit) is auto-started in the background.
 func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
 	req := ScanRequest{
 		ServerName:    serverName,
-		Incarnation:   s.serverIncarnation(serverName),
+		Incarnation:   inc,
 		DryRun:        dryRun,
 		ScannerIDs:    scannerIDs,
 		SourceDir:     sourceDir,
@@ -1311,7 +1354,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 // startPass2 starts the background supply chain audit (Pass 2) for a server.
 // It re-resolves source WITHOUT filtering (full container filesystem including deps)
 // and runs only Trivy-compatible scanners for deep CVE analysis.
-func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
+//
+// inc is the incarnation of the Pass 1 job that scheduled it: Pass 2 and its
+// failed-source placeholder bind to it, and Pass 2 does not start at all once
+// that incarnation is no longer current (Spec 116 FR-014a, review round 1).
+func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int64) {
+	if !s.incarnationIsCurrent(serverName, inc) {
+		s.logger.Info("Pass 2 skipped: the server was removed or replaced since Pass 1 started",
+			zap.String("server", serverName), zap.Int64("incarnation", inc))
+		return
+	}
 	s.logger.Info("Starting Pass 2 (supply chain audit) in background",
 		zap.String("server", serverName),
 	)
@@ -1320,7 +1372,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 
 	req := ScanRequest{
 		ServerName:    serverName,
-		Incarnation:   s.serverIncarnation(serverName),
+		Incarnation:   inc,
 		DryRun:        false,
 		ScanPass:      ScanPassSupplyChainAudit,
 		IsolationMode: s.resolveIsolationMode(serverName),
@@ -1344,7 +1396,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 				zap.Error(err),
 			)
 			// Fall back to a failed pass 2 job so the UI knows it was attempted
-			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error())
+			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error(), inc)
 			return
 		}
 		req.SourceDir = resolved.SourceDir
@@ -1404,7 +1456,8 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 }
 
 // saveFailedPass2Job creates a failed ScanJob for Pass 2 so the UI knows it was attempted.
-func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
+// It is bound to inc, the originating Pass 1 job's incarnation.
+func (s *Service) saveFailedPass2Job(serverName, errMsg string, inc int64) {
 	job := &ScanJob{
 		ID:          fmt.Sprintf("scan-%s-pass2-%d", serverName, time.Now().UnixNano()),
 		ServerName:  serverName,
@@ -1413,7 +1466,7 @@ func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
 		StartedAt:   time.Now(),
 		CompletedAt: time.Now(),
 		Error:       errMsg,
-		Incarnation: s.serverIncarnation(serverName),
+		Incarnation: inc,
 	}
 	s.saveJob(job)
 }
@@ -2016,7 +2069,10 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 // reportIsForIncarnation reports whether an aggregated report describes the
 // server incarnation inc: its job carries inc, or carries none (a job saved
 // before Spec 116 PR2, which can only belong to the current server because a
-// removal purges every job of the name).
+// removal purges every job of the name). A zero-incarnation job cannot be
+// written AFTER a commit (review round 1): StartScan refuses a server the
+// committed view does not know, and storage refuses an unbound job or report
+// once a config commit exists, so a remove/re-add gap cannot mint one.
 func (s *Service) reportIsForIncarnation(agg *AggregatedReport, inc int64) bool {
 	if agg == nil || agg.JobID == "" {
 		return true

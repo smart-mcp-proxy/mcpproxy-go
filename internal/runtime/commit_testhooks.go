@@ -56,6 +56,10 @@ type commitTestHooks struct {
 	// beforeRegisterIdentity runs in a post-commit connect worker before it
 	// registers the server identity (T2.12).
 	beforeRegisterIdentity func(serverName string)
+	// serverViewAfterRead runs in GetServerReview and GetAllServers right
+	// after they read the server data they display (review round 1: the
+	// displayed config and the incarnation come from one snapshot).
+	serverViewAfterRead func()
 }
 
 // commitWaitState carries the commit-lock and approval-lock waiter probes and

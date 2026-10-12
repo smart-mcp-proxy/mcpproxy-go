@@ -3989,6 +3989,11 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Spec 116 FR-017 (review round 1): the incarnation is read BEFORE the
+	// tools, so a same-name replacement landing in between yields an older
+	// incarnation (a decision is refused, 409) and never a newer one paired
+	// with the old server's tools.
+	incarnation := s.serverIncarnationOf(serverID)
 	tools, err := mgmtSvc.GetServerTools(r.Context(), serverID)
 	if err != nil {
 		s.logger.Errorw("Failed to get server tools", "server", serverID, "error", err)
@@ -4013,10 +4018,15 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return toolApprovalPriority(typedTools[i].ApprovalStatus) < toolApprovalPriority(typedTools[j].ApprovalStatus)
 	})
 
+	for i := range typedTools {
+		typedTools[i].ServerIncarnation = incarnation
+	}
+
 	response := contracts.GetServerToolsResponse{
-		ServerName: serverID,
-		Tools:      typedTools,
-		Count:      len(typedTools),
+		ServerName:  serverID,
+		Tools:       typedTools,
+		Count:       len(typedTools),
+		Incarnation: incarnation,
 	}
 
 	s.writeSuccess(w, response)
@@ -4173,6 +4183,13 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Spec 116 FR-017: the server's incarnation, read BEFORE its tools
+		// (see handleGetServerTools). The controller's server projection
+		// may not carry it, so ask the controller when the row has none.
+		serverInc := incarnationField(srv)
+		if serverInc == 0 {
+			serverInc = s.serverIncarnationOf(name)
+		}
 		generic, terr := getTools(name)
 		if terr != nil {
 			// Spec edge case: a genuine fetch error — still return every tool
@@ -4186,6 +4203,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 
 		typed := s.enrichServerTools(name, generic, discloseHash)
 		for i := range typed {
+			typed[i].ServerIncarnation = serverInc
 			if st, ok := usage[name+"\x00"+typed[i].Name]; ok {
 				typed[i].Usage = st.Count
 				if !st.LastUsed.IsZero() {
@@ -7321,6 +7339,8 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Spec 116 FR-017: read before the records (see handleGetServerTools).
+	incarnation := s.serverIncarnationOf(serverID)
 	records, err := s.controller.ListToolApprovals(serverID)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
@@ -7385,11 +7405,15 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		})
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
+	payload := map[string]interface{}{
 		"server_name": serverID,
 		"tools":       exports,
 		"count":       len(exports),
-	})
+	}
+	if incarnation > 0 {
+		payload["incarnation"] = incarnation
+	}
+	s.writeSuccess(w, payload)
 }
 
 // handleAnnotationCoverage godoc

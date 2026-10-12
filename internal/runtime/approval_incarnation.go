@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -29,7 +31,9 @@ import (
 // approval; only a remove followed by a create does.
 
 // ServerIncarnation returns name's committed incarnation from the live
-// snapshot. ok is false when the server is not configured.
+// snapshot. ok is false when the server is not configured. A snapshot no
+// commit has published (no generations at all: a fixture or a pre-boot
+// state) reports a configured server as (0, true): known, but unbound.
 func (r *Runtime) ServerIncarnation(name string) (int64, bool) {
 	if r.configSvc == nil {
 		return 0, false
@@ -38,11 +42,53 @@ func (r *Runtime) ServerIncarnation(name string) (int64, bool) {
 	if snap == nil {
 		return 0, false
 	}
+	if snap.ServerGenerations == nil {
+		if snap.GetServer(name) != nil {
+			return 0, true
+		}
+		if cfg, err := r.GetConfig(); err == nil && cfg != nil {
+			for _, sc := range cfg.Servers {
+				if sc != nil && sc.Name == name {
+					return 0, true
+				}
+			}
+		}
+		return 0, false
+	}
 	g, ok := snap.ServerGeneration(name)
 	if !ok {
 		return 0, false
 	}
 	return g.Incarnation, true
+}
+
+// committedServerView returns name's configuration and its committed
+// generation from ONE configuration snapshot, so a view that displays the
+// configuration and offers the incarnation for expected_incarnation never
+// pairs one server's command or URL with another's incarnation (review round
+// 1, FR-017). Without a config service it falls back to the live
+// configuration and reports no generation. server is nil when name is not
+// configured.
+func (r *Runtime) committedServerView(name string) (server *config.ServerConfig, gen configsvc.ServerGen, hasGen bool, err error) {
+	if r.configSvc != nil {
+		if snap := r.configSvc.Current(); snap != nil && snap.Config != nil {
+			server = snap.GetServer(name)
+			if server != nil {
+				gen, hasGen = snap.ServerGeneration(name)
+			}
+			return server, gen, hasGen, nil
+		}
+	}
+	cfg, err := r.GetConfig()
+	if err != nil {
+		return nil, gen, false, err
+	}
+	for _, sc := range cfg.Servers {
+		if sc != nil && sc.Name == name {
+			return sc, gen, false, nil
+		}
+	}
+	return nil, gen, false, nil
 }
 
 // serverReplacedError builds the ErrServerReplaced error for name. Its text is

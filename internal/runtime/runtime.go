@@ -36,6 +36,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -1575,6 +1576,16 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 		callArgs = originalCall.Arguments
 	}
 
+	// Spec 116 FR-014c (review round 1): bind the history write to the
+	// server's incarnation, captured BEFORE the client is resolved. A removal
+	// or same-name replacement completing in between then makes the write
+	// drop instead of recording the old client's call under the replacement;
+	// a server with no committed identity is not replayed at all.
+	callInc, incOK := r.ServerIncarnation(originalCall.ServerName)
+	if !incOK && r.approvalBindingEnforced() {
+		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
+	}
+
 	// Get the upstream client
 	client, ok := upstreamManager.GetClient(originalCall.ServerName)
 	if !ok || client == nil {
@@ -1601,9 +1612,6 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	startTime := time.Now()
-	// Spec 116 FR-014c: the history write is bound to the incarnation the
-	// replay started on.
-	callInc, _ := r.ServerIncarnation(originalCall.ServerName)
 	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
 	duration := time.Since(startTime)
 
@@ -2522,6 +2530,15 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		return r.getAllServersLegacy()
 	}
 
+	// Spec 116 FR-017 (review round 1): the committed snapshot supplies BOTH
+	// the displayed configuration and the generation/incarnation of each
+	// server. The StateView lags commits, so pairing its config with the
+	// snapshot's incarnation could show the old server's command or URL with
+	// a same-name replacement's incarnation, which the client echoes back as
+	// expected_incarnation. Read it before the StateView: the view then never
+	// shows a server newer than the identity it carries.
+	committed := r.committedSnapshot()
+
 	// Get snapshot - this is lock-free and instant
 	snapshot := stateView.Snapshot()
 	r.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
@@ -2538,9 +2555,13 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		oauthExpiryWarningHours = cfg.OAuthExpiryWarningHours
 	}
 
+	if hook := r.testHooks.serverViewAfterRead; hook != nil {
+		hook()
+	}
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
-	snapGens := r.serverGenerationSnapshot()
+	snapGens := committed.gens()
 	for _, serverStatus := range snapshot.Servers {
+		serverStatus = committed.pairStatus(serverStatus)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
 		connecting := strings.EqualFold(serverStatus.State, "connecting")
@@ -2947,17 +2968,55 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
-// serverGenerationSnapshot returns the per-server committed generations of
-// the live snapshot (nil before the first commit).
-func (r *Runtime) serverGenerationSnapshot() map[string]configsvc.ServerGen {
+// committedView is one committed configuration snapshot that a server list
+// reads both the displayed configuration and the incarnation from (Spec 116
+// FR-017, review round 1). A nil view (no config service) pairs nothing and
+// offers no generation.
+type committedView struct{ snap *configsvc.Snapshot }
+
+func (r *Runtime) committedSnapshot() committedView {
 	if r.configSvc == nil {
+		return committedView{}
+	}
+	return committedView{snap: r.configSvc.Current()}
+}
+
+func (v committedView) gens() map[string]configsvc.ServerGen {
+	if v.snap == nil {
 		return nil
 	}
-	snap := r.configSvc.Current()
-	if snap == nil {
-		return nil
+	return v.snap.ServerGenerations
+}
+
+// pairConfig returns the committed configuration of sc's server when the
+// snapshot has it, else sc unchanged (a row the snapshot does not carry gets
+// no generation either).
+func (v committedView) pairConfig(sc *config.ServerConfig) *config.ServerConfig {
+	if v.snap == nil || sc == nil {
+		return sc
 	}
-	return snap.ServerGenerations
+	if cs := v.snap.GetServer(sc.Name); cs != nil {
+		return cs
+	}
+	return sc
+}
+
+// pairStatus returns a copy of st whose configuration (and the enabled and
+// quarantined flags projected from it) is the committed one, so the row's
+// command, URL and quarantine state belong to the incarnation it carries.
+func (v committedView) pairStatus(st *stateview.ServerStatus) *stateview.ServerStatus {
+	if v.snap == nil || st == nil {
+		return st
+	}
+	cs := v.snap.GetServer(st.Name)
+	if cs == nil {
+		return st
+	}
+	paired := *st
+	paired.Config = cs
+	paired.Enabled = cs.Enabled
+	paired.Quarantined = cs.Quarantined
+	return &paired
 }
 
 // addServerGenerationFields adds "generation" and "incarnation" (Spec 116
@@ -2979,16 +3038,22 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		return []map[string]interface{}{}, nil
 	}
 
+	committed := r.committedSnapshot()
+
 	// Get all configured servers from storage
 	servers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get servers from storage: %w", err)
 	}
 
+	if hook := r.testHooks.serverViewAfterRead; hook != nil {
+		hook()
+	}
 	// Get connection status from upstream manager
 	result := make([]map[string]interface{}, 0, len(servers))
-	snapGens := r.serverGenerationSnapshot()
+	snapGens := committed.gens()
 	for _, srv := range servers {
+		srv = committed.pairConfig(srv)
 		serverInfo := map[string]interface{}{
 			"id":          srv.Name,
 			"name":        srv.Name,

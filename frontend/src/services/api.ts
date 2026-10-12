@@ -514,8 +514,10 @@ class APIService {
     )
   }
 
-  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
-    return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
+  // `incarnation` (Spec 116 FR-017) is the server identity the rows were read
+  // for; per-tool decisions echo it as expected_incarnation.
+  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[]; incarnation?: number }>> {
+    return this.request<{ tools: Tool[]; incarnation?: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }
 
   // Global tools listing (Spec 050) — all tools across all servers from a single consolidated endpoint.
@@ -538,10 +540,10 @@ class APIService {
   // endpoint `/tools` is fetched in parallel purely as ENRICHMENT and joined by
   // tool name. The enrichment call is caught individually and degrades to null —
   // a failed evidence fetch must never drop a durable approval record.
-  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
+  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number, incarnation?: number }>> {
     const encoded = encodeURIComponent(serverName)
     const [response, enrichment] = await Promise.all([
-      this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encoded}/tools/export`),
+      this.request<{ tools: ToolApproval[], count: number, incarnation?: number }>(`/api/v1/servers/${encoded}/tools/export`),
       this.request<{ tools: HoldEvidenceSource[] }>(`/api/v1/servers/${encoded}/tools`)
         .catch(() => null),
     ])

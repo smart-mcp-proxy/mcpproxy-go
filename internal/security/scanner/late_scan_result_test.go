@@ -66,8 +66,10 @@ func TestLateScanResult_T2_8_DroppedAfterReAdd(t *testing.T) {
 	svc.storage = store
 	svc.SetServerUnquarantiner(&rowUnquarantiner{store: store})
 
+	inc, err := svc.scanIncarnation("acme")
+	require.NoError(t, err)
 	job := &ScanJob{ID: "scan-acme-1", ServerName: "acme", Status: ScanJobStatusRunning, ScanPass: ScanPassSecurityScan,
-		StartedAt: time.Now(), Incarnation: svc.serverIncarnation("acme")}
+		StartedAt: time.Now(), Incarnation: inc}
 	require.Equal(t, int64(1), job.Incarnation, "the job records the incarnation it scans")
 	adapter := &scanCallbackAdapter{service: svc, scanPass: ScanPassSecurityScan}
 	adapter.OnScanStarted(job)
@@ -88,7 +90,7 @@ func TestLateScanResult_T2_8_DroppedAfterReAdd(t *testing.T) {
 
 	assert.Empty(t, base.jobs, "no job of the old incarnation under the replacement")
 	assert.Empty(t, base.reports, "no report of the old incarnation under the replacement")
-	err := svc.ApproveServer(context.Background(), "acme", false, "api")
+	err = svc.ApproveServer(context.Background(), "acme", false, "api")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no scan results")
 }

@@ -77,3 +77,34 @@ func (s *Server) writeApprovalWriteError(w http.ResponseWriter, r *http.Request,
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("%s: %v", prefix, err))
 	}
 }
+
+// serverIncarnationReader is the optional controller capability that reports
+// a server's committed incarnation. *server.Server implements it.
+type serverIncarnationReader interface {
+	ServerIncarnation(serverName string) (int64, bool)
+}
+
+// serverIncarnationOf returns name's committed incarnation, or 0 when the
+// controller cannot tell.
+func (s *Server) serverIncarnationOf(name string) int64 {
+	if rd, ok := s.controller.(serverIncarnationReader); ok {
+		if inc, found := rd.ServerIncarnation(name); found {
+			return inc
+		}
+	}
+	return 0
+}
+
+// incarnationField reads the "incarnation" of a GetAllServers row (int64 from
+// the runtime, float64 after a JSON round trip); 0 when absent.
+func incarnationField(row map[string]interface{}) int64 {
+	switch v := row["incarnation"].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return 0
+}

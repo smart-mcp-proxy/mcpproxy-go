@@ -2061,6 +2061,12 @@ components:
       properties:
         count:
           type: integer
+        incarnation:
+          description: |-
+            Incarnation is the committed incarnation of the server the tools were
+            read for (Spec 116 FR-017), captured before they were fetched; omitted
+            when unknown.
+          type: integer
         server_name:
           type: string
         tools:
@@ -3258,6 +3264,14 @@ components:
           - TierUnknown
         schema:
           type: object
+        server_incarnation:
+          description: |-
+            ServerIncarnation is the committed incarnation of the server this row
+            was read for (Spec 116 FR-017), captured before the tools were fetched.
+            A client echoes it as expected_incarnation on a per-tool decision, so a
+            stale row is refused (409 server_replaced) after a same-name re-add.
+            Omitted when the server has no committed incarnation.
+          type: integer
         server_name:
           type: string
         tier:

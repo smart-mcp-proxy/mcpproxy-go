@@ -1760,6 +1760,43 @@ const toolsEmptyBody = computed(() => {
 
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
+// Spec 116 FR-017 (review round 1): the incarnation of the server the displayed
+// tool list and approval rows were read for (the backend reads it before the
+// rows). Per-tool decisions are bound to THESE, not to the live store: a
+// same-name replacement arriving over SSE must not make the old rows act on it.
+const toolsIncarnation = ref<number | undefined>()
+const approvalsIncarnation = ref<number | undefined>()
+
+// displayedIncarnation is the incarnation the rows on screen belong to, or
+// null when they are stale: the two lists disagree, or the live server is
+// already a different incarnation whose rows have not arrived yet.
+function displayedIncarnation(): number | undefined | null {
+  const t = toolsIncarnation.value
+  const a = approvalsIncarnation.value
+  if (t !== undefined && a !== undefined && t !== a) return null
+  const shown = a ?? t
+  const live = server.value?.incarnation
+  if (shown !== undefined && live !== undefined && live !== shown) return null
+  return shown
+}
+
+// decisionIncarnation is the expected_incarnation argument of a per-tool
+// decision. On stale rows it refuses the decision, says why, and reloads the
+// rows instead (null).
+function decisionIncarnation(): [] | [number] | null {
+  const inc = displayedIncarnation()
+  if (inc === null) {
+    systemStore.addToast({
+      type: 'warning',
+      title: 'Server replaced',
+      message: `${props.serverName} was removed and added again. Its tools are reloading; review them before deciding.`,
+    })
+    void loadToolApprovals()
+    void refreshToolsSilently()
+    return null
+  }
+  return incarnationArgs(inc)
+}
 const approvalLoading = ref(false)
 // MCP-2917: the Tool-Quarantine banner carries a one-line hint about how to
 // auto-approve pending tools; let the operator dismiss it for the session.
@@ -2275,6 +2312,8 @@ watch(
   (next, prev) => {
     if (next === prev) return
     serverTools.value = []
+    toolsIncarnation.value = undefined
+    approvalsIncarnation.value = undefined
     toolsLoadedKey = ''
     toolsError.value = null
     selectedToolSchema.value = null
@@ -2490,10 +2529,12 @@ function refreshToolsSilently() {
 // The server fields the tool list depends on. A quarantined stdio server is
 // already connected with its tools withheld, so approval changes `quarantined`
 // and `tool_count` but neither of the flags the connected/enabled watch keys on.
-type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count'>
+// The incarnation is part of the key (Spec 116 FR-017): a same-name replacement
+// can carry identical state fields, and the old list must not stay on screen.
+type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count' | 'incarnation'>
 function toolsStateKey(s: Partial<ToolsStateFields> | null | undefined): string {
   if (!s) return ''
-  return [s.quarantined, s.connected, s.enabled, s.tool_count].join('|')
+  return [s.quarantined, s.connected, s.enabled, s.tool_count, s.incarnation ?? ''].join('|')
 }
 // Key of the server state the displayed tool list was requested under. It only
 // advances when a response is committed, so a failed refetch leaves it behind
@@ -2520,6 +2561,7 @@ async function _loadToolsWithGen(gen: number, silent = false) {
     if (gen !== loadGeneration || mySeq < toolsAppliedSeq) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
+      toolsIncarnation.value = response.data.incarnation || undefined
       toolsError.value = null
       toolsAppliedSeq = mySeq
       toolsLoadedKey = myKey
@@ -2589,6 +2631,7 @@ async function _loadToolApprovalsWithGen(gen: number) {
       }
 
       toolApprovals.value = approvals
+      approvalsIncarnation.value = response.data.incarnation || undefined
     }
   } catch {
     // Silently fail - tool approvals are supplementary info
@@ -2608,9 +2651,11 @@ function approveAllTools() {
 // no destructive-confirm modal. Mirrors approveTool, reusing approvalLoading.
 async function blockTool(toolName: string) {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   approvalLoading.value = true
   try {
-    const response = await api.blockTools(server.value.name, [toolName], ...incarnationArgs(server.value.incarnation))
+    const response = await api.blockTools(server.value.name, [toolName], ...bound)
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2643,10 +2688,12 @@ async function blockTool(toolName: string) {
 
 async function blockAllTools() {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   approvalLoading.value = true
   try {
-    const response = await (server.value.incarnation
-      ? api.blockTools(server.value.name, undefined, server.value.incarnation)
+    const response = await (bound.length > 0
+      ? api.blockTools(server.value.name, undefined, ...bound)
       : api.blockTools(server.value.name))
     if (response.success) {
       systemStore.addToast({
@@ -2680,6 +2727,8 @@ async function blockAllTools() {
 
 async function toggleToolEnabled(toolName: string, enabled: boolean) {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   toolToggleLoading.value = { ...toolToggleLoading.value, [toolName]: true }
 
   // optimistic local UI update
@@ -2702,7 +2751,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   bumpStoreBlockedCount(enabled ? -1 : 1)
 
   try {
-    const response = await api.setToolEnabled(server.value.name, toolName, enabled, ...incarnationArgs(server.value.incarnation))
+    const response = await api.setToolEnabled(server.value.name, toolName, enabled, ...bound)
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2794,6 +2843,8 @@ async function syncAfterToolToggle() {
 // disabled-flags immediately (instead of waiting for the SSE event).
 async function bulkToggleAllTools(enabled: boolean) {
   if (!server.value || bulkToolToggleLoading.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   bulkToolToggleLoading.value = true
 
   // Optimistic store mutation — same idea as the single-tool path, but
@@ -2822,7 +2873,7 @@ async function bulkToggleAllTools(enabled: boolean) {
   })
 
   try {
-    const response = await api.setAllToolsEnabled(server.value.name, enabled, ...incarnationArgs(server.value.incarnation))
+    const response = await api.setAllToolsEnabled(server.value.name, enabled, ...bound)
     if (response.success && response.data) {
       const changed = response.data.changed ?? 0
       // "Enable All" intentionally skips tools the server config denies

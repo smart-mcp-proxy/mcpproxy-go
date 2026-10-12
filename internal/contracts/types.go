@@ -400,6 +400,12 @@ type Tool struct {
 	HeldReason  string   `json:"held_reason,omitempty"`
 	HeldVerdict string   `json:"held_verdict,omitempty"`
 	HeldSignals []string `json:"held_signals,omitempty"`
+	// ServerIncarnation is the committed incarnation of the server this row
+	// was read for (Spec 116 FR-017), captured before the tools were fetched.
+	// A client echoes it as expected_incarnation on a per-tool decision, so a
+	// stale row is refused (409 server_replaced) after a same-name re-add.
+	// Omitted when the server has no committed incarnation.
+	ServerIncarnation int64 `json:"server_incarnation,omitempty"`
 	// Hash is the tool's current stored hash rendered in the preflight pin
 	// format "sha256/v{N}:{hex}" (Spec 098 FR-011), where N is the approval
 	// record's HashSchemaVersion. It is the authoring surface for
@@ -652,6 +658,10 @@ type GetServerToolsResponse struct {
 	ServerName string `json:"server_name"`
 	Tools      []Tool `json:"tools"`
 	Count      int    `json:"count"`
+	// Incarnation is the committed incarnation of the server the tools were
+	// read for (Spec 116 FR-017), captured before they were fetched; omitted
+	// when unknown.
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // GlobalToolsStats is the aggregate rollup shown on the global tools page

@@ -258,6 +258,26 @@ func (e *Engine) CancelScan(serverName string) error {
 	return nil
 }
 
+// DetachObsoleteJob releases serverName's activeScans slot when obsolete
+// reports that its job belongs to a server identity that no longer exists
+// (Spec 116 FR-014a, review round 1: a removed server's scan must not keep
+// the slot of a same-name replacement). The detached job is NOT cancelled:
+// its goroutine runs to its normal end so its callbacks still release the
+// temporary source directory, and every write it makes is bound to its own
+// (obsolete) incarnation and dropped by storage. Its clearActiveJob then
+// finds the slot not held by it and leaves a replacement's job alone. It
+// reports whether a job was detached.
+func (e *Engine) DetachObsoleteJob(serverName string, obsolete func(*ScanJob) bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	job, ok := e.activeScans[serverName]
+	if !ok || !obsolete(job) {
+		return false
+	}
+	delete(e.activeScans, serverName)
+	return true
+}
+
 // clearActiveJob releases the activeScans slot held by `job`, and ONLY if that
 // job still holds it.
 //

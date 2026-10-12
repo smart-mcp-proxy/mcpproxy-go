@@ -262,6 +262,9 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "already in progress") {
 			s.writeError(w, r, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "server is not configured") {
+			// Spec 116 FR-014a: the committed view does not know the server.
+			s.writeError(w, r, http.StatusNotFound, err.Error())
 		} else {
 			s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		}

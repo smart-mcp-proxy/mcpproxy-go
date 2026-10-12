@@ -24,8 +24,13 @@ import (
 // No lock beyond bbolt's own is taken, so this adds no lock-order edge.
 //
 // inc == 0 means "unbound" (a caller that has no committed view, or a
-// database no Spec 116 commit has written): the write is unconditional, as
-// before.
+// database no Spec 116 commit has written). For the tool-call and scan writers
+// the unbound fallback is limited to a database no commit has written: once a
+// commit exists every configured server has an incarnation, so an unbound
+// write comes from a caller that looked its server up after the removal, and
+// writing would recreate the removed server's history or scan evidence
+// (review round 1; FR-014a, FR-014c). It is refused in the same transaction
+// that would have written.
 
 // rowIncarnationMatchesTx reports whether upstreams[name] exists and carries
 // incarnation inc. A row without a stamp (written before Spec 116, or by a
@@ -45,6 +50,19 @@ func rowIncarnationMatchesTx(tx *bbolt.Tx, name string, inc int64) (bool, error)
 		return false, fmt.Errorf("decode upstream %s: %w", name, err)
 	}
 	return rec.Incarnation == 0 || rec.Incarnation == inc, nil
+}
+
+// writeAllowedTx reports whether a conditional write for name bound to inc
+// may proceed: inc > 0 needs the row to carry it; inc == 0 (unbound) is only
+// allowed while no config commit has been recorded.
+func writeAllowedTx(tx *bbolt.Tx, name string, inc int64) (bool, error) {
+	if inc == 0 {
+		if meta := tx.Bucket([]byte(MetaBucket)); meta != nil && meta.Get([]byte(ConfigCommitGenerationKey)) != nil {
+			return false, nil
+		}
+		return true, nil
+	}
+	return rowIncarnationMatchesTx(tx, name, inc)
 }
 
 // RegisterServerIdentityIfIncarnation is RegisterServerIdentity conditional on
@@ -97,7 +115,7 @@ func (m *Manager) RegisterServerIdentityIfIncarnation(server *config.ServerConfi
 // record.ServerName carrying incarnation inc (code_execution parent records
 // are exempt: they belong to no upstream and are recorded unconditionally).
 func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64) (bool, error) {
-	if inc == 0 || record == nil || record.ServerID == codeExecutionServerID {
+	if record == nil || record.ServerID == codeExecutionServerID {
 		if err := m.RecordToolCall(record); err != nil {
 			return false, err
 		}
@@ -110,7 +128,7 @@ func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64)
 	key := fmt.Sprintf("%d_%s", record.Timestamp.UnixNano(), record.ID)
 	written := false
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		ok, err := rowIncarnationMatchesTx(tx, record.ServerName, inc)
+		ok, err := writeAllowedTx(tx, record.ServerName, inc)
 		if err != nil || !ok {
 			return err
 		}
@@ -135,14 +153,11 @@ func (m *Manager) RecordToolCallIfIncarnation(record *ToolCallRecord, inc int64)
 // carries incarnation inc (FR-014a): a scan that outlives a remove and re-add
 // leaves no job under the replacement.
 func (m *Manager) SaveScanJobIfIncarnation(job *scanner.ScanJob, inc int64) (bool, error) {
-	if inc == 0 {
-		return true, m.SaveScanJob(job)
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	written := false
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		ok, err := rowIncarnationMatchesTx(tx, job.ServerName, inc)
+		ok, err := writeAllowedTx(tx, job.ServerName, inc)
 		if err != nil || !ok {
 			return err
 		}
@@ -165,14 +180,11 @@ func (m *Manager) SaveScanJobIfIncarnation(job *scanner.ScanJob, inc int64) (boo
 // SaveScanReportIfIncarnation saves report only while the scanned server's row
 // carries incarnation inc (FR-014a).
 func (m *Manager) SaveScanReportIfIncarnation(report *scanner.ScanReport, inc int64) (bool, error) {
-	if inc == 0 {
-		return true, m.SaveScanReport(report)
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	written := false
 	err := m.db.db.Update(func(tx *bbolt.Tx) error {
-		ok, err := rowIncarnationMatchesTx(tx, report.ServerName, inc)
+		ok, err := writeAllowedTx(tx, report.ServerName, inc)
 		if err != nil || !ok {
 			return err
 		}

@@ -723,6 +723,7 @@ import { accessReasonLabel, accessStateLabel } from '@/utils/accessReason'
 import { tierPhrase } from '@/utils/profiles'
 import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import { useAuthStore } from '@/stores/auth'
 import { useClientsStore } from '@/stores/clients'
 import { useProfilesStore } from '@/stores/profiles'
@@ -1029,7 +1030,9 @@ async function batchEnable(enabled: boolean) {
 
   for (const tool of targets) {
     try {
-      const resp = await api.setToolEnabled(tool.server_name, tool.name, enabled)
+      // Spec 116 FR-017: bound to the incarnation the row was listed for, so a
+      // stale selection is refused (409 server_replaced) after a same-name re-add.
+      const resp = await api.setToolEnabled(tool.server_name, tool.name, enabled, ...incarnationArgs(tool.server_incarnation))
       if (resp.success) {
         succeeded++
         // Update local state immediately so row reflects change
@@ -1073,11 +1076,15 @@ async function batchApproval(action: 'approve' | 'reject') {
   // call per server — the page spans multiple servers but each approve/block
   // endpoint is per-server.
   const byServer = new Map<string, string[]>()
+  // Spec 116 FR-017: each server's decision is bound to the incarnation its
+  // rows were listed for (one listing reads one incarnation per server).
+  const incarnationOf = new Map<string, number | undefined>()
   for (const tool of allTools.value) {
     if (!selectedKeys.value.has(toolKey(tool)) || !isApprovable(tool)) continue
     const names = byServer.get(tool.server_name) || []
     names.push(tool.name)
     byServer.set(tool.server_name, names)
+    if (!incarnationOf.has(tool.server_name)) incarnationOf.set(tool.server_name, tool.server_incarnation)
   }
 
   let toolCount = 0
@@ -1087,9 +1094,10 @@ async function batchApproval(action: 'approve' | 'reject') {
   await Promise.all(
     Array.from(byServer.entries()).map(async ([server, names]) => {
       try {
+        const bound = incarnationArgs(incarnationOf.get(server))
         const resp = action === 'approve'
-          ? await api.approveTools(server, names)
-          : await api.blockTools(server, names)
+          ? await api.approveTools(server, names, ...bound)
+          : await api.blockTools(server, names, ...bound)
         if (!resp.success) {
           failedServers.push(`${server} (${resp.error || 'failed'})`)
         }

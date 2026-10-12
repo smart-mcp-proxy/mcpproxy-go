@@ -75,6 +75,7 @@
         </div>
         <p class="text-sm text-base-content/70" data-test="review-range" aria-live="polite">{{ rangeText }}</p>
       </div>
+      <p v-if="toolNotice" class="text-sm text-error" role="alert" data-test="review-tool-notice">{{ toolNotice }}</p>
       <div v-if="review.tools.length > 0 && filteredTools.length === 0" class="rounded border border-base-300 p-4 text-sm" data-test="review-no-match">
         No tools match. <button type="button" class="link" @click="clearFilters">Clear filters</button>
       </div>
@@ -147,6 +148,10 @@ const review = ref<ServerReviewResponse | null>(null)
 // block list is the complement of what is on screen, so approval waits for the newest load to settle.
 const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Review the updated list and approve again.'
 const notice = ref('')
+// A failed per-tool approve or reject (e.g. 409 server_replaced). Rendered above
+// the tool list on every server, quarantined or not: `notice` lives in the
+// decision bar, which only a quarantined server shows.
+const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
@@ -292,8 +297,8 @@ async function rejectServer() {
   if (!res.success) error.value = res.error || 'Reject failed'; else await load()
 }
 // Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017); a refusal (409 server_replaced) reloads the review and says why beside it.
-async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; const res = await api.approveTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) notice.value = res.error || 'Approval failed' }
-async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) notice.value = res.error || 'Block failed' }
+async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.approveTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed' }
+async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
@@ -303,7 +308,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
