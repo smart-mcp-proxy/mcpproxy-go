@@ -108,3 +108,34 @@ func incarnationField(row map[string]interface{}) int64 {
 	}
 	return 0
 }
+
+// incarnationReadAttempts bounds how often a listing re-reads rows whose
+// server identity moved while they were read.
+const incarnationReadAttempts = 3
+
+// errIncarnationUnsettled is returned when a server kept being removed or
+// replaced while its rows were read; the handler answers 409.
+var errIncarnationUnsettled = errors.New("server_replaced: the server was removed or replaced while it was read; retry")
+
+// readAtSettledIncarnation runs read between two reads of name's committed
+// incarnation and returns the incarnation the rows belong to (Spec 116 PR2
+// review round 7, FR-017). The first read alone (round 1) stamps rows with
+// an incarnation no newer than their server, but when it saw the name ABSENT
+// a same-name replacement landing before read returns the replacement's rows
+// with no stamp at all, and the Web UI then sends no expected_incarnation, so
+// a decision binds to whichever server exists when the operator clicks. The
+// rows are therefore returned only when the identity did not move across the
+// read; otherwise they are read again, and errIncarnationUnsettled is
+// returned when it never settles.
+func (s *Server) readAtSettledIncarnation(name string, read func() error) (int64, error) {
+	for i := 0; i < incarnationReadAttempts; i++ {
+		before := s.serverIncarnationOf(name)
+		if err := read(); err != nil {
+			return before, err
+		}
+		if s.serverIncarnationOf(name) == before {
+			return before, nil
+		}
+	}
+	return 0, errIncarnationUnsettled
+}

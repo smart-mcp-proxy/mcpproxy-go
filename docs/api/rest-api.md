@@ -508,8 +508,12 @@ approvals, OAuth tokens and DCR client registration (exact key match, so
 removing `foo` never touches `foo_bar`), scan reports and jobs, the integrity
 baseline, tool-call history and identities, and tool hashes — together with its
 search-index entries, refresh schedule and cached scan verdict. A server added
-again under the same name starts clean: quarantined with nothing approved and
-no stored OAuth token. Activity log removal records carry the per-bucket counts in
+again under the same name inherits none of those records: no approval, no
+stored OAuth token, no scan result. Admission policy still applies to it as to
+any new server. Under the default manual trust it starts quarantined with
+nothing approved; with `trust_mode: "auto"` or an explicit
+`"quarantined": false` it is admitted per that setting, and its tool discovery
+can record a fresh approved baseline. Only the inherited records are purged. Activity log removal records carry the per-bucket counts in
 `metadata.purged`.
 
 Known limitation: OAuth credential writes are not yet bound to the server's
@@ -534,7 +538,12 @@ server their rows were read for: `GET /api/v1/servers/{id}/tools` and
 and the tool rows of `GET /api/v1/servers/{id}/tools` and `GET /api/v1/tools`
 add `server_incarnation` (export rows carry none: they all belong to the one
 exported server). Echo the value of the rows you acted on as
-`expected_incarnation`.
+`expected_incarnation`. A server that was removed and not yet re-added is not
+listed: `GET /api/v1/servers` and `GET /api/v1/tools` omit it and its
+`/tools` answers 404. If the server is removed or replaced while a listing
+reads its rows, the listing reads them again; if it keeps changing,
+`/tools` and `/tools/export` answer `409 server_replaced` and
+`GET /api/v1/tools` lists it under `failed_servers`.
 
 The approval writes — `tools/approve`, `tools/block`, `tools/{tool}/enabled`,
 `tools/enable_all`, `tools/disable_all`, `unquarantine` and

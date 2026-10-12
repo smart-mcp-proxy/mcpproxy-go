@@ -374,10 +374,15 @@ registration, scan reports and jobs, the integrity baseline, call history and
 tool hashes, plus its search-index entries and refresh schedule. OAuth state
 is matched exactly, so removing `foo` never signs out `foo_bar`.
 
-A server added again under the same name is therefore a new server: it starts
-quarantined (unless its config says otherwise), every tool and prompt it
-exposes is pending review even when the definitions are identical, an
-unforced scanner approval needs a new scan, and it needs a new OAuth sign-in.
+A server added again under the same name is therefore a new server that
+inherits none of the old one's records: an unforced scanner approval needs a
+new scan, and it needs a new OAuth sign-in. Admission policy applies to it as
+to any new server. Under the default manual trust it starts quarantined and
+every tool and prompt it exposes is pending review, even when the definitions
+are identical. With `trust_mode: "auto"` or an explicit `quarantined: false`
+it is admitted per that setting, and tool discovery can record a fresh
+approved baseline for it. Removal purges the inherited records; it does not
+override the admission policy.
 
 One gap remains for OAuth: credential writes are not yet bound to the
 server's incarnation. If the removed server's connection was saving a token

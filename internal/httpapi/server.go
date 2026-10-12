@@ -3969,6 +3969,7 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 // @Success 200 {object} contracts.GetServerToolsResponse "Server tools retrieved successfully"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 409 {object} contracts.ErrorResponse "server_replaced: the server kept being removed or replaced while its tools were read"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/tools [get]
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
@@ -3990,8 +3991,18 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	// tools, so a same-name replacement landing in between yields an older
 	// incarnation (a decision is refused, 409) and never a newer one paired
 	// with the old server's tools.
-	incarnation := s.serverIncarnationOf(serverID)
-	tools, err := mgmtSvc.GetServerTools(r.Context(), serverID)
+	// Review round 7: and re-read after them; rows whose server was removed
+	// or replaced during the read are read again (readAtSettledIncarnation).
+	var tools []map[string]interface{}
+	incarnation, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		tools, rerr = mgmtSvc.GetServerTools(r.Context(), serverID)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to get server tools", "server", serverID, "error", err)
 
@@ -4183,11 +4194,23 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 		// Spec 116 FR-017: the server's incarnation, read BEFORE its tools
 		// (see handleGetServerTools). The controller's server projection
 		// may not carry it, so ask the controller when the row has none.
+		// Review round 7: when the controller reports incarnations, the rows
+		// are returned only if the identity did not move across the read
+		// (readAtSettledIncarnation); a server replaced throughout is
+		// reported as a failed fetch rather than served under a stale stamp
+		// or none.
 		serverInc := incarnationField(srv)
-		if serverInc == 0 {
-			serverInc = s.serverIncarnationOf(name)
+		var generic []map[string]interface{}
+		var terr error
+		if _, reads := s.controller.(serverIncarnationReader); reads {
+			serverInc, terr = s.readAtSettledIncarnation(name, func() error {
+				var rerr error
+				generic, rerr = getTools(name)
+				return rerr
+			})
+		} else {
+			generic, terr = getTools(name)
 		}
-		generic, terr := getTools(name)
 		if terr != nil {
 			// Spec edge case: a genuine fetch error — still return every tool
 			// we could gather, flag the rest as partial.
@@ -7337,8 +7360,17 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 	}
 
 	// Spec 116 FR-017: read before the records (see handleGetServerTools).
-	incarnation := s.serverIncarnationOf(serverID)
-	records, err := s.controller.ListToolApprovals(serverID)
+	// Review round 7: settled across the read (readAtSettledIncarnation).
+	var records []*storage.ToolApprovalRecord
+	incarnation, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		records, rerr = s.controller.ListToolApprovals(serverID)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
 		return

@@ -2597,6 +2597,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	snapGens := committed.gens()
 	for _, serverStatus := range snapshot.Servers {
+		// Spec 116 PR2 review round 7: a server the committed snapshot no
+		// longer configures is a removed server the view has not caught up
+		// with; listing it would offer unbound rows (no incarnation).
+		if serverStatus == nil || committed.absent(serverStatus.Name) {
+			continue
+		}
 		serverStatus = committed.pairStatus(serverStatus)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
@@ -3037,6 +3043,17 @@ func (v committedView) pairConfig(sc *config.ServerConfig) *config.ServerConfig 
 	return sc
 }
 
+// absent reports whether the committed snapshot authoritatively has no server
+// named name: a snapshot a commit published (it carries generations) that does
+// not configure it. Between a removal and a same-name re-add the StateView can
+// still hold the removed server's row and tools, and there is no incarnation
+// to bind a decision on them to (Spec 116 PR2 review round 7), so readers
+// serve nothing for an absent server. A snapshot without generations (a
+// fixture or pre-boot state) is not authoritative and reports nothing absent.
+func (v committedView) absent(name string) bool {
+	return v.snap != nil && v.snap.Config != nil && v.snap.ServerGenerations != nil && v.snap.GetServer(name) == nil
+}
+
 // pairStatus returns a copy of st whose configuration (and the enabled and
 // quarantined flags projected from it) is the committed one, so the row's
 // command, URL and quarantine state belong to the incarnation it carries.
@@ -3168,6 +3185,15 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 	stateView := r.supervisor.StateView()
 	if stateView == nil {
 		return nil, fmt.Errorf("StateView not available")
+	}
+
+	// Spec 116 PR2 review round 7: read the committed snapshot before the
+	// view. A server it does not configure was removed (and not yet re-added):
+	// the view may still hold its tools, but they have no incarnation a
+	// decision could bind to, so the read answers not found rather than
+	// serving them unbound.
+	if r.committedSnapshot().absent(serverName) {
+		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
 	// Get snapshot - this is lock-free and instant

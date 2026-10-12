@@ -172,6 +172,11 @@ in PR2.
 
 ---
 
+### Review round 7 (Sol) design notes
+
+- Between a removal and a same-name re-add the committed snapshot has no such server, so there is no incarnation a decision could bind to. A snapshot a commit published (it carries server generations) is authoritative for absence: `Runtime.GetServerTools` answers "server not found" (REST 404) for a server it does not configure, and `GetAllServers` skips such a server's lagging StateView row, so neither the per-server nor the global listing serves the removed server's rows unbound (`TestServerTools_R7_RemovedServerNotServedFromLaggingView`). A snapshot without generations (fixture or pre-boot) is not authoritative and keeps the old behavior.
+- The per-server tool listing, the tools export and the global tool listing read the incarnation before AND after their rows (`readAtSettledIncarnation`) and return the rows only when it did not move; otherwise they read again, up to three times, and then answer 409 `server_replaced` (the global listing reports the server in `failed_servers`). A same-name server landing between an "absent" incarnation read and the row read therefore never yields unbound replacement rows (`TestServerTools_R7_*`, `TestToolExport_R7_*`, `TestGlobalTools_R7_*`). No new lock edge: both are lock-free snapshot reads.
+
 ### Review round 6 (Sol) design notes
 
 - A server identity id is a hash of the configuration and does not include the incarnation, so a same-config re-add registers the SAME identity id as the removed server, and the round-5 identity check alone passes. Replay therefore also requires the original call record itself: before dispatch (`ToolCallRecordExists`) and again inside the history write's transaction (`RecordReplayedToolCallIfIncarnation(record, inc, originalCallID)`). The removal commit purged that record with the history bucket and nothing recreates it, so a replay of a removed server's call is refused and B's history stays empty (`TestReplay_R5_OriginalReadBeforeReplacementRecreatesNothing/replaced_same_config`, `TestRecordReplayedToolCall_R6_SameConfigReplacementRequiresOriginalRecord`).

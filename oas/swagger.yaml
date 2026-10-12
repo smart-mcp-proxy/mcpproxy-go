@@ -9583,6 +9583,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Server not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'server_replaced: the server kept being removed or replaced
+            while its tools were read'
         "500":
           content:
             application/json:
