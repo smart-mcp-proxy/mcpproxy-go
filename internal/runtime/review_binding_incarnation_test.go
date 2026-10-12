@@ -68,3 +68,26 @@ func TestReviewBound_ServerApprovalChecksIncarnationThenFingerprints(t *testing.
 	assert.False(t, saved, "nothing is committed for a replaced server")
 	assert.True(t, spec116Live(rt, "acme").Quarantined, "the replacement stays quarantined")
 }
+
+// Review resync R1: a server removed (not re-added) after the reviewer
+// captured its incarnation is a replaced server (409 server_replaced), not a
+// missing one (404). Nothing is recorded and no server reappears.
+func TestReviewBound_ServerApprovalRemovedOnlyIsReplaced(t *testing.T) {
+	rt, _ := newSpec116Runtime(t, nil, manualStdio("acme", true))
+	old, ok := rt.ConfigSnapshot().ServerGeneration("acme")
+	require.True(t, ok)
+	_, err := rt.Commit("remove_server", func(tx *CommitTx) error { return tx.RemoveServer("acme") })
+	require.NoError(t, err)
+
+	saved := false
+	_, err = rt.CommitServerApprovalAt("acme", old.Incarnation, nil, nil, "api", func() error { saved = true; return nil })
+	require.ErrorIs(t, err, ErrServerReplaced)
+	var nf *ServerNotFoundError
+	assert.False(t, errors.As(err, &nf), "a bound approval of a removed server is server_replaced, not not-found")
+	assert.False(t, saved, "nothing is committed")
+	_, present := rt.ConfigSnapshot().ServerGeneration("acme")
+	assert.False(t, present, "the approval must not recreate the server")
+	recs, lerr := rt.storageManager.ListToolApprovals("acme")
+	require.NoError(t, lerr)
+	assert.Empty(t, recs, "no approval or baseline records for a removed server")
+}

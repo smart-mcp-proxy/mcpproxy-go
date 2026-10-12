@@ -270,6 +270,13 @@ func (r *Runtime) commitServerApproval(serverName string, inc int64, bound bool,
 	_, err := r.Commit("security_approve", func(tx *CommitTx) error {
 		tx.EventExtra(map[string]any{"server": serverName, "quarantined": false})
 		if err := tx.SetQuarantined(serverName, false); err != nil {
+			// A bound approval of a server removed since it was reviewed is a
+			// replaced server (409 server_replaced), the same answer the
+			// under-lock incarnation check gives; never a 404.
+			var nf *ServerNotFoundError
+			if bound && inc != 0 && r.approvalBindingEnforced() && errors.As(err, &nf) {
+				return serverReplacedError(serverName)
+			}
 			return err
 		}
 		return tx.UnderApprovalLock(serverName, func() error {
