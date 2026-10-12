@@ -261,6 +261,7 @@ func (m *Manager) PurgeSetCounts(name string) (map[string]int, error) {
 		hasPrefix := func(k, _ []byte) bool { return bytes.HasPrefix(k, prefix) }
 		count(UpstreamsBucket, exact)
 		count(IntegrityBaselinesBucket, exact)
+		count(ToolBaselineDecisionsBucket, exact)
 		count(ToolApprovalBucket, hasPrefix)
 		count(PromptApprovalBucket, hasPrefix)
 		count(ToolHashBucket, hasPrefix)

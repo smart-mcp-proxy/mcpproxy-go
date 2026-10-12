@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // Spec 116 PR2 T058: a test-only inspection command for the live checks
@@ -99,6 +100,9 @@ func registerQADebugCommands(root *cobra.Command) {
 func seedPurgeSet(mgr *storage.Manager, name, suffix string) error {
 	now := time.Now().UTC()
 	steps := []func() error{
+		func() error {
+			return mgr.MarkToolBaselineDecided(name, toolreview.BaselineDecision{Source: toolreview.BaselineSourceServerApproval, By: "qa-seed"})
+		},
 		func() error {
 			return mgr.SavePromptApproval(&storage.PromptApprovalRecord{ServerName: name, PromptName: "greet", Status: storage.ToolApprovalStatusApproved,
 				ApprovedHash: "seed", CurrentHash: "seed", ApprovedAt: now, ApprovedBy: "qa-seed"})
