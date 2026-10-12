@@ -155,6 +155,18 @@ type ToolApprovalLocker interface {
 	WithToolApprovalLock(serverName string, fn func() error) error
 }
 
+// ServerApprovalCommitter is an OPTIONAL capability of the
+// ServerUnquarantiner (Spec 117 PR-1, #1567): run the approval's storage
+// commit under the runtime's per-server tool-approval lock, after recording
+// the server's durable tool baseline decision (source server_approval, by).
+// It lets the scanner reach the baseline marker without importing storage or
+// the runtime (storage imports this package). expected is the Spec 117 PR-2
+// review binding and is nil in this release; the returned count is the
+// number of tools the commit section promoted (0 in this release).
+type ServerApprovalCommitter interface {
+	CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
 // Service coordinates scanner management, scan execution, and approval workflow
 type Service struct {
 	storage        Storage
@@ -1844,16 +1856,25 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
+	save := func() error { return s.storage.SaveIntegrityBaseline(baseline) }
+	if len(blocks) > 0 {
+		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
+	}
 	var saveErr error
-	if len(blocks) == 0 {
-		saveErr = s.storage.SaveIntegrityBaseline(baseline)
-	} else {
-		save := func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
-		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok {
-			saveErr = locker.WithToolApprovalLock(serverName, save)
-		} else {
-			saveErr = save()
+	if committer, ok := s.unquarantiner.(ServerApprovalCommitter); ok {
+		// Spec 117 PR-1 (FR-023): both branches commit inside the runtime's
+		// locked section, which first records the server's tool baseline
+		// decision — also for an empty or blind review, so tools the server
+		// lists later wait for review instead of being auto-baselined.
+		blockNames := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			blockNames = append(blockNames, block.ToolName)
 		}
+		_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+	} else if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok && len(blocks) > 0 {
+		saveErr = locker.WithToolApprovalLock(serverName, save)
+	} else {
+		saveErr = save()
 	}
 	if saveErr != nil {
 		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)

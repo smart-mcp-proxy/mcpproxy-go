@@ -1123,6 +1123,11 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 			// current instance (review round 7).
 			return true, false, nil
 		}
+		if errors.Is(err, errBaselineMarker) {
+			// Spec 117 FR-027a: aborted before held ran, so nothing of
+			// this capture was published.
+			return true, false, err
+		}
 		return true, published, err
 	}
 	return true, published, nil
@@ -1553,13 +1558,30 @@ func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverNam
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return errDiscoveryStaleGeneration
 	}
+	// Spec 117 PR-1 (FR-027, FR-027a): the server's tool baseline is resolved
+	// (and an older store's marker back-filled) BEFORE anything of this pass
+	// is published or written. If it cannot be, the pass aborts here: no
+	// last-good snapshot, capture stamp or StateView publish (held), no
+	// approval record, no absent-tool or tool-hash delete, no index write.
+	// The index and records still describe the last applied capture, so the
+	// holds computed then stay in force; the next pass retries.
+	baseline, err := r.resolveToolBaselineHeld(serverName)
+	if err != nil {
+		return err
+	}
+
 	if held != nil {
 		held()
 	}
 
 	// Check tool-level quarantine approvals before indexing
-	approvalResult, err := r.checkToolApprovalsHeld(serverName, newTools)
+	approvalResult, err := r.checkToolApprovalsResolved(serverName, newTools, baseline)
 	if err != nil {
+		if errors.Is(err, errBaselineMarker) {
+			// Unreachable after the resolve above (the baseline is passed
+			// in); kept fail-closed for any future error of that kind.
+			return err
+		}
 		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
 			zap.String("server", serverName),
 			zap.Error(err))
