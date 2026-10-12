@@ -314,9 +314,13 @@ suite_exit_status() {
   return $ok
 }
 
-# lab_config_images <config.json> — prints the isolation image of every
-# server in the config, one per line (a server without isolation prints
-# "<none>").
+# lab_config_images <config.json> — prints the isolation image the daemon
+# will RUN for every server in the config, one per line (a server without an
+# isolation image prints "<none>"). Sol r15 P2: the daemon prefixes an
+# unqualified image with docker_isolation.registry
+# (internal/upstream/core/isolation.go buildFullImageName), so the raw tag is
+# not what runs; this mirrors that rewrite and prints the docker.io default
+# in Docker's short form ("docker.io/library/x:t" is the local "x:t").
 lab_config_images() {
   python3 - "$1" <<'PY'
 import json, sys
@@ -328,8 +332,20 @@ def ci(d, name):
         if k.casefold() == name:
             hit = v
     return hit
+registry = ci(ci(cfg, "docker_isolation"), "registry") or ""
+def effective(image):
+    # Mirrors IsolationManager.buildFullImageName: only an image without a
+    # slash is rewritten, to <registry or docker.io>/library/<image>.
+    if "/" in image:
+        return image
+    full = "%s/library/%s" % (registry or "docker.io", image)
+    for short in ("docker.io/library/", "index.docker.io/library/"):
+        if full.startswith(short):
+            return full[len(short):]
+    return full
 for s in ci(cfg, "mcpservers") or []:
-    print(ci(ci(s, "isolation"), "image") or "<none>")
+    image = ci(ci(s, "isolation"), "image")
+    print(effective(image) if image else "<none>")
 PY
 }
 
@@ -468,6 +484,14 @@ reject_references(glob, "docker_isolation")
 if glob.get("enable_cache_volume") is not False:
     sys.exit("docker_isolation.enable_cache_volume must be false for the lab (got %r; the daemon default is true): cache volumes are shared with ordinary upstreams" % glob.get("enable_cache_volume", "<absent>"))
 global_present = check_args(glob.get("extra_args"), "docker_isolation")
+# Sol r15 P2: the daemon prefixes an unqualified isolation image with
+# docker_isolation.registry (internal/upstream/core/isolation.go
+# buildFullImageName), so "tpa-attack-lab:lab" plus a custom registry runs
+# <registry>/library/tpa-attack-lab:lab, not the fixture the lab just built.
+# Only the default registry (absent, "docker.io") resolves to the local tag.
+lab_registry = glob.get("registry") or ""
+if lab_registry not in ("", "docker.io", "index.docker.io"):
+    sys.exit("docker_isolation.registry %r would make the daemon pull and run <registry>/library/<image> instead of the locally built lab image; the lab refuses a custom registry" % lab_registry)
 
 servers = cfg.get("mcpservers", [])
 if not servers:

@@ -53,7 +53,7 @@ lab_scrub_mcpproxy_env
 # Every upstream must be Docker-isolated with network_mode none: the
 # malicious lab server never runs bare or with network access (Sol r5 P2).
 lab_config_check_isolation "$CONFIG" || {
-  echo "ERROR: $CONFIG does not Docker-isolate every server with network_mode none; refusing to run the lab." >&2
+  echo "ERROR: $CONFIG does not Docker-isolate every server as the lab requires (reason above); refusing to run the lab." >&2
   exit 1
 }
 
