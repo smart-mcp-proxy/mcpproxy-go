@@ -76,10 +76,10 @@
                   {{ isHttpProtocol ? 'Reconnect' : 'Restart' }}
                 </button>
               </li>
-              <li v-if="healthAction === 'login'">
-                <button @click="triggerOAuth" :disabled="actionLoading">
+              <li v-if="canSignIn">
+                <button @click="triggerOAuth" :disabled="actionLoading" data-test="server-detail-menu-login">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  Login
+                  {{ server.authenticated || server.connected ? 'Sign in again' : 'Sign in' }}
                 </button>
               </li>
               <li v-if="server.enabled && server.connected">
@@ -1604,6 +1604,7 @@ import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
+import { canStartOAuthLogin } from '@/utils/oauthActions'
 import type { HealthStatusValue } from '@/types/contracts'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
@@ -1824,6 +1825,7 @@ const logTail = ref(100)
 const isHttpProtocol = computed(() => {
   return server.value?.protocol === 'http' || server.value?.protocol === 'streamable-http'
 })
+const canSignIn = computed(() => !!server.value && canStartOAuthLogin(server.value))
 
 // Suggested action from unified health status
 const healthAction = computed(() => {
