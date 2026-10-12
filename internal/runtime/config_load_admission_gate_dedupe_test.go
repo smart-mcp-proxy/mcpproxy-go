@@ -32,9 +32,9 @@ func TestConfigLoadAdmissionGate_PreFixAdvisoryOncePerProcess(t *testing.T) {
 		seedApproval(t, rt, name, "read_graph", storage.ToolApprovalStatusApproved, "h1")
 	}
 
-	// Production startup order (lifecycle.go): hook + initial gate, then
-	// backgroundInitialization -> LoadConfiguredServers(nil).
-	rt.installAdmissionGateHook()
+	// Production startup order (lifecycle.go): the initial gate commit, then
+	// backgroundInitialization -> the boot commit (Spec 116: every commit runs
+	// the gate, as the pre-publish hook used to).
 	rt.gateInitialConfig()
 	require.NoError(t, rt.LoadConfiguredServers(nil))
 

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,7 +15,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -83,12 +84,11 @@ func (r *Runtime) StartBackgroundInitialization() {
 	}
 
 	// Issue #937 (review): admission must be settled BEFORE the supervisor can
-	// reconcile. installAdmissionGateHook gates every future publication inside
-	// configsvc; gateInitialConfig covers the one snapshot that never goes
-	// through Update — the one NewService was constructed with. Both run while
+	// reconcile. gateInitialConfig commits the snapshot NewService was
+	// constructed with through the config commit, whose gate step runs the
+	// admission gate (Spec 116: every later commit runs it too). It runs while
 	// the supervisor is still stopped, so the startup gate cannot race a
 	// reconcile that would connect an ungated server and index its tools.
-	r.installAdmissionGateHook()
 	r.gateInitialConfig()
 
 	// Phase 6: Start Supervisor for state reconciliation and lock-free reads
@@ -169,10 +169,11 @@ func (r *Runtime) backgroundInitialization() {
 
 	appCtx := r.AppContext()
 
-	// Load configured servers - saves to storage synchronously (fast ~100-200ms),
-	// then starts connections asynchronously (slow 30s+)
-	// We do this synchronously to ensure API /servers endpoint has data immediately
-	if err := r.LoadConfiguredServers(nil); err != nil {
+	// The boot reconcile (Spec 116 review R9.6): one commit that repairs the
+	// storage projection synchronously (fast) and schedules a connect for every
+	// enabled server (slow, asynchronous). Synchronous so the API /servers
+	// endpoint has data immediately.
+	if err := r.bootReconcile(); err != nil {
 		r.logger.Error("Failed to load configured servers", zap.Error(err))
 		// Don't set error phase - servers can be loaded later via config reload
 	}
@@ -357,6 +358,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// astra r1 I2), and stamped with the token so an identity read can tell
 	// whether it still describes the live connection (astra r2 C3).
 	gens := r.discoveryGenerations()
+	instanceGens := r.instanceGenerations()
 
 	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
 	if err != nil {
@@ -375,10 +377,13 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// (Spec 105 FR-009, research D4). Its tool set is left alone — the sweep
 	// never wipes a server on an empty result — and servers the sweep skipped
 	// or that failed to list are not stamped.
-	r.markZeroToolServersDiscovered(listed, toolsByServer, gens)
+	// An empty result from a superseded instance generation is re-listed
+	// below like a non-empty one (review round 7).
+	staleEmpty := r.markZeroToolServersDiscovered(listed, toolsByServer, gens, instanceGens)
 
 	if len(tools) == 0 {
 		r.logger.Warn("No tools discovered from upstream servers")
+		r.relistStaleSweepServers(ctx, staleEmpty)
 		return nil
 	}
 
@@ -408,12 +413,30 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// differential update atomically with respect to review reads. A
 	// quarantined or disabled server is never (re)indexed by the sweep
 	// (issue #873).
+	//
+	// Each server's StateView publish runs inside that commit, in the same
+	// approval-lock hold as its D15 check (FR-008a). A server whose connection
+	// changed while the sweep was listing had its result dropped and is
+	// collected in stale.
 	processedServers := make(map[string]struct{}, len(toolsByServer))
+	stale := staleEmpty
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		if _, err := r.commitDiscoveredTools(ctx, serverName, serverTools); err != nil {
+		// No generation captured before the list: the result cannot be bound
+		// to a connection, so it is indexed but not published into the
+		// StateView, and the server is re-listed (as before).
+		var capture *supervisor.DiscoveryCapture
+		c, captured := gens[serverName]
+		if r.supervisor != nil && captured {
+			capture = &c
+		}
+		eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, serverTools, instanceGens[serverName], capture)
+		if err != nil {
 			r.logger.Error("Failed to apply differential update for server during sweep",
 				zap.String("server", serverName), zap.Error(err))
+		}
+		if eligible && r.supervisor != nil && (!captured || !published) {
+			stale = append(stale, serverName)
 		}
 	}
 
@@ -446,29 +469,12 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools
-	if r.supervisor != nil {
-		stale, err := r.supervisor.RefreshToolsFromDiscovery(tools, gens)
-		if err != nil {
-			r.logger.Warn("Failed to refresh tools in StateView", zap.Error(err))
-			// Don't fail the entire operation if StateView update fails
-		} else {
-			r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", len(tools)))
-		}
-		// A server whose connection changed while the sweep was listing had
-		// its result dropped: re-list it under its current connection so it
-		// does not linger in the connect→discovery window until the next
-		// sweep tick (the reactive connect discovery may have been skipped by
-		// the in-progress dedup).
-		for _, serverName := range stale {
-			r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
-				zap.String("server", serverName))
-			if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
-				r.logger.Warn("Failed to re-list server after a stale sweep result",
-					zap.String("server", serverName), zap.Error(err))
-			}
-		}
-	}
+	// A server whose connection changed while the sweep was listing had its
+	// result dropped: re-list it under its current connection so it does not
+	// linger in the connect→discovery window until the next sweep tick (the
+	// reactive connect discovery may have been skipped by the in-progress
+	// dedup).
+	r.relistStaleSweepServers(ctx, stale)
 
 	// Profiles v2 (Spec 057, T1): reconcile per-profile indexes against the
 	// current config — build new profiles, rebuild those whose membership changed
@@ -558,6 +564,10 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 		// below rejects the mismatched pair and retries under the replacement.
 		capture := r.discoveryGeneration(serverName)
 		if client, ok := r.upstreamManager.GetClient(serverName); ok {
+			// The commit generation of the config this instance runs, taken
+			// before the list (Spec 116 FR-008a): a capture from an instance a
+			// commit has since superseded is dropped and re-listed.
+			instanceGen := client.Generation()
 			// Bind this inspection result to the connection that supplied it.
 			// RequestInspectionExemption may reconcile while tools/list is in
 			// flight, replacing the managed client. Capturing an old client's
@@ -572,7 +582,7 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 						zap.String("server", serverName), zap.Int("attempt", attempt+1))
 					continue
 				}
-				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools)
 				if err != nil {
 					return err
 				}
@@ -832,6 +842,10 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 	if !ok || client == nil || !client.IsConnected() {
 		return false
 	}
+	// The commit generation of the config this instance runs, taken before
+	// the list (Spec 116 FR-008a): a capture from an instance a commit has
+	// since superseded is dropped, not persisted.
+	instanceGen := client.Generation()
 	// A fresh list (Sol r5 P2): joining a tools/list already in flight
 	// when tools/list_changed arrived could verify the contract as it was
 	// BEFORE the change, and periodic discovery never re-verifies a
@@ -848,7 +862,7 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 	if len(tools) == 0 {
 		return false
 	}
-	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools)
 	if err != nil {
 		r.logger.Warn("Quarantined contract verification failed",
 			zap.String("server", serverName), zap.Error(err))
@@ -890,7 +904,7 @@ func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interfac
 // current-generation check immediately before checkToolApprovals writes review
 // records. A false result is deliberately retried by the caller; no stale
 // response is persisted or announced as review.changed.
-func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
+func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, instanceGen int64, tools []*config.ToolMetadata) (bool, error) {
 	if r.quarantinedCaptureBeforePersist != nil {
 		r.quarantinedCaptureBeforePersist()
 	}
@@ -912,10 +926,11 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 		if r.discoveryGeneration(serverName) != capture {
 			return nil
 		}
-		if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+		ok, err := r.persistQuarantinedToolDefinitionsAt(serverName, tools, instanceGen)
+		if err != nil {
 			return err
 		}
-		persisted = true
+		persisted = ok
 		return nil
 	})
 	if err != nil {
@@ -980,16 +995,38 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 }
 
 func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
-	return r.persistToolDefinitionsLocked(serverName, tools)
+	_, err := r.persistQuarantinedToolDefinitionsAt(serverName, tools, 0)
+	return err
 }
 
-// persistToolDefinitionsLocked records, prunes and publishes one capture.
-// Caller holds captureSnapMu for writing.
-func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*config.ToolMetadata) error {
-	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
-		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
+// persistQuarantinedToolDefinitionsAt is persistQuarantinedToolDefinitions
+// for tools that came from an instance at commit generation instanceGen (0 =
+// unknown). persisted is false when the capture was dropped as stale.
+func (r *Runtime) persistQuarantinedToolDefinitionsAt(serverName string, tools []*config.ToolMetadata, instanceGen int64) (persisted bool, err error) {
+	r.captureSnapMu.Lock()
+	defer r.captureSnapMu.Unlock()
+	return r.persistToolDefinitionsLocked(serverName, tools, instanceGen)
+}
+
+// persistToolDefinitionsLocked records, prunes and publishes one review
+// capture. Caller holds captureSnapMu for writing.
+//
+// Spec 116 FR-008a (review R2.2): the capture's final generation check and
+// all of its writes (review records, prune, last-good snapshot, capture
+// stamp) run in ONE hold of the server's approval lock, the lock a config
+// commit writes the row under. A capture from an instance whose generation is
+// no longer the row's (a tools/list that was in flight when a commit changed
+// the endpoint and quarantined the server) writes nothing and reports
+// persisted=false; the commit's after-unlock discovery request replaces it.
+func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*config.ToolMetadata, instanceGen int64) (persisted bool, err error) {
+	defer r.lockToolApprovals(serverName)()
+	if !r.discoveryCaptureCurrentHeld(serverName, instanceGen) {
+		r.logger.Info("Review capture dropped: the server's committed generation moved on",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return false, nil
+	}
+	if _, err := r.checkToolApprovalsHeld(serverName, tools); err != nil {
+		return false, fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
 	r.pruneAbsentUndecidedApprovals(serverName, tools)
 	if hook := r.captureAfterPrune; hook != nil {
@@ -1001,7 +1038,7 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 	r.lastGoodTools[serverName] = snapshot
 	r.noteCaptureLocked(serverName)
 	r.lastGoodToolsMu.Unlock()
-	return nil
+	return true, nil
 }
 
 // noteCaptureLocked stamps a fresh capture for the review payload. Caller
@@ -1021,30 +1058,74 @@ func (r *Runtime) noteCaptureLocked(serverName string) {
 // commitDiscoveredTools publishes a discovery result and updates the stored
 // approval records under captureSnapMu, so GetServerReview never observes the
 // new capture stamp with the previous generation's records (or vice versa).
-// For an eligible server it publishes the snapshot and stamp, then applies the
-// differential index update (which writes the approval records). For a server
-// that is quarantined or disabled it records the definitions for review
+// For an eligible server the last-good snapshot and capture stamp are written,
+// together with the differential index update, in ONE hold of the server's
+// approval lock and only after its final eligibility and generation check
+// (Spec 116 D15, FR-008a): a pass the check rejects writes nothing. For a
+// server that is quarantined or disabled it records the definitions for review
 // without indexing. eligible reports whether the index update was attempted.
-func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, tools []*config.ToolMetadata) (eligible bool, err error) {
+func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64) (eligible bool, err error) {
+	eligible, _, err = r.commitDiscoveredToolsAt(ctx, serverName, tools, instanceGen, nil)
+	return eligible, err
+}
+
+// commitDiscoveredToolsAt is commitDiscoveredTools that also publishes the
+// result into the supervisor snapshot and StateView inside the same approval
+// lock hold when capture (the DiscoveryGeneration taken before the list) is
+// non-nil. published is false when that publish was dropped because the
+// server's connection changed while the tools were listed, or when the D15
+// check found the result came from a superseded instance generation; the
+// caller re-lists in both cases. A pass rejected by the D15 check because the
+// server was removed, disabled or quarantined returns eligible=false
+// (terminal, no re-list).
+func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture) (eligible, published bool, err error) {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 	if !r.serverEligibleForIndexing(serverName) {
-		if perr := r.persistToolDefinitionsLocked(serverName, tools); perr != nil {
+		if _, perr := r.persistToolDefinitionsLocked(serverName, tools, instanceGen); perr != nil {
 			r.logger.Warn("Failed to capture review definitions for ineligible server",
 				zap.String("server", serverName), zap.Error(perr))
 		}
-		return false, nil
+		return false, false, nil
 	}
-	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.noteCaptureLocked(serverName)
-	r.lastGoodToolsMu.Unlock()
-	if hook := r.discoveryAfterPublish; hook != nil {
-		hook()
+	published = true
+	held := func() {
+		r.lastGoodToolsMu.Lock()
+		snapshot := make([]*config.ToolMetadata, len(tools))
+		copy(snapshot, tools)
+		r.lastGoodTools[serverName] = snapshot
+		r.noteCaptureLocked(serverName)
+		r.lastGoodToolsMu.Unlock()
+		if capture != nil && r.supervisor != nil {
+			// The per-server variant stamps the server's discovery as
+			// completed even when the result is EMPTY, so a tool-less
+			// server is not left in the connect→discovery window (Spec 105
+			// FR-009, research D4). The supervisor never calls back into
+			// the runtime (plan.md lock rule 5), so this adds no edge.
+			ok, rerr := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, *capture)
+			if rerr != nil {
+				r.logger.Warn("Failed to refresh tools in StateView for server",
+					zap.String("server", serverName), zap.Error(rerr))
+			} else {
+				published = ok
+			}
+		}
+		if hook := r.discoveryAfterPublish; hook != nil {
+			hook()
+		}
 	}
-	return true, r.applyDifferentialToolUpdate(ctx, serverName, tools)
+	if err := r.applyDifferentialToolUpdateHeld(ctx, serverName, tools, instanceGen, held); err != nil {
+		if errors.Is(err, errDiscoveryIneligible) {
+			return false, false, nil
+		}
+		if errors.Is(err, errDiscoveryStaleGeneration) {
+			// Eligible but not published: the caller re-lists the
+			// current instance (review round 7).
+			return true, false, nil
+		}
+		return true, published, err
+	}
+	return true, published, nil
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -1107,6 +1188,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	if !ok {
 		return false, fmt.Errorf("client not found for server %s", serverName)
 	}
+	// The commit generation of the config this instance runs (Spec 116 D15):
+	// the publish below is dropped when it no longer matches the stored row.
+	instanceGen := client.Generation()
 
 	// The connection generation and live connection token this result will
 	// be published under: captured BEFORE the list so a reconnect during it
@@ -1164,6 +1248,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	if err != nil {
 		return false, fmt.Errorf("failed to list tools for server %s after %d attempts: %w", serverName, maxRetries, err)
 	}
+	if h := r.testHooks.discoveryAfterList; h != nil {
+		h(serverName)
+	}
 
 	if len(tools) == 0 {
 		if !authoritative {
@@ -1178,8 +1265,9 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 			// window until a non-empty or authoritative pass (astra r1 I1).
 			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
 				zap.String("server", serverName))
-			r.markZeroToolServersDiscovered([]string{serverName}, nil, map[string]supervisor.DiscoveryCapture{serverName: gen})
-			return true, nil
+			// A stale-generation empty result is re-listed like a
+			// non-empty one (review round 7).
+			return r.markServerZeroToolsDiscovered(serverName, gen, instanceGen), nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
 		// is the truth. Fall through with an empty toolset so the differential
@@ -1202,7 +1290,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// quarantined in that window has its records captured for review (no index
 	// write); a microsecond window remains before the index mutation, which is
 	// deliberately not closed with a lock across the index write.
-	eligible, err := r.commitDiscoveredTools(ctx, serverName, tools)
+	eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, tools, instanceGen, &gen)
 	if !eligible {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
@@ -1215,32 +1303,33 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools. The per-server variant stamps
-	// the server's discovery as completed even when the result is EMPTY, so
-	// a tool-less server is not left in the connect→discovery window (Spec
-	// 105 FR-009, research D4). The publish is bound to the generation
-	// captured before the list; a dropped (stale) result is reported to the
-	// caller, which re-lists.
-	published = true
-	if r.supervisor != nil {
-		ok, err := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, gen)
-		if err != nil {
-			r.logger.Warn("Failed to refresh tools in StateView for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-		} else {
-			published = ok
-			r.logger.Debug("Refreshed tools in StateView for server",
-				zap.String("server", serverName),
-				zap.Int("tool_count", len(tools)),
-				zap.Bool("published", ok))
-		}
-	}
+	// The StateView publish ran inside the commit above, bound to the
+	// generation captured before the list; a dropped (stale) result is
+	// reported to the caller, which re-lists.
+	r.logger.Debug("Refreshed tools in StateView for server",
+		zap.String("server", serverName),
+		zap.Int("tool_count", len(tools)),
+		zap.Bool("published", published))
 
 	r.logger.Info("Successfully indexed tools for server",
 		zap.String("server", serverName),
 		zap.Int("count", len(tools)))
 	return published, nil
+}
+
+// instanceGenerations captures the Spec 116 commit generation of every
+// registered instance before a sweep lists their tools (D15).
+func (r *Runtime) instanceGenerations() map[string]int64 {
+	out := map[string]int64{}
+	if r.upstreamManager == nil {
+		return out
+	}
+	for _, name := range r.upstreamManager.GetAllServerNames() {
+		if c, ok := r.upstreamManager.GetClient(name); ok && c != nil {
+			out[name] = c.Generation()
+		}
+	}
+	return out
 }
 
 // discoveryGenerations is supervisor.DiscoveryGenerations, nil-safe for
@@ -1265,18 +1354,77 @@ func (r *Runtime) discoveryGeneration(serverName string) supervisor.DiscoveryCap
 // that returned nothing — without touching its tool set (Spec 105 FR-009,
 // research D4; supervisor.MarkServersToolsDiscovered, which also refuses to
 // stamp a server still holding a previous connection's retained set). gens
-// is the generation capture taken before the list.
-func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture) {
+// is the connection-generation capture and instanceGens the commit
+// generations (Spec 116 D15) taken before the list.
+//
+// It returns the servers whose empty result came from a superseded instance
+// generation, for the caller to re-list (review round 7).
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture, instanceGens map[string]int64) []string {
 	if r.supervisor == nil {
-		return
+		return nil
 	}
-	zeroTool := make([]string, 0, len(listed))
+	var stale []string
 	for _, serverName := range listed {
-		if _, hasTools := toolsByServer[serverName]; !hasTools {
-			zeroTool = append(zeroTool, serverName)
+		if _, hasTools := toolsByServer[serverName]; hasTools {
+			continue
+		}
+		if !r.markServerZeroToolsDiscoveredWith(serverName, gens, instanceGens[serverName]) {
+			stale = append(stale, serverName)
 		}
 	}
-	r.supervisor.MarkServersToolsDiscovered(zeroTool, gens)
+	return stale
+}
+
+// relistStaleSweepServers re-lists, in name order, every server whose sweep
+// result was dropped because its connection or its instance generation
+// changed while the sweep was listing.
+func (r *Runtime) relistStaleSweepServers(ctx context.Context, stale []string) {
+	sort.Strings(stale)
+	for _, serverName := range stale {
+		r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
+			zap.String("server", serverName))
+		if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
+			r.logger.Warn("Failed to re-list server after a stale sweep result",
+				zap.String("server", serverName), zap.Error(err))
+		}
+	}
+}
+
+// markServerZeroToolsDiscovered stamps one server's completed, empty
+// discovery. Spec 116 FR-008a (review R2.3): like every other discovery
+// write, the stamp is made in one hold of the server's approval lock after
+// the final eligibility and commit-generation check, so a stale empty
+// tools/list (captured at G) cannot mark discovery complete after a
+// connection-changing commit at G+1. The supervisor never calls back into the
+// runtime, so stateMu under the approval lock adds no edge (the non-empty
+// publish already nests it there).
+//
+// It reports false only when the result came from a superseded instance
+// generation, so the caller re-lists the current instance (review round 7).
+func (r *Runtime) markServerZeroToolsDiscovered(serverName string, gen supervisor.DiscoveryCapture, instanceGen int64) bool {
+	return r.markServerZeroToolsDiscoveredWith(serverName, map[string]supervisor.DiscoveryCapture{serverName: gen}, instanceGen)
+}
+
+// markServerZeroToolsDiscoveredWith is markServerZeroToolsDiscovered with the
+// sweep's capture map handed to the supervisor as is (a server missing from it
+// is judged by the supervisor's own rules, as before).
+func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[string]supervisor.DiscoveryCapture, instanceGen int64) bool {
+	if r.supervisor == nil {
+		return true
+	}
+	defer r.lockToolApprovals(serverName)()
+	switch r.discoveryVerdictHeld(serverName, instanceGen) {
+	case discoveryIneligible:
+		r.logger.Info("Empty discovery result dropped: the server is no longer eligible at the captured generation",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return true
+	case discoveryStaleGen:
+		r.logger.Info("Empty discovery result dropped: it came from a superseded instance generation",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return false
+	}
+	r.supervisor.MarkServersToolsDiscovered([]string{serverName}, gens)
+	return true
 }
 
 // applyDifferentialToolUpdate performs differential update of tools for a server.
@@ -1286,13 +1434,139 @@ func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer m
 // - Modified tools (different hash) are re-indexed (unless blocked by tool-level quarantine)
 // - Tools blocked by quarantine are removed from the index if previously indexed
 func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName string, newTools []*config.ToolMetadata) error {
+	return r.applyDifferentialToolUpdateAt(ctx, serverName, newTools, 0)
+}
+
+// errDiscoveryIneligible reports a discovery result dropped by the final
+// eligibility check (D15). It is not an error for the caller's caller.
+var errDiscoveryIneligible = errors.New("server not eligible for indexing at the committed generation")
+
+// errDiscoveryStaleGeneration reports a discovery result dropped by the final
+// check because it came from an instance whose commit generation no longer
+// matches the stored row (a connection-changing commit ran while it listed).
+// Unlike errDiscoveryIneligible it is not terminal: the caller re-lists the
+// current instance, whose own discovery may have been deduped while this
+// pass was in flight (review round 7).
+var errDiscoveryStaleGeneration = errors.New("discovery result came from a superseded instance generation")
+
+// discoveryVerdict is the outcome of the final D15 check.
+type discoveryVerdict int
+
+const (
+	discoveryCurrent    discoveryVerdict = iota // eligible at the instance's generation
+	discoveryIneligible                         // removed, disabled or quarantined: terminal
+	discoveryStaleGen                           // generation mismatch: re-list the current instance
+)
+
+// discoveryVerdictHeld is the final eligibility check of a discovery pass
+// (Spec 116 D15), made while the caller holds serverName's approval lock: the
+// server's stored row exists, is enabled and not quarantined, and — when both
+// are known — carries the generation of the instance the tools came from. A
+// config commit writes the row (and purges the index) under the same lock, so
+// a pass either finished before the commit and was purged by it, or sees the
+// new row here and writes nothing. A database no commit has written yet
+// (unit-test fixtures) is not authoritative and is not consulted.
+//
+// A removed, disabled or quarantined row is terminal (discoveryIneligible),
+// while a generation mismatch on an otherwise eligible row means a newer
+// instance now serves the server and must be listed (discoveryStaleGen,
+// review round 7).
+func (r *Runtime) discoveryVerdictHeld(serverName string, instanceGen int64) discoveryVerdict {
+	if r.storageManager == nil {
+		return discoveryCurrent
+	}
+	if committed, err := r.storageManager.ConfigCommitted(); err != nil || !committed {
+		if err == nil {
+			return discoveryCurrent
+		}
+		return discoveryIneligible
+	}
+	row, err := r.storageManager.GetStoredServer(serverName)
+	if err != nil || row == nil || row.Config == nil {
+		return discoveryIneligible
+	}
+	if !row.Config.Enabled || row.Config.Quarantined {
+		return discoveryIneligible
+	}
+	if instanceGen != 0 && row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
+		return discoveryStaleGen
+	}
+	return discoveryCurrent
+}
+
+// discoveryCaptureCurrentHeld is the final check of a REVIEW capture (a
+// discovery result for a server that is not eligible for indexing), made
+// while the caller holds serverName's approval lock: the stored row exists
+// and — when both are known — carries the generation of the instance the
+// tools came from. Unlike discoveryVerdictHeld it accepts a quarantined or
+// disabled row: recording definitions for review is the point. A database no
+// commit has written yet is not authoritative and is not consulted.
+func (r *Runtime) discoveryCaptureCurrentHeld(serverName string, instanceGen int64) bool {
+	if r.storageManager == nil {
+		return true
+	}
+	if committed, err := r.storageManager.ConfigCommitted(); err != nil || !committed {
+		return err == nil
+	}
+	row, err := r.storageManager.GetStoredServer(serverName)
+	if err != nil || row == nil || row.Config == nil {
+		return false
+	}
+	if instanceGen != 0 && row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
+		return false
+	}
+	return true
+}
+
+// applyDifferentialToolUpdateAt is applyDifferentialToolUpdate for tools that
+// came from an instance at commit generation instanceGen (0 = unknown). Its
+// final eligibility check, the approval decisions, every index mutation and
+// the approval-record deletes run in ONE hold of the server's approval lock
+// (Spec 116 D15, FR-008a); the per-profile rebuild and the events run after
+// the lock is released.
+func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64) error {
+	return r.applyDifferentialToolUpdateHeld(ctx, serverName, newTools, instanceGen, nil)
+}
+
+// applyDifferentialToolUpdateHeld is applyDifferentialToolUpdateAt with held,
+// which runs inside the same approval-lock hold right after the final
+// eligibility check passed and before any index write (the discovery pass's
+// last-good and StateView publish, D15). It never runs for a rejected pass.
+func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func()) error {
+	unlock := r.lockToolApprovals(serverName)
+	locked := true
+	release := func() {
+		if locked {
+			locked = false
+			unlock()
+		}
+	}
+	defer release()
+
+	switch r.discoveryVerdictHeld(serverName, instanceGen) {
+	case discoveryIneligible:
+		r.logger.Info("Discovery result dropped: the server is no longer eligible at the captured generation",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return errDiscoveryIneligible
+	case discoveryStaleGen:
+		r.logger.Info("Discovery result dropped: it came from a superseded instance generation; the current instance is re-listed",
+			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return errDiscoveryStaleGeneration
+	}
+	if held != nil {
+		held()
+	}
+
 	// Check tool-level quarantine approvals before indexing
-	approvalResult, err := r.checkToolApprovals(serverName, newTools)
+	approvalResult, err := r.checkToolApprovalsHeld(serverName, newTools)
 	if err != nil {
 		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
 			zap.String("server", serverName),
 			zap.Error(err))
 		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
+	}
+	if h := r.testHooks.discoveryBeforeIndex; h != nil {
+		h(serverName)
 	}
 
 	// Query existing tools from the index
@@ -1307,6 +1581,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 			return err
 		}
 		r.warmSignatureCache(allowedTools)
+		release()
 		// The shared index changed for this server; refresh dependent profiles.
 		r.reindexAffectedProfiles(serverName)
 		r.reconcileSignatureCache()
@@ -1446,7 +1721,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 				r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
 					zap.String("server", serverName),
 					zap.String("legacy_key", toolName))
-			} else if err := r.deleteToolApprovalLocked(serverName, toolName); err != nil {
+			} else if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
 				r.logger.Debug("Failed to delete tool approval for removed tool",
 					zap.String("tool", fullToolName),
 					zap.Error(err))
@@ -1535,6 +1810,10 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	// Idempotent and cheap: Warm returns on the first cache hit, so the steady
 	// state is one map lookup per tool per discovery.
 	r.warmSignatureCache(filterBlockedTools(newTools, approvalResult.BlockedTools))
+
+	// Index and approval writes are done; the per-profile rebuild and the
+	// events below must not run under the approval lock (D15).
+	release()
 
 	// If the shared index changed for this server, refresh the per-profile indexes
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
@@ -1659,664 +1938,190 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
-// LoadConfiguredServers synchronizes storage and upstream manager from the given or current config.
-// If cfg is nil, it will use the current runtime configuration.
-//
-//nolint:unparam // maintained for parity with previous implementation
-func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
-	if cfg == nil {
-		cfg = r.Config()
-		if cfg == nil {
-			return fmt.Errorf("runtime configuration is not available")
-		}
-	}
-
-	if r.storageManager == nil || r.upstreamManager == nil || r.indexManager == nil {
+// bootReconcile is the boot commit: ReconcileLive plus Bootstrap (Spec 116
+// D13, D14, review R9.6). The configuration file is the source of truth; rows
+// that match it keep their stored generations, every enabled server gets a
+// connect worker, and the file is not rewritten.
+func (r *Runtime) bootReconcile() error {
+	if r.configSvc == nil || r.storageManager == nil || r.upstreamManager == nil || r.indexManager == nil {
 		return fmt.Errorf("runtime managers not initialized")
 	}
-
 	r.logger.Info("Synchronizing servers from configuration (config as source of truth)")
-
-	currentUpstreams := r.upstreamManager.GetAllServerNames()
-	storedServers, err := r.storageManager.ListUpstreamServers()
-	// A failed read is NOT an empty database. Flattening it into one made the
-	// admission gate below see every configured server as first-seen and
-	// quarantine the lot (review P2); the rest of the sync already tolerates an
-	// empty stored view, so only the gate needs to know the difference.
-	storageReadable := err == nil
-	if err != nil {
-		r.logger.Error("Failed to get stored servers for sync", zap.Error(err))
-		storedServers = []*config.ServerConfig{}
-	}
-
-	configuredServers := make(map[string]*config.ServerConfig)
-	storedServerMap := make(map[string]*config.ServerConfig)
-	var changed bool
-	var reviewChangedServers []string
-
-	for _, storedServer := range storedServers {
-		storedServerMap[storedServer.Name] = storedServer
-	}
-
-	// Issue #937: apply the trust-mode admission gate to servers that arrived by
-	// config edit. Runs BEFORE the storage save loop below so the gated value is
-	// what gets persisted, connected, and reported.
-	//
-	// The gate returns a COPY rather than writing through cfg.Servers: those
-	// pointers are the ones configsvc published, and the supervisor reads them
-	// concurrently. publishAdmissionGatedConfig swaps the whole config in so the
-	// decision reaches subscribers atomically. Normally this is already a no-op
-	// because configsvc's pre-publish hook gated the config on its way in; it
-	// still fires when storage changed after publication (e.g. a restart
-	// inheriting a recorded quarantine).
-	if gated, gateChanged := r.applyConfigLoadAdmissionGate(cfg, storedServerMap, storageReadable); gateChanged {
-		r.publishAdmissionGatedConfig(cfg, gated)
-		cfg = gated
-	}
-
-	for _, serverCfg := range cfg.Servers {
-		configuredServers[serverCfg.Name] = serverCfg
-	}
-
-	// GC orphaned tool-approval records (MCP-1002): drop approvals whose server
-	// is no longer configured. Configured-but-disabled servers are preserved so
-	// a later re-enable doesn't re-quarantine their previously-approved tools.
-	// Guard against a transient empty config nuking every approval — explicit
-	// server deletion already cleans up via DeleteServerToolApprovals.
-	if len(configuredServers) > 0 {
-		configuredNames := make([]string, 0, len(configuredServers))
-		for name := range configuredServers {
-			configuredNames = append(configuredNames, name)
-		}
-		if pruned, perr := r.storageManager.PruneOrphanToolApprovals(configuredNames); perr != nil {
-			r.logger.Warn("Failed to prune orphan tool approvals", zap.Error(perr))
-		} else if pruned > 0 {
-			r.logger.Info("Pruned orphan tool-approval records", zap.Int("removed", pruned))
-		}
-
-		// Same GC for per-server tool-call history (#1176). These buckets held
-		// ~432MB of one reporter's 940MB config.db and nothing ever deleted
-		// them — a server removed from the config left its whole call history
-		// behind forever. Guarded by the same non-empty check above, and the
-		// synthetic code_execution bucket is never treated as an orphan.
-		if pruned, perr := r.storageManager.PruneOrphanToolCalls(configuredNames); perr != nil {
-			r.logger.Warn("Failed to prune orphan tool-call history", zap.Error(perr))
-		} else if pruned > 0 {
-			r.logger.Info("Pruned orphan tool-call history", zap.Int("servers_removed", pruned))
-		}
-	}
-
-	// Add/remove servers asynchronously to prevent blocking on slow connections
-	// All server operations now happen in background goroutines with timeouts
-
-	// FIRST: Save all servers to storage in one batch (fast, synchronous)
-	// This ensures API /servers endpoint can return data immediately
-	r.logger.Debug("Starting synchronous storage save phase", zap.Int("total_servers", len(cfg.Servers)))
-	for _, serverCfg := range cfg.Servers {
-		storedServer, existsInStorage := storedServerMap[serverCfg.Name]
-
-		// Check if OAuth config changed (requires reconnection)
-		oauthChanged := existsInStorage && config.OAuthConfigChanged(storedServer.OAuth, serverCfg.OAuth)
-
-		// ExposePrompts changed: doesn't need a reconnect (upstream.Manager's
-		// AddServerConfig already refreshes it via managed.Client.SetConfig
-		// regardless of hasChanged), but without counting it here a
-		// hot-reloaded toggle would never emit servers.changed, so
-		// RefreshPrompts would never re-run and the proxy's advertised
-		// prompt set would stay stale until an unrelated change (PR #973
-		// review, P2).
-		exposePromptsChanged := existsInStorage && !boolPtrEqual(storedServer.ExposePrompts, serverCfg.ExposePrompts)
-
-		hasChanged := !existsInStorage ||
-			storedServer.Enabled != serverCfg.Enabled ||
-			storedServer.Quarantined != serverCfg.Quarantined ||
-			storedServer.URL != serverCfg.URL ||
-			storedServer.Command != serverCfg.Command ||
-			storedServer.Protocol != serverCfg.Protocol ||
-			oauthChanged ||
-			exposePromptsChanged
-
-		// Security (issue #1061): a server that just BECAME quarantined on this
-		// path must lose its indexed tools, exactly as it does when the API
-		// handler sets the flag. The purge used to live only in
-		// Runtime.QuarantineServer, so a quarantine written into the config file
-		// — by an operator edit, by the config-load admission gate re-holding an
-		// unreviewed server, or by any future writer — was detected here and then
-		// ignored, leaving the tool descriptions retrievable indefinitely.
-		//
-		// Purge on the false -> true transition, and also when the server is not
-		// in the stored view at all. Doing it whenever the flag is already true
-		// would re-delete on every unrelated reload, and doing it on true -> false
-		// would blank the catalog until the next discovery pass.
-		//
-		// The not-in-storage arm is not redundant: a genuinely first-seen server
-		// has nothing indexed, so the delete is a cheap no-op, but a FAILED
-		// storage read produces the same empty view (see storageReadable above)
-		// while the index still holds the previous run's tools. Without this arm
-		// a quarantined server would keep its descriptions searchable for exactly
-		// as long as storage stays unreadable.
-		newlyQuarantined := serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)
-
-		if hasChanged {
-			changed = true
-			r.logger.Info("Server configuration changed, updating storage",
-				zap.String("server", serverCfg.Name),
-				zap.Bool("new", !existsInStorage),
-				zap.Bool("enabled_changed", existsInStorage && storedServer.Enabled != serverCfg.Enabled),
-				zap.Bool("quarantined_changed", existsInStorage && storedServer.Quarantined != serverCfg.Quarantined),
-				zap.Bool("oauth_changed", oauthChanged))
-
-			if newlyQuarantined {
-				r.purgeQuarantinedServerFromIndex(serverCfg.Name)
-			}
-
-			// Clear OAuth state if OAuth config changed
-			if oauthChanged && r.storageManager != nil {
-				r.logger.Info("OAuth config changed, clearing cached OAuth state",
-					zap.String("server", serverCfg.Name))
-				if err := r.storageManager.ClearOAuthState(serverCfg.Name); err != nil {
-					r.logger.Warn("Failed to clear OAuth state",
-						zap.String("server", serverCfg.Name),
-						zap.Error(err))
-				}
-			}
-		}
-
-		// Save synchronously to ensure storage is populated for API queries
-		r.logger.Debug("Saving server to storage", zap.String("server", serverCfg.Name), zap.Bool("exists", existsInStorage))
-		if err := r.storageManager.SaveUpstreamServer(serverCfg); err != nil {
-			r.logger.Error("Failed to save/update server in storage", zap.Error(err), zap.String("server", serverCfg.Name))
-			continue
-		}
-		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
-		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
-			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
-			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
-		}
-	}
-	r.logger.Debug("Completed synchronous storage save phase")
-
-	// SECOND: Manage upstream connections asynchronously (slow, can take 30s+)
-	for _, serverCfg := range cfg.Servers {
-		if serverCfg.Enabled {
-			// Add server asynchronously to prevent blocking on connections
-			go func(cfg *config.ServerConfig, cfgPath string) {
-				if err := r.upstreamManager.AddServer(cfg.Name, cfg); err != nil {
-					r.logger.Error("Failed to add/update upstream server", zap.Error(err), zap.String("server", cfg.Name))
-				} else {
-					// Register server identity for tool call tracking
-					if _, err := r.storageManager.RegisterServerIdentity(cfg, cfgPath); err != nil {
-						r.logger.Warn("Failed to register server identity",
-							zap.Error(err),
-							zap.String("server", cfg.Name))
-					}
-				}
-
-				if cfg.Quarantined {
-					r.logger.Info("Server is quarantined but kept connected for security inspection", zap.String("server", cfg.Name))
-				}
-			}(serverCfg, r.cfgPath)
-		} else {
-			// Remove server asynchronously to prevent blocking
-			go func(name string) {
-				r.upstreamManager.RemoveServer(name)
-				r.logger.Info("Server is disabled, removing from active connections", zap.String("server", name))
-			}(serverCfg.Name)
-		}
-	}
-
-	serversToRemove := []string{}
-
-	for _, serverName := range currentUpstreams {
-		if _, exists := configuredServers[serverName]; !exists {
-			serversToRemove = append(serversToRemove, serverName)
-		}
-	}
-
-	for _, storedServer := range storedServers {
-		if _, exists := configuredServers[storedServer.Name]; !exists {
-			found := false
-			for _, name := range serversToRemove {
-				if name == storedServer.Name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				serversToRemove = append(serversToRemove, storedServer.Name)
-			}
-		}
-	}
-
-	// Remove servers asynchronously to prevent blocking
-	for _, serverName := range serversToRemove {
-		changed = true
-		go func(name string) {
-			r.logger.Info("Removing server no longer in config", zap.String("server", name))
-			r.upstreamManager.RemoveServer(name)
-			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {
-				r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", name))
-			} else {
-				// Removing a configured server can remove either a quarantined-server
-				// row or a trusted row with pending/changed tools from the review
-				// queue. Publish after storage deletion so subscribers refetch it.
-				r.emitReviewChanged(name)
-			}
-			if err := r.indexManager.DeleteServerTools(name); err != nil {
-				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
-			} else {
-				r.logger.Info("Removed server tools from search index", zap.String("server", name))
-			}
-		}(serverName)
-	}
-
-	if len(serversToRemove) > 0 {
-		r.logger.Info("Comprehensive server cleanup completed",
-			zap.Int("removed_count", len(serversToRemove)),
-			zap.Strings("removed_servers", serversToRemove))
-	}
-
-	r.logger.Info("Server synchronization completed",
-		zap.Int("configured_servers", len(cfg.Servers)),
-		zap.Int("removed_servers", len(serversToRemove)))
-
-	if changed {
-		r.emitServersChanged("sync", map[string]any{
-			"configured": len(cfg.Servers),
-			"removed":    len(serversToRemove),
-		})
-	}
-	for _, serverName := range reviewChangedServers {
-		r.emitReviewChanged(serverName)
-	}
-
-	return nil
+	_, err := r.Commit(commitReasonBoot, func(tx *CommitTx) error {
+		tx.ReconcileLive()
+		tx.Bootstrap()
+		tx.noDisk()
+		return nil
+	})
+	return err
 }
 
-// SaveConfiguration persists the runtime configuration to disk.
-func (r *Runtime) SaveConfiguration() error {
-	// Serialize the read-modify-write against the other two-store commit paths
-	// (ApplyConfig, ReloadConfiguration, UpdateConfig). This reads the current
-	// configSvc snapshot, splices in the latest servers, then writes both
-	// configSvc and r.cfg.Servers; without the lock a concurrent ApplyConfig
-	// could land its new config between the snapshot read and these writes,
-	// and this stale-based write would clobber configSvc while r.cfg keeps the
-	// applied value — leaving the two stores divergent (PR #857 review). MUST
-	// be acquired before r.mu.
-	r.configCommitMu.Lock()
-	defer r.configCommitMu.Unlock()
+// ReconcileServers reconciles storage and the upstream manager with the live
+// configuration (projection repair, Spec 116 ReconcileLive). It never replaces
+// the configuration and never writes the config file.
+func (r *Runtime) ReconcileServers() error {
+	_, err := r.Commit("reconcile", func(tx *CommitTx) error {
+		tx.ReconcileLive()
+		tx.noDisk()
+		return nil
+	})
+	return err
+}
 
-	latestServers, err := r.storageManager.ListUpstreamServers()
-	if err != nil {
-		r.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
-		return err
+// CommitConfig makes cfg the live configuration through one config commit and
+// returns its error. cfg must be a configuration the caller owns and submits
+// now (D14); see UpdateConfig.
+func (r *Runtime) CommitConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config cannot be nil")
 	}
+	_, err := r.Commit("runtime_update", func(tx *CommitTx) error {
+		tx.ReplaceConfig(cfg)
+		return nil
+	})
+	return err
+}
 
-	// Get current snapshot (lock-free)
+// SaveConfiguration persists the live configuration to disk.
+//
+// Spec 116 (FR-004): it no longer rebuilds the server list from storage —
+// storage is a projection of the live configuration written by every commit,
+// so there is nothing to splice back and nothing a pending removal could be
+// resurrected from (#1559). It is a commit with ForceDisk: the file is written
+// even when nothing changed, pending-aware as before (a restart-gated value
+// saved but not yet adopted stays on disk).
+func (r *Runtime) SaveConfiguration() error {
 	snapshot := r.ConfigSnapshot()
-	if snapshot.Config == nil {
+	if snapshot == nil || snapshot.Config == nil {
 		return fmt.Errorf("runtime configuration is not available")
 	}
-
 	if snapshot.Path == "" {
 		r.logger.Warn("Configuration file path is not available, cannot save configuration")
 		return fmt.Errorf("configuration file path is not available")
 	}
-
-	// Create a copy of config to avoid mutations
-	configCopy := snapshot.Clone()
-	if configCopy == nil {
-		return fmt.Errorf("failed to clone configuration")
+	_, err := r.Commit("save_configuration", func(tx *CommitTx) error {
+		tx.ForceDisk()
+		return nil
+	})
+	if err != nil {
+		r.logger.Error("Failed to save configuration", zap.Error(err))
 	}
-
-	// Update servers with latest from storage
-	configCopy.Servers = latestServers
-
-	// config.db's UpstreamRecord has no field for the "a quarantine value was
-	// stated" bit (issue #937), so servers that came back from storage look
-	// un-stated again. Carry the bit across the round-trip from the snapshot,
-	// or an operator's explicit `"quarantined": false` — and the decision the
-	// user made in the quarantine UI, which QuarantineServer stamps — would be
-	// erased from the config file by the next save.
-	stated := make(map[string]bool, len(configCopy.Servers))
-	configOnly := make(map[string]*config.ServerConfig, len(snapshot.Config.Servers))
-	for _, sc := range snapshot.Config.Servers {
-		if sc != nil {
-			// Shared and AuthBroker are configuration-only; BBolt's reduced
-			// server record cannot carry them through an unrelated save.
-			configOnly[sc.Name] = sc
-		}
-		if sc != nil && sc.QuarantineExplicitlySet() {
-			stated[sc.Name] = true
-		}
-	}
-	for _, sc := range latestServers {
-		if sc != nil && configOnly[sc.Name] != nil {
-			preserved := config.CopyServerConfig(configOnly[sc.Name])
-			sc.Shared = preserved.Shared
-			sc.AuthBroker = preserved.AuthBroker
-		}
-		if sc != nil && stated[sc.Name] {
-			sc.MarkQuarantineExplicitlySet(true)
-		}
-	}
-
-	r.logger.Debug("Saving configuration to disk",
-		zap.Int("server_count", len(latestServers)),
-		zap.String("config_path", snapshot.Path),
-		zap.Bool("using_config_service", r.configSvc != nil))
-
-	// This path rewrites the WHOLE file from the running configuration, so a
-	// restart-gated value that is saved but not yet adopted — a routing-mode
-	// switch the operator is still being told is pending — would be reverted on
-	// disk by the next server enable/disable. Overlay the pending values onto
-	// what goes to disk, while the in-memory stores keep describing what is
-	// actually running.
-	diskCopy := r.pendingAwareDiskConfig(configCopy)
-
-	// Use ConfigService to save (doesn't hold locks, handles file I/O)
-	oldServerCount := 0
-	if r.configSvc != nil {
-		// Update the config service with latest servers first
-		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
-			r.logger.Error("Failed to update config service", zap.Error(err))
-			return err
-		}
-		// Keep the legacy r.cfg store in sync with configSvc BEFORE the disk
-		// write. If SaveToFile then fails we return an error, but the two
-		// in-memory stores still agree (only disk is stale) — a failed save
-		// must not leave configSvc and r.cfg divergent (PR #857 review).
-		oldServerCount = r.syncServersToLegacyConfig(latestServers)
-		// Then persist to disk
-		if diskCopy != nil {
-			// Written directly rather than through SaveToFile, whose source is
-			// the configSvc snapshot (the running config). Marked as our own
-			// write first, or the watcher reads the pending value back as an
-			// external edit and hot-applies what we deliberately deferred.
-			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
-			if err := config.SaveConfig(diskCopy, snapshot.Path); err != nil {
-				r.forgetConfigSelfWrite(diskCopy, snapshot.Path)
-				r.logger.Error("Failed to save config to file (pending-aware path)", zap.Error(err))
-				return err
-			}
-			r.setDesired(diskCopy)
-		} else if err := r.configSvc.SaveToFile(); err != nil {
-			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
-			return err
-		}
-		r.logger.Debug("Config saved to disk via config service")
-	} else {
-		// Fallback to legacy save (no configSvc store to keep in sync)
-		if diskCopy != nil {
-			configCopy = diskCopy
-			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
-		}
-		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
-			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
-			return err
-		}
-		oldServerCount = r.syncServersToLegacyConfig(latestServers)
-		r.logger.Debug("Config saved to disk via legacy path")
-	}
-
-	r.logger.Debug("Configuration saved and in-memory config updated",
-		zap.Int("old_server_count", oldServerCount),
-		zap.Int("new_server_count", len(latestServers)),
-		zap.String("config_path", snapshot.Path))
-
-	// Telemetry keeps its OWN pointer to the live config (Service.config), and
-	// several heartbeat sections are computed from it rather than from the
-	// runtime: server_protocol_counts, trust_mode_distribution and the whole
-	// feature_flags block. That pointer moves only on NotifyConfigChanged, which
-	// until now was called from ApplyConfig and ReloadConfiguration but NOT from
-	// here — the path every server add/remove takes, whether it arrives via the
-	// REST API or the upstream_servers tool.
-	//
-	// The effect was silent and systematic: a fleet built up through the API
-	// reported {stdio:0, http:0, …} and an all-zero trust distribution until
-	// some UNRELATED edit to the config file happened to trigger a reload. The
-	// counts were not filtered or sampled — they were stale, and stale in the
-	// direction that makes adoption look like non-adoption.
-	//
-	// Fire-and-forget and cheap (a guarded pointer swap), matching the two
-	// existing call sites.
-	if r.telemetryService != nil {
-		r.telemetryService.NotifyConfigChanged(r.Config())
-	}
-
-	// Emit config.saved event to notify subscribers (Web UI, tray, etc.)
-	r.emitConfigSaved(snapshot.Path)
-
-	return nil
-}
-
-// syncServersToLegacyConfig writes the latest server list into the legacy
-// r.cfg store under r.mu and returns the previous server count. Callers must
-// hold configCommitMu so this stays serialized with the other config-commit
-// paths.
-func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
-	r.mu.Lock()
-	oldCfg := r.cfg
-	oldServerCount := len(oldCfg.Servers)
-	// ConfigService readers hold an immutable snapshot pointer. Mutating
-	// r.cfg.Servers in place therefore races request-time policy checks such as
-	// IsToolConfigDenied while a quarantine approval saves its new server state.
-	// Publish a cloned configuration instead, matching UpdateConfig's snapshot
-	// replacement semantics.
-	updatedCfg := (&configsvc.Snapshot{Config: oldCfg}).Clone()
-	updatedCfg.Servers = latestServers
-	r.cfg = updatedCfg
-	// The desired config is a separate struct once anything is pending, so the
-	// server list has to be written to both — otherwise the next PATCH merges
-	// onto a base whose servers are whatever they were at the last apply.
-	if r.desiredCfg != nil {
-		if r.desiredCfg == oldCfg {
-			r.desiredCfg = updatedCfg
-		} else {
-			desired := (&configsvc.Snapshot{Config: r.desiredCfg}).Clone()
-			desired.Servers = latestServers
-			r.desiredCfg = desired
-		}
-	}
-	r.mu.Unlock()
-	if r.configSvc != nil {
-		_ = r.configSvc.Update(updatedCfg, configsvc.UpdateTypeModify, "sync_servers")
-	}
-	return oldServerCount
+	return err
 }
 
 // ReloadConfiguration reloads the configuration from disk and resyncs state.
+//
+// Spec 116: one commit. The file is read inside the commit lock and published
+// once, pinned (the raw file is never published unpinned); storage and the
+// manager are reconciled against it before the snapshot is published.
 func (r *Runtime) ReloadConfiguration() error {
 	r.logger.Info("Reloading configuration from disk")
 
-	// Serialize the whole reload against ApplyConfig: both paths update the
-	// configSvc snapshot AND the legacy r.cfg/live components, but in different
-	// orders and releasing r.mu in between. Without this outer lock a
-	// watcher-triggered reload of config A can interleave with an API apply of
-	// B and leave r.cfg=A while configSvc=B persistently (PR #857 review). Held
-	// across configSvc.ReloadFromFile → r.cfg swap → live-component apply.
-	// MUST be acquired before r.mu (matches ApplyConfig's lock ordering).
-	r.configCommitMu.Lock()
-	defer r.configCommitMu.Unlock()
-
-	// Get current snapshot before reload
-	oldSnapshot := r.ConfigSnapshot()
-	oldServerCount := oldSnapshot.ServerCount()
-	dataDir := oldSnapshot.Config.DataDir
-
-	cfgPath := config.GetConfigPath(dataDir)
-
-	// Use ConfigService for file reload (handles disk I/O without holding locks)
-	var newSnapshot *configsvc.Snapshot
-	var err error
-	if r.configSvc != nil {
-		newSnapshot, err = r.configSvc.ReloadFromFile()
-	} else {
-		// Fallback to legacy path
-		newConfig, loadErr := config.LoadFromFile(cfgPath)
-		if loadErr != nil {
-			return fmt.Errorf("failed to reload config: %w", loadErr)
+	var (
+		oldCfg  *config.Config
+		fileCfg *config.Config
+		running *config.Config
+		path    string
+	)
+	res, err := r.Commit(commitReasonFileReload, func(tx *CommitTx) error {
+		oldCfg = tx.Base()
+		path = r.configSvc.Current().Path
+		if path == "" {
+			return fmt.Errorf("failed to reload config: no configuration file path set")
 		}
-		r.mu.RLock()
-		live := r.cfg
-		r.mu.RUnlock()
-		config.ReapplyFlagOverrides(newConfig, live)
-		// Already holding configCommitMu; use the locked helper so we don't
-		// re-acquire the non-reentrant mutex (would deadlock).
-		r.updateConfigLocked(newConfig, cfgPath)
-		newSnapshot = r.ConfigSnapshot()
-	}
+		loaded, loadErr := config.LoadFromFile(path)
+		if loadErr != nil {
+			return fmt.Errorf("failed to reload config: failed to load config from %s: %w", path, loadErr)
+		}
+		// Spec 107 FR-035: a hot reload re-runs the loader, which records (but
+		// cannot log) the removed-key / deprecated-key findings; emit them here,
+		// once per successful reload, with the logger the reload path has.
+		config.LogLoadDiagnostics(loaded, r.logger)
+		fileCfg = loaded
 
-	if err != nil {
-		return fmt.Errorf("failed to reload config: %w", err)
-	}
-
-	// Spec 107 FR-035: a hot reload re-runs the loader, which records (but
-	// cannot log) the removed-key / deprecated-key findings; emit them here,
-	// once per successful reload, with the logger the reload path has.
-	if newSnapshot != nil {
-		config.LogLoadDiagnostics(newSnapshot.Config, r.logger)
-	}
-
-	// fileCfg is the file as reloaded — the DESIRED config. running is what
-	// this process adopts from it: restart-gated fields pinned to the live
-	// values and the serve flags re-applied. They coincide unless something is
-	// pending or a flag is in force; every per-component side effect below
-	// follows running (parity with ApplyConfig, which applies hotCfg), while
-	// the restart-required warning diffs the file.
-	fileCfg := newSnapshot.Config
-	running := newSnapshot.Config
-
-	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
-	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
-	// a disk reload only lands in the configsvc snapshot — the API keeps
-	// serving the stale config, and a subsequent PATCH would deep-merge onto
-	// the stale base and save it, silently reverting the external edit.
-	// (configSvc.ReloadFromFile doesn't touch the legacy fields; the legacy
-	// fallback branch above already synced them via UpdateConfig.)
-	if r.configSvc != nil {
 		// A hand-edited restart-gated field cannot be adopted any more than an
 		// API-applied one can: /mcp stays bound to the mode it registered at
-		// startup, the listener stays bound, the DB stays open. Pinning them
-		// here is what keeps "the running config" meaning that on BOTH commit
-		// paths — without it every surface that reports the routing mode named
-		// a surface nobody was being served, and pinRestartGated on the apply
-		// path would pin to a value that was never live.
+		// startup, the listener stays bound, the DB stays open. Pin them to the
+		// live values. The loader re-applied the MCPPROXY_* env overrides but
+		// knows nothing about the serve flags; the RUNNING config is the file
+		// plus both, so a hand edit of an unrelated key must not switch
+		// `--read-only` off. Applied to the pinned copy only (nested blocks
+		// copy-on-write): the desired config stays the file.
 		r.mu.RLock()
 		live := r.cfg
-		pinned := pinRestartGated(live, newSnapshot.Config)
 		r.mu.RUnlock()
-
-		// The loader re-applied the MCPPROXY_* env overrides but knows nothing
-		// about the serve flags; the RUNNING config is the file plus both, so
-		// a hand edit of an unrelated key must not switch `--read-only` off.
-		// Applied to the pinned copy only (nested blocks copy-on-write): the
-		// desired config below stays the file, so a pending file edit of a
-		// restart-gated flag field (listen) is still reported as pending.
+		pinned := pinRestartGated(live, loaded)
 		config.ReapplyFlagOverrides(pinned, live)
-
-		// Republish so the configsvc snapshot and r.cfg cannot disagree:
-		// ReloadFromFile has already published the RAW file, which live
-		// subscribers would read as the running configuration. Skipped when
-		// nothing is pending and no flag differs — the common case, where
-		// pinned is equivalent to what ReloadFromFile just published.
-		if DetectConfigChanges(fileCfg, pinned).RequiresRestart || !configsEquivalent(fileCfg, pinned) {
-			if uerr := r.configSvc.Update(pinned, configsvc.UpdateTypeModify, "reload_pin_restart_gated"); uerr != nil {
-				r.logger.Error("Failed to republish the pinned configuration after reload", zap.Error(uerr))
-			} else {
-				newSnapshot = r.configSvc.Current()
-			}
-		}
 		running = pinned
 
-		r.mu.Lock()
-		r.cfg = pinned
+		tx.ReplaceConfig(pinned)
+		// The file is the source here: the reload never writes it back.
+		tx.noDisk()
 		// The file IS the desired configuration, so a disk reload resets it —
 		// including over an API change that was still waiting for a restart:
-		// whoever edited the file wins, and nothing may keep merging onto a
-		// base the file no longer agrees with. The hot serve flags ride along
-		// exactly as they do in the startup desired config (the effective
-		// one): every PUT/PATCH round-trips this document, and a base that
-		// had lost --read-only would hand the file's value back as an "edit".
-		// Restart-gated fields stay the file's, so a pending edit of listen
-		// is still reported as pending.
-		r.desiredCfg = pinRestartGated(fileCfg, pinned)
-		if newSnapshot.Path != "" {
-			r.cfgPath = newSnapshot.Path
-		}
-		r.mu.Unlock()
+		// whoever edited the file wins. The hot serve flags ride along exactly
+		// as they do in the startup desired config. Restart-gated fields stay
+		// the file's, so a pending edit of listen is still reported as pending.
+		tx.setDesired(pinRestartGated(loaded, pinned))
+		// Parity with ApplyConfig's live per-component side effects (PR #857
+		// review): logging, the tool-response truncator and the observability
+		// cadence must follow disk reloads too.
+		tx.publishHook(func(o, n *config.Config) {
+			r.applyComponentConfigLocked(o, n)
+			// Spec 079 FR-012: re-gate the update checker on the disk-reload
+			// path too (ApplyConfig covers the API path). Applied here, under
+			// the commit lock, so checker state follows commit order: run
+			// after the commit, a reload paused past publication could apply
+			// its older update_check over a newer commit's (review round 8).
+			r.applyUpdateCheckConfig(n)
+		})
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	// GH #965 review: an external file edit is applied silently even when it
-	// touches a restart-required field (listen, TLS, the HTTP server timeouts,
-	// …) — the snapshot and the API then report the new value while the running
-	// server keeps the old one. The API path surfaces this via
-	// ConfigApplyResult; the disk path had no channel at all, so at least make
-	// it loud in the log. Log-only on purpose: auto-restarting on a file save
-	// would be far more surprising than a stale deadline.
-	if oldSnapshot != nil && oldSnapshot.Config != nil && fileCfg != nil {
-		if result := DetectConfigChanges(oldSnapshot.Config, fileCfg); result.RequiresRestart {
+	// touches a restart-required field; at least make it loud in the log.
+	if oldCfg != nil && fileCfg != nil {
+		if result := DetectConfigChanges(oldCfg, fileCfg); result.RequiresRestart {
 			r.logger.Warn("Config file change includes restart-required fields; the running server keeps the old values until restart",
 				zap.Strings("changed_fields", result.ChangedFields),
 				zap.String("reason", result.RestartReason))
 		}
 	}
 
-	// Propagate the reloaded global config to the upstream manager and every
-	// running managed client (parity with ApplyConfig, spec 074): health-check
-	// loops and Docker-recovery decisions re-resolve values like
-	// health_check_interval from this, so external edits must reach it too —
-	// not only API applies.
-	if r.upstreamManager != nil {
-		r.upstreamManager.SetGlobalConfig(running)
-	}
-
-	// Parity with ApplyConfig's live per-component side effects (PR #857
-	// review): logging via SetLogConfig, the tool-response truncator, and the
-	// observability usage cadence must follow disk reloads too — otherwise an
-	// external edit lands in the snapshot/API while the running components
-	// keep their stale values.
-	r.mu.Lock()
-	r.applyComponentConfigLocked(oldSnapshot.Config, running)
-	r.mu.Unlock()
-
 	// Issue #1458: a hand edit of profiles / anonymous_profile must reach the
 	// per-profile search indexes now, not after postConfigReload's reconnect and
-	// discovery pass. The detector ran on the restart-pinned configs, so a
-	// restart-gated field cannot hide the profile fields from it.
-	if oldSnapshot.Config != nil &&
-		profileIndexInputsChanged(DetectConfigChanges(oldSnapshot.Config, running).ChangedFields) {
+	// discovery pass.
+	if oldCfg != nil && running != nil &&
+		profileIndexInputsChanged(DetectConfigChanges(oldCfg, running).ChangedFields) {
 		r.reconcileProfileIndexes()
 	}
 
-	if err := r.LoadConfiguredServers(nil); err != nil {
-		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
-		return fmt.Errorf("failed to reload servers: %w", err)
-	}
-
-	// MCP-2482: detect a telemetry enabled->disabled flip across the reload and
-	// fire the one-time opt-out beacon. This covers config changes that arrive
-	// via a disk reload — both the manual/triggered-reload path and the
-	// fsnotify config file watcher (config_watcher.go), which funnels external
-	// file edits into this method. nil-safe + fire-and-forget.
-	if r.telemetryService != nil {
-		r.telemetryService.NotifyConfigChanged(running)
-	}
-
-	// Spec 079 FR-012: re-gate the update checker on the disk-reload path too
-	// (ApplyConfig covers the API path). SetConfig no-ops when unchanged.
-	r.applyUpdateCheckConfig(running)
+	// MCP-2482 (telemetry opt-out beacon) is covered by the commit's telemetry
+	// notification; the update checker is re-gated in the publish hook above.
 
 	go r.postConfigReload()
 
+	newCount := 0
+	var version int64
+	if res != nil && res.Snapshot != nil {
+		newCount = res.Snapshot.ServerCount()
+		version = res.Snapshot.Version
+	}
+	oldCount := 0
+	if oldCfg != nil {
+		oldCount = len(oldCfg.Servers)
+	}
 	r.logger.Info("Configuration reload completed",
-		zap.String("path", newSnapshot.Path),
-		zap.Int64("version", newSnapshot.Version),
-		zap.Int("old_server_count", oldServerCount),
-		zap.Int("new_server_count", newSnapshot.ServerCount()),
-		zap.Int("server_delta", newSnapshot.ServerCount()-oldServerCount))
+		zap.String("path", path),
+		zap.Int64("version", version),
+		zap.Int("old_server_count", oldCount),
+		zap.Int("new_server_count", newCount),
+		zap.Int("server_delta", newCount-oldCount))
 
-	r.emitConfigReloaded(newSnapshot.Path)
+	r.emitConfigReloaded(path)
 
 	return nil
 }
@@ -2348,20 +2153,22 @@ func (r *Runtime) postConfigReload() {
 }
 
 // EnableServer enables or disables a server and persists the change.
+//
+// Spec 116: one commit. The flag reaches the live config, storage and the file
+// together, the commit purges a disabled server's tools from the index, and
+// the connect/disconnect runs after the commit lock is released.
 func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	r.logger.Info("Request to change server enabled state",
 		zap.String("server", serverName),
 		zap.Bool("enabled", enabled))
 
-	if err := r.storageManager.EnableUpstreamServer(serverName, enabled); err != nil {
-		r.logger.Error("Failed to update server enabled state in storage", zap.Error(err))
-		return fmt.Errorf("failed to update server '%s' in storage: %w", serverName, err)
-	}
-
-	// Save configuration synchronously to ensure changes are persisted before returning
-	if err := r.SaveConfiguration(); err != nil {
-		r.logger.Error("Failed to save configuration after state change", zap.Error(err))
-		return fmt.Errorf("failed to save configuration: %w", err)
+	if _, err := r.Commit("enable_toggle", func(tx *CommitTx) error {
+		// The commit sends the one servers.changed of this toggle (FR-028).
+		tx.EventExtra(map[string]any{"server": serverName, "enabled": enabled})
+		return tx.SetEnabled(serverName, enabled)
+	}); err != nil {
+		r.logger.Error("Failed to update server enabled state", zap.Error(err))
+		return fmt.Errorf("failed to update server '%s': %w", serverName, err)
 	}
 
 	// Emit config change activity for audit trail (Spec 024)
@@ -2371,128 +2178,34 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	}
 	r.EmitActivityConfigChange(action, serverName, "api", []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
 
-	// Perform heavy operations (server reload, reconnection, reindexing) asynchronously
-	// so the HTTP handler returns immediately after the storage write.
-	// The SSE event is emitted after completion so the UI updates.
-	go func() {
-		if err := r.LoadConfiguredServers(nil); err != nil {
-			r.logger.Error("Failed to synchronize runtime after enable toggle", zap.Error(err))
-		}
-
-		// When disabling a server, remove its tools from the search index
-		// This ensures disabled server tools don't appear in search results
-		if !enabled && r.indexManager != nil {
-			if err := r.indexManager.DeleteServerTools(serverName); err != nil {
-				r.logger.Warn("Failed to remove disabled server tools from index",
-					zap.String("server", serverName),
-					zap.Error(err))
-			} else {
-				r.logger.Info("Removed disabled server tools from search index",
-					zap.String("server", serverName))
-				// Refresh per-profile indexes that include this now-disabled server.
-				r.reindexAffectedProfiles(serverName)
-			}
-		}
-
-		r.HandleUpstreamServerChange(r.AppContext())
-
-		r.emitServersChanged("enable_toggle", map[string]any{
-			"server":  serverName,
-			"enabled": enabled,
-		})
-	}()
+	// Reindexing and reconnect checks are slow; run them off the caller's
+	// goroutine so the HTTP handler returns right after the commit.
+	go r.HandleUpstreamServerChange(r.AppContext())
 
 	return nil
-}
-
-// purgeQuarantinedServerFromIndex removes a now-quarantined server's tools from
-// the search index and refreshes any per-profile index that included it.
-//
-// Security (issue #1061): this is not an optimisation, it is the control.
-// Quarantine exists to keep an unreviewed server's tool DESCRIPTIONS away from
-// the agent, because that is where a Tool Poisoning Attack payload lives, and
-// the description-bearing branch of the search path has no query-time quarantine
-// filter — absence from the index IS the enforcement. So this must run on EVERY
-// path that can set the flag, not only on the API handler that first grew it: a
-// quarantine applied through the config file used to leave every tool indexed
-// and retrievable via retrieve_tools, complete with its description and a
-// call_with recommendation, right up until the call was refused.
-//
-// Failure is logged and swallowed rather than propagated: the server is
-// quarantined either way, and refusing the state change because the index write
-// failed would leave the caller believing the server is still live.
-func (r *Runtime) purgeQuarantinedServerFromIndex(serverName string) {
-	if r.indexManager == nil {
-		return
-	}
-
-	if err := r.indexManager.DeleteServerTools(serverName); err != nil {
-		r.logger.Warn("Failed to remove quarantined server tools from index",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return
-	}
-
-	r.logger.Info("Removed quarantined server tools from index",
-		zap.String("server", serverName))
-	// Refresh per-profile indexes that include this now-quarantined server.
-	r.reindexAffectedProfiles(serverName)
-}
-
-// PurgeQuarantinedServerFromIndex is the exported seam for writers outside the
-// runtime package (e.g. Server.UpdateServer behind REST PATCH, issue #1561)
-// that set the quarantine flag themselves: it runs the same purge as the
-// dedicated quarantine path instead of duplicating it.
-func (r *Runtime) PurgeQuarantinedServerFromIndex(serverName string) {
-	r.purgeQuarantinedServerFromIndex(serverName)
 }
 
 // QuarantineServer updates the quarantine state and persists the change.
 // Security: When quarantining a server, all its tools are removed from the index
 // to prevent Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
+//
+// Spec 116: one commit. The flag is stamped as an explicit decision (#937),
+// written to storage under the server's approval lock in the same step that
+// purges the index (FR-008), and published before this returns.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
 
-	// UX-02: flip storage under the server's tool-approval lock. An in-flight
-	// discovery pass finishes first (its quarantine decision then precedes the
-	// flip), and every later pass reads the flipped storage value under the
-	// same lock (checkToolApprovals consults storage, fail closed) even before
-	// the runtime config below catches up — so a just-quarantined server is
-	// never auto-baselined. The lock is NOT held across SaveConfiguration /
-	// LoadConfiguredServers, which can start discovery.
-	unlockApprovals := r.lockToolApprovals(serverName)
-	err := r.storageManager.QuarantineUpstreamServer(serverName, quarantined)
-	unlockApprovals()
+	res, err := r.Commit("quarantine_toggle", func(tx *CommitTx) error {
+		// The commit sends the one servers.changed and review.changed of this
+		// transition (FR-028); no caller-side copy follows.
+		tx.EventExtra(map[string]any{"server": serverName, "quarantined": quarantined})
+		return tx.SetQuarantined(serverName, quarantined)
+	})
 	if err != nil {
-		r.logger.Error("Failed to update server quarantine state in storage", zap.Error(err))
-		return fmt.Errorf("failed to update quarantine state for server '%s' in storage: %w", serverName, err)
-	}
-
-	// Security: When quarantining a server, immediately remove its tools from the index
-	// to prevent TPA exposure through search results
-	if quarantined {
-		r.purgeQuarantinedServerFromIndex(serverName)
-	}
-
-	// A human toggling quarantine IS a statement about this server (issue #937).
-	// Record it in the config document so the admission gate — and the
-	// "predates the gate" advisory — can tell a reviewed server from one that
-	// merely happens to have a config.db row. Must happen before the save below,
-	// which is what writes the file.
-	r.markQuarantineDecisionExplicit(serverName)
-
-	// Save configuration synchronously to ensure changes are persisted before returning
-	if err := r.SaveConfiguration(); err != nil {
-		r.logger.Error("Failed to save configuration after quarantine state change", zap.Error(err))
-		return fmt.Errorf("failed to save configuration: %w", err)
-	}
-
-	// Reload configuration synchronously to ensure server state is updated before returning
-	if err := r.LoadConfiguredServers(nil); err != nil {
-		r.logger.Error("Failed to synchronize runtime after quarantine toggle", zap.Error(err))
-		return fmt.Errorf("failed to reload configuration: %w", err)
+		r.logger.Error("Failed to update server quarantine state", zap.Error(err))
+		return fmt.Errorf("failed to update quarantine state for server '%s': %w", serverName, err)
 	}
 
 	// On unquarantine/approval, baseline-trust the server's CURRENT tool
@@ -2502,19 +2215,23 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	// re-index in HandleUpstreamServerChange so the newly-trusted tools become
 	// immediately searchable. Best-effort: a promotion failure must not abort
 	// the unquarantine the user already requested and that is already persisted.
+	//
+	// The follow-up is bound to the incarnation of the commit that
+	// unquarantined, taken from its result and never recaptured by name
+	// (FR-014i); Spec 116 PR2 adds the under-lock check of that incarnation.
 	if !quarantined {
-		if err := r.approveBaselineToolsForServer(serverName); err != nil {
+		var inc int64
+		if res != nil && res.Snapshot != nil {
+			if g, ok := res.Snapshot.ServerGeneration(serverName); ok {
+				inc = g.Incarnation
+			}
+		}
+		if err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil {
 			r.logger.Warn("Failed to baseline-approve tools on server unquarantine",
 				zap.String("server", serverName),
 				zap.Error(err))
 		}
 	}
-
-	r.emitServersChanged("quarantine_toggle", map[string]any{
-		"server":      serverName,
-		"quarantined": quarantined,
-	})
-	r.emitReviewChanged(serverName)
 
 	// Emit activity event for quarantine state change
 	reason := "Server unquarantined by administrator"
@@ -2532,42 +2249,41 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }
 
-// BulkEnableServers toggles the enabled state for multiple servers in a single
-// storage/config save to avoid repeated file writes. Returns a map of per-server
-// errors for operations that could not be applied.
+// BulkEnableServers toggles the enabled state for multiple servers in one
+// config commit (one storage transaction, one file write). Returns a map of
+// per-server errors for operations that could not be applied.
 func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error) {
 	resultErrs := make(map[string]error)
 	if len(serverNames) == 0 {
 		return resultErrs, nil
 	}
 
-	servers, err := r.storageManager.ListUpstreamServers()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list servers: %w", err)
-	}
-	serversByName := make(map[string]*config.ServerConfig, len(servers))
-	for _, srv := range servers {
-		serversByName[srv.Name] = srv
-	}
-
 	var changed []string
-	for _, name := range serverNames {
-		cfg, ok := serversByName[name]
-		if !ok {
-			resultErrs[name] = fmt.Errorf("server '%s' not found", name)
-			continue
+	_, err := r.Commit("bulk_enable_toggle", func(tx *CommitTx) error {
+		for _, name := range serverNames {
+			cur, ok := tx.Server(name)
+			if !ok {
+				resultErrs[name] = fmt.Errorf("server '%s' not found", name)
+				continue
+			}
+			if cur.Enabled == enabled {
+				r.logger.Debug("Skipping server already in desired enabled state",
+					zap.String("server", name),
+					zap.Bool("enabled", enabled))
+				continue
+			}
+			if err := tx.SetEnabled(name, enabled); err != nil {
+				resultErrs[name] = err
+				continue
+			}
+			changed = append(changed, name)
 		}
-		if cfg.Enabled == enabled {
-			r.logger.Debug("Skipping server already in desired enabled state",
-				zap.String("server", name),
-				zap.Bool("enabled", enabled))
-			continue
-		}
-		if err := r.storageManager.EnableUpstreamServer(name, enabled); err != nil {
-			resultErrs[name] = fmt.Errorf("failed to update server '%s' in storage: %w", name, err)
-			continue
-		}
-		changed = append(changed, name)
+		// The commit sends the one servers.changed of this bulk toggle.
+		tx.EventExtra(map[string]any{"enabled": enabled, "count": len(changed)})
+		return nil
+	})
+	if err != nil {
+		return resultErrs, fmt.Errorf("failed to save configuration: %w", err)
 	}
 
 	// Nothing changed; return collected errors (if any)
@@ -2575,83 +2291,76 @@ func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[str
 		return resultErrs, nil
 	}
 
-	// Persist once and reload once for all changes
-	if err := r.SaveConfiguration(); err != nil {
-		return resultErrs, fmt.Errorf("failed to save configuration: %w", err)
-	}
-
-	if err := r.LoadConfiguredServers(nil); err != nil {
-		return resultErrs, fmt.Errorf("failed to reload configuration: %w", err)
-	}
-
-	r.emitServersChanged("bulk_enable_toggle", map[string]any{
-		"enabled": enabled,
-		"count":   len(changed),
-	})
-
 	r.HandleUpstreamServerChange(r.AppContext())
 
 	return resultErrs, nil
 }
 
-// lookupServerConfigForRestart returns the named server's config, preferring
-// the on-disk mcp_config.json over the BoltDB cache. Falls back to BoltDB
-// when the disk file is unreadable, malformed, or missing the named server.
-//
-// On a successful disk read, the resolved config is also written back to
-// BoltDB so subsequent restarts (and any other read-from-storage code path)
-// see the same value. Without this, only the synchronous restart that did
-// the disk read would see the edit; the next one would replay storage and
-// regress. See issue #467 for context.
-//
-// The disk entry is admission-gated (issue #937) before it is persisted or
-// returned: a server whose file entry never stated `quarantined` keeps the
-// quarantine recorded for it instead of being reset to unquarantined.
-func (r *Runtime) lookupServerConfigForRestart(serverName string) *config.ServerConfig {
-	r.mu.RLock()
-	cfgPath := r.cfgPath
-	r.mu.RUnlock()
-
-	if cfgPath != "" {
-		diskCfg, err := config.LoadFromFile(cfgPath)
-		if err != nil {
-			r.logger.Warn("Failed to re-read config from disk during restart, falling back to storage",
-				zap.String("path", cfgPath),
-				zap.String("server", serverName),
-				zap.Error(err))
-		} else {
-			for _, srv := range diskCfg.Servers {
-				if srv != nil && srv.Name == serverName {
-					gated, persist := r.gateServerForRestart(diskCfg, srv)
-					if persist && r.storageManager != nil {
-						if saveErr := r.storageManager.SaveUpstreamServer(gated); saveErr != nil {
-							r.logger.Warn("Failed to persist disk-loaded config to storage during restart",
-								zap.String("server", serverName),
-								zap.Error(saveErr))
-						}
+// refreshServerFromDiskForRestart is RestartServer's disk refresh (Spec 116
+// FR-003): the named server's entry is re-read from mcp_config.json and
+// committed, so a fast edit-then-restart cannot race the watcher's debounce
+// (issue #467) and the edit reaches the live config, storage and the manager
+// together. The disk entry is admission-gated (#937): a server whose file
+// entry never stated `quarantined` keeps its recorded quarantine. When the file
+// is unreadable or does not list the server, the live entry stands. The file
+// itself is not rewritten.
+func (r *Runtime) refreshServerFromDiskForRestart(serverName string) (*config.ServerConfig, error) {
+	_, err := r.Commit("restart_refresh", func(tx *CommitTx) error {
+		// The file is the source here and is never written back (as on
+		// main): rewriting it from the live config would overwrite an
+		// unreloaded external edit of another server or of a global field,
+		// and its self-write marker would stop the watcher from applying it
+		// (review round 1).
+		tx.noDisk()
+		path := r.configSvc.Current().Path
+		var disk *config.ServerConfig
+		var diskCfg *config.Config
+		if path != "" {
+			loaded, err := config.LoadFromFile(path)
+			if err != nil {
+				r.logger.Warn("Failed to re-read config from disk during restart, using the live configuration",
+					zap.String("path", path),
+					zap.String("server", serverName),
+					zap.Error(err))
+			} else {
+				diskCfg = loaded
+				for _, srv := range loaded.Servers {
+					if srv != nil && srv.Name == serverName {
+						disk = srv
+						break
 					}
-					return gated
 				}
 			}
 		}
-	}
-
-	if r.storageManager == nil {
+		if disk != nil {
+			stored, serr := tx.loadStored()
+			storedCfg := make(map[string]*config.ServerConfig, len(stored))
+			for name, s := range stored {
+				storedCfg[name] = s.Config
+			}
+			gated, _ := r.admitServerForRestart(diskCfg, disk, storedCfg, serr == nil && r.storageManager != nil)
+			if _, live := tx.Server(serverName); live {
+				return tx.UpdateServer(serverName, func(cur *config.ServerConfig) error {
+					*cur = *config.CopyServerConfig(gated)
+					return nil
+				})
+			}
+			return tx.CreateServer(gated)
+		}
+		if _, ok := tx.Server(serverName); !ok {
+			return &ServerNotFoundError{Name: serverName}
+		}
 		return nil
-	}
-	servers, err := r.storageManager.ListUpstreamServers()
+	})
 	if err != nil {
-		r.logger.Error("Failed to list servers during restart fallback",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return nil
+		return nil, err
 	}
-	for _, srv := range servers {
-		if srv.Name == serverName {
-			return srv
+	for _, sc := range r.Config().Servers {
+		if sc != nil && sc.Name == serverName {
+			return sc, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // RestartServer restarts an upstream server by disconnecting and reconnecting it.
@@ -2665,7 +2374,13 @@ func (r *Runtime) RestartServer(serverName string) error {
 	// now hot-reloads external edits, but its debounce window means a fast
 	// edit-then-restart could still race a stale BoltDB record — disk-first
 	// here keeps the edit-then-restart UX deterministic regardless.
-	serverConfig := r.lookupServerConfigForRestart(serverName)
+	serverConfig, err := r.refreshServerFromDiskForRestart(serverName)
+	if err != nil {
+		if errors.Is(err, ErrServerNotFound) {
+			return fmt.Errorf("server '%s' not found in configuration", serverName)
+		}
+		return fmt.Errorf("failed to refresh server '%s' from disk: %w", serverName, err)
+	}
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)
 	}

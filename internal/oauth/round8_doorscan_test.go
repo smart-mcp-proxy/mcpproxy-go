@@ -64,6 +64,10 @@ var rawServerLeafDoors = map[string]string{
 		"httpapi.redactServerSecrets (personal edition) and by listAdminServers (server edition); both call " +
 		"oauth.RedactServerSecretFields.",
 
+	"internal/runtime/configsvc/service.go:(m).prepareLocked": "Spec 116 two-phase publish: builds the next " +
+		"configsvc.Snapshot (the live config itself, not a response). It reaches clients only through the same " +
+		"redacting doors as every published snapshot; this is the in-process store, like the updateLocked it replaced.",
+
 	// --- redacted at the return of the same function ---
 	"internal/server/server.go:upstreamStatsFromSnapshot": "the per-server entries are built raw and the whole map is " +
 		"handed to oauth.RedactUpstreamStats at the single return, reveal-gated. Issue #1148 round 8: this is the " +
@@ -141,6 +145,7 @@ var routedDoors = map[string]string{
 	"internal/server/mcp.go:(m).handleQuarantineSecurity": "the quarantine_security dispatcher — records its own mutation payload through scrubUpstreamTextForAudit.",
 	"internal/server/mcp.go:(m).handleUpstreamServers":    "the upstream_servers dispatcher — every add/update/patch payload is recorded through scrubUpstreamTextForAudit.",
 	"internal/server/mcp.go:(m).handleUpdateUpstream":     "upstream_servers update — the error it reports carries the upstream URL; scrubUpstreamText.",
+	"internal/server/mcp.go:(m).mergeUpstreamPatch":       "upstream_servers update/patch merge inside the Spec 116 config commit — a commit failure can carry the upstream URL; scrubUpstreamText.",
 	"internal/server/mcp.go:(m).handleTailLog":            "tail_log — upstream log lines carry whatever the server printed; scrubUpstreamLines/scrubUpstreamText.",
 	"internal/httpapi/server.go:(m).handleGetDiagnostics": "GET /api/v1/diagnostics — the same upstream error prose via oauth.ScrubUpstreamText.",
 

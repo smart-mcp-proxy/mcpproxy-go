@@ -89,6 +89,22 @@ jobs:
       - name: Check the repository
         run: bash scripts/check-no-unquarantine-callers.sh
 
+  # Spec 116 FR-009 (T002): storage's upstreams rows are written only by the
+  # config commit (internal/runtime/commit*.go). Hermetic grep; the self-test
+  # proves the check can fail.
+  check-upstream-write-sites:
+    name: Upstream Write Sites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the checker
+        run: bash scripts/check-upstream-write-sites.test.sh
+
+      - name: Check the repository
+        run: bash scripts/check-upstream-write-sites.sh
+
   test:
     name: Unit Tests
     needs: [build-frontend, verify-oas]

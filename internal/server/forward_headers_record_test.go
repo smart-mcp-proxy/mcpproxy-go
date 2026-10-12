@@ -123,7 +123,7 @@ func TestForwardedHeaderSuccessEchoScrubbedFromRecords(t *testing.T) {
 	// background reader of rt.Config() (for example the scan-settled handler).
 	cfg := *rt.Config()
 	cfg.Servers = servers
-	require.NoError(t, rt.LoadConfiguredServers(&cfg))
+	require.NoError(t, rt.CommitConfig(&cfg))
 	time.Sleep(3 * time.Second)
 	_ = rt.DiscoverAndIndexTools(ctx)
 	time.Sleep(3 * time.Second)

@@ -39,7 +39,11 @@ type Client struct {
 	// is lock-free, so it is safe to read whether or not mc.mu is held (the RLock
 	// accessor approach would deadlock the in-lock readers). Access via
 	// GetConfig() / SetConfig() only — never touch the field directly. (MCP-770)
-	cfg          atomic.Pointer[config.ServerConfig]
+	//
+	// Spec 116: the config and the commit generation it belongs to are one
+	// atomic pair, so a reader never sees a config with another commit's
+	// generation (Generation, SetConfigAt).
+	cfg          atomic.Pointer[stampedConfig]
 	coreClient   *core.Client
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
@@ -374,7 +378,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		healthProbe:    coreClient,
 		toolInvoker:    coreClient,
 	}
-	mc.cfg.Store(serverConfig)
+	mc.cfg.Store(&stampedConfig{cfg: serverConfig})
 	mc.globalConfig.Store(globalConfig)
 
 	// Spec 112 R6: coreClient is created once and never replaced, so installing
@@ -781,7 +785,46 @@ func (mc *Client) GetConnectionInfo() types.ConnectionInfo {
 // GetConfig returns the current server configuration pointer in a thread-safe,
 // lock-free manner. Safe to call whether or not mc.mu is held.
 func (mc *Client) GetConfig() *config.ServerConfig {
-	return mc.cfg.Load()
+	if p := mc.cfg.Load(); p != nil {
+		return p.cfg
+	}
+	return nil
+}
+
+// stampedConfig pairs a server config with the Spec 116 commit generation it
+// was committed at (0 when the instance was built by a path that does not know
+// it yet).
+type stampedConfig struct {
+	cfg *config.ServerConfig
+	gen int64
+}
+
+// Generation returns the commit generation of the config this instance holds
+// (Spec 116): the generation of the commit that created or last restamped it,
+// or 0 when the instance was built without one. Discovery captures it and
+// drops a result whose generation no longer matches the stored row (D15).
+func (mc *Client) Generation() int64 {
+	if p := mc.cfg.Load(); p != nil {
+		return p.gen
+	}
+	return 0
+}
+
+// SetConfigAt stores cfg together with its commit generation gen as one atomic
+// pair, but only when gen is newer than the generation the instance holds, so
+// a late legacy worker can never roll the config back (Spec 116 review R9.1).
+// It reports whether it applied. Lock-free, like SetConfig.
+func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) bool {
+	for {
+		cur := mc.cfg.Load()
+		if cur != nil && gen <= cur.gen {
+			return false
+		}
+		if mc.cfg.CompareAndSwap(cur, &stampedConfig{cfg: cfg, gen: gen}) {
+			mc.applyConfigSideEffects(cfg)
+			return true
+		}
+	}
 }
 
 // SetConfig atomically swaps the server configuration. Lock-free; callers must
@@ -792,9 +835,27 @@ func (mc *Client) GetConfig() *config.ServerConfig {
 // without this a hot-reloaded expose_prompts value would stay frozen at
 // whatever was in effect when the connection was created, until the next
 // reconnect-forcing change or restart.
+//
+// The instance keeps the commit generation it holds (Spec 116): SetConfig is
+// the legacy path that does not know one.
 func (mc *Client) SetConfig(config *config.ServerConfig) {
-	mc.cfg.Store(config)
-	if mc.coreClient != nil {
+	for {
+		cur := mc.cfg.Load()
+		next := &stampedConfig{cfg: config}
+		if cur != nil {
+			next.gen = cur.gen
+		}
+		if mc.cfg.CompareAndSwap(cur, next) {
+			break
+		}
+	}
+	mc.applyConfigSideEffects(config)
+}
+
+// applyConfigSideEffects pushes the parts of a swapped config that a running
+// connection caches.
+func (mc *Client) applyConfigSideEffects(config *config.ServerConfig) {
+	if mc.coreClient != nil && config != nil {
 		mc.coreClient.SetExposePrompts(config.ExposePrompts)
 	}
 	mc.warnForwardHeaders()

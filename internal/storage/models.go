@@ -264,6 +264,12 @@ type UpstreamRecord struct {
 	// Persisted here because SaveConfiguration rebuilds the JSON server list
 	// from these records: a field absent here is wiped on the next mutation.
 	ForwardHeaders []string `json:"forward_headers,omitempty"`
+
+	// Generation and Incarnation are the committed ServerGen of the config
+	// commit that last wrote this row (Spec 116). A row written before Spec
+	// 116 reads as zero; the next commit that writes it stamps it.
+	Generation  int64 `json:"generation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

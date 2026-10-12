@@ -119,7 +119,7 @@ func TestE2E_UpstreamIsErrorRecordedAsActivityError(t *testing.T) {
 	require.NoError(t, err)
 	cfg := rt.Config()
 	cfg.Servers = servers
-	require.NoError(t, rt.LoadConfiguredServers(cfg))
+	require.NoError(t, rt.CommitConfig(cfg))
 
 	time.Sleep(3 * time.Second)
 	_ = rt.DiscoverAndIndexTools(ctx)

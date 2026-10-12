@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -57,43 +58,33 @@ func configWithAppendedServer(current *config.Config, sc *config.ServerConfig) *
 // ServerExistsError is returned when a create-only add names a server that is
 // already configured. Its text is part of the contract: the REST 409 mapping,
 // cliclient, `upstream add --if-not-exists` and the registry add all match on
-// "already exists".
-type ServerExistsError struct{ Name string }
+// "already exists". Since Spec 116 the runtime's commit raises it.
+type ServerExistsError = runtime.ServerExistsError
 
-func (e *ServerExistsError) Error() string {
-	return fmt.Sprintf("server '%s' already exists", e.Name)
-}
-
-// createServer is the single create-only door for new upstream servers. It
-// refuses a name that is already present in the runtime config or in storage,
-// and publishes the new server to the runtime config, all under one mutex so
-// two concurrent adds of one name cannot both succeed. The storage write is
-// additionally atomic (one bbolt tx), which covers other writers that do not
-// take this mutex. On any error nothing has been published to the runtime
-// config.
+// createServer is the single create-only door for new upstream servers. It is
+// one config commit (Spec 116): the existence check runs against the live
+// configuration (and any row still stored under the name) inside the commit
+// lock, and the live config, storage and the file all receive the server
+// before this returns. configCommitMu gives the exclusion the old createMu
+// gave. On any error nothing has been written.
 func (s *Server) createServer(sc *config.ServerConfig) error {
-	s.createMu.Lock()
-	defer s.createMu.Unlock()
-
-	if cfg := s.runtime.Config(); cfg != nil {
-		for _, existing := range cfg.Servers {
-			if existing != nil && existing.Name == sc.Name {
-				return &ServerExistsError{Name: sc.Name}
-			}
-		}
+	if h := s.createAfterConfigRead; h != nil {
+		h(sc.Name)
 	}
-	if err := s.runtime.StorageManager().CreateUpstreamServer(sc); err != nil {
-		if errors.Is(err, storage.ErrUpstreamExists) {
-			return &ServerExistsError{Name: sc.Name}
-		}
-		return fmt.Errorf("failed to save server to storage: %w", err)
+	_, err := s.runtime.Commit("create_server", func(tx *runtime.CommitTx) error {
+		return tx.CreateServer(sc)
+	})
+	if err == nil {
+		return nil
 	}
-	// runtime.Config() is the live immutable snapshot; copy-on-write, see
-	// configWithAppendedServer.
-	if updated := configWithAppendedServer(s.runtime.Config(), sc); updated != nil {
-		s.runtime.UpdateConfig(updated, "")
+	var exists *ServerExistsError
+	if errors.As(err, &exists) {
+		return exists
 	}
-	return nil
+	if errors.Is(err, storage.ErrUpstreamExists) {
+		return &ServerExistsError{Name: sc.Name}
+	}
+	return fmt.Errorf("failed to save server: %w", err)
 }
 
 // configWithoutServer returns a NEW *config.Config that omits the named server,
@@ -120,24 +111,18 @@ func configWithoutServer(current *config.Config, name string) *config.Config {
 	return &updated
 }
 
-// removeServerStorage runs removeStorage (the storage deletion of a server) and,
-// on success, synchronously drops the server from the runtime config snapshot,
-// both under createMu. createServer treats the runtime config as an existence
-// source, so without this a delete followed immediately by an add of the same
-// name would be refused until the async config sync caught up (and forever when
-// no config file path is available). Holding createMu across both steps makes a
-// racing create see the server either fully present or fully gone.
-func (s *Server) removeServerStorage(name string, removeStorage func() error) error {
-	s.createMu.Lock()
-	defer s.createMu.Unlock()
-
-	if err := removeStorage(); err != nil {
-		return err
+// removeServerFromConfig removes a server through one config commit (Spec 116):
+// the live config, its storage row and call history, and the file lose it
+// together, and the commit purges its tools from the index. A delete followed
+// immediately by an add of the same name therefore always succeeds, and no
+// later save can resurrect the server (#1559). Unknown names fail with
+// runtime.ErrServerNotFound.
+func (s *Server) removeServerFromConfig(name string) error {
+	if s.runtime == nil {
+		return fmt.Errorf("runtime not available")
 	}
-	if s.runtime != nil {
-		if updated := configWithoutServer(s.runtime.Config(), name); updated != nil {
-			s.runtime.UpdateConfig(updated, "")
-		}
-	}
-	return nil
+	_, err := s.runtime.Commit("remove_server", func(tx *runtime.CommitTx) error {
+		return tx.RemoveServer(name)
+	})
+	return err
 }

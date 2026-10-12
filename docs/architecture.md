@@ -115,6 +115,65 @@ The event bus enables real-time communication between runtime and UI components:
 - Automatic connection management with proper cleanup
 - JSON-formatted event payloads for easy consumption
 
+### Config Commit (Spec 116)
+
+Every change to the server set, or to any server's fields, is one **config
+commit** (`Runtime.Commit`, `internal/runtime/commit.go`). The live
+configuration is the only source of server membership and fields; the
+`upstreams` rows in `config.db` are its projection, written by the commit.
+`SaveConfiguration` never rebuilds the server list from storage, so a removed
+server cannot be resurrected by a later save.
+
+A commit holds `configCommitMu` from reading the live config until the new
+config is published and runs one pipeline:
+
+1. **Build**: clone the live config; the caller mutates the copy through a
+   `CommitTx` (`CreateServer`, `UpdateServer`, `SetEnabled`, `SetQuarantined`,
+   `RemoveServer`, `ReplaceConfig`, `ReconcileLive`, `MutateGlobal`).
+2. **Gate**: the #937 admission gate, against the stored view.
+3. **Prepare**: `configsvc.Prepare` assigns the commit generation `G` and
+   per-server generations (`ServerGen{Gen, Incarnation}`; an unchanged entry
+   keeps its generation, a re-created name gets a new incarnation).
+4. **Locks**: the approval lock of every server step 6 writes, sorted:
+   changed servers, servers with an `UnderApprovalLock` hook, removals,
+   replacements, OAuth-state clears and projection-repair saves of a server
+   the commit did not change (a repair can rewrite the stored trust and
+   quarantine policy a discovery pass reads under that lock). A global
+   approval-policy change (`quarantine_enabled`) takes every configured
+   server's lock. Dropping the lock for an unchanged server whose row is
+   repaired reopens the discovery-versus-repair race (#1571).
+5. **Disk** (only when a path is set and the commit writes the file): the raw
+   file is captured, then the new file is written. A file reload
+   (`ReloadConfiguration`) never writes the file, so it skips this step.
+6. **Storage**: one bbolt transaction (rows with their stamps, deletions,
+   `meta.config_commit_generation`), then the index purge for removed,
+   quarantined and disabled servers. The approval locks are released. On a
+   storage failure nothing is published; when step 5 wrote the file, the
+   captured file is restored byte for byte (or removed if it did not exist).
+   A failed reload wrote nothing, so the file keeps the operator's edit
+   unapplied: the next reload applies it, but the next disk-writing commit
+   (`SaveConfiguration`, a server mutation, `ApplyConfig`) writes the live
+   config over it.
+7. **Advance**: retained instances get their new config and generation
+   (`Manager.RestampRetained`).
+8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.
+
+After the lock is released the commit unregisters removed servers, schedules
+connect workers, requests discovery for restamped instances and sends its
+events once. A discovery pass makes its final eligibility check (stored row
+present, enabled, not quarantined, generation unchanged) and its index writes
+in one hold of the server's approval lock, and approval policy is read from
+storage, so a pass can never re-index a server a commit has just quarantined
+or removed.
+
+**Lock order** (outermost first): `configCommitMu` → server approval locks
+(sorted; released before step 7) → `storage.Manager.mu`/bbolt; `configCommitMu`
+→ `upstream.Manager.captureMu` (W) → `Manager.mu` in step 7; `configCommitMu`
+→ `configsvc` update lock → `Runtime.mu`. Code holding any of the inner locks
+must never call `Commit`. `scripts/check-upstream-write-sites.sh` (CI) fails
+when an `upstreams` row is written anywhere but the storage package and
+`internal/runtime/commit*.go`.
+
 ### Runtime Lifecycle
 
 **Initialization**:

@@ -36,6 +36,13 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	for _, server := range discoveryConfig.Servers {
 		if server.Name == "filesystem" {
 			server.Quarantined = false
+			// The configured server gets the counting upstream's transport
+			// (Spec 116): the unquarantine below is a config commit whose
+			// connect worker re-adds the CONFIGURED server, and a config
+			// without a transport would replace the runtime client wired to
+			// the counting upstream with one that can never connect.
+			server.URL = up.URL
+			server.Protocol = "streamable-http"
 		}
 	}
 	rt.UpdateConfig(discoveryConfig, "")

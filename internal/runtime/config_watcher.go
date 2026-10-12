@@ -165,6 +165,28 @@ func (r *Runtime) noteConfigSelfWriteWithEdits(cfg, mergeBase *config.Config, pa
 	}
 }
 
+// noteConfigSelfWriteBytes records raw bytes mcpproxy itself is about to put
+// back on disk (the Spec 116 commit compensation restores the pre-commit
+// file verbatim), so the watcher does not read the restore as an external
+// edit and re-run a failed reload in a loop.
+func (r *Runtime) noteConfigSelfWriteBytes(data []byte) {
+	payload := bytes.TrimSpace(data)
+	now := time.Now()
+	r.selfWriteMu.Lock()
+	defer r.selfWriteMu.Unlock()
+	r.pruneExpiredSelfWritesLocked(now)
+	for i := range r.recentSelfWrites {
+		if bytes.Equal(r.recentSelfWrites[i].payload, payload) {
+			r.recentSelfWrites[i].at = now
+			return
+		}
+	}
+	r.recentSelfWrites = append(r.recentSelfWrites, selfWriteEntry{payload: append([]byte(nil), payload...), at: now})
+	if len(r.recentSelfWrites) > selfWriteMaxEntries {
+		r.recentSelfWrites = r.recentSelfWrites[len(r.recentSelfWrites)-selfWriteMaxEntries:]
+	}
+}
+
 // forgetConfigSelfWrite removes the entry for a config whose save FAILED:
 // those bytes never reached disk, so a later byte-identical write of them is
 // a genuine external edit the watcher must reload. Only the failed payload is
