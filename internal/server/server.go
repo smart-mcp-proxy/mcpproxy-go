@@ -3323,6 +3323,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
 
 	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection.
+	// Explicit HTTPS reverse-proxy callbacks reuse OAuth's state/PKCE flow.
+	// Providers cannot attach an API key; the callback dispatcher requires a
+	// live, single-use state and never initiates a sign-in itself.
+	mux.HandleFunc(config.OAuthRemoteCallbackPrefix, oauth.GetGlobalCallbackManager().RemoteCallbackHandler)
+
 	// Spec 080 (FR-006): every serve of the UI entrypoint (index document)
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe

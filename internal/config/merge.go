@@ -579,6 +579,9 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 	if patch.RedirectURI != "" {
 		result.RedirectURI = patch.RedirectURI
 	}
+	if patch.CallbackBaseURL != "" {
+		result.CallbackBaseURL = patch.CallbackBaseURL
+	}
 
 	if patch.AuthorizationEndpoint != "" {
 		result.AuthorizationEndpoint = patch.AuthorizationEndpoint
@@ -776,10 +779,11 @@ func copyOAuthConfig(src *OAuthConfig) *OAuthConfig {
 	}
 
 	dst := &OAuthConfig{
-		ClientID:     src.ClientID,
-		ClientSecret: src.ClientSecret,
-		RedirectURI:  src.RedirectURI,
-		PKCEEnabled:  src.PKCEEnabled,
+		ClientID:        src.ClientID,
+		ClientSecret:    src.ClientSecret,
+		RedirectURI:     src.RedirectURI,
+		CallbackBaseURL: src.CallbackBaseURL,
+		PKCEEnabled:     src.PKCEEnabled,
 
 		AuthorizationEndpoint: src.AuthorizationEndpoint,
 		TokenEndpoint:         src.TokenEndpoint,

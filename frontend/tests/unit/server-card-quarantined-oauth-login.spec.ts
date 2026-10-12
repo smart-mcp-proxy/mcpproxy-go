@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ServerCard from '@/components/ServerCard.vue'
 import { useServersStore } from '@/stores/servers'
+import { useSystemStore } from '@/stores/system'
 import type { Server } from '@/types'
 
 vi.mock('@/services/api', () => ({
@@ -89,12 +90,25 @@ describe('ServerCard — quarantined server that needs OAuth sign-in', () => {
   it('the primary action triggers the OAuth flow for the server', async () => {
     const card = mountCard(quarantinedOAuthServer())
     const store = useServersStore()
-    const spy = vi.spyOn(store, 'triggerOAuthLogin').mockResolvedValue(undefined as never)
+    const spy = vi.spyOn(store, 'triggerOAuthLogin').mockResolvedValue({ browser_opened: true })
 
     await card.find('[data-test="server-card-primary-action"]').trigger('click')
     await flushPromises()
 
     expect(spy).toHaveBeenCalledWith('github')
+    expect(useSystemStore().toasts.at(-1)?.title).toBe('Sign-in opened')
+  })
+
+  it('keeps a clickable sign-in link when the client browser blocks the popup', async () => {
+    const card = mountCard(quarantinedOAuthServer())
+    const url = 'https://provider.example/authorize?state=test'
+    vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue({ browser_opened: false, auth_url: url })
+    await card.find('[data-test="server-card-primary-action"]').trigger('click')
+    await flushPromises()
+    const toast = useSystemStore().toasts.at(-1)
+    expect(toast?.type).toBe('warning')
+    expect(toast?.duration).toBe(0)
+    expect(toast?.link).toEqual({ url, label: 'Sign in to github' })
   })
 
   it('offers Review, not Sign in, for a quarantined server that does not need sign-in', () => {

@@ -58,6 +58,15 @@ func TestResolveCallbackPortForPersistence_UsesLiveCallbackServer(t *testing.T) 
 		"the live callback server's redirect URI must win over the stored value")
 }
 
+func TestResolveCallbackRedirectURIForPersistence_UsesRemoteCallback(t *testing.T) {
+	name := "persist-remote-callback"
+	t.Cleanup(func() { _ = oauth.GetGlobalCallbackManager().StopCallbackServer(name) })
+	cfg := &config.ServerConfig{Name: name, URL: "http://127.0.0.1:1/mcp", OAuth: &config.OAuthConfig{ClientID: "static", Scopes: []string{"read"}, CallbackBaseURL: "https://proxy.example"}}
+	created := oauth.CreateOAuthConfig(cfg, nil)
+	require.NotNil(t, created)
+	require.Equal(t, created.RedirectURI, resolveCallbackRedirectURIForPersistence(name, "", nil))
+}
+
 // TestResolveCallbackPortForPersistence_FallsBackToStoredPort verifies we do not
 // regress the original behavior when no callback server is running.
 func TestResolveCallbackPortForPersistence_FallsBackToStoredPort(t *testing.T) {

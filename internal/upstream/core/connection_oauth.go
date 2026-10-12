@@ -1845,7 +1845,7 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 // reuse a client_id the provider registered for the old path.
 func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB) string {
 	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.RedirectURI != "" {
-		return callbackServer.RedirectURI
+		return callbackServer.EffectiveRedirectURI()
 	}
 
 	if store == nil {

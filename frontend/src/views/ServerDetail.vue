@@ -2965,11 +2965,13 @@ async function triggerOAuth() {
 
   actionLoading.value = true
   try {
-    await serversStore.triggerOAuthLogin(server.value.name)
+    const result = await serversStore.triggerOAuthLogin(server.value.name)
     systemStore.addToast({
-      type: 'success',
-      title: 'OAuth Login Triggered',
-      message: `Check your browser for ${server.value.name} login`,
+      type: result.browser_opened ? 'info' : 'warning',
+      title: result.browser_opened ? 'Sign-in opened' : 'Open the sign-in page',
+      message: result.browser_opened ? `Finish signing in to ${server.value.name} in the new tab.` : 'Your browser blocked the new tab. Use the link below to continue.',
+      link: result.auth_url ? { url: result.auth_url, label: `Sign in to ${server.value.name}` } : undefined,
+      duration: result.browser_opened ? 10000 : 0,
     })
   } catch (error) {
     systemStore.addToast({
