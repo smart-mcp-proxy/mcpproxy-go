@@ -63,11 +63,9 @@ func TestAdmissionPublicationCannotRestoreStaleSharing(t *testing.T) {
 	_, err := rt.ApplyConfig(cfg, path)
 	require.NoError(t, err)
 
-	snapshot := rt.ConfigSnapshot()
-	previous := snapshot.Config
-	stale := snapshot.Clone()
-	stale.Servers[0].MarkQuarantineExplicitlySet(true)
-
+	// Spec 116 removed the admission re-publication of a derived (possibly
+	// stale) config; the decision it carried is now a commit of its own, which
+	// reads the live entry under the commit lock.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -77,7 +75,13 @@ func TestAdmissionPublicationCannotRestoreStaleSharing(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		rt.publishAdmissionGatedConfig(previous, stale)
+		_, commitErr := rt.Commit("mark_quarantine_explicit", func(tx *CommitTx) error {
+			return tx.UpdateServer("fixture", func(cur *config.ServerConfig) error {
+				cur.MarkQuarantineExplicitlySet(true)
+				return nil
+			})
+		})
+		require.NoError(t, commitErr)
 	}()
 	wg.Wait()
 

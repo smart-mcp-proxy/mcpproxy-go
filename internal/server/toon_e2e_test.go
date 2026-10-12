@@ -216,7 +216,7 @@ func TestE2E_ToonOutputModeFlip(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 	time.Sleep(2 * time.Second)
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
 

@@ -4,11 +4,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Issue #937 — the trust-mode admission gate on the CONFIG-LOAD path.
+//
+// Since Spec 116 the gate runs in step 2 of every config commit
+// (Runtime.Commit), against the stored view read inside the commit lock.
 //
 // Before this, Config.QuarantineDefaultForServer() was invoked from exactly
 // three ADD-time sites (registry add, the upstream_servers MCP tool, the REST
@@ -94,7 +96,7 @@ import (
 // for a server that is not quarantined and never stated the key; without that,
 // a single save (any `PUT /api/v1/config`) stamped `"quarantined": false` on
 // every server, the presence check below skipped them forever, and the save
-// loop in LoadConfiguredServers then wrote false over the config.db quarantine.
+// loop of the reconcile then wrote false over the config.db quarantine.
 //
 // # Immutability
 //
@@ -248,9 +250,9 @@ func (r *Runtime) applyConfigLoadAdmissionGate(cfg *config.Config, stored map[st
 		}
 	}
 
-	// Activity is emitted off the caller's goroutine: this runs inside
-	// configsvc's publish lock on the hot path, and an event subscriber must
-	// never be able to stall a config update.
+	// Activity is emitted off the caller's goroutine: this runs inside the
+	// config commit lock, and an event subscriber must never be able to stall
+	// a config update.
 	pending := make([]admissionDecision, 0, len(decisions))
 	for _, d := range decisions {
 		if d.newly || d.neverApproved {
@@ -277,9 +279,8 @@ func (r *Runtime) reportPreFixAdmissions(names []string) {
 	if len(names) == 0 {
 		return
 	}
-	// The gate runs several times per process (gateInitialConfig, then
-	// LoadConfiguredServers, then the pre-publish hook on every publish); name
-	// each affected server once per process.
+	// The gate runs on every config commit; name each affected server once per
+	// process.
 	r.preFixMu.Lock()
 	if r.preFixReported == nil {
 		r.preFixReported = make(map[string]struct{})
@@ -322,7 +323,7 @@ func (r *Runtime) storedServersForAdmission() (map[string]*config.ServerConfig, 
 	return byName, true
 }
 
-// gateServerForRestart runs one server entry that was just re-read from
+// admitServerForRestart runs one server entry that was just re-read from
 // mcp_config.json (the #467 disk-first restart) through the admission gate and
 // reports whether the result may be persisted to config.db.
 //
@@ -334,12 +335,6 @@ func (r *Runtime) storedServersForAdmission() (map[string]*config.ServerConfig, 
 // gate" warning or emit duplicate first-seen activity on every restart.
 //
 // Like the gate itself this can only ever ADD quarantine.
-func (r *Runtime) gateServerForRestart(diskCfg *config.Config, srv *config.ServerConfig) (*config.ServerConfig, bool) {
-	stored, ok := r.storedServersForAdmission()
-	return r.admitServerForRestart(diskCfg, srv, stored, ok)
-}
-
-// admitServerForRestart is gateServerForRestart with the storage view injected.
 //
 // When storage is readable the disk entry goes through applyConfigLoadAdmissionGate
 // as a one-server config. When it is not, the gate would abstain, but a restart
@@ -384,113 +379,49 @@ func (r *Runtime) admitServerForRestart(diskCfg *config.Config, srv *config.Serv
 	return out, false
 }
 
-// gateConfigForAdmission is the one-call form used by paths that hold a config
-// they have not published yet (ApplyConfig before its disk write, and the
-// configsvc pre-publish hook). It reads storage itself.
+// gateConfigForAdmission is the one-call form used by ApplyConfig, which holds
+// a config it has not committed yet and must gate it before the disk write of
+// its restart-required branch. It reads storage itself.
 func (r *Runtime) gateConfigForAdmission(cfg *config.Config) *config.Config {
 	stored, ok := r.storedServersForAdmission()
 	gated, _ := r.applyConfigLoadAdmissionGate(cfg, stored, ok)
 	return gated
 }
 
-// installAdmissionGateHook wires the gate into configsvc so that EVERY
-// configuration published to subscribers has already been through admission.
-//
-// Without it there is a real exposure window: ReloadConfiguration publishes the
-// freshly-parsed file (waking the supervisor's reconcile loop) and only then
-// calls LoadConfiguredServers, so a poisoned server hand-added to a running
-// mcpproxy could be connected and its tools indexed before the gate flipped the
-// bit.
-func (r *Runtime) installAdmissionGateHook() {
-	if r.configSvc == nil {
-		return
-	}
-	r.configSvc.SetPrePublishHook(func(cfg *config.Config) *config.Config {
-		return r.gateConfigForAdmission(cfg)
-	})
-}
-
 // gateInitialConfig applies admission to the snapshot configsvc was constructed
-// with. NewService stores that snapshot directly, so it never passes through the
-// pre-publish hook; this must run before anything can observe it (i.e. before
-// supervisor.Start()).
+// with, and projects it into storage, before anything can observe it (i.e.
+// before supervisor.Start()). Since Spec 116 it is a config commit: admission
+// runs in the commit's gate step, so every later publication is gated the same
+// way and no pre-publish hook exists (review R1.7). It writes no file (the
+// boot never rewrites the operator's config) and schedules no connect: the
+// boot commit (backgroundInitialization) does that with Bootstrap().
 func (r *Runtime) gateInitialConfig() {
 	if r.configSvc == nil {
 		return
 	}
-	current := r.configSvc.Current()
-	if current == nil || current.Config == nil {
-		return
-	}
-	if gated := r.gateConfigForAdmission(current.Config); gated != current.Config {
-		if err := r.configSvc.Update(gated, configsvc.UpdateTypeModify, "config_load_admission_gate"); err != nil {
-			r.logger.Error("Failed to publish admission-gated startup configuration", zap.Error(err))
-			return
-		}
-		r.mu.Lock()
-		r.cfg = gated
-		r.setDesiredLocked(gated)
-		r.mu.Unlock()
+	r.seedCommitGeneration()
+	if _, err := r.Commit(commitReasonAdmissionGate, func(tx *CommitTx) error {
+		tx.ReconcileLive()
+		tx.noDisk()
+		tx.noWorkers()
+		return nil
+	}); err != nil {
+		r.logger.Error("Failed to commit the admission-gated startup configuration", zap.Error(err))
 	}
 }
 
-// markQuarantineDecisionExplicit records, in the published configuration, that
-// a quarantine value has been stated for this server. Called when a human
-// toggles quarantine: config.db cannot carry the presence bit, so without this
-// the next SaveConfiguration would drop the key and the server would look
-// never-reviewed again.
-//
-// Republished as a copy for the same reason the gate is: the snapshot's
-// ServerConfig pointers are read concurrently by the supervisor.
-func (r *Runtime) markQuarantineDecisionExplicit(serverName string) {
-	if r.configSvc == nil {
+// seedCommitGeneration seeds configsvc's version from storage so commit
+// generations are monotonic across restarts (Spec 116 D6, T1.9).
+func (r *Runtime) seedCommitGeneration() {
+	if r.storageManager == nil || r.configSvc == nil {
 		return
 	}
-	current := r.configSvc.Current()
-	if current == nil || current.Config == nil {
-		return
-	}
-
-	for i, sc := range current.Config.Servers {
-		if sc == nil || sc.Name != serverName || sc.QuarantineExplicitlySet() {
-			continue
-		}
-		updated := *current.Config
-		updated.Servers = make([]*config.ServerConfig, len(current.Config.Servers))
-		copy(updated.Servers, current.Config.Servers)
-		stamped := config.CopyServerConfig(sc)
-		stamped.MarkQuarantineExplicitlySet(true)
-		updated.Servers[i] = stamped
-		r.publishAdmissionGatedConfig(current.Config, &updated)
-		return
-	}
-}
-
-// publishAdmissionGatedConfig swaps a gated config in for the one it was
-// derived from, atomically, so subscribers see the decision.
-//
-// It is a no-op when `previous` is no longer the published config: someone
-// committed a newer one while we were gating, and that config went through the
-// pre-publish hook on its own way in. Clobbering it here would revert a
-// concurrent apply.
-func (r *Runtime) publishAdmissionGatedConfig(previous, gated *config.Config) {
-	if r.configSvc == nil || previous == gated {
-		return
-	}
-	published, err := r.configSvc.UpdateIfCurrent(previous, gated, configsvc.UpdateTypeModify, "config_load_admission_gate")
+	seed, _, err := r.storageManager.ConfigCommitState()
 	if err != nil {
-		r.logger.Error("Failed to publish admission-gated configuration", zap.Error(err))
+		r.logger.Warn("Failed to read the persisted config commit generation", zap.Error(err))
 		return
 	}
-	if !published {
-		return
-	}
-	r.mu.Lock()
-	if r.cfg == previous {
-		r.cfg = gated
-		r.setDesiredLocked(gated)
-	}
-	r.mu.Unlock()
+	r.configSvc.SeedVersion(seed)
 }
 
 // hasApprovalBaseline reports whether serverName has ever had a tool approved:

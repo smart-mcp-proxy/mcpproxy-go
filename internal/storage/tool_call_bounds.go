@@ -404,33 +404,40 @@ func serverIDFromToolCallsBucket(name string) (string, bool) {
 // for any caller that recorded without registering an identity.
 func (m *Manager) deleteToolCallHistoryForName(name string) error {
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
-		ids := []string{name}
-
-		if bucket := tx.Bucket([]byte(serverIdentitiesBucket)); bucket != nil {
-			if err := bucket.ForEach(func(_, value []byte) error {
-				var identity ServerIdentity
-				if err := json.Unmarshal(value, &identity); err != nil {
-					// Cannot read the name, so cannot rule this identity out.
-					// Deleting a stranger's history would be worse than leaving
-					// one behind, so this only widens the delete when the id
-					// looks like this server's own: the ONLY safe use of an
-					// unreadable record here is none.
-					return nil //nolint:nilerr // an unreadable identity is not a reason to fail a delete
-				}
-				if identity.ServerName == name {
-					ids = append(ids, identity.ID)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-
-		for _, id := range ids {
-			if _, err := deleteToolCallBucketTx(tx, id); err != nil {
-				return err
-			}
-		}
-		return nil
+		return deleteToolCallHistoryForNameTx(tx, name)
 	})
+}
+
+// deleteToolCallHistoryForNameTx is deleteToolCallHistoryForName inside a
+// caller's transaction (Spec 116: the commit deletes a removed server's row and
+// history in one bbolt transaction).
+func deleteToolCallHistoryForNameTx(tx *bbolt.Tx, name string) error {
+	ids := []string{name}
+
+	if bucket := tx.Bucket([]byte(serverIdentitiesBucket)); bucket != nil {
+		if err := bucket.ForEach(func(_, value []byte) error {
+			var identity ServerIdentity
+			if err := json.Unmarshal(value, &identity); err != nil {
+				// Cannot read the name, so cannot rule this identity out.
+				// Deleting a stranger's history would be worse than leaving
+				// one behind, so this only widens the delete when the id
+				// looks like this server's own: the ONLY safe use of an
+				// unreadable record here is none.
+				return nil //nolint:nilerr // an unreadable identity is not a reason to fail a delete
+			}
+			if identity.ServerName == name {
+				ids = append(ids, identity.ID)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	for _, id := range ids {
+		if _, err := deleteToolCallBucketTx(tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

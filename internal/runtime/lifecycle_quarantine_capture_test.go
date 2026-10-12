@@ -276,7 +276,7 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	}, 5*time.Second, 10*time.Millisecond, "supervisor must bind the replacement client before its review capture")
 	tools, err := client.ListTools(context.Background())
 	require.NoError(t, err)
-	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), tools)
+	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), client.Generation(), tools)
 	require.NoError(t, err)
 	require.True(t, published)
 	current, err := rt.storageManager.GetToolApproval("quarantined", "current_definition")

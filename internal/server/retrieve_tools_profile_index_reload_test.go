@@ -56,7 +56,7 @@ func newProfileReloadFixture(t *testing.T, mutate func(*config.ProfileConfig)) *
 
 	// Settle the server set first so a later reload does not treat a and b as
 	// first-seen and empty the shared index.
-	require.NoError(t, srv.runtime.LoadConfiguredServers(nil))
+	require.NoError(t, srv.runtime.ReconcileServers())
 	require.NoError(t, srv.runtime.IndexManager().BatchIndexTools([]*config.ToolMetadata{
 		{Name: "a:alpha_tool", ServerName: "a", Description: "alpha_tool", ParamsJSON: "{}",
 			Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}},

@@ -441,6 +441,15 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
+	return m.AddServerConfigAt(id, serverConfig, 0)
+}
+
+// AddServerConfigAt is AddServerConfig for a config committed at Spec 116
+// commit generation gen: a new instance is stamped with gen, and a retained
+// instance is restamped with it (SetConfigAt, only forward). gen 0 means
+// "unknown" and leaves the stamp as it is. PR3 of Spec 116 adds the
+// execution-time generation check; this method does not refuse anything.
+func (m *Manager) AddServerConfigAt(id string, serverConfig *config.ServerConfig, gen int64) error {
 	m.captureMu.Lock()
 	m.mu.Lock()
 
@@ -449,15 +458,14 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	if existingClient, exists := m.clients[id]; exists {
 		existingConfig := existingClient.GetConfig()
 
-		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
-			existingConfig.Protocol != serverConfig.Protocol ||
-			existingConfig.Command != serverConfig.Command ||
-			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
-			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
-			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
+		// Compare configurations to determine if reconnection is needed. The
+		// predicate is the one the config commit uses to mark a change as
+		// Reconnect (config.ConnectionEquivalent): a narrower set here would
+		// keep a running instance on its old isolation, OAuth, working_dir or
+		// init timeout after a commit that asked for a reconnect (Spec 116
+		// review round 1; the MCP update/patch handlers used to cover this
+		// with an unconditional RemoveServer).
+		configChanged := !config.ConnectionEquivalent(existingConfig, serverConfig)
 
 		if configChanged {
 			m.logger.Info("Server configuration changed, disconnecting existing client",
@@ -490,7 +498,15 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			// Use thread-safe setter to avoid race with GetServerState()
 			m.mu.Unlock()
 			m.captureMu.Unlock()
-			existingClient.SetConfig(serverConfig)
+			if gen > 0 {
+				if !existingClient.SetConfigAt(serverConfig, gen) {
+					// The instance already holds this or a newer commit's
+					// config; a late worker must not roll it back.
+					return nil
+				}
+			} else {
+				existingClient.SetConfig(serverConfig)
+			}
 			// Spec 093: the per-server limits may have changed even though the
 			// transport config did not.
 			m.applyServerConcurrency(serverConfig)
@@ -538,6 +554,9 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	// Spec 093: install admission control before the client becomes reachable,
 	// so no dispatch can ever see a client without its limiter wiring.
 	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())
+	if gen > 0 {
+		client.SetConfigAt(serverConfig, gen)
+	}
 
 	m.clients[id] = client
 	m.logger.Info("Added upstream server configuration",
@@ -561,34 +580,15 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	return nil
 }
 
-// Helper functions for comparing slices and maps
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalStringMaps(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 // AddServer adds a new upstream server and connects to it (legacy method)
 func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
-	if err := m.AddServerConfig(id, serverConfig); err != nil {
+	return m.AddServerAt(id, serverConfig, 0)
+}
+
+// AddServerAt is AddServer for a config committed at Spec 116 generation gen
+// (see AddServerConfigAt).
+func (m *Manager) AddServerAt(id string, serverConfig *config.ServerConfig, gen int64) error {
+	if err := m.AddServerConfigAt(id, serverConfig, gen); err != nil {
 		return err
 	}
 
@@ -648,6 +648,50 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 	}
 
 	return nil
+}
+
+// RestampRequest is one retained instance's new committed config.
+type RestampRequest struct {
+	Name   string
+	Config *config.ServerConfig
+	Gen    int64
+}
+
+// RestampRetained gives every registered instance named in reqs its new config
+// and commit generation as one atomic pair (Spec 116 commit step 7, review
+// R9.1). It is for changes that keep the connection (config.ConnectionEquivalent
+// holds): the instance is not replaced and does not reconnect. A request whose
+// generation is not newer than the instance's is ignored, so a late legacy
+// worker cannot roll a config back. It returns the names it restamped.
+//
+// Takes captureMu for writing and then mu (lock order L3 → L4); the caller
+// must hold no approval lock (Spec 116 plan §Lock order). The limiter update
+// runs after both are released, as on the AddServerConfig path.
+func (m *Manager) RestampRetained(reqs []RestampRequest) []string {
+	if len(reqs) == 0 {
+		return nil
+	}
+	m.captureMu.Lock()
+	m.mu.Lock()
+	var applied []RestampRequest
+	for _, req := range reqs {
+		client, ok := m.clients[req.Name]
+		if !ok || client == nil || req.Config == nil {
+			continue
+		}
+		if client.SetConfigAt(req.Config, req.Gen) {
+			applied = append(applied, req)
+		}
+	}
+	m.mu.Unlock()
+	m.captureMu.Unlock()
+
+	names := make([]string, 0, len(applied))
+	for _, req := range applied {
+		m.applyServerConcurrency(req.Config)
+		names = append(names, req.Name)
+	}
+	return names
 }
 
 // RemoveServer removes an upstream server

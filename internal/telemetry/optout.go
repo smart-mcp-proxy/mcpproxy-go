@@ -242,3 +242,14 @@ func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
 		s.EmitOptOutBeacon(ctx)
 	}()
 }
+
+// Active reports whether the service currently resolves telemetry as enabled
+// and has not latched an opt-out. It reads the state NotifyConfigChanged
+// maintains, so callers can check which configuration the service last
+// installed (Spec 116: notifications follow commit order).
+func (s *Service) Active() bool {
+	s.mu.Lock()
+	enabled := s.resolvedEnabled
+	s.mu.Unlock()
+	return enabled && !s.optedOut.Load()
+}

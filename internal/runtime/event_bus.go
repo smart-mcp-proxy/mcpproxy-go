@@ -245,6 +245,9 @@ func eventWithoutDetectorPayload(evt Event) Event {
 // The no-coalescer branch (some tests, shutdown paths) builds and publishes
 // synchronously to preserve the prior semantics.
 func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
+	if hook := r.serversChangedHook.Load(); hook != nil {
+		(*hook)(reason, extra)
+	}
 	if r.coalescer != nil {
 		r.coalescer.submit(reason, extra)
 		return
