@@ -75,6 +75,7 @@
         </div>
         <p class="text-sm text-base-content/70" data-test="review-range" aria-live="polite">{{ rangeText }}</p>
       </div>
+      <p v-if="notice && !review.server.quarantined" class="text-sm text-warning" role="status" data-test="review-stale-notice">{{ notice }}</p>
       <p v-if="toolNotice" class="text-sm text-error" role="alert" data-test="review-tool-notice">{{ toolNotice }}</p>
       <div v-if="review.tools.length > 0 && filteredTools.length === 0" class="rounded border border-base-300 p-4 text-sm" data-test="review-no-match">
         No tools match. <button type="button" class="link" @click="clearFilters">Clear filters</button>
@@ -139,7 +140,7 @@ import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import { scanReportPath } from '@/utils/serverRoute'
-import { APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, filterReviewTools, formatLaunchCommand, hasActiveFilters, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
+import { APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
 
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
@@ -155,6 +156,8 @@ const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
+// The review binding (Spec 117 PR-2) of the attempt the force retry belongs to: the retry re-sends it with lastBlock.
+let lastExpected: Record<string, string> | undefined
 // The blind confirmation is bound to the (empty) review that opened it and to the choice made at click time.
 let blindReview: ServerReviewResponse | null = null; let blindEverything = false
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
@@ -271,16 +274,27 @@ async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   const visit = visitGeneration
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''
-  const all = review.value?.tools.map(t => t.name) ?? []
-  const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  const tools = review.value?.tools ?? []
+  const all = tools.map(t => t.name)
+  const retry = force && lastBlock.value !== null
+  const blocked = block ?? (retry && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  // Spec 117 PR-2 (#1566): bind the approval to the review on screen at click time (every reviewed tool's
+  // fingerprint, {} for an empty review); a force retry re-sends the binding of the attempt that triggered it.
+  const expected = retry ? lastExpected : expectedHashes(tools)
   lastBlock.value = blocked
-  // Bound to the incarnation of the review on screen (Spec 116 FR-017): a
-  // remove and re-add of the name since it rendered answers 409 server_replaced.
-  const res = await api.securityApprove(server, force, blocked, ...incarnationArgs(review.value?.server.incarnation))
+  lastExpected = expected
+  // Both bindings travel together: the incarnation of the review on screen (Spec 116 FR-017: a remove and
+  // re-add of the name since it rendered answers 409 server_replaced) and, unless the review has no
+  // fingerprints (an older core), the reviewed definitions (Spec 117 PR-2: 409 review_out_of_date).
+  const inc = review.value?.server.incarnation
+  const res = expected ? await api.securityApprove(server, force, blocked, inc, expected) : await api.securityApprove(server, force, blocked, ...incarnationArgs(inc))
   if (!isCurrent(server, visit)) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
     const message = res.error || 'Approval failed'
+    // The review changed since it was shown: nothing was approved. Reload it (explicit choices that still apply are
+    // kept by mergeSelection) and show the core's message beside the controls, never the error panel or the force dialog.
+    if (isStaleReviewError(message)) { lastBlock.value = null; lastExpected = undefined; await reloadAfterStaleReview(server, visit, message); return }
     // A refresh that began while this attempt was in flight dropped its block list (lastBlock was cleared): the force retry is bound to a snapshot that is gone, so do not offer it and do not replace the refreshed review with an error panel; show the stale notice beside the fresh approval controls instead.
     if (!force && /dangerous/i.test(message) && lastBlock.value === null) { notice.value = STALE_FORCE_NOTICE; return }
     error.value = message
@@ -297,8 +311,25 @@ async function rejectServer() {
   approving.value = false
   if (!res.success) error.value = res.error || 'Reject failed'; else await load()
 }
-// Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017); a refusal (409 server_replaced) reloads the review and says why beside it.
-async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.approveTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed' }
+// Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017) and, for an approve,
+// to that tool's fingerprint (Spec 117 PR-2). A stale review (409 review_out_of_date) reloads and says why in the
+// stale notice; any other refusal (409 server_replaced) reloads and says why beside the tool list.
+async function approveTool(name: string) {
+  const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''
+  const tools = review.value?.tools ?? []
+  const inc = review.value?.server.incarnation
+  // A per-tool approve sends that tool's fingerprint ({} when it has none in a fingerprinted review).
+  const expected = expectedHashes(tools.filter(t => t.name === name), tools)
+  const res = expected ? await api.approveTools(server, [name], inc, expected) : await api.approveTools(server, [name], ...incarnationArgs(inc))
+  if (!isCurrent(server, visit)) return
+  if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
+  await load()
+  if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'
+}
+async function reloadAfterStaleReview(server: string, visit: number, message: string) {
+  await load()
+  if (isCurrent(server, visit)) notice.value = message
+}
 async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {

@@ -1500,6 +1500,8 @@ export interface ReviewTool {
   default_allowed?: boolean
   previous?: ReviewToolPrevious | null
   diff?: ReviewToolDiff | null
+  /** Review fingerprint (Spec 117 PR-2): sent back in expected_hashes to bind an approval to this review. Absent on an older core. */
+  current_hash?: string
 }
 
 export interface ServerReviewResponse {

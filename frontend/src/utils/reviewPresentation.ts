@@ -215,3 +215,23 @@ export function posixQuote(word: string): string {
 export function formatLaunchCommand(command: string, args: string[] = []): string {
   return [command, ...args].map(posixQuote).join(' ')
 }
+
+// Spec 117 PR-2 (#1566): binding an approval to the reviewed definitions, the same rule as the
+// macOS tray (ReviewPresentation.expectedHashes) and the CLI. The core approves only these
+// fingerprints and answers 409 "out of date" when one changed or a tool appeared since.
+// `tools` are the tools the approval covers; `review` (default `tools`) is the whole review on
+// screen. Undefined (an unbound request) only when the review has tools and none carries a
+// fingerprint, i.e. the core predates it; an empty review binds to the empty snapshot {}.
+export function expectedHashes(tools: ReviewTool[], review: ReviewTool[] = tools): Record<string, string> | undefined {
+  if (review.length > 0 && !review.some(t => !!t.current_hash)) return undefined
+  // Null prototype: tool names are upstream-controlled, and a tool named "__proto__" written into
+  // a plain {} hits the inherited setter and silently drops out of the JSON (Sol review r1).
+  const out: Record<string, string> = Object.create(null)
+  for (const tool of tools) if (tool.current_hash) out[tool.name] = tool.current_hash
+  return out
+}
+
+/** A refusal because the review is out of date (Spec 117 FR-008): reload, never the force dialog. */
+export function isStaleReviewError(message: string | undefined | null): boolean {
+  return !!message && /out of date/i.test(message)
+}

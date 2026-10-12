@@ -322,6 +322,15 @@ mcpproxy review show github [--full]
    [Durable tool baseline](#durable-tool-baseline)), so any tool the server
    lists later waits for review instead of being trusted automatically.
 
+**The approval is bound to the review on screen.** The Web UI, the CLI and
+the macOS tray send the review fingerprint of every tool they showed. If a
+tool's definition or safety hints changed, or a new tool appeared, after the
+review was loaded, nothing is approved: the server stays quarantined, the
+review reloads and shows "The review is out of date ...". Approve again after
+checking the reloaded list. A server approval promotes only the tools that were
+pending when it was committed; a tool the server lists afterwards waits for
+review. See [Review-bound approvals](/api/rest-api#review-bound-approvals).
+
 The review controls are deliberate: **Fetch tool definitions** (CLI: `mcpproxy review fetch`) uses the
 inspection-only `discover-tools` capture to store current upstream metadata
 without indexing it, **Allow this tool** selects an individual tool for
@@ -341,9 +350,11 @@ curl -H "X-API-Key: your-key" \
   http://127.0.0.1:8080/api/v1/servers/server-name/review
 
 # Submit the scan-gated approval. Omit block[] or list only the tools to keep
-# disabled; direct unquarantine is legacy-only.
+# disabled; direct unquarantine is legacy-only. expected_hashes binds the
+# approval to the review you read (each tool's current_hash; {} for an empty
+# review): a tool that changed since answers 409 review_out_of_date.
 curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
-  -d '{"block":["tool-to-keep-disabled"]}' \
+  -d '{"block":["tool-to-keep-disabled"],"expected_hashes":{"read_note":"rv2-...","tool-to-keep-disabled":"rv2-..."}}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
@@ -356,6 +367,10 @@ mcpproxy review approve github [--all | --tools a,b] [--except a,b] [--force] [-
 
 # Trusted server: approve only the listed new or changed tools
 mcpproxy review approve github --tools create_issue
+
+# Bind the approval to a review you saved and read first
+mcpproxy review show github -o json > review.json
+mcpproxy review approve github --from-review review.json --yes
 ```
 
 See [Review Commands](/cli/review-commands) for every flag.
