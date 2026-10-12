@@ -17,6 +17,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
@@ -165,6 +166,22 @@ type ToolApprovalLocker interface {
 // number of tools the commit section promoted (0 in this release).
 type ServerApprovalCommitter interface {
 	CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
+// ReviewedServerApprover is the Spec 117 PR-2 (#1566) form of the approval
+// commit capability. Its CommitServerApproval runs the whole server approval
+// in one critical section under the per-server tool-approval lock: validate
+// expected (the review binding; nil = unbound), record the tool baseline,
+// run commit (the integrity baseline + blocks), promote the pending tools
+// present at that moment, and clear the quarantine in storage, config and
+// file. A stale binding returns *toolreview.StaleToolReviewError with nothing
+// written. FinishServerApproval then runs the rest without the lock (activity
+// record, upstream/index refresh) and promotes nothing, so a tool filed after
+// the commit stays pending (FR-012). When the unquarantiner implements it the
+// scanner never calls UnquarantineServer for an approval.
+type ReviewedServerApprover interface {
+	ServerApprovalCommitter
+	FinishServerApproval(serverName string) error
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -1775,18 +1792,45 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
-	return s.approveServer(ctx, serverName, force, approvedBy, nil)
+	return s.ApproveServerReviewed(ctx, serverName, force, approvedBy, nil, nil)
+}
+
+// ApproveServerReviewed approves a scanned server bound to the review the
+// caller showed (Spec 117 PR-2, #1566). expected maps tool name to the review
+// fingerprint (current_hash) the operator saw; nil is an unbound (legacy)
+// request and an empty map binds to the empty snapshot. blocks are the tools
+// to keep disabled. The dangerous-scan gate runs first and keeps its message;
+// a stale binding returns *toolreview.StaleToolReviewError unchanged, with
+// nothing written and the server still quarantined.
+func (s *Service) ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	if len(blocks) == 0 {
+		return s.approveServer(ctx, serverName, force, approvedBy, nil, expected)
+	}
+	approvalBlocks, err := toolApprovalBlocks(blocks, approvedBy)
+	if err != nil {
+		return err
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, approvalBlocks, expected)
 }
 
 // ApproveServerWithBlocks approves a scanned server and atomically records the
 // selected tool blocks with the integrity baseline before the server can be
 // unquarantined.
 func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string) error {
+	blocks, err := toolApprovalBlocks(toolNames, approvedBy)
+	if err != nil {
+		return err
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks, nil)
+}
+
+// toolApprovalBlocks validates and deduplicates block names.
+func toolApprovalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBlock, error) {
 	seen := make(map[string]struct{}, len(toolNames))
 	blocks := make([]ToolApprovalBlock, 0, len(toolNames))
 	for _, name := range toolNames {
 		if name == "" {
-			return fmt.Errorf("%w: empty tool name", ErrToolApprovalBlockNotFound)
+			return nil, fmt.Errorf("%w: empty tool name", ErrToolApprovalBlockNotFound)
 		}
 		if _, exists := seen[name]; exists {
 			continue
@@ -1794,10 +1838,10 @@ func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string
 		seen[name] = struct{}{}
 		blocks = append(blocks, ToolApprovalBlock{ToolName: name, ApprovedAt: time.Now().UTC(), ApprovedBy: approvedBy})
 	}
-	return s.approveServer(ctx, serverName, force, approvedBy, blocks)
+	return blocks, nil
 }
 
-func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock) error {
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string) error {
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
 	if err != nil {
@@ -1860,6 +1904,14 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	if len(blocks) > 0 {
 		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
 	}
+	if approver, ok := s.unquarantiner.(ReviewedServerApprover); ok {
+		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save)
+	}
+	if expected != nil {
+		// Never drop a binding silently: without the reviewed capability the
+		// approval could not be checked against the review.
+		return fmt.Errorf("review-bound approval is not supported for server %q by this core", serverName)
+	}
 	var saveErr error
 	if committer, ok := s.unquarantiner.(ServerApprovalCommitter); ok {
 		// Spec 117 PR-1 (FR-023): both branches commit inside the runtime's
@@ -1915,6 +1967,40 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		zap.String("approved_by", approvedBy),
 	)
 
+	return nil
+}
+
+// approveServerReviewed is approveServer's Spec 117 PR-2 path: one locked
+// commit section (validate, baseline marker, integrity baseline + blocks,
+// promotion of the pending tools present, storage/config unquarantine), then
+// the block audit events and the unlocked finish.
+func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error) error {
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	if _, err := approver.CommitServerApproval(serverName, blockNames, expected, approvedBy, save); err != nil {
+		var stale *toolreview.StaleToolReviewError
+		if errors.As(err, &stale) {
+			return stale
+		}
+		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	}
+	if len(blocks) > 0 {
+		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+			recorder.RecordToolBlocksForSecurityApproval(serverName, blockNames, approvedBy)
+		}
+	}
+	if err := approver.FinishServerApproval(serverName); err != nil {
+		s.logger.Error("Failed to finish server approval",
+			zap.String("server", serverName), zap.Error(err))
+		return fmt.Errorf("failed to finish approval of server %q: %w", serverName, err)
+	}
+	s.logger.Info("Server approved after security scan",
+		zap.String("server", serverName),
+		zap.String("approved_by", approvedBy),
+		zap.Bool("review_bound", expected != nil),
+	)
 	return nil
 }
 

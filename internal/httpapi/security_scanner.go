@@ -335,11 +335,21 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 type securityApproveRequest struct {
 	Force bool     `json:"force"`
 	Block []string `json:"block,omitempty"`
+	// ExpectedHashes binds the approval to the reviewed definitions (Spec
+	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+	// null is an unbound (legacy) request; {} binds to the empty snapshot.
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty"`
+}
+
+// reviewedSecurityApprover is the review-bound server approval of the
+// security controller (scanner.Service implements it).
+type reviewedSecurityApprover interface {
+	ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error
 }
 
 // handleSecurityApprove godoc
 // @Summary Approve a server after security review
-// @Description Saves the integrity baseline and optionally blocks selected tools atomically before unquarantining the server.
+// @Description Saves the integrity baseline and optionally blocks selected tools atomically before unquarantining the server. With expected_hashes (tool name -> the review's current_hash; {} for an empty review) the approval is bound to the reviewed definitions: when a tool the approval would make reachable (pending, or approved and enabled, minus block) changed or appeared since the review, or a block target no longer exists, the response is 409 review_out_of_date, nothing is written and the server stays quarantined. Tools listed after the approval wait for review.
 // @Tags security
 // @Accept json
 // @Produce json
@@ -349,7 +359,7 @@ type securityApproveRequest struct {
 // @Param body body securityApproveRequest false "Force approval and tool names to keep disabled"
 // @Success 200 {object} contracts.SuccessResponse "Server approved"
 // @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
-// @Failure 409 {object} contracts.ErrorResponse "Dangerous scan verdict requires force or approval failed"
+// @Failure 409 {object} StaleReviewErrorResponse "Dangerous scan verdict requires force, the review is out of date (error_code review_out_of_date), or approval failed"
 // @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
@@ -371,7 +381,14 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 
 	// Use "api" as the approver since we don't have user context in personal edition
 	var approveErr error
-	if len(req.Block) > 0 {
+	if req.ExpectedHashes != nil {
+		reviewed, ok := s.securityController.(reviewedSecurityApprover)
+		if !ok {
+			s.writeError(w, r, http.StatusServiceUnavailable, "Review-bound security approval is unavailable")
+			return
+		}
+		approveErr = reviewed.ApproveServerReviewed(r.Context(), name, req.Force, "api", req.Block, req.ExpectedHashes)
+	} else if len(req.Block) > 0 {
 		blockApprover, ok := s.securityController.(interface {
 			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
 		})
@@ -384,6 +401,9 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		approveErr = s.securityController.ApproveServer(r.Context(), name, req.Force, "api")
 	}
 	if approveErr != nil {
+		if s.writeStaleReview(w, r, approveErr) {
+			return
+		}
 		if errors.Is(approveErr, scanner.ErrToolApprovalBlockNotFound) {
 			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
 			return

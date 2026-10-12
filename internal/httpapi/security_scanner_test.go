@@ -46,6 +46,9 @@ type mockSecurityController struct {
 	approvedBy      string
 	approvedForce   bool
 	approvedBlocks  []string
+	// Spec 117 PR-2: the last ApproveServerReviewed call.
+	reviewedCalls    int
+	reviewedExpected map[string]string
 
 	// What the last ConfigureScanner call carried.
 	configuredEnv   map[string]string
@@ -138,6 +141,15 @@ func (m *mockSecurityController) ApproveServer(_ context.Context, serverName str
 }
 
 func (m *mockSecurityController) ApproveServerWithBlocks(_ context.Context, _ string, force bool, approvedBy string, blocks []string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	m.approvedBlocks = append([]string(nil), blocks...)
+	return m.approveErr
+}
+
+func (m *mockSecurityController) ApproveServerReviewed(_ context.Context, _ string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	m.reviewedCalls++
+	m.reviewedExpected = expected
 	m.approvedBy = approvedBy
 	m.approvedForce = force
 	m.approvedBlocks = append([]string(nil), blocks...)

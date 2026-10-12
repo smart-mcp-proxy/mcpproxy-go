@@ -4547,6 +4547,37 @@ components:
         profile:
           type: string
       type: object
+    httpapi.StaleReviewErrorResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        request_id:
+          type: string
+        stale_tools:
+          $ref: '#/components/schemas/httpapi.StaleToolsDetail'
+        success:
+          type: boolean
+      type: object
+    httpapi.StaleToolsDetail:
+      properties:
+        changed:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        missing_blocks:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        unreviewed:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     httpapi.TryProfileRequest:
       properties:
         limit:
@@ -4592,6 +4623,24 @@ components:
           type: string
         profile:
           type: string
+      type: object
+    httpapi.approveToolsRequest:
+      properties:
+        approve_all:
+          type: boolean
+        expected_hashes:
+          additionalProperties:
+            type: string
+          description: |-
+            ExpectedHashes binds the approval to the reviewed definitions (Spec
+            117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+            null is an unbound (legacy) request; {} is bound.
+          type: object
+        tools:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     httpapi.attentionResponse:
       properties:
@@ -4720,6 +4769,14 @@ components:
             type: string
           type: array
           uniqueItems: false
+        expected_hashes:
+          additionalProperties:
+            type: string
+          description: |-
+            ExpectedHashes binds the approval to the reviewed definitions (Spec
+            117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+            null is an unbound (legacy) request; {} binds to the empty snapshot.
+          type: object
         force:
           type: boolean
       type: object
@@ -9417,8 +9474,14 @@ paths:
       - review
   /api/v1/servers/{id}/security/approve:
     post:
-      description: Saves the integrity baseline and optionally blocks selected tools
-        atomically before unquarantining the server.
+      description: 'Saves the integrity baseline and optionally blocks selected tools
+        atomically before unquarantining the server. With expected_hashes (tool name
+        -> the review''s current_hash; {} for an empty review) the approval is bound
+        to the reviewed definitions: when a tool the approval would make reachable
+        (pending, or approved and enabled, minus block) changed or appeared since
+        the review, or a block target no longer exists, the response is 409 review_out_of_date,
+        nothing is written and the server stays quarantined. Tools listed after the
+        approval wait for review.'
       parameters:
       - description: Server name
         in: path
@@ -9449,8 +9512,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Dangerous scan verdict requires force or approval failed
+                $ref: '#/components/schemas/httpapi.StaleReviewErrorResponse'
+          description: Dangerous scan verdict requires force, the review is out of
+            date (error_code review_out_of_date), or approval failed
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -9550,6 +9614,52 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Get tools for a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/tools/approve:
+    post:
+      description: 'Approves the given pending/changed tools (or all of them with
+        approve_all). With expected_hashes (tool name -> the review''s current_hash)
+        the approval is bound to the reviewed definitions: when a requested tool (approve_all:
+        any pending or changed tool) no longer matches, the response is 409 review_out_of_date
+        and nothing is approved.'
+      parameters:
+      - description: Server name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.approveToolsRequest'
+        description: Tools to approve, or approve_all, with an optional review binding
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Approval outcome
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.StaleReviewErrorResponse'
+          description: The review is out of date; nothing was approved
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Approve tools for a server
       tags:
       - servers
   /api/v1/servers/{id}/tools/block:

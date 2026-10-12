@@ -4368,6 +4368,18 @@ func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, err
 	return s.runtime.ApproveAllTools(serverName, approvedBy)
 }
 
+// ApproveToolsReviewed approves the named tools bound to the reviewed
+// fingerprints (Spec 117 PR-2); expected == nil is ApproveTools.
+func (s *Server) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {
+	return s.runtime.ApproveToolsReviewed(serverName, toolNames, expected, approvedBy)
+}
+
+// ApproveAllToolsReviewed approves every pending/changed tool bound to the
+// reviewed fingerprints (Spec 117 PR-2); expected == nil is ApproveAllTools.
+func (s *Server) ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error) {
+	return s.runtime.ApproveAllToolsReviewed(serverName, expected, approvedBy)
+}
+
 // BlockTools atomically blocks (approve+disable) specific tools (MCP-2198).
 func (s *Server) BlockTools(serverName string, toolNames []string, blockedBy string) (int, error) {
 	return s.runtime.BlockTools(serverName, toolNames, blockedBy)
@@ -4476,15 +4488,30 @@ func (a *serverUnquarantinerAdapter) WithToolApprovalLock(serverName string, fn 
 func (a *serverUnquarantinerAdapter) CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
 	if a.server == nil || a.server.runtime == nil {
 		// No runtime: no discovery can auto-baseline either (as
-		// WithToolApprovalLock above).
+		// WithToolApprovalLock above). A binding cannot be checked, so a
+		// bound approval fails closed.
+		if expected != nil {
+			return 0, fmt.Errorf("review-bound approval unavailable: runtime not initialized")
+		}
 		return 0, commit()
 	}
 	return a.server.runtime.CommitServerApproval(serverName, blocks, expected, by, commit)
 }
 
+// FinishServerApproval runs the unlocked tail of a security approval after
+// CommitServerApproval (Spec 117 PR-2): activity record and upstream/index
+// refresh, with no promotion of tools filed after the commit.
+func (a *serverUnquarantinerAdapter) FinishServerApproval(serverName string) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.runtime.FinishServerApproval(serverName)
+}
+
 var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 var _ scanner.ToolApprovalLocker = (*serverUnquarantinerAdapter)(nil)
 var _ scanner.ServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)
+var _ scanner.ReviewedServerApprover = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

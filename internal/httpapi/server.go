@@ -277,6 +277,12 @@ type ServerController interface {
 	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
 	ApproveTools(serverName string, toolNames []string, approvedBy string) error
 	ApproveAllTools(serverName string, approvedBy string) (int, error)
+	// ApproveToolsReviewed / ApproveAllToolsReviewed are the review-bound
+	// forms (Spec 117 PR-2, #1566): expected maps tool name to the review
+	// fingerprint the client showed; nil is an unbound (legacy) request. A
+	// mismatch returns *toolreview.StaleToolReviewError and writes nothing.
+	ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error)
+	ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error)
 	// BlockTools / BlockAllTools atomically approve+disable tools (MCP-2198):
 	// all-or-nothing so a tool is never left approved+enabled.
 	BlockTools(serverName string, toolNames []string, blockedBy string) (int, error)
@@ -6913,7 +6919,31 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// approveToolsRequest is the body of POST /api/v1/servers/{id}/tools/approve.
+type approveToolsRequest struct {
+	Tools      []string `json:"tools"`
+	ApproveAll bool     `json:"approve_all"`
+	// ExpectedHashes binds the approval to the reviewed definitions (Spec
+	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+	// null is an unbound (legacy) request; {} is bound.
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty"`
+}
+
 // handleApproveTools handles POST /api/v1/servers/{id}/tools/approve
+//
+// @Summary Approve tools for a server
+// @Description Approves the given pending/changed tools (or all of them with approve_all). With expected_hashes (tool name -> the review's current_hash) the approval is bound to the reviewed definitions: when a requested tool (approve_all: any pending or changed tool) no longer matches, the response is 409 review_out_of_date and nothing is approved.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server name"
+// @Param body body approveToolsRequest true "Tools to approve, or approve_all, with an optional review binding"
+// @Success 200 {object} contracts.SuccessResponse "Approval outcome"
+// @Failure 400 {object} contracts.ErrorResponse "Invalid request"
+// @Failure 409 {object} StaleReviewErrorResponse "The review is out of date; nothing was approved"
+// @Router /api/v1/servers/{id}/tools/approve [post]
 func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -6921,17 +6951,24 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Tools      []string `json:"tools"`
-		ApproveAll bool     `json:"approve_all"`
-	}
+	var req approveToolsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	bound := req.ExpectedHashes != nil
 
 	if req.ApproveAll {
-		count, err := s.controller.ApproveAllTools(serverID, "api")
+		var count int
+		var err error
+		if bound {
+			count, err = s.controller.ApproveAllToolsReviewed(serverID, req.ExpectedHashes, "api")
+		} else {
+			count, err = s.controller.ApproveAllTools(serverID, "api")
+		}
+		if s.writeStaleReview(w, r, err) {
+			return
+		}
 		if err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
 			return
@@ -6958,7 +6995,19 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.ApproveTools(serverID, req.Tools, "api"); err != nil {
+	if bound {
+		// A bound request validates, writes and reports each name once
+		// (Spec 117 edge case: duplicates).
+		req.Tools = uniqueStrings(req.Tools)
+		_, err := s.controller.ApproveToolsReviewed(serverID, req.Tools, req.ExpectedHashes, "api")
+		if s.writeStaleReview(w, r, err) {
+			return
+		}
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+			return
+		}
+	} else if err := s.controller.ApproveTools(serverID, req.Tools, "api"); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
 		return
 	}
@@ -7444,4 +7493,18 @@ func joinValidationMessages(errs []config.ValidationError) string {
 		msgs = append(msgs, e.Field+": "+e.Message)
 	}
 	return strings.Join(msgs, "; ")
+}
+
+// uniqueStrings returns in without repeats, in first-seen order.
+func uniqueStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
