@@ -719,6 +719,13 @@ func (r *Runtime) pendingAwareDiskConfig(running *config.Config) *config.Config 
 // published snapshot all move together. cfg must be a configuration the caller
 // owns and submits in this call (D14); a copy of an earlier Config() read is
 // a stale replacement — use Commit with a CommitTx operation instead.
+//
+// UpdateConfig schedules no manager work, as before Spec 116: the supervisor
+// reconciles the manager to the new desired configuration. No production
+// writer uses it any more (each one commits its own operation, which schedules
+// its connect workers); a second actor here would race the supervisor's
+// reconnect of the same server and leave the replacement instance
+// disconnected or replaced by a config without a transport.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 	if cfg == nil {
 		return
@@ -727,6 +734,7 @@ func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
 		if cfgPath != "" {
 			tx.setPath(cfgPath)
 		}
+		tx.noWorkers()
 		tx.ReplaceConfig(cfg)
 		return nil
 	}); err != nil {

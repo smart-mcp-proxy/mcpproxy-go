@@ -109,6 +109,11 @@ type CommitTx struct {
 	created   map[string]bool // created in this tx and absent from base
 	removed   map[string]bool // present in base and removed in this tx
 	replaced  map[string]bool // removed and re-created in this tx (review R8.2)
+	// quarantineDecided: servers an UpdateServer or SetQuarantined in this tx
+	// explicitly quarantined while the entry was not already an explicit
+	// quarantine (#1561): the index purge covers them even when the admission
+	// gate had quarantined the entry implicitly.
+	quarantineDecided map[string]bool
 
 	hooks []approvalHook
 
@@ -242,6 +247,12 @@ func (tx *CommitTx) UpdateServer(name string, fn func(cur *config.ServerConfig) 
 	if cp.Name != name {
 		return fmt.Errorf("%w: UpdateServer cannot rename %q to %q", ErrCommitInvariant, name, cp.Name)
 	}
+	if prev := tx.next.Servers[i]; cp.Quarantined && cp.QuarantineExplicitlySet() && (!prev.Quarantined || !prev.QuarantineExplicitlySet()) {
+		if tx.quarantineDecided == nil {
+			tx.quarantineDecided = map[string]bool{}
+		}
+		tx.quarantineDecided[name] = true
+	}
 	tx.next.Servers[i] = cp
 	return nil
 }
@@ -294,6 +305,7 @@ func (tx *CommitTx) ReplaceConfig(cfg *config.Config) {
 	tx.created = map[string]bool{}
 	tx.removed = map[string]bool{}
 	tx.replaced = map[string]bool{}
+	tx.quarantineDecided = nil
 }
 
 // ReconcileLive reconciles storage with the live configuration (projection
@@ -1007,11 +1019,11 @@ func (r *Runtime) commitIndexPurge(tx *CommitTx, changes map[string]ServerChange
 			// An explicit quarantine decision made in this commit purges too,
 			// even when the entry was already quarantined implicitly by the
 			// admission gate (#1561): a REST PATCH {"quarantined":true} is the
-			// operator's quarantine and must leave no description indexed.
-			if sc := tx.entry(name); sc != nil && sc.Quarantined && sc.QuarantineExplicitlySet() {
-				if prev := baseEntry(tx.base.Config, name); prev == nil || !prev.Quarantined || !prev.QuarantineExplicitlySet() {
-					targets[name] = true
-				}
+			// operator's quarantine and must leave no description indexed. A
+			// whole-config replacement (ApplyConfig, a reload) is not such a
+			// decision: a JSON round trip marks every present flag explicit.
+			if sc := tx.entry(name); sc != nil && sc.Quarantined && tx.quarantineDecided[name] {
+				targets[name] = true
 			}
 			if sc := tx.entry(name); sc != nil && !sc.Enabled {
 				if prev := baseEntry(tx.base.Config, name); prev == nil || prev.Enabled {
