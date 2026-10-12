@@ -175,6 +175,24 @@ type Service struct {
 	summaryCache    map[string]*ScanSummary
 	summaryCacheGen map[string]uint64
 	summaryCacheMu  sync.RWMutex
+
+	// approvalHooks are Spec 116 PR2 test seams (plan.md §Test seams), nil
+	// in production.
+	approvalHooks scannerApprovalHooks
+}
+
+// scannerApprovalHooks are the scanner's Spec 116 test seams.
+type scannerApprovalHooks struct {
+	// afterBaselineBeforeUnquarantine runs in approveServer after its
+	// approval-lock section (baseline and blocks) has exited and before the
+	// unquarantine commit, with the captured incarnation (T2.5, review R5.6).
+	afterBaselineBeforeUnquarantine func(serverName string, incarnation int64)
+}
+
+// SetAfterBaselineBeforeUnquarantineHookForTest installs the
+// afterBaselineBeforeUnquarantine seam. Test-only.
+func (s *Service) SetAfterBaselineBeforeUnquarantineHookForTest(fn func(serverName string, incarnation int64)) {
+	s.approvalHooks.afterBaselineBeforeUnquarantine = fn
 }
 
 // NewService creates a new SecurityService

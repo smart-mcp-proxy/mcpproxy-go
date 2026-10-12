@@ -42,6 +42,20 @@ type commitTestHooks struct {
 	// skipAdvance stubs commit step 7 out, so a regression test can show it
 	// detects the loss of the retained-instance update (T1.19).
 	skipAdvance bool
+
+	// Spec 116 PR2 approval seams (plan.md §Test seams).
+	//
+	// approvalAfterCapture runs in every approval writer right after it
+	// captured the server's incarnation and before it takes the server's
+	// approval lock (T2.4, T2.17).
+	approvalAfterCapture func(serverName string, incarnation int64)
+	// approvalAfterUnquarantineCommit runs in QuarantineServer(name, false)
+	// after its commit returned and before the baseline promotion, with the
+	// incarnation of that commit (T2.19, review R9.5).
+	approvalAfterUnquarantineCommit func(serverName string, incarnation int64)
+	// beforeRegisterIdentity runs in a post-commit connect worker before it
+	// registers the server identity (T2.12).
+	beforeRegisterIdentity func(serverName string)
 }
 
 // commitWaitState carries the commit-lock and approval-lock waiter probes and
@@ -108,4 +122,11 @@ func (r *Runtime) CommitWaitersForTest() int { return r.commitWaiters() }
 // packages.
 func (r *Runtime) ApprovalLockWaitersForTest(serverName string) int {
 	return r.approvalLockWaiters(serverName)
+}
+
+// SetApprovalAfterCaptureHookForTest installs the approvalAfterCapture seam.
+// Test-only: the prompt approval writers in internal/server capture through
+// the runtime.
+func (r *Runtime) SetApprovalAfterCaptureHookForTest(fn func(serverName string, incarnation int64)) {
+	r.testHooks.approvalAfterCapture = fn
 }
