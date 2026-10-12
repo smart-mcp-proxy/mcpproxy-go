@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,4 +398,62 @@ func TestRT06_ExportCoversEveryAnalysedContract(t *testing.T) {
 	assert.NotEqual(t, digest(omitted), digest(noOutput))
 	assert.NotEqual(t, hash.ToolDefinitionDigest(rt06Poisoned, `{"type":"object"}`), digest(noOutput),
 		"the versioned digest never equals the output-unaware one")
+}
+
+// TestRT06_Pass2_LiveExportError_TrivyRunsMetadataScannerRefused (Sol r8 P3):
+// the Pass-2 export failure is driven end to end through installed scanner
+// fixtures and the container-run seam. The metadata-independent Trivy audit
+// actually runs; a Docker scanner that may read tools.json is refused before
+// any container starts, with the explicit reason recorded on the job.
+func TestRT06_Pass2_LiveExportError_TrivyRunsMetadataScannerRefused(t *testing.T) {
+	source := staleSourceDir(t)
+	info := &ServerInfo{Name: "toctou-p2", Protocol: "stdio", Command: "node", Args: []string{"server.js"}, WorkingDir: source}
+	svc, store := newR3Service(t, &liveFailProvider{info: info, liveErr: errors.New("server not found: toctou-p2")})
+
+	eng := svc.engine
+	eng.docker = nil // no image-presence checks against a real daemon
+	eng.setDeepScan(true, nil)
+	eng.registry.mu.Lock()
+	for _, s := range eng.registry.scanners {
+		if !s.InProcess {
+			s.Status = ScannerStatusAvailable
+		}
+	}
+	eng.registry.scanners["trivy-mcp"].Status = ScannerStatusInstalled
+	eng.registry.scanners["meta-scan"] = &ScannerPlugin{
+		ID: "meta-scan", Name: "metadata scanner fixture", DockerImage: "example/meta-scan:test",
+		Inputs: []string{"source"}, Command: []string{"scan"}, Status: ScannerStatusInstalled,
+	}
+	eng.registry.mu.Unlock()
+
+	var mu sync.Mutex
+	var ran []string
+	eng.runScannerContainer = func(_ context.Context, cfg ScannerRunConfig) (string, string, int, error) {
+		mu.Lock()
+		ran = append(ran, cfg.Image)
+		mu.Unlock()
+		require.NoError(t, os.WriteFile(filepath.Join(cfg.ReportDir, "results.json"), []byte(`{"findings":[]}`), 0o644))
+		return "", "", 0, nil
+	}
+
+	svc.startPass2("toctou-p2", info)
+	require.Eventually(t, func() bool {
+		jobs, err := store.ListScanJobs("toctou-p2")
+		return err == nil && len(jobs) == 1 && jobs[0].Status != ScanJobStatusRunning && jobs[0].Status != ScanJobStatusPending
+	}, 10*time.Second, 20*time.Millisecond)
+	jobs, err := store.ListScanJobs("toctou-p2")
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"ghcr.io/smart-mcp-proxy/scanner-trivy:latest"}, ran,
+		"only the metadata-independent Trivy container runs")
+	statuses := map[string]ScannerJobStatus{}
+	for _, st := range jobs[0].ScannerStatuses {
+		statuses[st.ScannerID] = st
+	}
+	require.Contains(t, statuses, "trivy-mcp")
+	assert.Empty(t, statuses["trivy-mcp"].Error, "the CVE audit completes")
+	require.Contains(t, statuses, "meta-scan")
+	assert.Contains(t, statuses["meta-scan"].Error, "could not be exported", "the metadata scanner is refused with the reason")
 }

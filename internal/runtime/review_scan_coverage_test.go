@@ -354,3 +354,34 @@ func TestReviewToolCovered_OutputAwareDigests(t *testing.T) {
 	require.True(t, reviewToolCovered(job(&scanner.ScanContext{ToolHashes: historical}), false, "srv", record("")),
 		"a pre-upgrade scan still covers a record without an output schema")
 }
+
+// TestReviewToolCovered_LegacyJobsNeverCoverOutputSchema (Sol r8 P2): a
+// name-only or count-only legacy scan (no ToolHashes, no contract digests)
+// predates output-schema export, so it never analysed one. A record whose
+// current contract has an output schema is not covered by it; a record
+// without one keeps the legacy rules.
+func TestReviewToolCovered_LegacyJobsNeverCoverOutputSchema(t *testing.T) {
+	const outSchema = `{"properties":{"x":{"type":"string"}},"type":"object"}`
+	job := func(sc *scanner.ScanContext) *scanner.ScanJob {
+		sc.ToolsExported = 1
+		return &scanner.ScanJob{Status: scanner.ScanJobStatusCompleted, StartedAt: time.Now().Add(-time.Hour), ScanContext: sc}
+	}
+	record := func(status, out string) *storage.ToolApprovalRecord {
+		return &storage.ToolApprovalRecord{ToolName: "notes", Status: status, CurrentDescription: "reads notes", CurrentSchema: `{"type":"object"}`, CurrentOutputSchema: out}
+	}
+	nameOnly := func() *scanner.ScanJob { return job(&scanner.ScanContext{ToolNames: []string{"notes"}}) }
+	countOnly := func() *scanner.ScanJob { return job(&scanner.ScanContext{}) }
+
+	for name, j := range map[string]func() *scanner.ScanJob{"name-only": nameOnly, "count-only": countOnly} {
+		t.Run(name, func(t *testing.T) {
+			require.False(t, reviewToolCovered(j(), false, "srv", record(storage.ToolApprovalStatusApproved, outSchema)),
+				"a legacy scan never analysed an output schema")
+			require.False(t, reviewToolCovered(j(), true, "srv", record(storage.ToolApprovalStatusPending, outSchema)),
+				"not even for a quarantined server's pending record")
+			require.True(t, reviewToolCovered(j(), false, "srv", record(storage.ToolApprovalStatusApproved, "")),
+				"a record without an output schema keeps the legacy coverage")
+			require.True(t, reviewToolCovered(j(), false, "srv", record(storage.ToolApprovalStatusApproved, "null")),
+				"a null output schema is none")
+		})
+	}
+}

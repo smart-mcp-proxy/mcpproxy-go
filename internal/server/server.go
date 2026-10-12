@@ -4644,6 +4644,14 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 	if cachedErr != nil {
 		return nil, cachedErr
 	}
+	if len(cached) == 0 && liveErr != nil {
+		// The StateView says connected but holds no tools, and the live
+		// tools/list failed: there is no usable definition. Report the live
+		// failure so the scanner fails closed instead of exporting an empty
+		// snapshot that a source-only scan could turn into a clean baseline
+		// (Sol r8 P2).
+		return nil, fmt.Errorf("live tool export for %s failed and no cached tools are available: %w", serverName, liveErr)
+	}
 	return cached, nil
 }
 
