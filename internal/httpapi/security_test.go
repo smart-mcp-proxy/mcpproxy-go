@@ -362,6 +362,12 @@ func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRec
 }
 func (m *baseController) ApproveTools(_ string, _ []string, _ string) error { return nil }
 func (m *baseController) ApproveAllTools(_ string, _ string) (int, error)   { return 0, nil }
+func (m *baseController) ApproveToolsReviewed(_ string, _ []string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
+func (m *baseController) ApproveAllToolsReviewed(_ string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
 func (m *baseController) BlockTools(_ string, _ []string, _ string) (int, error) {
 	return 0, nil
 }

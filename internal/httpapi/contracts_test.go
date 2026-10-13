@@ -404,6 +404,12 @@ func (m *MockServerController) ListToolApprovals(_ string) ([]*storage.ToolAppro
 }
 func (m *MockServerController) ApproveTools(_ string, _ []string, _ string) error { return nil }
 func (m *MockServerController) ApproveAllTools(_ string, _ string) (int, error)   { return 0, nil }
+func (m *MockServerController) ApproveToolsReviewed(_ string, _ []string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
+func (m *MockServerController) ApproveAllToolsReviewed(_ string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
 func (m *MockServerController) BlockTools(_ string, _ []string, _ string) (int, error) {
 	return 0, nil
 }

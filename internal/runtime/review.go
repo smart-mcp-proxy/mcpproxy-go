@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -107,6 +108,13 @@ type ReviewServer struct {
 	// inventory (Tools), which retains operator decisions for absent tools.
 	LiveToolCount int        `json:"live_tool_count,omitempty"`
 	LastCaptureAt *time.Time `json:"last_capture_at,omitempty"`
+	// Generation and Incarnation identify the committed server this review
+	// shows (Spec 116 FR-017). A client echoes Incarnation back as
+	// expected_incarnation on approve, block and unquarantine, so a decision
+	// made on this review can never land on a server re-added under the same
+	// name (409 server_replaced).
+	Generation  int64 `json:"generation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 type ReviewTool struct {
@@ -126,6 +134,12 @@ type ReviewTool struct {
 	DefaultAllowed bool                `json:"default_allowed"`
 	Previous       *ReviewToolPrevious `json:"previous"`
 	Diff           *ReviewToolDiff     `json:"diff,omitempty"`
+	// CurrentHash is the review fingerprint of this tool (Spec 117 PR-2,
+	// #1566), not the storage CurrentHash: send it back in expected_hashes
+	// to bind an approval to this review. Opaque; compare only with a later
+	// review. The /tools/{tool}/diff payload's current_hash is a different
+	// value (the storage hash).
+	CurrentHash string `json:"current_hash,omitempty"`
 }
 
 type ReviewToolPrevious struct {
@@ -201,19 +215,20 @@ func (r *Runtime) GetReviewQueue(ctx context.Context) (*ReviewQueue, error) {
 // GetServerReview returns a caller-independent review view. Server command,
 // URL, environment, header, and argument values are redacted unconditionally.
 func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*ServerReview, error) {
-	cfg, err := r.GetConfig()
+	// Spec 116 FR-017 (review round 1): the displayed configuration and the
+	// incarnation come from ONE committed snapshot. Reading them separately
+	// lets a same-name remove/re-add land in between, and the review would
+	// show the old server's command or URL with the replacement's
+	// incarnation, which the client echoes back as expected_incarnation.
+	server, gen, hasGen, err := r.committedServerView(serverName)
 	if err != nil {
 		return nil, err
 	}
-	var server *config.ServerConfig
-	for i := range cfg.Servers {
-		if cfg.Servers[i].Name == serverName {
-			server = cfg.Servers[i]
-			break
-		}
-	}
 	if server == nil {
 		return nil, fmt.Errorf("%w: %q", ErrReviewServerNotFound, serverName)
+	}
+	if hook := r.testHooks.serverViewAfterRead; hook != nil {
+		hook()
 	}
 	contractServer := contracts.Server{
 		Name: server.Name, Protocol: server.Protocol, Command: server.Command,
@@ -239,6 +254,9 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		URL: contractServer.URL, Env: contractServer.Env, Headers: contractServer.Headers,
 		Quarantined: server.Quarantined, TrustMode: string(server.EffectiveTrustMode()),
 		SourceRegistryID: server.SourceRegistryID, SourceRegistryProvenance: server.SourceRegistryProvenance,
+	}
+	if hasGen {
+		reviewServer.Generation, reviewServer.Incarnation = gen.Gen, gen.Incarnation
 	}
 	// Stored records and the live capture state are published by different
 	// writers. A capture holds captureSnapMu for persist + prune + stamp, so
@@ -285,6 +303,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 			HeldReason:  record.HeldReason, HeldSignals: append([]string(nil), record.HeldSignals...),
 		}
 		tool.DefaultAllowed = reviewDefaultAllowed(tool)
+		tool.CurrentHash = reviewFingerprint(record)
 		if record.PreviousDescription != "" || record.PreviousSchema != "" || record.PreviousOutputSchema != "" || record.PreviousAnnotations != nil {
 			tool.Previous = &ReviewToolPrevious{
 				Description: record.PreviousDescription, InputSchema: rawSchema(record.PreviousSchema),
@@ -421,10 +440,32 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 	if !record.DefinitionChangedAt.IsZero() && record.DefinitionChangedAt.After(analysedAt) {
 		return false
 	}
+	if len(job.ScanContext.ToolContractDigests) > 0 {
+		// Output-aware scan: covered when ANY contract the scan analysed
+		// under this name — the live export or a divergent ingested
+		// contract (RT-06) — is the record's CURRENT contract, output
+		// schema included (Sol r7 P2).
+		digests, ok := job.ScanContext.ToolContractDigests[record.ToolName]
+		if !ok {
+			digests, ok = job.ScanContext.ToolContractDigests[serverName+":"+record.ToolName]
+		}
+		if !ok || (record.CurrentDescription == "" && record.CurrentSchema == "") {
+			return false
+		}
+		return slices.Contains(digests, hash.ToolContractDigest(record.CurrentDescription, record.CurrentSchema, record.CurrentOutputSchema))
+	}
+	// Every scan below predates output-aware coverage: hash-bound (ToolHashes,
+	// a description/input-only digest), name-only and count-only legacy jobs
+	// never exported an output schema, so none of them analysed one. A record
+	// whose current contract has one is not covered by any of them
+	// (Sol r7/r8 P2).
+	if reviewHasOutputSchema(record.CurrentOutputSchema) {
+		return false
+	}
 	if len(job.ScanContext.ToolHashes) > 0 {
 		// Hash-bound scan: the analysed definition must be the record's
-		// CURRENT one. A record with no stored definition cannot be compared,
-		// so it is not covered.
+		// CURRENT one. A record with no stored definition cannot be
+		// compared, so it is not covered.
 		scanned, ok := job.ScanContext.ToolHashes[record.ToolName]
 		if !ok {
 			scanned, ok = job.ScanContext.ToolHashes[serverName+":"+record.ToolName]
@@ -451,6 +492,16 @@ func reviewToolCovered(job *scanner.ScanJob, quarantined bool, serverName string
 		return !record.DefinitionChangedAt.IsZero()
 	}
 	return false
+}
+
+// reviewHasOutputSchema reports whether a stored output schema is present
+// (absent, empty and JSON null all mean none).
+func reviewHasOutputSchema(outputSchemaJSON string) bool {
+	switch strings.TrimSpace(outputSchemaJSON) {
+	case "", "null":
+		return false
+	}
+	return true
 }
 
 // reviewScanAndFindings returns the newest baseline scan, its findings, and

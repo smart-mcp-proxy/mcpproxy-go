@@ -337,7 +337,10 @@ export const useServersStore = defineStore('servers', () => {
     // user-facing "Approve" buttons.
   async function securityApproveServer(serverName: string, force = false) {
     try {
-      const response = await api.securityApprove(serverName, force)
+      const incarnation = servers.value.find(s => s.name === serverName)?.incarnation
+      const response = incarnation
+        ? await api.securityApprove(serverName, force, [], incarnation)
+        : await api.securityApprove(serverName, force)
       if (response.success) {
         // Optimistic update: the backend will also unquarantine the server
         // on a successful approve, so reflect that in local state. SSE

@@ -103,6 +103,12 @@ func getDockerRetryInterval(attempt int) time.Duration {
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
 	clients map[string]*managed.Client
+	// desired is the committed generation of every server name (Spec 116
+	// PR3): written by AdvanceGenerations (commit step 7) and the unbound
+	// legacy methods, under captureMu W + mu W; read under mu. A bound (*At)
+	// action acts only when its generation matches. Removed names keep a
+	// tombstone (present=false).
+	desired map[string]desiredGen
 	mu      sync.RWMutex
 	// captureMu serializes a bounded quarantined-review persistence against
 	// client replacement/removal. It is deliberately separate from mu: approval
@@ -110,8 +116,18 @@ type Manager struct {
 	// deadlock behind a queued AddServerConfig writer. Lock order is captureMu
 	// then mu; mutation releases both before disconnecting or invoking callbacks.
 	captureMu sync.RWMutex
-	logger    *zap.Logger
-	logConfig *config.LogConfig
+	// limiterPubMu serializes limiter publication (Spec 093 SetServer /
+	// RetireServer / Apply) in the order of the registry critical sections
+	// that decided it (Spec 116 PR3, Sol round 2). Every registry mutation
+	// takes it hand over hand: it is acquired while mu is still held and
+	// released after the publication, so a newer commit's publication can
+	// never be overtaken by an older action that validated its generation and
+	// then lost the CPU after the unlock. Lock order: captureMu → mu →
+	// limiterPubMu → limiter.Registry.mu (leaf). Nothing that holds it takes
+	// captureMu or mu, connects, disconnects or calls back into the runtime.
+	limiterPubMu sync.Mutex
+	logger       *zap.Logger
+	logConfig    *config.LogConfig
 	// globalConfig holds the proxy-wide config as an atomic pointer so a config
 	// hot-reload (SetGlobalConfig) can swap it lock-free while the construction
 	// paths and the Docker-recovery goroutine read it concurrently (spec 074:
@@ -157,6 +173,16 @@ type Manager struct {
 	dockerRecoveryState  *storage.DockerRecoveryState
 	dockerRecoveryCancel context.CancelFunc
 	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
+
+	// forceReconnectBeforeReplace is a Spec 116 PR3 test seam (T3.8): it runs
+	// in ForceReconnectAll after the clients were captured and before the
+	// captured instance is replaced. Nil in production.
+	forceReconnectBeforeReplace atomic.Pointer[func(id string)]
+
+	// limiterPublishHook is a Spec 116 PR3 test seam (Sol round 2): it runs
+	// with the server name right before a registry mutation publishes that
+	// server's limiter. Nil in production.
+	limiterPublishHook atomic.Pointer[func(name string)]
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
@@ -227,6 +253,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:           make(map[string]*managed.Client),
+		desired:           make(map[string]desiredGen),
 		logger:            logger,
 		storage:           boltStorage,
 		notificationMgr:   NewNotificationManager(),
@@ -437,265 +464,6 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 	defer m.mu.Unlock()
 	m.promptsChangedCallback = callback
 	m.logger.Debug("Prompts-changed callback set on manager")
-}
-
-// AddServerConfig adds a server configuration without connecting
-func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
-	m.captureMu.Lock()
-	m.mu.Lock()
-
-	// Check if existing client exists and if config has changed
-	var clientToDisconnect *managed.Client
-	if existingClient, exists := m.clients[id]; exists {
-		existingConfig := existingClient.GetConfig()
-
-		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
-			existingConfig.Protocol != serverConfig.Protocol ||
-			existingConfig.Command != serverConfig.Command ||
-			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
-			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
-			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
-
-		if configChanged {
-			m.logger.Info("Server configuration changed, disconnecting existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-
-			// Remove from map immediately to prevent new operations
-			delete(m.clients, id)
-			// Spec 113-d FR-066: the replacement connects to a different
-			// endpoint/command/credentials, so the old client's failure
-			// history must not degrade it. Same critical section as the
-			// delete, mirroring RemoveServer.
-			statsName := id
-			if existingConfig != nil && existingConfig.Name != "" {
-				statsName = existingConfig.Name
-			}
-			m.callStats.Drop(statsName)
-			m.dropCallHealth(statsName)
-			// Save reference to disconnect outside lock
-			clientToDisconnect = existingClient
-		} else {
-			m.logger.Debug("Server configuration unchanged, keeping existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-			// Update the client's config reference to the new config but don't recreate the client
-			// Use thread-safe setter to avoid race with GetServerState()
-			m.mu.Unlock()
-			m.captureMu.Unlock()
-			existingClient.SetConfig(serverConfig)
-			// Spec 093: the per-server limits may have changed even though the
-			// transport config did not.
-			m.applyServerConcurrency(serverConfig)
-			return nil
-		}
-	}
-
-	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
-	if err != nil {
-		m.mu.Unlock()
-		m.captureMu.Unlock()
-		// Disconnect old client if we failed to create new one
-		if clientToDisconnect != nil {
-			_ = clientToDisconnect.Disconnect()
-		}
-		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
-	}
-
-	// Set up notification callback for state changes
-	if m.notificationMgr != nil {
-		notifierCallback := StateChangeNotifier(m.notificationMgr, serverConfig.Name)
-		// Combine with existing callback if present
-		existingCallback := client.StateManager.GetStateChangeCallback()
-		client.StateManager.SetStateChangeCallback(func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
-			// Call existing callback first (for logging)
-			if existingCallback != nil {
-				existingCallback(oldState, newState, info)
-			}
-			// Then call notification callback
-			notifierCallback(oldState, newState, info)
-		})
-	}
-
-	// Set up tool discovery callback for notifications/tools/list_changed handling
-	if m.toolDiscoveryCallback != nil {
-		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
-	}
-
-	// Set up prompts-changed callback for notifications/prompts/list_changed (F13)
-	if m.promptsChangedCallback != nil {
-		client.SetPromptsChangedCallback(m.promptsChangedCallback)
-	}
-
-	// Spec 093: install admission control before the client becomes reachable,
-	// so no dispatch can ever see a client without its limiter wiring.
-	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())
-
-	m.clients[id] = client
-	m.logger.Info("Added upstream server configuration",
-		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
-
-	// IMPORTANT: Release lock before disconnecting to prevent deadlock
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093: publish this server's limits (or retire them when the server is
-	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
-	// callers.
-	m.applyServerConcurrency(serverConfig)
-
-	// Disconnect old client outside lock to avoid blocking other operations
-	if clientToDisconnect != nil {
-		_ = clientToDisconnect.Disconnect()
-	}
-
-	return nil
-}
-
-// Helper functions for comparing slices and maps
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalStringMaps(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
-// AddServer adds a new upstream server and connects to it (legacy method)
-func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
-	if err := m.AddServerConfig(id, serverConfig); err != nil {
-		return err
-	}
-
-	if !serverConfig.Enabled {
-		m.logger.Debug("Skipping connection for disabled server",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-		return nil
-	}
-
-	// Check if client exists and is already connected
-	if client, exists := m.GetClient(id); exists {
-		if client.IsConnected() {
-			m.logger.Debug("Server is already connected, skipping connection attempt",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name))
-			return nil
-		}
-
-		// Connect to server with the resolved init_timeout (MCP-3322) to prevent
-		// hanging while still honoring a per-server/global handshake deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
-		defer cancel()
-		if err := client.Connect(ctx); err != nil {
-			// The supervisor's reconcile usually owns the connect at startup;
-			// LoadConfiguredServers' AddServer for the same unchanged server then
-			// hits the in-flight guard. Nothing failed.
-			if errors.Is(err, managed.ErrConnectAlreadyActive) {
-				m.logger.Debug("Connect already in progress or established, not starting another",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.String("state", client.GetState().String()))
-				return nil
-			}
-			// Check if this is an OAuth error - don't fail AddServer for OAuth
-			errStr := err.Error()
-			isOAuthError := strings.Contains(errStr, "OAuth") ||
-				strings.Contains(errStr, "oauth") ||
-				strings.Contains(errStr, "authorization required")
-
-			if isOAuthError {
-				m.logger.Info("Server requires OAuth authorization - connection will complete after OAuth login",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.Error(err))
-				// Don't return error - server is added successfully, just needs OAuth
-				return nil
-			}
-
-			// For non-OAuth errors, still return error
-			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
-		}
-	} else {
-		m.logger.Error("Client not found after AddServerConfig - this should not happen",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-	}
-
-	return nil
-}
-
-// RemoveServer removes an upstream server
-func (m *Manager) RemoveServer(id string) {
-	// Get client reference while holding lock briefly
-	m.captureMu.Lock()
-	m.mu.Lock()
-	client, exists := m.clients[id]
-	callStatsName := id
-	if exists {
-		// Remove from map immediately to prevent new operations
-		delete(m.clients, id)
-		if client != nil {
-			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-				callStatsName = cfg.Name
-			}
-		}
-	}
-	// Spec 113-d FR-066: a removed (or renamed — remove + add) server must not
-	// carry its failure history into whatever reuses the name. Dropped in the
-	// SAME critical section as the delete: RecordClientCallOutcome records
-	// under m.mu.RLock, so a replacement registered after this unlock cannot
-	// have its first samples wiped by a late drop, and the old client's
-	// in-flight completions fail the registered check.
-	m.callStats.Drop(callStatsName)
-	m.dropCallHealth(callStatsName)
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
-	// immediately with the server-unavailable semantics instead of waiting out
-	// their queue deadline against a server that no longer exists.
-	name := id
-	if exists && client != nil {
-		if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-			name = cfg.Name
-		}
-	}
-	m.retireServerConcurrency(name)
-
-	// Disconnect outside the lock to avoid blocking other operations
-	if exists {
-		m.logger.Info("Removing upstream server",
-			zap.String("id", id),
-			zap.String("state", client.GetState().String()))
-		_ = client.Disconnect()
-		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
-	}
 }
 
 // ShutdownAll disconnects all clients and ensures all Docker containers are stopped
@@ -1378,7 +1146,7 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, false)
+	tools, _, _, err := m.discoverTools(ctx, false)
 	return tools, err
 }
 
@@ -1389,6 +1157,15 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // FR-009: the discovery-completed marker must be stamped for the former and
 // left alone for the latter).
 func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+	tools, listed, _, err := m.discoverTools(ctx, dueOnly)
+	return tools, listed, err
+}
+
+// DiscoverToolsReportCaptured is DiscoverToolsReport that also returns, per
+// listed server, the capture of that server's own tools/list (Spec 117 PR-3,
+// FR-031): the sweep applies each server's inventory in capture order, not
+// under one ticket for the whole sweep.
+func (m *Manager) DiscoverToolsReportCaptured(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	return m.discoverTools(ctx, dueOnly)
 }
 
@@ -1399,11 +1176,11 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, true)
+	tools, _, _, err := m.discoverTools(ctx, true)
 	return tools, err
 }
 
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1450,6 +1227,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 	var allTools []*config.ToolMetadata
 	var listed []string
+	captures := make(map[string]managed.InventoryCapture)
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
@@ -1500,7 +1278,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		connectedCount++
 
-		tools, err := client.ListTools(ctx)
+		tools, capture, err := client.ListToolsCaptured(ctx)
 		if err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
@@ -1519,6 +1297,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
+			captures[snapshot.name] = capture
 		}
 
 		if tools != nil {
@@ -1535,7 +1314,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		zap.Bool("due_only", dueOnly),
 		zap.Int("skipped_not_due", skippedNotDue))
 
-	return allTools, listed, nil
+	return allTools, listed, captures, nil
 }
 
 // tryReconnectOnUse attempts a single synchronous reconnect for a disconnected
@@ -1865,6 +1644,12 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	clients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
+		// Spec 116 PR3 (FR-020): connect only an instance that runs its
+		// server's committed generation. An instance a commit has not
+		// restamped or replaced yet is left to that commit's worker.
+		if d, ok := m.desired[id]; ok && (!d.present || (d.gen != 0 && client.Generation() != d.gen)) {
+			continue
+		}
 		clients[id] = client
 	}
 	m.mu.RUnlock()
@@ -1967,7 +1752,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.DependsOnDocker()))
 			defer cancel()
 
-			if err := c.Connect(connectCtx); err != nil {
+			if err := c.Connect(connectCtx); errors.Is(err, managed.ErrInstanceUnregistered) || errors.Is(err, managed.ErrConnectAborted) {
+				m.logger.Debug("Connect skipped: the instance was superseded while ConnectAll ran",
+					zap.String("id", id), zap.Error(err))
+			} else if err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
 					zap.String("name", c.GetConfig().Name),
@@ -2589,7 +2377,12 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			continue
 		}
 
-		cfg := cloneServerConfig(client.GetConfig())
+		// Spec 116 PR3 (review R4.1, R5.4, Sol round 1): the config and the
+		// generation are read from ONE atomic load, so a non-connection commit
+		// that restamps the instance in between cannot pair the old config
+		// with the new generation.
+		capturedCfg, gen := client.ConfigAt()
+		cfg := cloneServerConfig(capturedCfg)
 		if cfg == nil {
 			result.SkippedServers[id] = "failed to clone config"
 			continue
@@ -2609,12 +2402,46 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			zap.String("id", id),
 			zap.String("reason", reason))
 
-		m.RemoveServer(id)
+		// Replace exactly the instance captured above, at its generation. A
+		// server a commit removed or replaced since the capture is left alone
+		// (ErrStaleGeneration): a removed one is not re-created and a
+		// replacement is not torn down. When the SAME instance is still
+		// registered (a commit only restamped it with a non-connection edit),
+		// the recovery re-reads its (config, generation) pair and retries, so
+		// it installs the latest committed config.
+		var fresh *managed.Client
+		var err error
+		for attempt := 0; ; attempt++ {
+			if hook := m.forceReconnectBeforeReplace.Load(); hook != nil {
+				(*hook)(id)
+			}
+			fresh, err = m.ReplaceInstanceAt(id, gen, client, cfg)
+			if !errors.Is(err, ErrStaleGeneration) || attempt >= 2 {
+				break
+			}
+			if cur, ok := m.GetClient(id); !ok || cur != client {
+				break
+			}
+			capturedCfg, gen = client.ConfigAt()
+			if cfg = cloneServerConfig(capturedCfg); cfg == nil || !cfg.Enabled {
+				break
+			}
+		}
+		if errors.Is(err, ErrStaleGeneration) || cfg == nil || !cfg.Enabled {
+			result.AttemptedServers--
+			result.SkippedServers[id] = "replaced or removed since the reconnect started"
+			m.logger.Debug("ForceReconnectAll: skipping a server a newer commit or replacement superseded",
+				zap.String("server", id))
+			continue
+		}
 
 		// Small delay to allow container/process cleanup before restart
 		time.Sleep(200 * time.Millisecond)
 
-		if err := m.AddServer(id, cfg); err != nil {
+		if err == nil {
+			err = m.connectInstance(id, fresh)
+		}
+		if err != nil {
 			result.FailedServers[id] = err
 			m.logger.Error("ForceReconnectAll: failed to rebuild client",
 				zap.String("server", cfg.Name),

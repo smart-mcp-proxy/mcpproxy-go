@@ -101,6 +101,12 @@ func apiRequestTimeout(defaultBudget time.Duration, budgets map[string]time.Dura
 	}
 }
 
+// SetPatchAfterParseHookForTest installs the PATCH /api/v1/servers/{id}
+// after-parse seam (Spec 116 T001). Test-only.
+func (s *Server) SetPatchAfterParseHookForTest(fn func(serverName string)) {
+	s.patchAfterParse = fn
+}
+
 // ServerController defines the interface for core server functionality
 type ServerController interface {
 	IsRunning() bool
@@ -271,6 +277,12 @@ type ServerController interface {
 	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
 	ApproveTools(serverName string, toolNames []string, approvedBy string) error
 	ApproveAllTools(serverName string, approvedBy string) (int, error)
+	// ApproveToolsReviewed / ApproveAllToolsReviewed are the review-bound
+	// forms (Spec 117 PR-2, #1566): expected maps tool name to the review
+	// fingerprint the client showed; nil is an unbound (legacy) request. A
+	// mismatch returns *toolreview.StaleToolReviewError and writes nothing.
+	ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error)
+	ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error)
 	// BlockTools / BlockAllTools atomically approve+disable tools (MCP-2198):
 	// all-or-nothing so a tool is never left approved+enabled.
 	BlockTools(serverName string, toolNames []string, blockedBy string) (int, error)
@@ -295,7 +307,10 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller        ServerController
+	controller ServerController
+	// patchAfterParse is a Spec 116 test seam (nil in production): it runs in
+	// PATCH /api/v1/servers/{id} after the body was parsed and validated.
+	patchAfterParse   func(serverName string)
 	logger            *zap.SugaredLogger
 	httpLogger        *zap.Logger // Separate logger for HTTP requests
 	router            *chi.Mux
@@ -365,6 +380,10 @@ type Server struct {
 	// preflightPollOverride lowers the 250 ms poll floor. Tests set it; nothing
 	// in production does.
 	preflightPollOverride time.Duration
+	// preflightNowOverride replaces time.Now as the source of the wait start,
+	// so tests can observe the exact budget the server computed. Tests set it;
+	// nothing in production does.
+	preflightNowOverride func() time.Time
 
 	// sessionPrincipalResolver resolves a session cookie or bearer JWT to an
 	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
@@ -2663,65 +2682,29 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePatchServer godoc
-// @Summary Partially update an upstream server
-// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
-// @Tags servers
-// @Accept json
-// @Produce json
-// @Security ApiKeyAuth
-// @Security ApiKeyQuery
-// @Param id path string true "Server ID or name"
-// @Param server body AddServerRequest true "Fields to update (all optional)"
-// @Success 200 {object} contracts.SuccessResponse "Server updated successfully"
-// @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
-// @Failure 404 {object} contracts.ErrorResponse "Server not found"
-// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
-// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
-// @Router /api/v1/servers/{id} [patch]
-func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
-	serverName := chi.URLParam(r, "id")
-	if serverName == "" {
-		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
-		return
-	}
+// patchError is a PATCH /api/v1/servers/{id} refusal produced while the
+// update is resolved against the live entry (inside the config commit).
+type patchError struct {
+	status int
+	msg    string
+}
 
-	var req AddServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
-		return
-	}
+func (e *patchError) Error() string { return e.msg }
 
-	// GH #938: reject an unrecognized trust_mode before anything is persisted.
-	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
-	// unchanged); only a present-but-bogus value is refused.
-	if !config.IsValidTrustMode(req.TrustMode) {
-		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
-		return
-	}
+// ServerPatcher is implemented by controllers that resolve a partial server
+// update inside their config commit (Spec 116 FR-006). resolve receives a copy
+// of the LIVE entry read under the commit lock and returns the update to
+// apply; an error from it aborts the commit with nothing written.
+type ServerPatcher interface {
+	PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error
+}
 
-	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
-	// isolation mode BEFORE anything is persisted.
-	if err := req.Isolation.validate(); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Pre-fetch existing server so we can preserve bool fields the request
-	// did not explicitly set. `config.ServerConfig` uses non-pointer bools
-	// whose zero value cannot be distinguished from "not set" by the time
-	// the update reaches the controller — without this, a PATCH body like
-	// `{"args": [...]}` silently disables a previously-enabled server.
-	var existingSrv *config.ServerConfig
-	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
-		for _, sc := range cfg.Servers {
-			if sc != nil && sc.Name == serverName {
-				existingSrv = sc
-				break
-			}
-		}
-	}
-
+// resolveServerPatch turns a PATCH body into the partial update to apply to
+// existingSrv (the live entry; nil when unknown). Omitted fields, map merges,
+// isolation and forward-header validation are all resolved against it, so
+// running it inside the commit means a PATCH can never revert a newer write
+// with values it read earlier (#1560).
+func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
@@ -2747,8 +2730,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		}
 		unmaskedURL, err := oauth.UnmaskLiveURL(req.URL, storedURL)
 		if err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
+			return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		updates.URL = unmaskedURL
 		hasUpdates = true
@@ -2768,8 +2750,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			storedArgs = existingSrv.Args
 		}
 		if err := oauth.CheckArgvMaskEcho("args", req.Args, storedArgs); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, err.Error())
-			return
+			return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		updates.Args = req.Args
 		hasUpdates = true
@@ -2892,16 +2873,14 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case req.ForwardHeaders != nil:
 			if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
-				s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-				return
+				return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
 			}
 			updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
 			hasUpdates = true
 		case existingSrv != nil:
 			if req.Headers != nil {
 				if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
-					s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
-					return
+					return nil, &patchError{status: http.StatusBadRequest, msg: joinValidationMessages(errs)}
 				}
 			}
 			updates.ForwardHeaders = existingSrv.ForwardHeaders
@@ -2960,8 +2939,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !hasUpdates {
-		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
-		return
+		return nil, &patchError{status: http.StatusBadRequest, msg: "No fields to update"}
 	}
 
 	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
@@ -2973,13 +2951,98 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// round-tripping its own mask into the config. See
 	// oauth.ServerFieldMaskDecisions.
 	if err := oauth.CheckServerWriteMasks("server.", updates); err != nil {
+		return nil, &patchError{status: http.StatusBadRequest, msg: err.Error()}
+	}
+
+	return updates, nil
+}
+
+// handlePatchServer godoc
+// @Summary Partially update an upstream server
+// @Description Update specific fields of an existing upstream MCP server configuration. Isolation: `isolation.enabled` is READ-ONLY (it reports the effective state on reads) and is rejected with 400; set the per-server override via `isolation.enabled_override` (true | false | null to clear, omit to leave unchanged). An unrecognized `isolation.mode_override` is rejected with 400.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Param server body AddServerRequest true "Fields to update (all optional)"
+// @Success 200 {object} contracts.SuccessResponse "Server updated successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
+// @Router /api/v1/servers/{id} [patch]
+func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
+	serverName := chi.URLParam(r, "id")
+	if serverName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req AddServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// GH #938: reject an unrecognized trust_mode before anything is persisted.
+	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
+	// unchanged); only a present-but-bogus value is refused.
+	if !config.IsValidTrustMode(req.TrustMode) {
+		s.writeError(w, r, http.StatusBadRequest, invalidTrustModeMessage(req.TrustMode))
+		return
+	}
+
+	// GH #1142: refuse a read-only `isolation.enabled` and an unrecognized
+	// isolation mode BEFORE anything is persisted.
+	if err := req.Isolation.validate(); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	logger := s.getRequestLogger(r)
+	if h := s.patchAfterParse; h != nil {
+		h(serverName)
+	}
 
-	if err := s.controller.UpdateServer(r.Context(), serverName, updates); err != nil {
+	resolve := func(existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
+		return resolveServerPatch(serverName, &req, existingSrv)
+	}
+
+	var err error
+	if patcher, ok := s.controller.(ServerPatcher); ok {
+		// Spec 116: resolved inside the config commit, on the live entry.
+		err = patcher.PatchServer(r.Context(), serverName, resolve)
+	} else {
+		// A controller without a config commit resolves against its current
+		// configuration (test doubles).
+		var existingSrv *config.ServerConfig
+		if cfg, cerr := s.controller.GetConfig(); cerr == nil && cfg != nil {
+			for _, sc := range cfg.Servers {
+				if sc != nil && sc.Name == serverName {
+					existingSrv = sc
+					break
+				}
+			}
+		}
+		var updates *config.ServerConfig
+		if updates, err = resolve(existingSrv); err == nil {
+			err = s.controller.UpdateServer(r.Context(), serverName, updates)
+		}
+	}
+
+	logger := s.getRequestLogger(r)
+	var perr *patchError
+	if errors.As(err, &perr) {
+		s.writeError(w, r, perr.status, perr.msg)
+		return
+	}
+	var verr *config.InvalidServerUpdateError
+	if errors.As(err, &verr) {
+		s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(verr.Errors))
+		return
+	}
+	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, err.Error())
 			return
@@ -3115,29 +3178,42 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 
 	// Apply the swap as a deep-merge PATCH so we don't touch any other
 	// keys on the server. Build the updates map with just the one field
-	// we care about.
-	updates := &config.ServerConfig{Name: serverName}
-	if req.Scope == "header" {
-		merged := map[string]string{}
-		for k, v := range sc.Headers {
-			merged[k] = v
+	// we care about, from the entry the update is applied to.
+	buildUpdates := func(cur *config.ServerConfig) *config.ServerConfig {
+		updates := &config.ServerConfig{Name: serverName}
+		if req.Scope == "header" {
+			merged := map[string]string{}
+			for k, v := range cur.Headers {
+				merged[k] = v
+			}
+			merged[req.Key] = referenceStr
+			updates.Headers = merged
+		} else {
+			merged := map[string]string{}
+			for k, v := range cur.Env {
+				merged[k] = v
+			}
+			merged[req.Key] = referenceStr
+			updates.Env = merged
 		}
-		merged[req.Key] = referenceStr
-		updates.Headers = merged
-	} else {
-		merged := map[string]string{}
-		for k, v := range sc.Env {
-			merged[k] = v
-		}
-		merged[req.Key] = referenceStr
-		updates.Env = merged
+		// Preserve existing bool fields so the partial config doesn't reset them.
+		updates.Enabled = cur.Enabled
+		updates.Quarantined = cur.Quarantined
+		updates.ReconnectOnUse = cur.ReconnectOnUse
+		return updates
 	}
-	// Preserve existing bool fields so the partial config doesn't reset them.
-	updates.Enabled = sc.Enabled
-	updates.Quarantined = sc.Quarantined
-	updates.ReconnectOnUse = sc.ReconnectOnUse
 
-	if err := s.controller.UpdateServer(ctx, serverName, updates); err != nil {
+	var updateErr error
+	if patcher, ok := s.controller.(ServerPatcher); ok {
+		// Spec 116: merged inside the config commit, on the live entry, so a
+		// concurrent edit of another header or env key is not reverted.
+		updateErr = patcher.PatchServer(ctx, serverName, func(cur *config.ServerConfig) (*config.ServerConfig, error) {
+			return buildUpdates(cur), nil
+		})
+	} else {
+		updateErr = s.controller.UpdateServer(ctx, serverName, buildUpdates(sc))
+	}
+	if err := updateErr; err != nil {
 		s.logger.Errorw("config-to-secret: keyring write succeeded but config update failed; secret is stored but not referenced",
 			"server", serverName, "scope", req.Scope, "key", req.Key, "secret_name", req.SecretName, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("secret stored as %q but config update failed: %v", req.SecretName, err))
@@ -3848,9 +3924,11 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Param id path string true "Server ID or name"
+// @Param body body expectedIncarnationBody false "Optional incarnation of the reviewed server (Spec 116)"
 // @Success 200 {object} contracts.ServerActionResponse "Server unquarantined successfully"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 409 {object} contracts.ErrorResponse "server_replaced: the server was removed or re-added since expected_incarnation"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/unquarantine [post]
@@ -3861,9 +3939,23 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.controller.QuarantineServer(serverID, false); err != nil {
+	// Spec 116 FR-017: an optional {"expected_incarnation": n} binds the
+	// unquarantine to the server the client reviewed (409 server_replaced).
+	expected, err := readOptionalExpectedIncarnation(r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+	if ic := s.incarnationController(); ic != nil && expected > 0 {
+		err = ic.QuarantineServerAt(serverID, false, expected)
+	} else {
+		err = s.controller.QuarantineServer(serverID, false)
+	}
+	if err != nil {
 		s.logger.Errorw("Failed to unquarantine server", "server", serverID, "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to unquarantine server: %v", err))
+		// 409 server_replaced, 404 for a server that is not configured
+		// (documented, review round 4), 500 otherwise.
+		s.writeApprovalWriteError(w, r, err, "Failed to unquarantine server")
 		return
 	}
 
@@ -3887,6 +3979,7 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 // @Success 200 {object} contracts.GetServerToolsResponse "Server tools retrieved successfully"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 409 {object} contracts.ErrorResponse "server_replaced: the server kept being removed or replaced while its tools were read"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/tools [get]
 func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
@@ -3904,7 +3997,22 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tools, err := mgmtSvc.GetServerTools(r.Context(), serverID)
+	// Spec 116 FR-017 (review round 1): the incarnation is read BEFORE the
+	// tools, so a same-name replacement landing in between yields an older
+	// incarnation (a decision is refused, 409) and never a newer one paired
+	// with the old server's tools.
+	// Review round 7: and re-read after them; rows whose server was removed
+	// or replaced during the read are read again (readAtSettledIncarnation).
+	var tools []map[string]interface{}
+	incarnation, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		tools, rerr = mgmtSvc.GetServerTools(r.Context(), serverID)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to get server tools", "server", serverID, "error", err)
 
@@ -3928,10 +4036,15 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return toolApprovalPriority(typedTools[i].ApprovalStatus) < toolApprovalPriority(typedTools[j].ApprovalStatus)
 	})
 
+	for i := range typedTools {
+		typedTools[i].ServerIncarnation = incarnation
+	}
+
 	response := contracts.GetServerToolsResponse{
-		ServerName: serverID,
-		Tools:      typedTools,
-		Count:      len(typedTools),
+		ServerName:  serverID,
+		Tools:       typedTools,
+		Count:       len(typedTools),
+		Incarnation: incarnation,
 	}
 
 	s.writeSuccess(w, response)
@@ -4088,7 +4201,45 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		generic, terr := getTools(name)
+		// Spec 116 FR-017: the server's incarnation, read BEFORE its tools
+		// (see handleGetServerTools). The controller's server projection
+		// may not carry it, so ask the controller when the row has none.
+		// Review round 7: when the controller reports incarnations, the rows
+		// are returned only if the identity did not move across the read
+		// (readAtSettledIncarnation); a server replaced throughout is
+		// reported as a failed fetch rather than served under a stale stamp
+		// or none.
+		serverInc := incarnationField(srv)
+		rowInc := serverInc
+		var generic []map[string]interface{}
+		var terr error
+		if _, reads := s.controller.(serverIncarnationReader); reads {
+			serverInc, terr = s.readAtSettledIncarnation(name, func() error {
+				var rerr error
+				generic, rerr = getTools(name)
+				return rerr
+			})
+		} else {
+			generic, terr = getTools(name)
+		}
+		// Review round 8 (#1064 + FR-017): the quarantine exclusion above
+		// came from the enumeration row, read before the tools. When the
+		// settled read moved to a replacement incarnation, that row
+		// describes the removed server, not the one whose rows were read —
+		// a quarantined replacement would contribute its inspection
+		// definitions under its own valid stamp. Re-read the replacement's
+		// row and apply the exclusion to it.
+		if terr == nil && rowInc != 0 && serverInc != rowInc {
+			current, found, lerr := s.serverRowAt(name, serverInc)
+			switch {
+			case lerr != nil || !found:
+				terr = errIncarnationUnsettled
+			default:
+				if quarantined, _ := current["quarantined"].(bool); quarantined {
+					continue
+				}
+			}
+		}
 		if terr != nil {
 			// Spec edge case: a genuine fetch error — still return every tool
 			// we could gather, flag the rest as partial.
@@ -4101,6 +4252,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 
 		typed := s.enrichServerTools(name, generic, discloseHash)
 		for i := range typed {
+			typed[i].ServerIncarnation = serverInc
 			if st, ok := usage[name+"\x00"+typed[i].Name]; ok {
 				typed[i].Usage = st.Count
 				if !st.LastUsed.IsZero() {
@@ -6847,7 +6999,53 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// approveToolsRequest is the body of POST /api/v1/servers/{id}/tools/approve.
+type approveToolsRequest struct {
+	Tools      []string `json:"tools"`
+	ApproveAll bool     `json:"approve_all"`
+	// ExpectedHashes binds the approval to the reviewed definitions (Spec
+	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+	// null is an unbound (legacy) request; {} is bound.
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty" extensions:"x-nullable"`
+	// ExpectedIncarnation binds the approval to the server the client
+	// reviewed (Spec 116 FR-017); 409 server_replaced on a mismatch. It is
+	// independent of ExpectedHashes and the two may be sent together.
+	ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
+}
+
+// approveAllReviewed / approveToolsReviewed run the review-bound writers,
+// carrying the expected incarnation when the controller supports it.
+func (s *Server) approveAllReviewed(serverID string, expected map[string]string, inc int64) (int, error) {
+	if ic, ok := s.controller.(reviewedIncarnationController); ok {
+		return ic.ApproveAllToolsReviewedAt(serverID, expected, "api", inc)
+	}
+	return s.controller.ApproveAllToolsReviewed(serverID, expected, "api")
+}
+
+func (s *Server) approveToolsReviewed(serverID string, tools []string, expected map[string]string, inc int64) error {
+	if ic, ok := s.controller.(reviewedIncarnationController); ok {
+		_, err := ic.ApproveToolsReviewedAt(serverID, tools, expected, "api", inc)
+		return err
+	}
+	_, err := s.controller.ApproveToolsReviewed(serverID, tools, expected, "api")
+	return err
+}
+
 // handleApproveTools handles POST /api/v1/servers/{id}/tools/approve
+//
+// @Summary Approve tools for a server
+// @Description Approves the given pending/changed tools (or all of them with approve_all). With expected_hashes (tool name -> the review's current_hash) the approval is bound to the reviewed definitions: when a requested tool (approve_all: any pending or changed tool) no longer matches, the response is 409 review_out_of_date and nothing is approved.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server name"
+// @Param body body approveToolsRequest true "Tools to approve, or approve_all, with an optional review binding"
+// @Success 200 {object} contracts.SuccessResponse "Approval outcome"
+// @Failure 400 {object} contracts.ErrorResponse "Invalid request"
+// @Failure 409 {object} StaleReviewErrorResponse "The review is out of date; nothing was approved"
+// @Router /api/v1/servers/{id}/tools/approve [post]
 func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
@@ -6855,19 +7053,34 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Tools      []string `json:"tools"`
-		ApproveAll bool     `json:"approve_all"`
-	}
+	var req approveToolsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	bound := req.ExpectedHashes != nil
+	ic := s.incarnationController()
 
 	if req.ApproveAll {
-		count, err := s.controller.ApproveAllTools(serverID, "api")
+		var (
+			count int
+			err   error
+		)
+		switch {
+		case bound:
+			// Both bindings travel together: the incarnation (server
+			// identity) and the hashes (reviewed definitions).
+			count, err = s.approveAllReviewed(serverID, req.ExpectedHashes, req.ExpectedIncarnation)
+		case ic != nil:
+			count, err = ic.ApproveAllToolsAt(serverID, "api", req.ExpectedIncarnation)
+		default:
+			count, err = s.controller.ApproveAllTools(serverID, "api")
+		}
+		if s.writeStaleReview(w, r, err) {
+			return
+		}
 		if err != nil {
-			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+			s.writeApprovalWriteError(w, r, err, "Failed to approve tools")
 			return
 		}
 		response := map[string]interface{}{
@@ -6892,8 +7105,22 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.ApproveTools(serverID, req.Tools, "api"); err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to approve tools: %v", err))
+	var approveErr error
+	if bound {
+		// A bound request validates, writes and reports each name once
+		// (Spec 117 edge case: duplicates).
+		req.Tools = uniqueStrings(req.Tools)
+		approveErr = s.approveToolsReviewed(serverID, req.Tools, req.ExpectedHashes, req.ExpectedIncarnation)
+	} else if ic != nil {
+		approveErr = ic.ApproveToolsAt(serverID, req.Tools, "api", req.ExpectedIncarnation)
+	} else {
+		approveErr = s.controller.ApproveTools(serverID, req.Tools, "api")
+	}
+	if s.writeStaleReview(w, r, approveErr) {
+		return
+	}
+	if approveErr != nil {
+		s.writeApprovalWriteError(w, r, approveErr, "Failed to approve tools")
 		return
 	}
 
@@ -6941,7 +7168,7 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 // handleApproveTools: accepts either {"tools":[...]} or {"block_all":true}.
 //
 // @Summary Block (approve+disable) tools for a server
-// @Description Atomically approves AND disables the given tools (or all pending/changed tools when block_all=true) for a server. The approve and disable land in a single write per tool, so a tool is never left in the approved+enabled state. The "blocked" field counts tools actually blocked.
+// @Description Atomically approves AND disables the given tools (or all pending/changed tools when block_all=true) for a server. The approve and disable land in a single write per tool, so a tool is never left in the approved+enabled state. The "blocked" field counts tools actually blocked. An optional expected_incarnation binds the write to the reviewed server (Spec 116): a remove and re-add since then answers 409 server_replaced and writes nothing.
 // @Tags servers
 // @Accept json
 // @Produce json
@@ -6950,6 +7177,8 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 // @Param id path string true "Server ID or name"
 // @Success 200 {object} contracts.SuccessResponse "Block result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 409 {object} contracts.ErrorResponse "server_replaced: the server was removed or re-added since expected_incarnation"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/tools/block [post]
@@ -6963,16 +7192,27 @@ func (s *Server) handleBlockTools(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Tools    []string `json:"tools"`
 		BlockAll bool     `json:"block_all"`
+		// ExpectedIncarnation: Spec 116 FR-017 (see handleApproveTools).
+		ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	ic := s.incarnationController()
 
 	if req.BlockAll {
-		count, err := s.controller.BlockAllTools(serverID, "api")
+		var (
+			count int
+			err   error
+		)
+		if ic != nil {
+			count, err = ic.BlockAllToolsAt(serverID, "api", req.ExpectedIncarnation)
+		} else {
+			count, err = s.controller.BlockAllTools(serverID, "api")
+		}
 		if err != nil {
-			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to block tools: %v", err))
+			s.writeApprovalWriteError(w, r, err, "Failed to block tools")
 			return
 		}
 		s.writeSuccess(w, map[string]interface{}{
@@ -6987,9 +7227,17 @@ func (s *Server) handleBlockTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := s.controller.BlockTools(serverID, req.Tools, "api")
+	var (
+		count int
+		err   error
+	)
+	if ic != nil {
+		count, err = ic.BlockToolsAt(serverID, req.Tools, "api", req.ExpectedIncarnation)
+	} else {
+		count, err = s.controller.BlockTools(serverID, req.Tools, "api")
+	}
 	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to block tools: %v", err))
+		s.writeApprovalWriteError(w, r, err, "Failed to block tools")
 		return
 	}
 
@@ -7017,6 +7265,8 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Enabled bool `json:"enabled"`
+		// ExpectedIncarnation: Spec 116 FR-017 (see handleApproveTools).
+		ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
@@ -7042,8 +7292,14 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := controller.SetToolEnabled(serverID, toolName, req.Enabled, "api"); err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update tool enabled state: %v", err))
+	var setErr error
+	if ic := s.incarnationController(); ic != nil {
+		setErr = ic.SetToolEnabledAt(serverID, toolName, req.Enabled, "api", req.ExpectedIncarnation)
+	} else {
+		setErr = controller.SetToolEnabled(serverID, toolName, req.Enabled, "api")
+	}
+	if setErr != nil {
+		s.writeApprovalWriteError(w, r, setErr, "Failed to update tool enabled state")
 		return
 	}
 
@@ -7073,7 +7329,10 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyQuery
 // @Param id path string true "Server ID or name"
 // @Success 200 {object} contracts.SuccessResponse "Operation result"
+// @Param body body expectedIncarnationBody false "Optional incarnation of the reviewed server (Spec 116)"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 409 {object} contracts.ErrorResponse "server_replaced: the server was removed or re-added since expected_incarnation"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/tools/enable_all [post]
 // @Router /api/v1/servers/{id}/tools/disable_all [post]
@@ -7099,9 +7358,19 @@ func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 			return
 		}
 
-		changed, err := controller.SetAllToolsEnabled(serverID, enabled, "api")
+		expected, err := readOptionalExpectedIncarnation(r)
 		if err != nil {
-			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update tool states: %v", err))
+			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+			return
+		}
+		var changed int
+		if ic := s.incarnationController(); ic != nil {
+			changed, err = ic.SetAllToolsEnabledAt(serverID, enabled, "api", expected)
+		} else {
+			changed, err = controller.SetAllToolsEnabled(serverID, enabled, "api")
+		}
+		if err != nil {
+			s.writeApprovalWriteError(w, r, err, "Failed to update tool states")
 			return
 		}
 
@@ -7176,7 +7445,18 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	records, err := s.controller.ListToolApprovals(serverID)
+	// Spec 116 FR-017: read before the records (see handleGetServerTools).
+	// Review round 7: settled across the read (readAtSettledIncarnation).
+	var records []*storage.ToolApprovalRecord
+	incarnation, err := s.readAtSettledIncarnation(serverID, func() error {
+		var rerr error
+		records, rerr = s.controller.ListToolApprovals(serverID)
+		return rerr
+	})
+	if errors.Is(err, errIncarnationUnsettled) {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
 		return
@@ -7240,11 +7520,15 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		})
 	}
 
-	s.writeSuccess(w, map[string]interface{}{
+	payload := map[string]interface{}{
 		"server_name": serverID,
 		"tools":       exports,
 		"count":       len(exports),
-	})
+	}
+	if incarnation > 0 {
+		payload["incarnation"] = incarnation
+	}
+	s.writeSuccess(w, payload)
 }
 
 // handleAnnotationCoverage godoc
@@ -7378,4 +7662,18 @@ func joinValidationMessages(errs []config.ValidationError) string {
 		msgs = append(msgs, e.Field+": "+e.Message)
 	}
 	return strings.Join(msgs, "; ")
+}
+
+// uniqueStrings returns in without repeats, in first-seen order.
+func uniqueStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }

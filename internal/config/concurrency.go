@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -210,4 +211,42 @@ func (c *Config) validateConcurrency() []ValidationError {
 	}
 
 	return errs
+}
+
+// ValidateServerConcurrency runs the per-server scope of validateConcurrency
+// (FR-020(c)) for one server against the global defaults of c, exactly as the
+// next start's Config.Validate would. Write surfaces that change a server's
+// concurrency overrides (the REST PATCH, Spec 116) use it so they can never
+// persist an entry that would stop the daemon from loading its config. Only
+// the errors attributable to server are returned; c is not modified.
+func (c *Config) ValidateServerConcurrency(server *ServerConfig) []ValidationError {
+	if c == nil || server == nil {
+		return nil
+	}
+	probe := &Config{ServerConcurrencyDefaults: c.ServerConcurrencyDefaults, Servers: []*ServerConfig{server}}
+	const prefix = "mcpServers[0]"
+	var out []ValidationError
+	for _, e := range probe.validateConcurrency() {
+		if strings.HasPrefix(e.Field, prefix) {
+			e.Field = strings.TrimPrefix(strings.TrimPrefix(e.Field, prefix), ".")
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// InvalidServerUpdateError reports a server update refused by validation: the
+// write surface answers it as a client error (HTTP 400) and nothing is
+// persisted.
+type InvalidServerUpdateError struct {
+	Server string
+	Errors []ValidationError
+}
+
+func (e *InvalidServerUpdateError) Error() string {
+	msgs := make([]string, 0, len(e.Errors))
+	for _, v := range e.Errors {
+		msgs = append(msgs, v.Error())
+	}
+	return fmt.Sprintf("invalid update for server %q: %s", e.Server, strings.Join(msgs, "; "))
 }

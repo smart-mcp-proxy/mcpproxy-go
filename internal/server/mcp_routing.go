@@ -1796,6 +1796,10 @@ func (p *MCPProxyServer) RefreshPrompts() {
 	if cfg.AggregateUpstreamPrompts {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// Spec 116 FR-014: bind the approval pass to the incarnations current
+		// BEFORE the listing, so prompts listed from a server that is removed
+		// and re-added meanwhile are never recorded for the replacement.
+		incs := p.capturePromptIncarnations()
 		upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
 		if err != nil {
 			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
@@ -1810,7 +1814,7 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		// in series after the TPA scan — scan detects poison, baseline detects
 		// change). A withheld prompt is absent from prompts/list and fails
 		// prompts/get natively; there is no runtime get-time gate.
-		approval := p.checkPromptApprovals(upstreamPrompts)
+		approval := p.checkPromptApprovalsAt(upstreamPrompts, incs)
 		upstreamPrompts = filterBlockedPrompts(upstreamPrompts, approval.blocked)
 		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.authorizeAggregatedPromptServer, p.logger)
 		p.logger.Info("refreshed prompts",

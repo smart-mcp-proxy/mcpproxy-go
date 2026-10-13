@@ -64,6 +64,27 @@ Scan: out of date (1 tool changed or added after the last scan: notes); run: mcp
 
 A scan that covers every captured tool reads `Scan: clean · risk 0/100 · covers all 5 tools`. When definitions have not been captured, the line says so and tells you to run `mcpproxy review fetch <server>` (the same capture as **Fetch tool definitions** on the Web or macOS review screen).
 
+### Tools held as changed
+
+A trusted server whose tool definition changed after approval holds that tool as `changed`. `review show` lists, under the table, what differs from the approved definition (description, input schema, output schema and the safety hints), then how to approve the update and the opt-out for servers you trust:
+
+```
+Changed since approval: create_issue
+  Description:
+    @@ -1 +1 @@
+    -Create an issue
+    +Create an issue and email the reporter
+  Safety hints:
+    @@ -1 +1 @@
+    -{"readOnlyHint":true}
+    +{"readOnlyHint":false}
+
+1 tool(s) are held until you approve the update: mcpproxy review approve github --tools create_issue
+To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it (https://docs.mcpproxy.app/features/security-quarantine).
+```
+
+Scan mode holds every changed contract; the diff and a one-step approval are what keeps that cheap. The Web review screen shows the same changes and an **Approve update (N changed tools)** button that approves exactly the changed tools on screen.
+
 Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
 
 ## review fetch
@@ -100,7 +121,7 @@ Retrying is safe: the command can be run again at any time.
 ## review approve
 
 ```bash
-mcpproxy review approve <server> [--all | --tools a,b] [--except a,b] [--force] [--yes]
+mcpproxy review approve <server> [--all | --tools a,b] [--except a,b] [--force] [--yes] [--from-review <file>]
 ```
 
 On a quarantined server the command allows the same default selection as the Web and macOS review screens: only read-only tools with a clean scan (`default_allowed` in the review payload). Every other tool is blocked, meaning approved and disabled, until you enable it on the Tools tab. A core that does not send `default_allowed` blocks every tool.
@@ -111,7 +132,8 @@ On a quarantined server the command allows the same default selection as the Web
 | `--tools a,b` | Quarantined server: allow exactly these tools and block the rest. Trusted server: approve only these pending or changed tools |
 | `--except a,b` | Quarantined server only: block these tools as well, whichever base was chosen |
 | `--force` | Approve although the scan verdict is dangerous (use only after reading the findings) |
-| `--yes` | Skip the confirmation prompt |
+| `--yes` | Skip the confirmation prompt. Without `--from-review` this approves what the server serves at that moment |
+| `--from-review <file>` | Bind the approval to a review saved with `mcpproxy review show <server> -o json`; the selection and the binding come from that file |
 
 The command picks the right endpoint for you:
 
@@ -127,9 +149,40 @@ Using the wrong flag for the state fails with exit code 1 instead of doing somet
 - `--tools` or `--except` while no tool definitions are captured: `no tool definitions captured for server 's'; fetch them first (mcpproxy review fetch s) ...`; nothing is written
 - `--except` on a trusted server: `--except applies only while approving a quarantined server`
 
-The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools?` when nothing is captured. In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`; with `--all` it reads `Allowing all pending or changed tools; previously blocked tools stay blocked`. JSON and YAML output stay the REST data object.
+The confirmation prompt reads the review first and names the exact count, for example `Approve server 'memory' with 3 of 9 tools? Blocked: a, b, c.`, `Approve server 'memory' with all 9 tools?` or `Approve server 'memory' without seeing tools? Tools the server lists later will wait for review.` when nothing is captured (the approval records the server's tool baseline, so tools it lists later are held for review). In table output one line precedes the result: `Allowing 3 of 9 tools; blocking 6: a, b, ...`; with `--all` it reads `Allowing all pending or changed tools; previously blocked tools stay blocked`. JSON and YAML output stay the REST data object.
 
 After the write the command reports what actually applied. In table output the result line reads, for example, `Approved server memory: 6 tools approved, 3 blocked, 0 still pending, 0 changed`. If any tool on the server is still pending or changed after the approval, a warning naming those tools is printed to stderr in every output format, for example `Warning: 2 tool(s) on server 'memory' still need review (2 pending, 0 changed): a, b. Inspect them with: mcpproxy review show memory`. JSON and YAML output carry the same counts (`approved_count`, `blocked_count`, `still_pending`, `still_changed`, `held_tools`).
+
+**The approval is bound to the review you saw** (issue #1566). The command sends
+the review fingerprint (`current_hash`) of every reviewed tool as
+`expected_hashes` (`{}` for an empty review). If a tool changed (definition or
+safety hints) or appeared after that review, the core approves nothing and the
+command exits 1:
+
+```
+Error: tool review for server 'notes' is out of date (definition changed since review: read_note); nothing was approved — fetch the review again
+Run 'mcpproxy review show notes' and approve again.
+```
+
+With `-o json` the 409 envelope (`error_code: "review_out_of_date"`,
+`stale_tools`) is printed to stdout first. Which review is bound:
+
+- `--from-review <file>`: the saved review. Save it with
+  `mcpproxy review show <server> -o json > review.json`, read it, then run
+  `mcpproxy review approve <server> --from-review review.json --yes`. The file
+  must be the review of `<server>` (its `server.name`); a file of another
+  server, a malformed file or an error response exits 1 before anything is
+  sent. This is the path for scripts and headless use.
+- Interactive (no `--yes`): before asking, the command lists every tool the
+  approval will make callable, with tier, status, the first line of its
+  description and `[changed since approval]` for a changed tool. The binding
+  is to that listing.
+- `--yes` without a file: binds to the review fetched at that moment, so it
+  approves what the server serves now and is still refused if a definition
+  changes during the call.
+
+A core that predates review fingerprints reports no `current_hash`; the
+command then sends an unbound request, as before.
 
 `mcpproxy review approve <server> --yes` used to allow every tool. It now allows the default selection, so it matches the review screens; add `--all` to approve every tool.
 

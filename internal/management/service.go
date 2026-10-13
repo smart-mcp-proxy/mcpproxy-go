@@ -570,6 +570,16 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// Spec 116 FR-017: the committed generation and incarnation (int64 in
+		// the runtime projection). Clients echo the incarnation back as
+		// expected_incarnation on approval writes.
+		if g, ok := srvRaw["generation"].(int64); ok {
+			srv.Generation = g
+		}
+		if inc, ok := srvRaw["incarnation"].(int64); ok {
+			srv.Incarnation = inc
+		}
+
 		// Spec 112: project the forward_headers allowlist (names only).
 		if names, ok := srvRaw["forward_headers"].([]string); ok && len(names) > 0 {
 			srv.ForwardHeaders = append([]string(nil), names...)

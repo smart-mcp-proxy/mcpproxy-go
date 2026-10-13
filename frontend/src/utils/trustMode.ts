@@ -86,7 +86,7 @@ export const TRUST_MODES: readonly TrustModeMeta[] = [
     mode: 'scan',
     label: 'Scan',
     description:
-      'Tool changes are approved automatically only when the offline security scan returns a clean verdict; anything else is held for your review.',
+      'New tools are approved automatically only when the offline security scan returns a clean verdict. Changes to an approved tool are always held for your review, with the scan findings attached.',
     admissionNote:
       'At add time the server is quarantined and scanned automatically; a scan that is not clean — or cannot complete — keeps it quarantined (fail closed).',
     warnsOnSelect: false,

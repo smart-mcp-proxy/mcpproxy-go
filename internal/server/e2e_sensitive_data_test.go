@@ -117,7 +117,7 @@ func TestE2E_SensitiveData_AWSAccessKey(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for server to connect
@@ -261,7 +261,7 @@ func TestE2E_SensitiveData_FilePath(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)
@@ -654,7 +654,7 @@ func TestE2E_SensitiveData_CreditCard(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)

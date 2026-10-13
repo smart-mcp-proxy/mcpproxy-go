@@ -154,6 +154,45 @@ func upstreamRecordFromConfig(serverConfig *config.ServerConfig) *UpstreamRecord
 	}
 }
 
+// serverConfigFromRecord is the inverse of upstreamRecordFromConfig: every
+// persisted field, no config-only field.
+func serverConfigFromRecord(record *UpstreamRecord) *config.ServerConfig {
+	return &config.ServerConfig{
+		Name:                   record.Name,
+		URL:                    record.URL,
+		Protocol:               record.Protocol,
+		Command:                record.Command,
+		Args:                   record.Args,
+		WorkingDir:             record.WorkingDir,
+		Env:                    record.Env,
+		Headers:                record.Headers,
+		OAuth:                  record.OAuth,
+		Enabled:                record.Enabled,
+		Quarantined:            record.Quarantined,
+		Created:                record.Created,
+		Updated:                record.Updated,
+		Isolation:              record.Isolation,
+		ReconnectOnUse:         record.ReconnectOnUse,
+		AutoApproveToolChanges: record.AutoApproveToolChanges,
+		TrustMode:              record.TrustMode,
+		LauncherWaitTimeout:    record.LauncherWaitTimeout,
+		EnabledTools:           record.EnabledTools,
+		DisabledTools:          record.DisabledTools,
+		ForwardHeaders:         record.ForwardHeaders,
+
+		SourceRegistryID:         record.SourceRegistryID,
+		SourceRegistryProvenance: record.SourceRegistryProvenance,
+		HealthCheckInterval:      record.HealthCheckInterval,
+		ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
+		InitTimeout:              record.InitTimeout,
+		ToonOutput:               record.ToonOutput,
+		MaxConcurrentRequests:    record.MaxConcurrentRequests,
+		QueueSize:                record.QueueSize,
+		QueueTimeout:             record.QueueTimeout,
+		ExposePrompts:            record.ExposePrompts,
+	}
+}
+
 // CreateUpstreamServer persists a NEW server and fails with ErrUpstreamExists
 // when a record with that name is already stored. The existence check and the
 // write share one bbolt transaction, so concurrent creates of the same name
@@ -198,40 +237,7 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		return nil, err
 	}
 
-	return &config.ServerConfig{
-		Name:                   record.Name,
-		URL:                    record.URL,
-		Protocol:               record.Protocol,
-		Command:                record.Command,
-		Args:                   record.Args,
-		WorkingDir:             record.WorkingDir,
-		Env:                    record.Env,
-		Headers:                record.Headers,
-		OAuth:                  record.OAuth,
-		Enabled:                record.Enabled,
-		Quarantined:            record.Quarantined,
-		Created:                record.Created,
-		Updated:                record.Updated,
-		Isolation:              record.Isolation,
-		ReconnectOnUse:         record.ReconnectOnUse,
-		AutoApproveToolChanges: record.AutoApproveToolChanges,
-		TrustMode:              record.TrustMode,
-		LauncherWaitTimeout:    record.LauncherWaitTimeout,
-		EnabledTools:           record.EnabledTools,
-		DisabledTools:          record.DisabledTools,
-		ForwardHeaders:         record.ForwardHeaders,
-
-		SourceRegistryID:         record.SourceRegistryID,
-		SourceRegistryProvenance: record.SourceRegistryProvenance,
-		HealthCheckInterval:      record.HealthCheckInterval,
-		ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
-		InitTimeout:              record.InitTimeout,
-		ToonOutput:               record.ToonOutput,
-		MaxConcurrentRequests:    record.MaxConcurrentRequests,
-		QueueSize:                record.QueueSize,
-		QueueTimeout:             record.QueueTimeout,
-		ExposePrompts:            record.ExposePrompts,
-	}, nil
+	return serverConfigFromRecord(record), nil
 }
 
 // ListUpstreamServers returns all upstream servers
@@ -246,40 +252,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 
 	var servers []*config.ServerConfig
 	for _, record := range records {
-		servers = append(servers, &config.ServerConfig{
-			Name:                   record.Name,
-			URL:                    record.URL,
-			Protocol:               record.Protocol,
-			Command:                record.Command,
-			Args:                   record.Args,
-			WorkingDir:             record.WorkingDir,
-			Env:                    record.Env,
-			Headers:                record.Headers,
-			OAuth:                  record.OAuth,
-			Enabled:                record.Enabled,
-			Quarantined:            record.Quarantined,
-			Created:                record.Created,
-			Updated:                record.Updated,
-			Isolation:              record.Isolation,
-			ReconnectOnUse:         record.ReconnectOnUse,
-			AutoApproveToolChanges: record.AutoApproveToolChanges,
-			TrustMode:              record.TrustMode,
-			LauncherWaitTimeout:    record.LauncherWaitTimeout,
-			EnabledTools:           record.EnabledTools,
-			DisabledTools:          record.DisabledTools,
-			ForwardHeaders:         record.ForwardHeaders,
-
-			SourceRegistryID:         record.SourceRegistryID,
-			SourceRegistryProvenance: record.SourceRegistryProvenance,
-			HealthCheckInterval:      record.HealthCheckInterval,
-			ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
-			InitTimeout:              record.InitTimeout,
-			ToonOutput:               record.ToonOutput,
-			MaxConcurrentRequests:    record.MaxConcurrentRequests,
-			QueueSize:                record.QueueSize,
-			QueueTimeout:             record.QueueTimeout,
-			ExposePrompts:            record.ExposePrompts,
-		})
+		servers = append(servers, serverConfigFromRecord(record))
 	}
 
 	return servers, nil
@@ -2463,43 +2436,15 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 		return fmt.Errorf("storage not initialized")
 	}
 
-	// Delete the exact server name key (legacy) and any hashed serverKey entries.
-	// Tokens are stored using oauth.GenerateServerKey(name, url) which prefixes the server
-	// name and appends a hash of the URL; clear both to ensure logout actually removes tokens.
 	cleared := 0
-	if err := m.db.DeleteOAuthToken(serverName); err == nil {
-		cleared++
-	}
-
 	if err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		if bucket == nil {
 			return fmt.Errorf("oauth token bucket not found")
 		}
-
-		// Collect the whole prefix range before deleting any of it. bbolt cursors
-		// are invalidated by mutations made during iteration ("Changing data while
-		// traversing with a cursor may cause it to be invalidated and return
-		// unexpected keys and/or values" — bbolt cursor.go): once any write in this
-		// transaction has materialised the leaf into a node, deleting through the
-		// cursor shifts the remaining entries under its index and Next() skips one.
-		// A key skipped here leaves an access token, a refresh token and the DCR
-		// client secret on disk after the user logged out, still reachable by
-		// PersistentTokenStore and RefreshManager.
-		prefix := []byte(serverName + "_")
-		var keys [][]byte
-		cursor := bucket.Cursor()
-		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
-			keys = append(keys, append([]byte(nil), k...))
-		}
-
-		for _, k := range keys {
-			if err := bucket.Delete(k); err != nil {
-				return err
-			}
-			cleared++
-		}
-		return nil
+		n, err := clearOAuthStateTx(bucket, serverName)
+		cleared = n
+		return err
 	}); err != nil {
 		return fmt.Errorf("failed to clear OAuth state: %w", err)
 	}
@@ -2509,6 +2454,76 @@ func (m *Manager) ClearOAuthState(serverName string) error {
 		m.logger.Debugw("No OAuth tokens found to clear (expected if already removed)", "server", serverName)
 	}
 	return nil
+}
+
+// clearOAuthStateTx deletes a server's cached OAuth state (tokens and DCR
+// client credentials) inside the caller's transaction: the exact server name
+// key (legacy) and every hashed serverKey entry. Tokens are stored under
+// oauth.GenerateServerKey(name, url), which appends "_" and the first 16
+// lowercase hex characters of a hash of the name and URL; both forms are
+// cleared so a logout, an OAuth config change or a removal actually removes
+// them. It returns the number of keys deleted.
+//
+// The match is exact (Spec 116 B2): a key "name_" + suffix is this server's
+// only when the suffix is exactly 16 lowercase hex characters. A plain prefix
+// match on "name_" would also delete the tokens of another server whose name
+// starts with it — removing "foo" signed "foo_bar" out (its keys are
+// "foo_bar_<hex>").
+//
+// The whole prefix range is collected before any of it is deleted. bbolt
+// cursors are invalidated by mutations made during iteration ("Changing data
+// while traversing with a cursor may cause it to be invalidated and return
+// unexpected keys and/or values" — bbolt cursor.go): once any write in this
+// transaction has materialised the leaf into a node, deleting through the
+// cursor shifts the remaining entries under its index and Next() skips one.
+// A key skipped here leaves an access token, a refresh token and the DCR
+// client secret on disk, still reachable by PersistentTokenStore and
+// RefreshManager.
+func clearOAuthStateTx(bucket *bbolt.Bucket, serverName string) (int, error) {
+	cleared := 0
+	if bucket.Get([]byte(serverName)) != nil {
+		if err := bucket.Delete([]byte(serverName)); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	prefix := []byte(serverName + "_")
+	var keys [][]byte
+	cursor := bucket.Cursor()
+	for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+		if oauthKeyBelongsTo(string(k), serverName) {
+			keys = append(keys, append([]byte(nil), k...))
+		}
+	}
+	for _, k := range keys {
+		if err := bucket.Delete(k); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	return cleared, nil
+}
+
+// oauthKeySuffixLen is the length of the hash suffix oauth.GenerateServerKey
+// appends to the server name.
+const oauthKeySuffixLen = 16
+
+// oauthKeyBelongsTo reports whether an oauth_tokens key belongs to server
+// name: exactly name (legacy) or name + "_" + 16 lowercase hex characters
+// (oauth.GenerateServerKey). Spec 116 B2.
+func oauthKeyBelongsTo(key, name string) bool {
+	if key == name {
+		return true
+	}
+	if len(key) != len(name)+1+oauthKeySuffixLen || !strings.HasPrefix(key, name+"_") {
+		return false
+	}
+	for _, c := range key[len(name)+1:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.

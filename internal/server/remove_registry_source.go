@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // MCP-1057: `registry remove` deletes a user-added custom registry source. It is
@@ -40,31 +41,29 @@ func RemoveRegistrySourceErrorCode(err error) string {
 }
 
 // RemoveRegistrySource removes a user-added custom registry by id and persists
-// the change via copy-on-write UpdateConfig (see the runtime-config-snapshot-cow
-// rule). Returns the removed entry.
+// the change through one config commit (Spec 116). Returns the removed entry.
 func (s *Server) RemoveRegistrySource(id string) (*config.RegistryEntry, error) {
-	currentConfig := s.runtime.Config()
-	if currentConfig == nil {
-		return nil, errors.New("configuration unavailable")
-	}
-
-	removed, remaining, err := removeRegistrySourceFromConfig(currentConfig, id)
+	var removed config.RegistryEntry
+	// One config commit (Spec 116): the removal is applied to the LIVE
+	// configuration inside the commit lock and persisted with it.
+	res, err := s.runtime.Commit("registry_source_remove", func(tx *runtime.CommitTx) error {
+		r, remaining, err := removeRegistrySourceFromConfig(tx.Config(), id)
+		if err != nil {
+			return err
+		}
+		removed = r
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			cfg.Registries = remaining
+			return nil
+		})
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy-on-write: clone the config and publish a fresh registries slice so
-	// background readers ranging over the shared snapshot are never disturbed.
-	updatedConfig := *currentConfig
-	updatedConfig.Registries = remaining
-	s.runtime.UpdateConfig(&updatedConfig, "")
-
 	// Rebuild the effective catalog so the removed source disappears immediately.
-	registries.SetRegistriesFromConfig(&updatedConfig)
-
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after removing registry source",
-			zap.String("registry_id", removed.ID), zap.Error(err))
+	if res != nil && res.Snapshot != nil {
+		registries.SetRegistriesFromConfig(res.Snapshot.Config)
 	}
 
 	s.logger.Info("Removed custom registry source",

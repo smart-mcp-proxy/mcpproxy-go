@@ -166,6 +166,16 @@ actionable **Sign-in** state:
   is quarantined, but its tools stay blocked until you **Approve** the server.
   The panel makes both gates explicit.
 
+### Switching accounts and retrying sign-in
+
+To switch accounts or recover an OAuth error, use **Sign in again** in the
+server card’s **More actions** menu or the detail page’s **Actions** menu.
+For an OAuth-capable upstream this remains available during reconnect attempts
+and generic timeout errors, even when the health panel does not suggest login.
+After logout it is labelled **Sign in**. Select the intended account/workspace
+at the provider; if the provider reuses its own browser session, switch that
+account before starting sign-in again.
+
 ## CLI Commands
 
 ### Start Authentication

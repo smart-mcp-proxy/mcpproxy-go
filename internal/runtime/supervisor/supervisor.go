@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -15,9 +16,12 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	transportpkg "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -180,6 +184,21 @@ type Supervisor struct {
 	actionsInFlight   atomic.Int64
 	startupReconciled atomic.Bool
 	stopping          bool
+
+	// beforeExecuteAction is a Spec 116 PR3 test seam (plan.md §Test seams):
+	// it runs in an action goroutine before the action touches the manager.
+	// Nil in production.
+	beforeExecuteAction atomic.Pointer[func(serverName string, action ReconcileAction)]
+}
+
+// SetBeforeExecuteActionHookForTest installs the beforeExecuteAction seam
+// (T3.3, T3.6, T3.9). Test-only.
+func (s *Supervisor) SetBeforeExecuteActionHookForTest(fn func(serverName string, action ReconcileAction)) {
+	if fn == nil {
+		s.beforeExecuteAction.Store(nil)
+		return
+	}
+	s.beforeExecuteAction.Store(&fn)
 }
 
 // inspectionFailureInfo tracks inspection failures for circuit breaker pattern
@@ -190,11 +209,22 @@ type inspectionFailureInfo struct {
 }
 
 // UpstreamInterface defines the interface for upstream adapters.
+//
+// Spec 116 PR3 (#1563): every registry change and connect is bound to the
+// commit generation of the snapshot the action was planned from, and a
+// disconnect to the exact instance it observed. The adapter returns
+// upstream.ErrStaleGeneration, and does nothing, when a newer commit (or a
+// same-generation replacement) superseded the action.
 type UpstreamInterface interface {
-	AddServer(name string, cfg *config.ServerConfig) error
-	RemoveServer(name string) error
-	ConnectServer(ctx context.Context, name string) error
-	DisconnectServer(name string) error
+	// AddServerAt installs (or keeps) the instance serving cfg at gen.
+	AddServerAt(name string, cfg *config.ServerConfig, gen int64) error
+	// RemoveServerAt removes the instance; gen 0 removes a server the
+	// committed configuration no longer has.
+	RemoveServerAt(name string, gen int64) error
+	// ConnectServerAt connects the instance serving name at gen.
+	ConnectServerAt(ctx context.Context, name string, gen int64) error
+	// DisconnectServerAt disconnects exactly instance inst serving name at gen.
+	DisconnectServerAt(name string, gen int64, inst managed.InstanceID) error
 	ConnectAll(ctx context.Context) error
 	GetServerState(name string) (*ServerState, error)
 	GetAllStates() map[string]*ServerState
@@ -439,20 +469,30 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 		// disconnecting clients.
 		s.actionWg.Add(1)
 		s.actionsInFlight.Add(1)
-		go func(name string, act ReconcileAction, snapshot *configsvc.Snapshot) {
+		// Bind the action to what it was planned from (Spec 116 PR3): the
+		// server's commit generation in this snapshot and, for an action on
+		// the live instance, that instance.
+		planned := plannedAction{Action: action}
+		if sg, ok := configSnapshot.ServerGeneration(serverName); ok {
+			planned.Gen = sg.Gen
+		}
+		if actual, ok := actualStates[serverName]; ok && actual != nil {
+			planned.Instance = actual.InstanceID
+		}
+		go func(name string, act plannedAction, snapshot *configsvc.Snapshot) {
 			defer s.actionWg.Done()
 			defer s.actionsInFlight.Add(-1)
 			if err := s.executeAction(name, act, snapshot); err != nil {
 				s.logger.Error("Failed to execute action",
 					zap.String("server", name),
-					zap.String("action", string(act)),
+					zap.String("action", string(act.Action)),
 					zap.Error(err))
 			} else {
 				s.logger.Debug("Action completed successfully",
 					zap.String("server", name),
-					zap.String("action", string(act)))
+					zap.String("action", string(act.Action)))
 			}
-		}(serverName, action, configSnapshot)
+		}(serverName, planned, configSnapshot)
 	}
 
 	// Update state snapshot immediately using actual states from manager
@@ -565,28 +605,68 @@ func (s *Supervisor) configChanged(old, new *config.ServerConfig) bool {
 	return !config.ConnectionEquivalent(old, new)
 }
 
-// executeAction performs the specified action on a server.
-func (s *Supervisor) executeAction(serverName string, action ReconcileAction, configSnapshot *configsvc.Snapshot) error {
+// plannedAction is a reconcile action bound to what it was planned from
+// (Spec 116 PR3): Gen is the server's commit generation in the planning
+// snapshot (0 when the snapshot carries none, or the server is absent), and
+// Instance the live manager instance the plan observed (0 when none).
+type plannedAction struct {
+	Action   ReconcileAction
+	Gen      int64
+	Instance managed.InstanceID
+}
+
+// executeAction performs the specified action on a server. Every manager
+// call is bound to the planned generation (and instance), so an action a
+// newer commit superseded while it waited is a no-op: the adapter answers
+// upstream.ErrStaleGeneration, logged at debug level (FR-020).
+func (s *Supervisor) executeAction(serverName string, planned plannedAction, configSnapshot *configsvc.Snapshot) error {
+	action := planned.Action
 	s.logger.Debug("Executing action",
 		zap.String("server", serverName),
-		zap.String("action", string(action)))
+		zap.String("action", string(action)),
+		zap.Int64("generation", planned.Gen))
+
+	if h := s.beforeExecuteAction.Load(); h != nil && action != ActionNone {
+		(*h)(serverName, action)
+	}
 
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
+
+	stale := func(err error) bool {
+		if !errors.Is(err, upstream.ErrStaleGeneration) {
+			return false
+		}
+		s.logger.Debug("Supervisor action superseded by a newer config commit or instance; skipping",
+			zap.String("server", serverName),
+			zap.String("action", string(action)),
+			zap.Int64("generation", planned.Gen),
+			zap.Uint64("instance", uint64(planned.Instance)))
+		return true
+	}
 
 	switch action {
 	case ActionNone:
 		// No action needed
 		return nil
 
-	case ActionConnect:
-		// Add server and connect
+	case ActionConnect, ActionReconnect:
+		// ActionReconnect has deliberately no separate disconnect leg: the
+		// commit that changed the connection settings already unregistered
+		// the old instance (AdvanceGenerations, commit step 7), and
+		// AddServerAt installs the instance for the planned generation only
+		// while that generation is current. A by-name disconnect here used
+		// to tear down the fresh instance the commit's worker was connecting
+		// (the #1603 regression).
 		serverConfig := configSnapshot.GetServer(serverName)
 		if serverConfig == nil {
 			return fmt.Errorf("server config not found: %s", serverName)
 		}
 
-		if err := s.upstream.AddServer(serverName, serverConfig); err != nil {
+		if err := s.upstream.AddServerAt(serverName, serverConfig, planned.Gen); err != nil {
+			if stale(err) {
+				return nil
+			}
 			return fmt.Errorf("failed to add server: %w", err)
 		}
 
@@ -595,10 +675,11 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 			// Log security event when connecting quarantined server via exemption
 			if serverConfig.Quarantined && s.IsInspectionExempted(serverName) {
 				s.logger.Warn("⚠️ Connecting quarantined server for inspection",
-					zap.String("server", serverName))
+					zap.String("server", serverName),
+					zap.String("action", string(action)))
 			}
 
-			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
+			if err := s.upstream.ConnectServerAt(ctx, serverName, planned.Gen); err != nil && !stale(err) {
 				s.logger.Warn("Failed to connect server (will retry)",
 					zap.String("server", serverName),
 					zap.Error(err))
@@ -609,46 +690,28 @@ func (s *Supervisor) executeAction(serverName string, action ReconcileAction, co
 		return nil
 
 	case ActionDisconnect:
-		return s.upstream.DisconnectServer(serverName)
-
-	case ActionReconnect:
-		// Disconnect then reconnect
-		if err := s.upstream.DisconnectServer(serverName); err != nil {
-			s.logger.Warn("Failed to disconnect server during reconnect",
-				zap.String("server", serverName),
-				zap.Error(err))
+		if qahooks.ParkSupervisorDisconnect != nil {
+			qahooks.ParkSupervisorDisconnect(serverName)
 		}
-
-		// Get updated config
-		serverConfig := configSnapshot.GetServer(serverName)
-		if serverConfig == nil {
-			return fmt.Errorf("server config not found: %s", serverName)
-		}
-
-		// Add with new config
-		if err := s.upstream.AddServer(serverName, serverConfig); err != nil {
-			return fmt.Errorf("failed to add server: %w", err)
-		}
-
-		// Connect if enabled and (not quarantined OR has inspection exemption)
-		if serverConfig.Enabled && (!serverConfig.Quarantined || s.IsInspectionExempted(serverName)) {
-			// Log security event when connecting quarantined server via exemption
-			if serverConfig.Quarantined && s.IsInspectionExempted(serverName) {
-				s.logger.Warn("⚠️ Reconnecting quarantined server for inspection",
-					zap.String("server", serverName))
+		if err := s.upstream.DisconnectServerAt(serverName, planned.Gen, planned.Instance); err != nil {
+			if stale(err) {
+				return nil
 			}
-
-			if err := s.upstream.ConnectServer(ctx, serverName); err != nil {
-				s.logger.Warn("Failed to reconnect server (will retry)",
-					zap.String("server", serverName),
-					zap.Error(err))
-			}
+			return err
 		}
-
 		return nil
 
 	case ActionRemove:
-		return s.upstream.RemoveServer(serverName)
+		// The commit that removed the server already unregistered its
+		// instance; this only clears what is left, and only while the
+		// committed configuration still lacks the name.
+		if err := s.upstream.RemoveServerAt(serverName, 0); err != nil {
+			if stale(err) {
+				return nil
+			}
+			return err
+		}
+		return nil
 
 	default:
 		return fmt.Errorf("unknown action: %s", action)
@@ -694,6 +757,9 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 			DesiredVersion: configSnapshot.Version,
 			LastReconcile:  time.Now(),
 		}
+		if g, ok := configSnapshot.ServerGeneration(srv.Name); ok {
+			state.Incarnation = g.Incarnation
+		}
 
 		// Use ACTUAL state from manager (authoritative, not dependent on events)
 		if actual, ok := actualStates[srv.Name]; ok {
@@ -703,8 +769,28 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 			state.ConnectionEpoch = actual.ConnectionEpoch
 		}
 
-		// Merge with existing snapshot for data only available from events
-		if existing, ok := existingStates[srv.Name]; ok {
+		// Merge with existing snapshot for data only available from events.
+		//
+		// Spec 116 PR2 review round 6 (FR-017): the retained state is keyed
+		// by NAME, and a same-name replacement is a different server. Its
+		// incarnation differs from the retained one, so nothing discovered
+		// for the removed server (tools, discovery stamp) is carried into
+		// it; the connection generation moves, so a discovery result
+		// captured before the replacement is dropped at publish time, and a
+		// connected replacement's discovery is kicked again (its own result
+		// may have been captured under the old generation). Incarnation zero
+		// means the snapshot carried no generations (the snapshot the config
+		// service was constructed with): that is the same server, not a
+		// replacement.
+		existing, ok := existingStates[srv.Name]
+		if ok && existing.Incarnation != 0 && state.Incarnation != 0 && existing.Incarnation != state.Incarnation {
+			state.ConnectionGeneration = existing.ConnectionGeneration + 1
+			ok = false
+			if state.Connected {
+				rediscover = append(rediscover, srv.Name)
+			}
+		}
+		if ok {
 			state.LastSeen = existing.LastSeen
 			state.Tools = existing.Tools // Tools come from background discovery
 			state.ConnectionGeneration = existing.ConnectionGeneration
@@ -798,6 +884,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		status.Quarantined = state.Quarantined
 		status.Connected = state.Connected
 		status.ToolCount = state.ToolCount
+		status.Incarnation = state.Incarnation
 
 		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
 		status.Tools = toolInfosFromMetadata(state.Tools)
@@ -1784,24 +1871,36 @@ func (s *Supervisor) RequestInspectionExemption(serverName string, duration time
 
 // RevokeInspectionExemption revokes the temporary connection permission and triggers disconnection.
 func (s *Supervisor) RevokeInspectionExemption(serverName string) {
+	if s.DropInspectionExemption(serverName) {
+		s.ReconcileAfterExemptionChange()
+	}
+}
+
+// DropInspectionExemption removes serverName's inspection exemption without
+// reconciling, and reports whether one existed. It takes only the exemption
+// mutex (a leaf), so the config commit calls it for a purged server inside
+// its commit section (Spec 116 PR2, review round 2); the caller reconciles
+// with ReconcileAfterExemptionChange once its locks are released.
+func (s *Supervisor) DropInspectionExemption(serverName string) bool {
 	s.inspectionExemptionsMu.Lock()
 	_, exists := s.inspectionExemptions[serverName]
 	if exists {
 		delete(s.inspectionExemptions, serverName)
 	}
 	s.inspectionExemptionsMu.Unlock()
-
 	if exists {
 		s.logger.Warn("⚠️ Inspection exemption revoked for quarantined server",
 			zap.String("server", serverName))
+	}
+	return exists
+}
 
-		// Trigger immediate reconciliation to disconnect the server
-		currentConfig := s.configSvc.Current()
-		if err := s.reconcile(currentConfig); err != nil {
-			s.logger.Error("Failed to trigger reconciliation after exemption revocation",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
+// ReconcileAfterExemptionChange reconciles against the current configuration
+// so a server whose exemption was dropped is disconnected.
+func (s *Supervisor) ReconcileAfterExemptionChange() {
+	currentConfig := s.configSvc.Current()
+	if err := s.reconcile(currentConfig); err != nil {
+		s.logger.Error("Failed to trigger reconciliation after exemption revocation", zap.Error(err))
 	}
 }
 

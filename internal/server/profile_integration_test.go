@@ -78,7 +78,7 @@ func newProfileTestEnv(t *testing.T) *profileTestEnv {
 		{Name: "deploy", Servers: []string{"deploy-srv"}},
 	}
 	env.proxyServer.runtime.UpdateConfig(cfg, "")
-	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+	require.NoError(t, env.proxyServer.runtime.CommitConfig(cfg))
 	time.Sleep(2 * time.Second)
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(context.Background())
 	time.Sleep(2 * time.Second)
@@ -365,7 +365,7 @@ func TestProfile_PolicyIntersection(t *testing.T) {
 		Servers: []string{"shared-srv", "research-srv"},
 	})
 	env.proxyServer.runtime.UpdateConfig(cfg2, "")
-	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg2)
+	_ = env.proxyServer.runtime.CommitConfig(cfg2)
 	time.Sleep(2 * time.Second)
 
 	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
@@ -431,7 +431,7 @@ func TestProfile_PerServerDisabledToolsRespected(t *testing.T) {
 	}
 	cfg3.Servers = newServers
 	env.proxyServer.runtime.UpdateConfig(cfg3, "")
-	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg3)
+	_ = env.proxyServer.runtime.CommitConfig(cfg3)
 	time.Sleep(1 * time.Second)
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(context.Background())
 	time.Sleep(2 * time.Second)

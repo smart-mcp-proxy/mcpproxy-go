@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // MCP-866: `registry add-source` adds a user-supplied generic MCP registry
@@ -128,19 +129,25 @@ func (s *Server) AddRegistrySource(req *AddRegistrySourceRequest) (*config.Regis
 		return nil, err
 	}
 
-	// Copy-on-write: clone the config and its registries slice, append to the
-	// clone, then publish atomically. runtime.Config() is a shared immutable
-	// snapshot background readers may be ranging over.
-	updatedConfig := *currentConfig
-	updatedConfig.Registries = append(append([]config.RegistryEntry(nil), currentConfig.Registries...), entry)
-	s.runtime.UpdateConfig(&updatedConfig, "")
+	// One config commit (Spec 116): the source is validated again against the
+	// LIVE configuration inside the commit lock (the probe above ran outside
+	// it), appended, written to disk and published together.
+	res, err := s.runtime.Commit("registry_source_add", func(tx *runtime.CommitTx) error {
+		if err := validateNewRegistrySource(tx.Config(), entry); err != nil {
+			return err
+		}
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			cfg.Registries = append(append([]config.RegistryEntry(nil), cfg.Registries...), entry)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Rebuild the effective catalog so the new source is immediately searchable.
-	registries.SetRegistriesFromConfig(&updatedConfig)
-
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after adding registry source",
-			zap.String("registry_id", entry.ID), zap.Error(err))
+	if res != nil && res.Snapshot != nil {
+		registries.SetRegistriesFromConfig(res.Snapshot.Config)
 	}
 
 	s.logger.Info("Added custom registry source",

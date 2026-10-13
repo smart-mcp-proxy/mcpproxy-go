@@ -39,8 +39,26 @@ type Client struct {
 	// is lock-free, so it is safe to read whether or not mc.mu is held (the RLock
 	// accessor approach would deadlock the in-lock readers). Access via
 	// GetConfig() / SetConfig() only — never touch the field directly. (MCP-770)
-	cfg          atomic.Pointer[config.ServerConfig]
-	coreClient   *core.Client
+	//
+	// Spec 116: the config and the commit generation it belongs to are one
+	// atomic pair, so a reader never sees a config with another commit's
+	// generation (Generation, SetConfigAt).
+	cfg        atomic.Pointer[stampedConfig]
+	coreClient *core.Client
+
+	// instanceID identifies this instance (Spec 116 PR3, review R5.2): a
+	// process-wide counter assigned at construction and never reused. A
+	// commit generation identifies a config; a restart, ForceReconnectAll or
+	// Docker recovery installs a new instance at the SAME generation, so an
+	// action that targets an existing instance binds to its InstanceID too.
+	instanceID InstanceID
+	// unregistered is set by upstream.Manager when it removes this instance
+	// from its registry (unregisterLocked, under the manager's locks). From
+	// then on Connect refuses (ErrInstanceUnregistered), so a worker, the
+	// reconnect loop or a sweep that still holds the pointer cannot bring an
+	// instance the manager no longer serves back online. Spec 116 PR4
+	// extends this to a byte-level retirement barrier (dial gate).
+	unregistered atomic.Bool
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
 
@@ -61,9 +79,40 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
-	listToolsWaitCh     chan struct{}
-	listToolsLastResult []*config.ToolMetadata
-	listToolsLastErr    error
+	// listToolsCur is the in-flight upstream tools/list request, or nil.
+	// Waiters keep the pointer they waited on and read the result from it, so
+	// a later leader replacing listToolsCur can never hand them its (nil,
+	// not-yet-published) result (RT-05, Sol r6 P1).
+	listToolsCur *listToolsCall
+	// listToolsLeaderSeq numbers ListTools leaders (incremented each time
+	// acquireListToolsContext grants one) so ListToolsFresh can tell an
+	// in-flight upstream call that started before it from one that started
+	// after it.
+	listToolsLeaderSeq uint64
+	// listToolsObserver and listToolsBeforeWaiterRead are test seams that
+	// let coalescing tests synchronize on a leader election, a waiter
+	// attaching to a call, and the window between a waiter waking and
+	// reading its call's result, instead of sleeping. Nil in production.
+	listToolsObserver         atomic.Pointer[func(ListToolsEvent)]
+	listToolsBeforeWaiterRead atomic.Pointer[func(seq uint64)]
+	// connectAfterDial is a test seam run by Connect after the transport
+	// connected and before Connect re-acquires mc.mu, the window in which a
+	// concurrent Disconnect can land. Nil in production.
+	connectAfterDial atomic.Pointer[func()]
+
+	// connectSeq identifies the current connect attempt. Guarded by mu. Every
+	// Connect takes a new value when it starts and every Disconnect advances
+	// it, so a Connect that re-acquires mu after its unlocked dial and finds
+	// a different value knows a Disconnect, or a newer attempt, superseded it
+	// and must not publish its result.
+	connectSeq uint64
+	// reconnectAfterTeardown is a test seam run by tryReconnect and
+	// TryReconnectSync after they tore the connection down and before their
+	// replacement Connect starts. Nil in production.
+	reconnectAfterTeardown atomic.Pointer[func()]
+	// reconnectMidTeardown is a test seam run inside teardownForReconnect
+	// between the transport close and the state reset. Nil in production.
+	reconnectMidTeardown atomic.Pointer[func()]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -160,6 +209,11 @@ type Client struct {
 	// stay outside; SetError dispatches its callback in a goroutine, so the
 	// probe may call it under epochMu.
 	epochMu sync.Mutex
+
+	// retired is set by the upstream manager when it replaces or removes this
+	// client (Spec 117 PR-3, FR-036): its tool captures are discarded and it
+	// is never current on any epoch again.
+	retired atomic.Bool
 
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
@@ -341,8 +395,16 @@ const ambiguousProbeTimeout = 5 * time.Second
 // request doesn't paint the UI red and clear the tools list.
 const healthCheckFailureThreshold = 3
 
-// NewClient creates a new managed client with state management
+// NewClient creates a new managed client with state management. The instance
+// holds no commit generation (0); the daemon builds instances with
+// NewClientAt.
 func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
+	return NewClientAt(id, serverConfig, 0, logger, logConfig, globalConfig, storage, secretResolver)
+}
+
+// NewClientAt creates a managed client stamped, from construction, with the
+// Spec 116 commit generation gen of serverConfig (Generation).
+func NewClientAt(id string, serverConfig *config.ServerConfig, gen int64, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
 	// Create core client
 	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage, secretResolver)
 	if err != nil {
@@ -361,7 +423,8 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		healthProbe:    coreClient,
 		toolInvoker:    coreClient,
 	}
-	mc.cfg.Store(serverConfig)
+	mc.instanceID = InstanceID(instanceIDCounter.Add(1))
+	mc.cfg.Store(&stampedConfig{cfg: serverConfig, gen: gen})
 	mc.globalConfig.Store(globalConfig)
 
 	// Spec 112 R6: coreClient is created once and never replaced, so installing
@@ -429,6 +492,17 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// ErrInstanceUnregistered is returned by Connect on an instance the upstream
+// manager has unregistered (Spec 116 PR3): a newer config commit, a removal or
+// a same-generation replacement superseded it, so it must not connect.
+var ErrInstanceUnregistered = errors.New("instance unregistered: superseded by a newer config commit or replacement")
+
+// ErrConnectAborted is returned by Connect when a Disconnect, or a newer
+// connect attempt, ran while the transport was being established. The dial's
+// result (success or failure) is discarded; the client keeps the state the
+// superseding operation left.
+var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnect or a newer attempt")
+
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
@@ -436,6 +510,13 @@ var ErrConnectAlreadyActive = errors.New("connection already in progress or esta
 func (mc *Client) Connect(ctx context.Context) error {
 	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
+
+	// An instance the manager unregistered never connects again: whoever
+	// still holds this pointer acts for a superseded config or instance.
+	if mc.unregistered.Load() {
+		mc.mu.Unlock()
+		return ErrInstanceUnregistered
+	}
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
@@ -485,6 +566,8 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	// Transition to connecting state
+	mc.connectSeq++
+	attempt := mc.connectSeq
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
 	// Release lock BEFORE the slow coreClient.Connect() call
@@ -507,10 +590,51 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Invoking core client Connect for managed client",
 		zap.String("server", serverName))
 	connectErr := mc.coreClient.Connect(connectCtx)
+	if hook := mc.connectAfterDial.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Phase 4: Re-acquire lock to update state based on result
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// A Disconnect, or a newer attempt, that ran while this attempt was
+	// dialing (mc.mu is not held in phase 3) owns the client's state now.
+	// Publishing this attempt's result would undo it: reporting Ready over
+	// the transport the Disconnect closed (the stuck re-enable after Spec 116
+	// PR1: every call fails with "client not connected", and since the client
+	// looks connected nothing reconnects it), or overwriting the reset state
+	// with Error/PendingAuth for a dial the Disconnect cancelled.
+	// Unregistered while dialing, before the manager's asynchronous
+	// Disconnect landed: discard the result and close what this dial opened.
+	if mc.connectSeq == attempt && mc.unregistered.Load() {
+		mc.connectSeq++
+		if connectErr == nil && mc.coreClient != nil {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.StateManager.Reset()
+		mc.logger.Info("Connect finished on an unregistered instance; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		return ErrInstanceUnregistered
+	}
+	if mc.connectSeq != attempt {
+		// Only Disconnects ran since (a newer attempt would have left
+		// Connecting, Ready or a failure state): close what this dial opened,
+		// because a Disconnect that landed before connectCancel was
+		// registered could not abort it. A newer attempt shares the core
+		// client, so its transport is left alone.
+		if connectErr == nil && mc.coreClient != nil && mc.StateManager.GetState() == types.StateDisconnected {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.logger.Info("Connect superseded by a concurrent disconnect or a newer attempt; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		if connectErr != nil {
+			return fmt.Errorf("%w: %v", ErrConnectAborted, connectErr)
+		}
+		return ErrConnectAborted
+	}
 
 	if connectErr != nil {
 		// A rate-limited upstream (429, or 503 with a hint) told us when to come
@@ -657,6 +781,9 @@ func (mc *Client) Disconnect() error {
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.GetConfig().Name))
 
+	// Supersede any connect attempt still dialing (see connectSeq).
+	mc.connectSeq++
+
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
 
@@ -741,7 +868,7 @@ func (mc *Client) ConnectionEpoch() int64 {
 func (mc *Client) WithConnectionEpoch(expectedEpoch int64, fn func() error) (current bool, err error) {
 	mc.epochMu.Lock()
 	defer mc.epochMu.Unlock()
-	if mc.connectionEpoch.Load() != expectedEpoch {
+	if mc.retired.Load() || mc.connectionEpoch.Load() != expectedEpoch {
 		return false, nil
 	}
 	if err := fn(); err != nil {
@@ -768,7 +895,59 @@ func (mc *Client) GetConnectionInfo() types.ConnectionInfo {
 // GetConfig returns the current server configuration pointer in a thread-safe,
 // lock-free manner. Safe to call whether or not mc.mu is held.
 func (mc *Client) GetConfig() *config.ServerConfig {
-	return mc.cfg.Load()
+	if p := mc.cfg.Load(); p != nil {
+		return p.cfg
+	}
+	return nil
+}
+
+// stampedConfig pairs a server config with the Spec 116 commit generation it
+// was committed at (0 when the instance was built by a path that does not know
+// it yet).
+type stampedConfig struct {
+	cfg *config.ServerConfig
+	gen int64
+}
+
+// Generation returns the commit generation of the config this instance holds
+// (Spec 116): the generation of the commit that created or last restamped it,
+// or 0 when the instance was built without one. Discovery captures it and
+// drops a result whose generation no longer matches the stored row (D15).
+func (mc *Client) Generation() int64 {
+	if p := mc.cfg.Load(); p != nil {
+		return p.gen
+	}
+	return 0
+}
+
+// ConfigAt returns the config this instance holds together with the commit
+// generation it was stamped with, read from ONE atomic load. A caller that
+// binds an action to (config, generation) must use it instead of separate
+// GetConfig and Generation calls: a restamp (SetConfigAt) between those two
+// reads would pair the OLD config with the NEW generation (Spec 116 PR3 Sol
+// round 1).
+func (mc *Client) ConfigAt() (*config.ServerConfig, int64) {
+	if p := mc.cfg.Load(); p != nil {
+		return p.cfg, p.gen
+	}
+	return nil, 0
+}
+
+// SetConfigAt stores cfg together with its commit generation gen as one atomic
+// pair, but only when gen is newer than the generation the instance holds, so
+// a late legacy worker can never roll the config back (Spec 116 review R9.1).
+// It reports whether it applied. Lock-free, like SetConfig.
+func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) bool {
+	for {
+		cur := mc.cfg.Load()
+		if cur != nil && gen <= cur.gen {
+			return false
+		}
+		if mc.cfg.CompareAndSwap(cur, &stampedConfig{cfg: cfg, gen: gen}) {
+			mc.applyConfigSideEffects(cfg)
+			return true
+		}
+	}
 }
 
 // SetConfig atomically swaps the server configuration. Lock-free; callers must
@@ -779,9 +958,27 @@ func (mc *Client) GetConfig() *config.ServerConfig {
 // without this a hot-reloaded expose_prompts value would stay frozen at
 // whatever was in effect when the connection was created, until the next
 // reconnect-forcing change or restart.
+//
+// The instance keeps the commit generation it holds (Spec 116): SetConfig is
+// the legacy path that does not know one.
 func (mc *Client) SetConfig(config *config.ServerConfig) {
-	mc.cfg.Store(config)
-	if mc.coreClient != nil {
+	for {
+		cur := mc.cfg.Load()
+		next := &stampedConfig{cfg: config}
+		if cur != nil {
+			next.gen = cur.gen
+		}
+		if mc.cfg.CompareAndSwap(cur, next) {
+			break
+		}
+	}
+	mc.applyConfigSideEffects(config)
+}
+
+// applyConfigSideEffects pushes the parts of a swapped config that a running
+// connection caches.
+func (mc *Client) applyConfigSideEffects(config *config.ServerConfig) {
+	if mc.coreClient != nil && config != nil {
 		mc.coreClient.SetExposePrompts(config.ExposePrompts)
 	}
 	mc.warnForwardHeaders()
@@ -962,13 +1159,52 @@ func (mc *Client) SetPromptsChangedCallback(callback func(serverName string)) {
 	mc.promptsChangedCallback = callback
 }
 
+// ListToolsEvent reports one step of ListTools coalescing to a test observer:
+// Leader is true when the caller became the leader of call Seq, false when
+// it attached to call Seq as a waiter. Fresh marks a ListToolsFresh caller.
+type ListToolsEvent struct {
+	Seq    uint64
+	Leader bool
+	Fresh  bool
+}
+
+// SetListToolsObserver installs a test observer for ListTools coalescing
+// (nil removes it). It lets cross-package tests acknowledge that a caller has
+// attached to an in-flight tools/list before releasing it. Tests only.
+func (mc *Client) SetListToolsObserver(fn func(ListToolsEvent)) {
+	if fn == nil {
+		mc.listToolsObserver.Store(nil)
+		return
+	}
+	mc.listToolsObserver.Store(&fn)
+}
+
+func (mc *Client) observeListTools(ev ListToolsEvent) {
+	if fn := mc.listToolsObserver.Load(); fn != nil {
+		(*fn)(ev)
+	}
+}
+
+// listToolsCall is one upstream tools/list request owned by a leader. The
+// leader publishes into it before release() closes done; waiters read the
+// result of the exact request they waited on.
+type listToolsCall struct {
+	done      chan struct{}
+	seq       uint64
+	tools     []*config.ToolMetadata
+	err       error
+	published bool
+	// capture is the flight's inventory capture (Spec 117 PR-3, FR-030),
+	// stamped when the leader acquires the list and before the upstream
+	// request. Immutable after acquisition.
+	capture InventoryCapture
+}
+
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools
-// call. When successful it also allocates listToolsWaitCh and resets the cached
-// last-result, so any concurrent ListTools waiter can safely block on the
-// channel and read the published result regardless of which caller is the
-// leader. release() must be called exactly once; it cancels the timeout,
-// publishes any result via publishListToolsResult (if the caller wrote one),
-// and closes the wait channel so coalesced waiters wake up.
+// call. When successful it allocates a fresh listToolsCall, so any concurrent
+// ListTools waiter can block on its done channel and read the result that this
+// leader publishes into it. release() must be called exactly once; it cancels
+// the timeout and closes the call's done channel so coalesced waiters wake up.
 func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
 	mc.listToolsMu.Lock()
 	if mc.listToolsInProgress {
@@ -977,9 +1213,9 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	}
 
 	mc.listToolsInProgress = true
-	mc.listToolsWaitCh = make(chan struct{})
-	mc.listToolsLastResult = nil
-	mc.listToolsLastErr = nil
+	mc.listToolsLeaderSeq++
+	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq, capture: mc.newCapture()}
+	mc.listToolsCur = call
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
 	mc.listToolsMu.Unlock()
@@ -989,10 +1225,10 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 		mc.listToolsMu.Lock()
 		mc.listToolsCancel = nil
 		mc.listToolsInProgress = false
-		if mc.listToolsWaitCh != nil {
-			close(mc.listToolsWaitCh)
-			mc.listToolsWaitCh = nil
+		if mc.listToolsCur == call {
+			mc.listToolsCur = nil
 		}
+		close(call.done)
 		mc.listToolsMu.Unlock()
 		return mc.IsConnected()
 	}
@@ -1000,21 +1236,46 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	return listCtx, release, true
 }
 
-// publishListToolsResult records the outcome of an upstream ListTools call so
-// that coalesced waiters in ListTools() can read it once the wait channel is
-// closed. All call sites that go through acquireListToolsContext (ListTools,
-// the health check, and the tool-count refresh) must publish their result so
-// that an arriving ListTools waiter never reads stale or zero data.
+// publishListToolsResult records the outcome of the in-flight upstream
+// ListTools call so that coalesced waiters in ListTools() can read it once the
+// call's done channel is closed. All call sites that go through
+// acquireListToolsContext (ListTools and the tool-count refresh) must publish
+// their result; a waiter that finds no published result lists again rather
+// than treating it as an empty tool list.
 func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error) {
 	mc.listToolsMu.Lock()
-	mc.listToolsLastResult = tools
-	mc.listToolsLastErr = err
+	if call := mc.listToolsCur; call != nil {
+		call.tools = tools
+		call.err = err
+		call.published = true
+	}
 	mc.listToolsMu.Unlock()
 }
 
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	tools, _, err := mc.listTools(ctx, false, 0)
+	return tools, err
+}
+
+// ListToolsFresh is ListTools for a caller that must see the tools as they
+// are AFTER the call was made — a contract verification triggered by
+// notifications/tools/list_changed (RT-05, Sol r5 P2). It never joins an
+// upstream tools/list that was already in flight when it was called (that
+// request may have been answered before the change the notification
+// announces): it waits for such a request to finish and then lists again,
+// joining only a request that started after the call.
+func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, error) {
+	tools, _, err := mc.ListToolsFreshCaptured(ctx)
+	return tools, err
+}
+
+// listTools implements ListTools and ListToolsFresh. With fresh set, an
+// in-flight leader numbered at or below entrySeq started before the caller,
+// so its result is not accepted. It returns the capture of the flight whose
+// result it returns (Spec 117 PR-3).
+func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1024,17 +1285,30 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, InventoryCapture{}, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
 	for {
 		listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
 		if ok {
-			return mc.runListToolsAsLeader(listCtx, release)
+			if mc.listToolsObserver.Load() != nil {
+				mc.listToolsMu.Lock()
+				seq := mc.listToolsLeaderSeq
+				mc.listToolsMu.Unlock()
+				mc.observeListTools(ListToolsEvent{Seq: seq, Leader: true, Fresh: fresh})
+			}
+			mc.listToolsMu.Lock()
+			capture := mc.listToolsCur.capture
+			mc.listToolsMu.Unlock()
+			tools, err := mc.runListToolsAsLeader(listCtx, release)
+			if err != nil {
+				return nil, InventoryCapture{}, err
+			}
+			return tools, capture, nil
 		}
 
 		mc.listToolsMu.Lock()
-		waitCh := mc.listToolsWaitCh
+		call := mc.listToolsCur
 		inProgress := mc.listToolsInProgress
 		mc.listToolsMu.Unlock()
 
@@ -1043,28 +1317,40 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			// Try to become the leader again.
 			continue
 		}
-		if waitCh == nil {
+		if call == nil {
 			// Defensive fallback: every leader path is supposed to allocate a
-			// wait channel via acquireListToolsContext, so this should be
-			// unreachable. Fail fast rather than block forever on a nil channel.
-			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
+			// call via acquireListToolsContext, so this should be unreachable.
+			// Fail fast rather than block forever.
+			return nil, InventoryCapture{}, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
 			zap.String("server", mc.GetConfig().Name))
+		mc.observeListTools(ListToolsEvent{Seq: call.seq, Fresh: fresh})
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-waitCh:
-			mc.listToolsMu.Lock()
-			res := mc.listToolsLastResult
-			err := mc.listToolsLastErr
-			mc.listToolsMu.Unlock()
-			if err != nil {
-				return nil, fmt.Errorf("ListTools failed: %w", err)
+			return nil, InventoryCapture{}, ctx.Err()
+		case <-call.done:
+			if fresh && call.seq <= entrySeq {
+				// That request predates the caller: list again.
+				continue
 			}
-			return res, nil
+			if hook := mc.listToolsBeforeWaiterRead.Load(); hook != nil {
+				(*hook)(call.seq)
+			}
+			mc.listToolsMu.Lock()
+			res, err, published, capture := call.tools, call.err, call.published, call.capture
+			mc.listToolsMu.Unlock()
+			if !published {
+				// The leader ended without a result (it never reached the
+				// upstream call): that is not an empty tool list. List again.
+				continue
+			}
+			if err != nil {
+				return nil, InventoryCapture{}, fmt.Errorf("ListTools failed: %w", err)
+			}
+			return res, capture, nil
 		}
 	}
 }
@@ -1511,6 +1797,32 @@ func (mc *Client) cancelInFlightListTools() {
 
 	mc.logger.Debug("Timed out waiting for ListTools operation to cancel",
 		zap.String("server", mc.GetConfig().Name))
+}
+
+// teardownForReconnect closes the transport and resets the state for the
+// reconnect helpers (tryReconnect, TryReconnectSync), which then start their
+// own Connect. The sequence bump, the transport close and the reset form one
+// mc.mu section, as in Disconnect, so Connect admission (phase 1, under mc.mu)
+// is ordered against the whole teardown: an attempt admitted before it is
+// superseded (see connectSeq) and discards its result instead of publishing
+// Ready over the closed transport; an attempt admitted after it dials a fresh
+// transport. The caller must not hold mc.mu.
+func (mc *Client) teardownForReconnect(reset func()) error {
+	mc.cancelInFlightConnect()
+	mc.cancelInFlightListTools()
+
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.connectSeq++
+	var err error
+	if mc.coreClient != nil {
+		err = mc.coreClient.Disconnect()
+	}
+	if hook := mc.reconnectMidTeardown.Load(); hook != nil {
+		(*hook)()
+	}
+	reset()
+	return err
 }
 
 // cancelInFlightConnect cancels any in-flight Connect() operation.
@@ -2057,18 +2369,17 @@ func (mc *Client) tryReconnect() {
 		return
 	}
 
-	// First, disconnect the current client to clean up any broken connections
-	// Cancel any in-flight connect/listTools before attempting reconnection
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// First, disconnect the current client to clean up any broken connections,
+	// cancelling any in-flight connect/listTools, and transition to
+	// disconnected for reconnect, preserving retryCount for backoff.
+	if err := mc.teardownForReconnect(mc.StateManager.ResetForReconnect); err != nil {
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 	}
-
-	// Transition to disconnected for reconnect, preserving retryCount for backoff
-	mc.StateManager.ResetForReconnect()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
@@ -2177,17 +2488,16 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 		return fmt.Errorf("reconnect deferred: a tool call is still in flight")
 	}
 
-	// Disconnect stale state first
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// Disconnect stale state first and reset state to disconnected (one
+	// mc.mu section, see teardownForReconnect).
+	if err := mc.teardownForReconnect(mc.StateManager.Reset); err != nil {
 		mc.logger.Warn("TryReconnectSync: disconnect during reconnect returned error",
 			zap.String("server", serverName),
 			zap.Error(err))
 	}
-
-	// Reset state to disconnected
-	mc.StateManager.Reset()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt synchronous connect with the provided context
 	if err := mc.Connect(ctx); err != nil {
@@ -2620,6 +2930,27 @@ func (mc *Client) setToolCountCache(count int) {
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.GetConfig().Command, "docker")
 }
+
+// InstanceID identifies one managed client instance (Spec 116 PR3). Zero is
+// never assigned by NewClient.
+type InstanceID uint64
+
+// instanceIDCounter hands out instance ids to every managed client in the
+// process; an id is never reused.
+var instanceIDCounter atomic.Uint64
+
+// InstanceID returns this instance's process-unique id (0 for a client that
+// was not built by NewClient).
+func (mc *Client) InstanceID() InstanceID { return mc.instanceID }
+
+// MarkUnregistered records that the upstream manager removed this instance
+// from its registry. Called only by upstream.Manager, under its registry
+// locks; from then on Connect refuses with ErrInstanceUnregistered.
+func (mc *Client) MarkUnregistered() { mc.unregistered.Store(true) }
+
+// Unregistered reports whether the upstream manager removed this instance
+// from its registry.
+func (mc *Client) Unregistered() bool { return mc.unregistered.Load() }
 
 // connectionEpochCounter hands out connection epochs to every managed client
 // in the process. It is process-wide so an epoch never repeats across client

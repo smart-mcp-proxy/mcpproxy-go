@@ -25,24 +25,60 @@ import (
 //   - One mutex per server, never a global one, so a large server's pass
 //     cannot stall approvals on other servers.
 //   - The lock covers approval-record reads/writes and the decisions made from
-//     them, nothing else. It is never held across LoadConfiguredServers,
+//     them, and (Spec 116 D15) a discovery pass's final eligibility check and
+//     its index writes. It is never held across a config commit,
 //     HandleUpstreamServerChange, SaveConfiguration, UnquarantineServer or
 //     any call that can synchronously reach checkToolApprovals again.
+//   - A config commit takes the locks of the servers it changes, sorted, after
+//     configCommitMu and before the storage step, and releases them before it
+//     touches the upstream manager (Spec 116 plan §Lock order).
 //   - It is released before spawning reindexServerToolsAfterApprovalChange,
 //     which re-enters checkToolApprovals and takes the lock itself.
 //   - Helpers called inside a locked section (recordScanHold,
-//     scanApproveChange, adopt*, stamp*, *Locked) never take it again.
+//     adopt*, stamp*, *Locked) never take it again.
 //   - Storage calls inside take the storage manager's own lock; storage never
 //     calls back into the runtime, so the order approval lock -> storage lock
 //     cannot invert.
 
+// toolApprovalServerLock is one server's tool-approval lock plus the capture
+// order state it guards (Spec 117 PR-3, #1565; data-model.md §7).
+//
+// applied is the highest capture sequence that entered an inventory apply for
+// the server (records, deletes, eviction, index, last-good snapshot, StateView
+// publish). Every admitted capture advances it, including one whose apply
+// later fails and a lenient-empty observation, so it is a fence: an older
+// capture that reaches the apply afterwards writes nothing.
+//
+// definitions is the sequence of the newest admitted capture that carried
+// definitions (a non-empty inventory, an authoritative empty one, or a
+// quarantined review capture). The retained last-good snapshot may be
+// re-applied by operator reconciliation (the approval reindex, the sweep
+// fallback) only while its capture is that one (FR-033a, FR-037).
+//
+// Both fields are guarded by mu. Sequences are process-global (managed.
+// InventoryCapture), so a removed and re-added server needs no reset: every
+// capture of the new instance is newer.
+type toolApprovalServerLock struct {
+	mu          sync.Mutex
+	applied     uint64
+	definitions uint64
+}
+
+// toolApprovalServerState returns serverName's lock state, creating it.
+func (r *Runtime) toolApprovalServerState(serverName string) *toolApprovalServerLock {
+	v, _ := r.toolApprovalLocks.LoadOrStore(serverName, &toolApprovalServerLock{})
+	return v.(*toolApprovalServerLock)
+}
+
 // lockToolApprovals acquires the per-server tool-approval lock and returns its
 // unlock function.
 func (r *Runtime) lockToolApprovals(serverName string) func() {
-	v, _ := r.toolApprovalLocks.LoadOrStore(serverName, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	st := r.toolApprovalServerState(serverName)
+	waiting := r.approvalLockWaiter(serverName)
+	waiting.Add(1)
+	st.mu.Lock()
+	waiting.Add(-1)
+	return st.mu.Unlock
 }
 
 // WithToolApprovalLock runs fn while holding serverName's tool-approval lock.
@@ -78,12 +114,4 @@ func (r *Runtime) serverQuarantinedInStorage(serverName string) bool {
 			zap.String("server", serverName), zap.Error(err))
 		return true
 	}
-}
-
-// deleteToolApprovalLocked deletes a removed tool's approval record under the
-// server's tool-approval lock, so the delete cannot interleave with another
-// writer's read-modify-write of the same record.
-func (r *Runtime) deleteToolApprovalLocked(serverName, toolName string) error {
-	defer r.lockToolApprovals(serverName)()
-	return r.storageManager.DeleteToolApproval(serverName, toolName)
 }

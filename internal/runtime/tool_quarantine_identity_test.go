@@ -262,7 +262,7 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		})
 		require.NoError(t, err)
 		require.Empty(t, result.BlockedTools)
-		flipped, err := rt.setToolEnabledNoEmit("a", "erase", false, "user")
+		flipped, err := rt.setToolEnabledNoEmit("a", "erase", false, "user", 0)
 		require.NoError(t, err)
 		require.True(t, flipped)
 		erase, err := rt.storageManager.GetToolApproval("a", "erase")
@@ -587,7 +587,7 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
 			ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
-			PreviousDescription: desc, CurrentDescription: rugPull,
+			PreviousDescription: desc, PreviousSchema: schema, CurrentDescription: rugPull,
 		}))
 
 		result, err := rt.checkToolApprovals("a", []*config.ToolMetadata{
@@ -605,7 +605,9 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 		assert.Equal(t, rugPull, rec.CurrentDescription)
 		assert.True(t, rec.IdentityKeyed)
 
-		// A revert to the approved contract restores it, as for any changed record.
+		// A revert to the approved contract restores it, as for any changed
+		// record (the lock carries its previous input schema; a missing one
+		// is not a wildcard, Sol r10 P1).
 		result, err = rt.checkToolApprovals("a", []*config.ToolMetadata{
 			{ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: desc, ParamsJSON: schema},
 		})
@@ -990,9 +992,11 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 			require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 				ServerName: "a", ToolName: "erase", Status: storage.ToolApprovalStatusChanged,
 				ApprovedHash: "pre-105-hash", CurrentHash: "pre-105-changed-hash",
-				PreviousDescription: desc, CurrentDescription: rugPull, Disabled: true,
+				PreviousDescription: desc, PreviousSchema: schema, CurrentDescription: rugPull, Disabled: true,
 			}))
-			// The upstream serves the PREVIOUS (approved) description again.
+			// The upstream serves the PREVIOUS (approved) contract again. The
+			// previous input schema is recorded: a missing one is not a
+			// wildcard (Sol r10 P1).
 			result, err := rt.checkToolApprovals("a", nsErase(desc))
 			require.NoError(t, err)
 			assert.True(t, result.BlockedTools["ns:erase"], "reverted, but still user-disabled")
@@ -1177,7 +1181,7 @@ func TestCheckToolApprovals_NeverBaselinedExactRecord_AdoptsLegacyLock(t *testin
 				} else {
 					assert.Equal(t, got.CurrentHash, got.ApprovedHash, "baselined only from the sibling's approved contract")
 				}
-				assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), got.HashSchemaVersion, "adoption raises the hash version")
+				assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), got.HashSchemaVersion, "adoption raises the hash version")
 				version, err := rt.storageManager.GetSchemaVersion()
 				require.NoError(t, err)
 				assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), version, "the migration completes once no approved record is below the current hash version")
@@ -1370,7 +1374,7 @@ func TestCheckToolApprovals_LegacyCollapsedRecord_OperatorWriteKeepsConsult(t *t
 			assert.True(t, result.BlockedTools["erase"])
 			rec, err := rt.storageManager.GetToolApproval("a", "erase")
 			require.NoError(t, err)
-			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion, "the hash-match branch refreshed the record ...")
+			assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion, "the hash-match branch refreshed the record ...")
 			assert.False(t, rec.IdentityKeyed, "... but a served, user-disabled pre-105 record keeps waiting for a namespaced tool")
 
 			result, err = rt.checkToolApprovals("a", bothServed)
