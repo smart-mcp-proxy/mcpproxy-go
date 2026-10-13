@@ -155,17 +155,25 @@ func TestBlockedWrite_UnblockedByRetire_Bounded(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	big := make([]byte, 64<<20) // far beyond the socket buffers: blocks
+	// Keep writing until the peer's and our socket buffers are full and a
+	// write blocks. A single large write is not enough everywhere: Windows
+	// loopback can absorb a 64 MiB write without blocking, so the writer loops
+	// until a write returns an error (which only Retire's close can cause).
+	chunk := make([]byte, 1<<20)
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := conn.Write(big)
-		writeDone <- err
+		for {
+			if _, err := conn.Write(chunk); err != nil {
+				writeDone <- err
+				return
+			}
+		}
 	}()
-	// Let the write fill the buffers and block.
-	time.Sleep(100 * time.Millisecond)
+	// Let the writer fill the buffers and block.
+	time.Sleep(200 * time.Millisecond)
 	select {
 	case err := <-writeDone:
-		t.Fatalf("write was expected to block, returned %v", err)
+		t.Fatalf("writer was expected to be blocked, returned %v", err)
 	default:
 	}
 
