@@ -578,14 +578,26 @@ func (c *Client) startStdioAdmitted(ctx context.Context) error {
 	if err != nil {
 		// Retired while the section ran: TrackProcess already killed the
 		// group. Leave the section, then reap the child through the
-		// transport's own Close so no zombie is left behind.
+		// transport's own Close so no zombie is left behind. The recorded
+		// group ID is cleared first (review round 4): once the child is
+		// reaped the number can be handed out again, and Connect's failure
+		// cleanup would otherwise signal it unchecked.
+		c.processGroupID = 0
 		release()
 		_ = c.client.Close()
+		if hook := stdioRetiredCloseHook; hook != nil {
+			hook(c)
+		}
 		return err
 	}
 	c.stdioProc = proc
 	return nil
 }
+
+// stdioRetiredCloseHook is a test seam run after the transport's Close
+// reaped a child the retired gate refused to track (review round 4). Nil in
+// production.
+var stdioRetiredCloseHook func(*Client)
 
 // launchObserver is a test seam told about every process a launch section
 // started (Spec 116 PR4, T4.1): it proves a retired instance launched

@@ -512,6 +512,57 @@ ungated "a spaced selector http . DefaultTransport" internal/transport a.go 'pac
 var rt = http . DefaultTransport' 1
 ungated "a spaced helper call http. Get" internal/oauth a.go 'package oauth
 func f() { _, _ = http. Get(u) }' 1
+# A selector split after its dot (gofmt-valid; Go inserts no semicolon after
+# a dot), with blank and comment lines between the parts (Sol review round 4).
+ungated "split helper call http. / Get(u)" internal/oauth a.go 'package oauth
+func f() {
+	_, _ = http.
+		Get(u)
+}' 1
+ungated "split helper call with a blank line and comments between" internal/upstream/core a.go 'package core
+func f() {
+	_, _ = http. // the helper
+'"
+"'
+		// fetch it
+		/* still the helper */
+		Post(u, ct, body)
+}' 1
+ungated "split http. / DefaultClient.Do(req)" internal/transport a.go 'package transport
+func f() {
+	_, _ = http.
+		DefaultClient.Do(req)
+}' 1
+ungated "split transport-less http. / Client{}" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+		Client{}
+	_ = c
+}' 1
+ungated "split transport-less multi-line http. / Client{ ... }" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+
+		// a client
+		Client{
+		Timeout: t,
+	}
+	_ = c
+}' 1
+ungated "split gated http. / Client{Transport: gated}" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+		Client{Transport: gated}
+	_ = c
+}' 0
+ungated "split selector state does not leak into the next file" internal/oauth a.go 'package oauth
+var x = http.' 0
+r="$(mkroot pr4-split-leak)"
+mkdir -p "$r/internal/oauth"
+# Each file starts with a bare Get( call and ends with a dangling http., so
+# whatever order the files are scanned in, a carried state would join them.
+for f in a b; do printf '\tGet(u)\npackage oauth\nvar y = http.\n' > "$r/internal/oauth/$f.go"; done
+expect "FR-024a: a trailing http. at the end of one file does not join the next" 0 "$r"
 ungated "*http.Client return type" internal/transport a.go 'package transport
 func f() *http.Client {
 	return nil

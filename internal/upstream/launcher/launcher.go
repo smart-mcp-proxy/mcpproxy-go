@@ -233,10 +233,10 @@ type handle struct {
 	pid    atomic.Int64 // 0 once exited
 	pumpWG sync.WaitGroup
 
-	// reapMu orders the retirement kill with the reaper (review round 3):
-	// reap sets reaped under it as soon as cmd.Wait returns, before it does
-	// anything else, and retireKill reads it under the same lock. A kill
-	// that sees reaped == false signals while the leader (alive or a
+	// reapMu orders the retirement kill with the reaper (review rounds 3
+	// and 4): reap calls cmd.Wait and sets reaped under it, and retireKill
+	// reads reaped and signals under the same lock. A kill that sees
+	// reaped == false therefore signals while the leader (alive or a
 	// zombie) still holds the group ID, so the ID cannot have been reused.
 	reapMu sync.Mutex
 	reaped bool
@@ -352,12 +352,32 @@ func (h *handle) reap() {
 	// pipe have completed." Pumps naturally finish when the child exits and the
 	// kernel propagates EOF — we don't need Wait() to reach that state.
 	h.pumpWG.Wait()
-	err := h.cmd.Wait()
-	h.reapMu.Lock()
-	h.reaped = true
-	h.reapMu.Unlock()
-	if hook := afterReapHook; hook != nil {
-		hook(h)
+
+	// Reap the leader under reapMu (review round 4). cmd.Wait releases the
+	// leader's PID, and with it the process-group ID once the group is
+	// empty; reaping outside the lock let a concurrent retireKill observe
+	// reaped == false after the kernel had already released the ID, and
+	// signal a group that reused it. waitExited first observes the exit
+	// without reaping, so the locked cmd.Wait returns at once and Kill is
+	// never held up by a live child. Where that is not available, reap
+	// falls back to the unlocked order.
+	var err error
+	if waitExited(h.cmd.Process.Pid) {
+		h.reapMu.Lock()
+		err = h.cmd.Wait()
+		if hook := reapedLockedHook.Load(); hook != nil {
+			(*hook)(h)
+		}
+		h.reaped = true
+		h.reapMu.Unlock()
+	} else {
+		err = h.cmd.Wait()
+		h.reapMu.Lock()
+		h.reaped = true
+		h.reapMu.Unlock()
+	}
+	if hook := afterReapHook.Load(); hook != nil {
+		(*hook)(h)
 	}
 
 	// Release the Job Object (Windows only — see createJob/winjob). By the
@@ -392,8 +412,14 @@ func (h *handle) reap() {
 var containTree = createJob
 
 // afterReapHook runs in the reaper after the leader was reaped and before
-// Done closes. A test seam; nil in production.
-var afterReapHook func(*handle)
+// Done closes. A test seam; nil in production. Atomic because reapers of
+// earlier tests' handles may still read it while a test installs its own.
+var afterReapHook atomic.Pointer[func(*handle)]
+
+// reapedLockedHook runs in the reaper right after cmd.Wait reaped the
+// leader and before reaped is published, with reapMu held. A test seam; nil
+// in production.
+var reapedLockedHook atomic.Pointer[func(*handle)]
 
 // pumpLines reads r line-by-line and writes each line, prefixed, to dst.
 // One Write per line so adapters that bridge io.Writer to a structured

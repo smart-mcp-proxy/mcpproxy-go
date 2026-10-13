@@ -421,12 +421,28 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
     FNR == 1 {
       flush_clients()
       inblock = 0; inraw = 0
+      hpend = 0
     }
     {
       raw = $0
       code = strip(raw)
       http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
       if (http_scope) {
+        # A selector split after its dot (review round 4): Go inserts no
+        # semicolon after a dot, so `http.` ending a line continues on the
+        # next code line, past blank and comment-only lines (strip blanks
+        # comments). The pending `http.` is prefixed to that line, so the
+        # helper, Default* and Client{ checks see one selector. The state is
+        # reset per file.
+        if (hpend) {
+          if (code ~ /^[ \t]*$/) next
+          code = "http." code
+          hpend = 0
+        }
+        if (code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*$/) {
+          hpend = 1
+          sub(/http[ \t]*[.][ \t]*$/, "", code)
+        }
         if (code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*(Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*Default(Client|Transport)([^A-Za-z0-9_]|$)/)
           report(FILENAME, FNR, raw)
         scan_clients(code, FILENAME, FNR, raw)

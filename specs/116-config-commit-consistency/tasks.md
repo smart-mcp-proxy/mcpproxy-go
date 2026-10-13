@@ -344,7 +344,8 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
 - [x] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
 - [x] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
-- [x] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+- [ ] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+  - Status (review round 4, 2026-10-13): open. The race/lint/e2e matrix, the Sol review rounds and the docs are done. SC-004 is now measured with the specified workloads by `internal/runtime/spec116_sc004_test.go` (`MCPPROXY_SC004_MEASURE=1`, in-process, 25 servers): a commit with no index work has p99 20.0 ms (n=300, budget 50 ms), and the Retire of one connected instance has p99 42 µs (n=40, budget 100 ms; the whole removal commit has p99 39.8 ms). **A removal with a 320-tool index purge has p99 6.26 s (n=40, budget 500 ms) and misses the budget.** The cause predates this PR: `BleveIndex.DeleteServerTools` deletes one document per bleve transaction. It is tracked in #1617. Tick T098 once #1617 lands and the measurement passes.
 
 
 ### PR4 implementation note (as shipped, 2026-10-13)
@@ -498,6 +499,27 @@ each documented in the PR:
 - The FR-024a scan matches `http.Client` with whitespace or a comment
   before its brace and spaced selectors (`http . Client{`,
   `http . DefaultTransport`, `http. Get(`).
+
+#### PR4 review round 4 (Sol) design notes
+
+- The launcher reaper now also reaps under `reapMu`. It first waits for the
+  leader's exit without reaping it: `waitid(WNOWAIT)` on Linux, and a kqueue
+  `EVFILT_PROC`/`NOTE_EXIT` event on Darwin and the BSDs. The zombie keeps
+  the PID and the group ID reserved. Only then does it take the lock, call
+  `cmd.Wait` and set `reaped`. A `Handle.Kill` that sees `reaped == false`
+  therefore signals while the leader still holds the group ID. Platforms
+  without a non-reaping wait keep the round-3 order. Windows has no group ID
+  to reuse.
+- When the gate refuses to track a stdio child that a retirement cut off,
+  the launch section clears `processGroupID` before the transport's `Close`
+  reaps the child. Connect's failure cleanup then has no released group ID
+  that it could signal.
+- The FR-024a scanner joins a selector that is split after its dot (`http.`
+  at the end of a line) with the next code line, past blank and comment
+  lines. The state resets for each file.
+- SC-004 is measured by `internal/runtime/spec116_sc004_test.go`
+  (`MCPPROXY_SC004_MEASURE=1`). The 320-tool purge misses its budget for a
+  reason that predates this PR, tracked in #1617, so T098 stays open.
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

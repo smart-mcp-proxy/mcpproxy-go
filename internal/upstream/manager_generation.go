@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -227,7 +229,13 @@ func (m *Manager) unregisterLocked(name string) *managed.Client {
 			// one write, a process start), whose connections it has
 			// already closed, so it is bounded and never waits on the
 			// network or on a manager lock.
-			old.Retire()
+			if obs := retireObserver.Load(); obs != nil {
+				start := time.Now()
+				old.Retire()
+				(*obs)(statsName, time.Since(start))
+			} else {
+				old.Retire()
+			}
 		}
 	}
 	m.callStats.Drop(statsName)
@@ -236,6 +244,18 @@ func (m *Manager) unregisterLocked(name string) *managed.Client {
 		return nil
 	}
 	return old
+}
+
+// retireObserver is a test seam told how long each Retire in
+// unregisterLocked took (Spec 116 SC-004: the retirement overhead of a
+// commit, measured apart from the rest of the commit). Nil in production.
+var retireObserver atomic.Pointer[func(server string, d time.Duration)]
+
+// SetRetireObserverForTest installs the retirement observer and returns a
+// restore func. Test-only.
+func SetRetireObserverForTest(fn func(server string, d time.Duration)) (restore func()) {
+	prev := retireObserver.Swap(&fn)
+	return func() { retireObserver.Store(prev) }
 }
 
 // installLocked is the ONLY code that adds an instance to m.clients. The

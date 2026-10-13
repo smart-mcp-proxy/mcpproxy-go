@@ -84,14 +84,14 @@ func TestHandleKill_AfterGroupGone_DoesNotSignalReusedID(t *testing.T) {
 func TestHandleKill_ReapedBeforeDone_DoesNotSignalReusedID(t *testing.T) {
 	inWindow := make(chan *handle, 1)
 	releaseReaper := make(chan struct{})
-	prev := afterReapHook
-	afterReapHook = func(h *handle) {
+	hook := func(h *handle) {
 		if h.name == "reap-window" {
 			inWindow <- h
 			<-releaseReaper
 		}
 	}
-	t.Cleanup(func() { afterReapHook = prev })
+	prev := afterReapHook.Swap(&hook)
+	t.Cleanup(func() { afterReapHook.Store(prev) })
 
 	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "reap-window"}, zap.NewNop())
 	require.NoError(t, err)
@@ -120,6 +120,72 @@ func TestHandleKill_ReapedBeforeDone_DoesNotSignalReusedID(t *testing.T) {
 	select {
 	case <-exited:
 		t.Fatal("an unrelated group with a reused ID was signalled between the reap and Done")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// Sol review round 4: cmd.Wait released the leader (and, with the group
+// empty, the group ID) before reap took reapMu, so a Kill in between saw
+// reaped == false and signalled the number unchecked. The reap now runs
+// under reapMu: a Kill that arrives after the real reap but before reaped is
+// published waits for it and then leaves a reused group alone.
+func TestHandleKill_AfterRealReapBeforePublish_DoesNotSignalReusedID(t *testing.T) {
+	inWindow := make(chan *handle, 1)
+	releaseReaper := make(chan struct{})
+	hook := func(h *handle) {
+		if h.name == "reap-publish-window" {
+			inWindow <- h
+			<-releaseReaper
+		}
+	}
+	prev := reapedLockedHook.Swap(&hook)
+	t.Cleanup(func() { reapedLockedHook.Store(prev) })
+
+	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "reap-publish-window"}, zap.NewNop())
+	require.NoError(t, err)
+	var hh *handle
+	select {
+	case hh = <-inWindow:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reaper did not reach the window after the real reap")
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(releaseReaper)
+		}
+	}
+	defer release()
+	require.ErrorIs(t, syscall.Kill(hh.cmd.Process.Pid, 0), syscall.ESRCH,
+		"control: the leader is really reaped in the window")
+
+	// Simulate the reuse: a live, unrelated group now holds the number.
+	other := exec.Command("sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, other.Start())
+	exited := make(chan struct{})
+	go func() { _ = other.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = other.Process.Kill(); <-exited })
+	hh.pgid = other.Process.Pid
+
+	killed := make(chan error, 1)
+	go func() { killed <- h.Kill() }()
+	select {
+	case <-exited:
+		t.Fatal("an unrelated group with a reused ID was signalled between the real reap and publishing reaped")
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-killed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kill did not return after the reaper published reaped")
+	}
+	select {
+	case <-exited:
+		t.Fatal("an unrelated group with a reused ID was signalled after the reap was published")
 	case <-time.After(300 * time.Millisecond):
 	}
 }

@@ -86,13 +86,13 @@ func startedGroupID(cmd *exec.Cmd) int {
 // out as a PID. A live process holding the number as its PID therefore means
 // our group is gone and the number was reused: the group is left alone.
 //
-// "Reaped" is the flag reap sets under reapMu right after cmd.Wait returns,
-// not Done (review round 3): Done closes only after reap has logged, so
-// keying the reuse check on Done left a window in which a reused group was
-// signalled unchecked. The kill runs under reapMu, so the leader cannot be
-// reaped by our reaper between the check and the signal; what remains is
-// the instant inside cmd.Wait between the kernel reaping the leader and
-// reap taking the lock, in which the number cannot be reused in practice.
+// "Reaped" is the flag reap sets under reapMu, not Done (review round 3):
+// Done closes only after reap has logged, so keying the reuse check on Done
+// left a window in which a reused group was signalled unchecked. Since
+// review round 4 the reap itself (cmd.Wait) also runs under reapMu, after a
+// non-reaping wait for the exit (waitExited), so the leader cannot be
+// reaped between the check and the signal: while reaped is false the
+// leader, alive or a zombie, holds the group ID.
 func (h *handle) retireKill() error {
 	h.reapMu.Lock()
 	defer h.reapMu.Unlock()
