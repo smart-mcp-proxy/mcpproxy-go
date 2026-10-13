@@ -82,10 +82,19 @@ func TestInventoryOrder_StressNoDeadlockAndConsistent(t *testing.T) {
 
 	// Trusted again, then one final authoritative capture; the background
 	// reindexes spawned by the approvals settle on it.
+	//
+	// Spec 116 PR3: a commit that changes Quarantined unregisters the
+	// instance under captureMu (so its in-flight captures can never apply)
+	// and the commit's connect worker installs and connects the instance of
+	// the new generation asynchronously. When the last toggle above left the
+	// server quarantined, this unquarantine is such a commit, so the name may
+	// briefly resolve to no client: wait for the CURRENT instance to be
+	// registered and connected instead of requiring it synchronously.
 	require.NoError(t, rt.QuarantineServer("inv", false))
-	c, ok := rt.upstreamManager.GetClient("inv")
-	require.True(t, ok)
-	require.Eventually(t, c.IsConnected, 10*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		c, ok := rt.upstreamManager.GetClient("inv")
+		return ok && c != nil && c.IsConnected()
+	}, 10*time.Second, 10*time.Millisecond, "the unquarantine commit's worker must install and connect the current instance")
 	require.NoError(t, rt.discoverAndIndexToolsForServer(ctx, "inv", true))
 	require.Eventually(t, func() bool {
 		indexed := invIndexed(t, rt)
