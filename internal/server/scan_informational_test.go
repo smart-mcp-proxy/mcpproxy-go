@@ -34,7 +34,7 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 			require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
 		}
 	}
-	return &Server{
+	s := &Server{
 		logger:                zap.NewNop(),
 		runtime:               rt,
 		securityScanner:       fake,
@@ -43,6 +43,8 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 		infoScanQueued:        make(map[string]bool),
 		infoScanSettleTimeout: 2 * time.Second,
 	}
+	s.forgetInformationalScansOnPurge()
+	return s
 }
 
 func enabledServer(name string, mode config.TrustMode) *config.ServerConfig {
@@ -671,4 +673,28 @@ func TestInformationalScan_ReaddDoesNotInheritRetiredAttempts(t *testing.T) {
 	// ...and must be retried, not retired on the old server's budget.
 	s.maybeStartInformationalScans(context.Background())
 	waitForStartedScans(t, fake, []string{"acme"})
+}
+
+// Forgetting must follow a SUCCESSFUL removal only. A removal whose commit
+// fails to persist leaves the server configured; its scan bookkeeping (known
+// mark, claim, retry budget) must survive, or every failed removal would hand a
+// retired server a fresh retry budget.
+func TestInformationalScan_FailedRemovalKeepsBookkeeping(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+	s.infoScanMu.Lock()
+	s.infoScanAttempts = map[string]int{"acme": maxInformationalScanAttempts}
+	s.infoScanMu.Unlock()
+
+	// Closing the store makes the commit fail after the transaction callback ran.
+	require.NoError(t, s.runtime.StorageManager().Close())
+	_, err := s.removeServerFromConfig("acme")
+	require.Error(t, err)
+
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	assert.True(t, s.infoScanKnown["acme"], "known mark must survive a failed removal")
+	assert.Equal(t, maxInformationalScanAttempts, s.infoScanAttempts["acme"], "retry budget must survive a failed removal")
 }

@@ -317,6 +317,23 @@ func (s *Server) forgetInformationalScan(name string) {
 	delete(s.infoScanAttempts, name)
 }
 
+// forgetInformationalScansOnPurge registers the purge observer that forgets a
+// removed (or replaced) server's informational-scan bookkeeping. It fires after
+// a successful commit only, on every removal door (REST Server.RemoveServer and
+// the MCP commit writer both commit through removeServerFromConfig), so a
+// re-added server is a fresh admission while a removal that failed to persist
+// changes nothing.
+func (s *Server) forgetInformationalScansOnPurge() {
+	if s.runtime == nil {
+		return
+	}
+	s.runtime.AddServerPurgeObserver(func(names []string) {
+		for _, name := range names {
+			s.forgetInformationalScan(name)
+		}
+	})
+}
+
 func (s *Server) releaseInformationalScan(name string) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()

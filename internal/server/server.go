@@ -3256,6 +3256,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				secService.InvalidateServerState(name)
 			}
 		})
+		s.forgetInformationalScansOnPurge()
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
