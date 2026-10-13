@@ -436,9 +436,18 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	}
 
 	if cls == RefreshClassInvalidClient {
-		// cur has the flight's generation (checked above): it is the record
-		// the clear may act on, by its revision (Spec 116 PR2b).
-		refreshErr = c.handleInvalidClient(req, cur, st, refreshErr)
+		// Sol r5 on #1621: a writer rewrote the record after the request
+		// read it (e.g. a same-binding replacement that kept the client id
+		// and refresh token but corrected the secret, callback port or
+		// redirect URI). The rejection was of the registration the request
+		// sent, not of the stored one: it supersedes this flight, so the
+		// failure has no side effects (no clear, no latch).
+		if !req.StaticClient && rec.Revision != 0 && cur.Revision != rec.Revision {
+			return nil, 0, false, refreshErr
+		}
+		// The clear acts on exactly the record the failed request used, by
+		// its revision (Spec 116 PR2b), never on a record re-read after it.
+		refreshErr = c.handleInvalidClient(req, rec, st, refreshErr)
 	}
 
 	if cls.IsTerminal() {

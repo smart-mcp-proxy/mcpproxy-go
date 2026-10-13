@@ -226,8 +226,11 @@ from the design text:
   the client id it sent, not the record it was read from.
 - **Refresh coordinator.** `RefreshRequest.Binding` keys flights, latch,
   cooldown, re-registration state and `lastSavedAt`; `ClearClientAt` clears by
-  the revision of the record the flight re-read (`cur`, same generation as
-  the flight's own read). `Forget`/`ForgetServer` run for purged and
+  the revision of the record the failed request itself read (`rec`), never
+  the post-request re-read; when the re-read's revision differs (a
+  same-binding replacement rewrote the registration with the same client id
+  and refresh token, Sol r5 on #1621) the invalid_client failure is
+  superseded: no clear, no latch. `Forget`/`ForgetServer` run for purged and
   OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
   ignores a terminal outcome whose binding is not the registered instance's
   (`Runtime.CurrentCredentialBinding`), in addition to the existing

@@ -397,3 +397,65 @@ func TestRefreshFlightsByBinding_T2_16(t *testing.T) {
 		assert.False(t, still, "Forget drops the obsolete binding's state")
 	})
 }
+
+// Sol r5 on #1621: an invalid_client refresh failure clears the DCR
+// registration of the record the failed request used (its revision), not of
+// the record re-read after the request. A same-binding replacement that
+// rewrote the registration meanwhile (same client id and refresh token,
+// corrected secret, callback port and redirect URI) keeps it.
+func TestBoundRefreshInvalidClientKeepsSameBindingRewrite(t *testing.T) {
+	f := newBindingFixture(t)
+	b := f.create(t)
+	_, err := f.db.SaveOAuthClientIfBound(f.key, "acme", b, storage.OAuthClientSaveAlways, "cid", "sec", 4000, "http://127.0.0.1:4000/oauth/callback")
+	require.NoError(t, err)
+	store := NewBoundPersistentTokenStore("acme", bindURL, f.db, b).(*PersistentTokenStore)
+	require.NoError(t, store.SaveToken(context.Background(), &client.Token{AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Second)}))
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	BindRefresher(store, RefreshBinding{Refresh: func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+		if calls.Add(1) > 1 {
+			// The replacement's corrected registration is accepted; the
+			// refresh persists through the store like the real one.
+			tok := &client.Token{AccessToken: "at2", RefreshToken: "rt2", ExpiresAt: time.Now().Add(time.Hour)}
+			return tok, store.SaveToken(ctx, tok)
+		}
+		close(parked)
+		<-release
+		return nil, fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_client"})
+	}})
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.GetToken(context.Background())
+		done <- err
+	}()
+	await(t, parked, "the refresh request to park after its read")
+
+	ok, err := f.db.SaveOAuthClientIfBound(f.key, "acme", b, storage.OAuthClientSaveAlways, "cid", "sec2", 4100, "http://127.0.0.1:4100/oauth/callback")
+	require.NoError(t, err)
+	require.True(t, ok)
+	before := f.record(t)
+	require.Equal(t, "rt", before.RefreshToken)
+
+	close(release)
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the refresh")
+	}
+	after := f.record(t)
+	require.NotNil(t, after)
+	assert.Equal(t, "cid", after.ClientID)
+	assert.Equal(t, "sec2", after.ClientSecret)
+	assert.Equal(t, 4100, after.CallbackPort)
+	assert.Equal(t, "http://127.0.0.1:4100/oauth/callback", after.RedirectURI)
+	assert.Equal(t, before.Revision, after.Revision, "the replacement's registration is unchanged")
+
+	// The superseded failure latched nothing: the next refresh runs against
+	// the replacement's registration.
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "at2", tok.AccessToken)
+	assert.Equal(t, int32(2), calls.Load())
+}
