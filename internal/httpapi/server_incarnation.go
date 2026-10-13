@@ -32,6 +32,13 @@ type incarnationApprovalController interface {
 	QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error
 }
 
+// reviewedIncarnationController is the optional capability that carries both
+// bindings on a review-bound tool approval (Spec 116 + Spec 117 PR-2).
+type reviewedIncarnationController interface {
+	ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error)
+	ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error)
+}
+
 // incarnationController returns the controller's incarnation capability, or
 // nil when it has none.
 func (s *Server) incarnationController() incarnationApprovalController {

@@ -301,9 +301,11 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	require.Eventually(t, func() bool {
 		return rt.discoveryGeneration("quarantined").Epoch == client.ConnectionEpoch()
 	}, 5*time.Second, 10*time.Millisecond, "supervisor must bind the replacement client before its review capture")
-	tools, err := client.ListTools(context.Background())
+	// Spec 117 PR-3: the capture carries its order; an unordered (seq 0)
+	// capture is no longer applied once an ordered one was.
+	tools, inv, err := client.ListToolsCaptured(context.Background())
 	require.NoError(t, err)
-	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), client.Generation(), tools)
+	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), client.Generation(), tools, inv)
 	require.NoError(t, err)
 	require.True(t, published)
 	current, err := rt.storageManager.GetToolApproval("quarantined", "current_definition")

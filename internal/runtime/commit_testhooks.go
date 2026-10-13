@@ -28,6 +28,17 @@ type commitTestHooks struct {
 	// baseline step of a discovery pass: op is "list" (the prior-record
 	// listing), "read" (the marker read) or "write" (the marker write).
 	toolBaselineFault func(serverName, op string) error
+	// reviewBindingValidated runs in a review-bound tool approval
+	// (ApproveToolsReviewed, ApproveAllToolsReviewed) after the binding
+	// validated and before the approval writes, with the server's
+	// tool-approval lock held (Spec 117 PR-2 r2).
+	reviewBindingValidated func(serverName string)
+	// inventoryBeforeApplyLock runs in every inventory write path (sweep,
+	// single-server discovery, quarantined review capture, lenient empty
+	// observation) after the tools/list returned and before the apply takes
+	// captureSnapMu and the server's approval lock, with the capture's
+	// sequence (Spec 117 PR-3).
+	inventoryBeforeApplyLock func(serverName string, seq uint64)
 
 	// Commit pipeline seams (plan.md §Test seams). Each runs inside
 	// configCommitMu with the reason of the commit.

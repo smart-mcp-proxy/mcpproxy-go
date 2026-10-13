@@ -258,7 +258,8 @@ type Runtime struct {
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
 	// operator approve/block/toggle, server-approval baseline promotion, the
 	// quarantine flip and the scanner's baseline+blocks write. Key: server
-	// name, value: *sync.Mutex. See lockToolApprovals.
+	// name, value: *toolApprovalServerLock (the mutex plus the Spec 117
+	// PR-3 capture-order state it guards). See lockToolApprovals.
 	toolApprovalLocks sync.Map
 
 	// toolApprovalReadHook, when set (tests only), runs inside
@@ -285,6 +286,11 @@ type Runtime struct {
 	// snapshot from an instance an endpoint change superseded is never
 	// reapplied; the caller re-lists the current instance instead.
 	lastGoodGen map[string]int64
+	// lastGoodCapture (guarded by lastGoodToolsMu) is the capture each
+	// last-good snapshot came from (Spec 117 PR-3, FR-037): a snapshot is
+	// replaced only by a newer-or-equal capture, and operator reconciliation
+	// re-applies it only while that capture is still current.
+	lastGoodCapture map[string]managed.InventoryCapture
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
 	// captureSnapMu makes "records persisted + pruned + stamp published" one

@@ -46,6 +46,42 @@ type mockToolQuarantineController struct {
 	blockedCount           int
 	blockedTools           []string
 	blockedServer          string
+	// Spec 117 PR-2: the review binding the last reviewed call carried.
+	reviewedExpected map[string]string
+	reviewedTools    []string
+	reviewedAll      bool
+	reviewedErr      error
+	reviewedInc      int64
+}
+
+// The incarnation-carrying forms (Spec 116 x Spec 117 PR-2) record the
+// incarnation and delegate to the plain reviewed forms.
+func (m *mockToolQuarantineController) ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveToolsReviewed(serverName, toolNames, expected, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveAllToolsReviewed(serverName, expected, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {
+	m.reviewedExpected = expected
+	m.reviewedTools = toolNames
+	if m.reviewedErr != nil {
+		return 0, m.reviewedErr
+	}
+	return len(toolNames), m.ApproveTools(serverName, toolNames, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error) {
+	m.reviewedExpected = expected
+	m.reviewedAll = true
+	if m.reviewedErr != nil {
+		return 0, m.reviewedErr
+	}
+	return m.ApproveAllTools(serverName, approvedBy)
 }
 
 func (m *mockToolQuarantineController) GetCurrentConfig() *config.Config {

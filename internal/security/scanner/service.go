@@ -18,6 +18,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
@@ -197,6 +198,22 @@ type ToolApprovalLocker interface {
 // number of tools the commit section promoted (0 in this release).
 type ServerApprovalCommitter interface {
 	CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
+// ReviewedServerApprover is the Spec 117 PR-2 (#1566) form of the approval
+// commit capability. Its CommitServerApproval runs the whole server approval
+// in one critical section under the per-server tool-approval lock: validate
+// expected (the review binding; nil = unbound), record the tool baseline,
+// run commit (the integrity baseline + blocks), promote the pending tools
+// present at that moment, and clear the quarantine in storage, config and
+// file. A stale binding returns *toolreview.StaleToolReviewError with nothing
+// written. FinishServerApproval then runs the rest without the lock (activity
+// record, upstream/index refresh) and promotes nothing, so a tool filed after
+// the commit stays pending (FR-012). When the unquarantiner implements it the
+// scanner never calls UnquarantineServer for an approval.
+type ReviewedServerApprover interface {
+	ServerApprovalCommitter
+	FinishServerApproval(serverName string) error
 }
 
 // IncarnationServerApprovalCommitter extends ServerApprovalCommitter with the
@@ -2004,7 +2021,39 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
-	return s.approveServer(ctx, serverName, force, approvedBy, nil, 0)
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, nil, nil, 0)
+}
+
+// ApproveServerReviewed approves a scanned server bound to the review the
+// caller showed (Spec 117 PR-2, #1566). expected maps tool name to the review
+// fingerprint (current_hash) the operator saw; nil is an unbound (legacy)
+// request and an empty map binds to the empty snapshot. blocks are the tools
+// to keep disabled. The dangerous-scan gate runs first and keeps its message;
+// a stale binding returns *toolreview.StaleToolReviewError unchanged, with
+// nothing written and the server still quarantined.
+func (s *Service) ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	return s.ApproveServerReviewedAt(ctx, serverName, force, approvedBy, blocks, expected, 0)
+}
+
+// ApproveServerReviewedAt is ApproveServerReviewed also bound to
+// expectedIncarnation, the incarnation of the server the caller reviewed
+// (Spec 116 FR-017). The two bindings are independent: a remove and re-add
+// since the review fails with server_replaced (the replacement stays
+// quarantined), changed definitions with the stale-review error. 0 binds to
+// the incarnation current when the call starts.
+func (s *Service) ApproveServerReviewedAt(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, blocks, expected, expectedIncarnation)
+}
+
+func (s *Service) approveServerBlocks(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
+	if len(blocks) == 0 {
+		return s.approveServer(ctx, serverName, force, approvedBy, nil, expected, expectedIncarnation)
+	}
+	approvalBlocks, err := toolApprovalBlocks(blocks, approvedBy)
+	if err != nil {
+		return err
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, approvalBlocks, expected, expectedIncarnation)
 }
 
 // ApproveServerAt is ApproveServerWithBlocks (toolNames may be empty) bound
@@ -2013,27 +2062,22 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 // server_replaced and leaves the replacement quarantined. 0 binds to the
 // incarnation current when the call starts.
 func (s *Service) ApproveServerAt(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string, expectedIncarnation int64) error {
-	blocks, err := approvalBlocks(toolNames, approvedBy)
-	if err != nil {
-		return err
-	}
-	return s.approveServer(ctx, serverName, force, approvedBy, blocks, expectedIncarnation)
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, toolNames, nil, expectedIncarnation)
 }
 
 // ApproveServerWithBlocks approves a scanned server and atomically records the
 // selected tool blocks with the integrity baseline before the server can be
 // unquarantined.
 func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string) error {
-	blocks, err := approvalBlocks(toolNames, approvedBy)
+	blocks, err := toolApprovalBlocks(toolNames, approvedBy)
 	if err != nil {
 		return err
 	}
-	return s.approveServer(ctx, serverName, force, approvedBy, blocks, 0)
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks, nil, 0)
 }
 
-// approvalBlocks turns the tool names an approval blocks into records,
-// rejecting an empty name and dropping duplicates.
-func approvalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBlock, error) {
+// toolApprovalBlocks validates and deduplicates block names.
+func toolApprovalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBlock, error) {
 	seen := make(map[string]struct{}, len(toolNames))
 	blocks := make([]ToolApprovalBlock, 0, len(toolNames))
 	for _, name := range toolNames {
@@ -2049,7 +2093,7 @@ func approvalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBlock,
 	return blocks, nil
 }
 
-func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expectedIncarnation int64) error {
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, expectedIncarnation int64) error {
 	// Spec 116 FR-014: bind the approval to the server identity it reviews.
 	binder, bound := s.unquarantiner.(ApprovalIncarnationBinder)
 	var inc int64
@@ -2126,6 +2170,14 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 	save := func() error { return s.storage.SaveIntegrityBaseline(baseline) }
 	if len(blocks) > 0 {
 		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
+	}
+	if approver, ok := s.unquarantiner.(ReviewedServerApprover); ok {
+		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save, bound, inc)
+	}
+	if expected != nil {
+		// Never drop a binding silently: without the reviewed capability the
+		// approval could not be checked against the review.
+		return fmt.Errorf("review-bound approval is not supported for server %q by this core", serverName)
 	}
 	var saveErr error
 	blockNames := make([]string, 0, len(blocks))
@@ -2212,6 +2264,53 @@ func (s *Service) approveServer(ctx context.Context, serverName string, force bo
 		zap.String("approved_by", approvedBy),
 	)
 
+	return nil
+}
+
+// approveServerReviewed is approveServer's Spec 117 PR-2 path: one locked
+// commit section (validate, baseline marker, integrity baseline + blocks,
+// promotion of the pending tools present, storage/config unquarantine), then
+// the block audit events and the unlocked finish.
+func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error, bound bool, inc int64) error {
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	var commitErr error
+	if ic, ok := approver.(IncarnationServerApprovalCommitter); ok && bound {
+		// Spec 116 FR-014 + Spec 117 FR-011: the incarnation is checked
+		// first, under the approval lock, then the fingerprints.
+		_, commitErr = ic.CommitServerApprovalAt(serverName, inc, blockNames, expected, approvedBy, save)
+	} else {
+		_, commitErr = approver.CommitServerApproval(serverName, blockNames, expected, approvedBy, save)
+	}
+	if err := commitErr; err != nil {
+		if errors.Is(err, commitview.ErrServerReplaced) {
+			s.logger.Info("Scanner approval not applied: the server was removed or replaced since it was reviewed",
+				zap.String("server", serverName), zap.Int64("incarnation", inc))
+			return &commitview.ServerReplacedError{Name: serverName}
+		}
+		var stale *toolreview.StaleToolReviewError
+		if errors.As(err, &stale) {
+			return stale
+		}
+		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	}
+	if len(blocks) > 0 {
+		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+			recorder.RecordToolBlocksForSecurityApproval(serverName, blockNames, approvedBy)
+		}
+	}
+	if err := approver.FinishServerApproval(serverName); err != nil {
+		s.logger.Error("Failed to finish server approval",
+			zap.String("server", serverName), zap.Error(err))
+		return fmt.Errorf("failed to finish approval of server %q: %w", serverName, err)
+	}
+	s.logger.Info("Server approved after security scan",
+		zap.String("server", serverName),
+		zap.String("approved_by", approvedBy),
+		zap.Bool("review_bound", expected != nil),
+	)
 	return nil
 }
 

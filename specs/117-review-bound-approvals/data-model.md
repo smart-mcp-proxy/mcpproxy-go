@@ -6,27 +6,30 @@ Computed from a `storage.ToolApprovalRecord` (`internal/storage/models.go:300`).
 
 ```go
 // internal/runtime/review_fingerprint.go
-const reviewFingerprintVersion = "rv1"
+const reviewFingerprintVersion = "rv2"
 
 func reviewFingerprint(rec *storage.ToolApprovalRecord) string {
-    base := rec.CurrentHash
-    if base == "" { // toggle-synthesized record (newToggleSynthesizedRecord)
-        sum := sha256.Sum256([]byte(rec.CurrentDescription + "\x00" + rec.CurrentSchema + "\x00" + rec.CurrentOutputSchema))
-        base = "nohash:" + hex.EncodeToString(sum[:])
-    }
     h := sha256.New()
-    write(h, reviewFingerprintVersion, rec.ServerName, rec.ToolName, base, hintString(rec.CurrentAnnotations)) // \x00-separated
+    // each part is written as an 8-byte big-endian length followed by its bytes
+    for _, part := range []string{reviewFingerprintVersion, rec.ServerName, rec.ToolName, rec.CurrentHash,
+        rec.CurrentDescription, normalizeJSON(rec.CurrentSchema), normalizeJSON(rec.CurrentOutputSchema),
+        hintString(rec.CurrentAnnotations)} {
+        writeLengthPrefixed(h, part)
+    }
     return reviewFingerprintVersion + "-" + hex.EncodeToString(h.Sum(nil))
 }
 
 // hintString: "ro=<v>;de=<v>;id=<v>;ow=<v>" with v ∈ {"-" (nil), "0", "1"}; nil annotations → all "-".
 ```
 
+Sol r2 P1: `rv1` hashed `base` (the storage `CurrentHash`, or a `nohash:` digest when empty) in place of the definition fields. The storage hash joins description and schemas with an unescaped `|` and leaves out an absent output schema, so `(D, I, O)` and `("D|I", O, none)` share one `CurrentHash` and shared one `rv1` fingerprint. `rv2` encodes every field on its own; the rug-pull hash is unchanged. A record with an empty `CurrentHash` still gets a non-empty, definition-sensitive fingerprint (FR-003).
+
 | Input | In the fingerprint | Why |
 |---|---|---|
 | server name | yes | a binding for server A never matches server B, even with identical definitions (design review r6 #2) |
 | tool name (raw, Spec 105) | yes | identity |
-| `CurrentHash` (description, input schema, output schema) | yes | the approval-hashed contract |
+| `CurrentHash` | yes | the approval-hashed contract that an approval copies to `ApprovedHash` |
+| description, input schema, output schema (each length-prefixed; schemas JSON-normalized) | yes | the definition on screen; field-separated so no two definitions collide (Sol r2 P1) |
 | `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` | yes | they set the tier and the default selection (G3) |
 | `title`, status, `disabled`, timestamps, held evidence | no | not part of what is approved; status changes come with hash changes anyway |
 

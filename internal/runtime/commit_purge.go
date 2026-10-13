@@ -6,7 +6,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -32,41 +31,12 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 		delete(r.lastGoodTools, name)
 		delete(r.lastGoodGen, name)
 		delete(r.lastCaptureAt, name)
+		delete(r.lastGoodCapture, name)
 		// A local reindex that already copied the snapshot sees the bump
 		// under the approval lock and drops its copy (review round 3).
 		r.lastGoodPurgeSeq[name]++
 	}
 	r.lastGoodToolsMu.Unlock()
-}
-
-// lastGoodSnapshotWithSeq returns a copy of serverName's last-good snapshot,
-// the server's purge sequence and the commit generation of the instance the
-// snapshot was listed from (Spec 116 PR3), read together under
-// lastGoodToolsMu.
-func (r *Runtime) lastGoodSnapshotWithSeq(serverName string) ([]*config.ToolMetadata, uint64, int64) {
-	r.lastGoodToolsMu.RLock()
-	defer r.lastGoodToolsMu.RUnlock()
-	seq := r.lastGoodPurgeSeq[serverName]
-	snapshot := r.lastGoodTools[serverName]
-	if len(snapshot) == 0 {
-		return nil, seq, 0
-	}
-	cp := make([]*config.ToolMetadata, len(snapshot))
-	copy(cp, snapshot)
-	return cp, seq, r.lastGoodGen[serverName]
-}
-
-// setLastGoodLocked records serverName's last-good snapshot together with the
-// commit generation of the instance it was listed from. Caller holds
-// lastGoodToolsMu for writing.
-func (r *Runtime) setLastGoodLocked(serverName string, tools []*config.ToolMetadata, instanceGen int64) {
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	if r.lastGoodGen == nil {
-		r.lastGoodGen = make(map[string]int64)
-	}
-	r.lastGoodGen[serverName] = instanceGen
 }
 
 // lastGoodPurgedSince reports whether serverName's snapshot was purged after

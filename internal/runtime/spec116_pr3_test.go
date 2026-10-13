@@ -467,7 +467,7 @@ func TestSpec116_T3_5b_CommitWaitsForCaptureSection(t *testing.T) {
 	}
 	captureDone := make(chan error, 1)
 	go func() {
-		_, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("q", client, rt.discoveryGeneration("q"), client.Generation(), tools)
+		_, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("q", client, rt.discoveryGeneration("q"), client.Generation(), tools, managed.InventoryCapture{})
 		captureDone <- err
 	}()
 	spec116Await(t, inSection, "the capture section")

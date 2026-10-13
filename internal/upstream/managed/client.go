@@ -210,6 +210,11 @@ type Client struct {
 	// probe may call it under epochMu.
 	epochMu sync.Mutex
 
+	// retired is set by the upstream manager when it replaces or removes this
+	// client (Spec 117 PR-3, FR-036): its tool captures are discarded and it
+	// is never current on any epoch again.
+	retired atomic.Bool
+
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
 	// admission control at all — the zero-config behaviour (FR-006). Swapped
@@ -863,7 +868,7 @@ func (mc *Client) ConnectionEpoch() int64 {
 func (mc *Client) WithConnectionEpoch(expectedEpoch int64, fn func() error) (current bool, err error) {
 	mc.epochMu.Lock()
 	defer mc.epochMu.Unlock()
-	if mc.connectionEpoch.Load() != expectedEpoch {
+	if mc.retired.Load() || mc.connectionEpoch.Load() != expectedEpoch {
 		return false, nil
 	}
 	if err := fn(); err != nil {
@@ -1189,6 +1194,10 @@ type listToolsCall struct {
 	tools     []*config.ToolMetadata
 	err       error
 	published bool
+	// capture is the flight's inventory capture (Spec 117 PR-3, FR-030),
+	// stamped when the leader acquires the list and before the upstream
+	// request. Immutable after acquisition.
+	capture InventoryCapture
 }
 
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools
@@ -1205,7 +1214,7 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 
 	mc.listToolsInProgress = true
 	mc.listToolsLeaderSeq++
-	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq, capture: mc.newCapture()}
 	mc.listToolsCur = call
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
@@ -1246,7 +1255,8 @@ func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	return mc.listTools(ctx, false, 0)
+	tools, _, err := mc.listTools(ctx, false, 0)
+	return tools, err
 }
 
 // ListToolsFresh is ListTools for a caller that must see the tools as they
@@ -1257,16 +1267,15 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 // announces): it waits for such a request to finish and then lists again,
 // joining only a request that started after the call.
 func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, error) {
-	mc.listToolsMu.Lock()
-	entrySeq := mc.listToolsLeaderSeq
-	mc.listToolsMu.Unlock()
-	return mc.listTools(ctx, true, entrySeq)
+	tools, _, err := mc.ListToolsFreshCaptured(ctx)
+	return tools, err
 }
 
 // listTools implements ListTools and ListToolsFresh. With fresh set, an
 // in-flight leader numbered at or below entrySeq started before the caller,
-// so its result is not accepted.
-func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, error) {
+// so its result is not accepted. It returns the capture of the flight whose
+// result it returns (Spec 117 PR-3).
+func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1276,7 +1285,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, InventoryCapture{}, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
 	for {
@@ -1288,7 +1297,14 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				mc.listToolsMu.Unlock()
 				mc.observeListTools(ListToolsEvent{Seq: seq, Leader: true, Fresh: fresh})
 			}
-			return mc.runListToolsAsLeader(listCtx, release)
+			mc.listToolsMu.Lock()
+			capture := mc.listToolsCur.capture
+			mc.listToolsMu.Unlock()
+			tools, err := mc.runListToolsAsLeader(listCtx, release)
+			if err != nil {
+				return nil, InventoryCapture{}, err
+			}
+			return tools, capture, nil
 		}
 
 		mc.listToolsMu.Lock()
@@ -1305,7 +1321,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 			// Defensive fallback: every leader path is supposed to allocate a
 			// call via acquireListToolsContext, so this should be unreachable.
 			// Fail fast rather than block forever.
-			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
+			return nil, InventoryCapture{}, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
@@ -1314,7 +1330,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, InventoryCapture{}, ctx.Err()
 		case <-call.done:
 			if fresh && call.seq <= entrySeq {
 				// That request predates the caller: list again.
@@ -1324,7 +1340,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				(*hook)(call.seq)
 			}
 			mc.listToolsMu.Lock()
-			res, err, published := call.tools, call.err, call.published
+			res, err, published, capture := call.tools, call.err, call.published, call.capture
 			mc.listToolsMu.Unlock()
 			if !published {
 				// The leader ended without a result (it never reached the
@@ -1332,9 +1348,9 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				continue
 			}
 			if err != nil {
-				return nil, fmt.Errorf("ListTools failed: %w", err)
+				return nil, InventoryCapture{}, fmt.Errorf("ListTools failed: %w", err)
 			}
-			return res, nil
+			return res, capture, nil
 		}
 	}
 }

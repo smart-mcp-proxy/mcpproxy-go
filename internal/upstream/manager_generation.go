@@ -197,7 +197,7 @@ func (m *Manager) checkDesiredLocked(name string, gen int64) error {
 // server's call-outcome history in the same critical section (Spec 113-d
 // FR-066), marks the instance unregistered so it never connects again, and
 // returns it for an asynchronous Disconnect by the caller. Spec 116 PR4 adds
-// the retirement barrier (Retire) here.
+// the retirement barrier here (Retire, Spec 117 PR-3).
 //
 // The call-outcome history is dropped even when no instance is registered:
 // a removed or replaced server must not carry its failure history into
@@ -213,6 +213,11 @@ func (m *Manager) unregisterLocked(name string) *managed.Client {
 				statsName = cfg.Name
 			}
 			old.MarkUnregistered()
+			// Spec 117 PR-3 (FR-036): retire the replaced or removed
+			// client while captureMu is held for writing, so a tools/list
+			// it captured can no longer be applied. Retire is an atomic
+			// store and takes no lock, so it adds no lock-order edge.
+			old.Retire()
 		}
 	}
 	m.callStats.Drop(statsName)

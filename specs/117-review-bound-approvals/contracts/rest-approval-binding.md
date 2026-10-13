@@ -15,7 +15,7 @@ Base `/api/v1`. Auth unchanged: `X-API-Key`, or the socket. Agent tokens are ref
         "tier": "read",
         "approval_status": "pending",
         "annotations": { "readOnlyHint": true },
-        "current_hash": "rv1-3f1c…(64 hex)",   // NEW: review fingerprint (opaque)
+        "current_hash": "rv2-3f1c…(64 hex)",   // NEW: review fingerprint (opaque)
         ...
       }
     ]
@@ -34,7 +34,7 @@ Request:
 {
   "force": false,
   "block": ["write_note"],
-  "expected_hashes": { "read_note": "rv1-…", "write_note": "rv1-…" }  // NEW, optional
+  "expected_hashes": { "read_note": "rv2-…", "write_note": "rv2-…" }  // NEW, optional
 }
 ```
 
@@ -43,6 +43,8 @@ Request:
 | absent or `null` | **unbound**: legacy behaviour, except FR-012 (no promote-all after unquarantine) |
 | `{}` | bound to the empty snapshot: any reachable record fails the approval |
 | `{name: fp, …}` | bound: the reachable set (pending + enabled approved − block) must equal-match |
+
+OpenAPI: both request schemas declare `expected_hashes` as `type: [object, "null"]` with string values, so a schema-validating client accepts an explicit `null` and rejects a string or an array. swag cannot emit a type union, so the field is tagged `extensions:"x-nullable"` and `make swagger` rewrites the marker with `cmd/oas-nullable` (Sol r3).
 
 Order of checks:
 1. `requireSecurity`.
@@ -76,8 +78,8 @@ Guarantees on 409:
 ## POST /servers/{id}/tools/approve
 
 ```jsonc
-{ "tools": ["t1"], "expected_hashes": { "t1": "rv1-…" } }          // bound per-tool
-{ "approve_all": true, "expected_hashes": { "t1": "rv1-…", … } }   // bound approve-all
+{ "tools": ["t1"], "expected_hashes": { "t1": "rv2-…" } }          // bound per-tool
+{ "approve_all": true, "expected_hashes": { "t1": "rv2-…", … } }   // bound approve-all
 ```
 
 - With `tools`: each requested name that has a record must match. Names without a record → `not_approved`, as today.

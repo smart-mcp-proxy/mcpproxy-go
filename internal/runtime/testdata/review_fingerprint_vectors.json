@@ -1,0 +1,70 @@
+[
+  {
+    "name": "read-only",
+    "record": {
+      "server_name": "notes2",
+      "tool_name": "read_note",
+      "approved_hash": "",
+      "current_hash": "abc123",
+      "status": "pending",
+      "approved_at": "0001-01-01T00:00:00Z",
+      "approved_by": "",
+      "current_description": "Read a note",
+      "current_annotations": {
+        "readOnlyHint": true
+      },
+      "current_schema": "{\"type\":\"object\"}"
+    },
+    "fingerprint": "rv2-de9f9dd42f6d3786f3371e9e422630b9a1818ceb52cd9b3e55089147379dd248"
+  },
+  {
+    "name": "no annotations",
+    "record": {
+      "server_name": "s",
+      "tool_name": "t",
+      "approved_hash": "",
+      "current_hash": "h",
+      "status": "",
+      "approved_at": "0001-01-01T00:00:00Z",
+      "approved_by": ""
+    },
+    "fingerprint": "rv2-c26ef12bd6d75fe0b141fc20e54257a656eec3049245703a56e1d7bf76be70ef"
+  },
+  {
+    "name": "destructive",
+    "record": {
+      "server_name": "s",
+      "tool_name": "ns:erase",
+      "approved_hash": "",
+      "current_hash": "h2",
+      "status": "",
+      "approved_at": "0001-01-01T00:00:00Z",
+      "approved_by": "",
+      "current_annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    "fingerprint": "rv2-82e058a251d50169377fedc584e21df5315416cdeaf54de635b89dec084dbd09"
+  },
+  {
+    "name": "hashless",
+    "record": {
+      "server_name": "notes2",
+      "tool_name": "read_note",
+      "approved_hash": "",
+      "current_hash": "",
+      "status": "pending",
+      "approved_at": "0001-01-01T00:00:00Z",
+      "approved_by": "",
+      "current_description": "Read a note",
+      "current_annotations": {
+        "readOnlyHint": true
+      },
+      "current_schema": "{\"type\":\"object\"}"
+    },
+    "fingerprint": "rv2-218d266580fc8c67c51660acd87336066b13f523823e82374f360dc17a8d7361"
+  }
+]

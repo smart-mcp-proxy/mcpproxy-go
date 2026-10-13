@@ -581,10 +581,15 @@ class APIService {
   // the operator reviewed (the `incarnation` of GET /servers or of the review
   // payload). The backend answers 409 server_replaced, and writes nothing, when
   // the server was removed and re-added since. Omitted when unknown.
-  async approveTools(serverName: string, tools?: string[], expectedIncarnation?: number): Promise<APIResponse<{ approved: number }>> {
-    const body = tools && tools.length > 0
+  // Spec 117 PR-2 (#1566): expectedHashes (tool name -> the review's current_hash) binds the
+  // approval to the reviewed definitions; the core answers 409 review_out_of_date ("out of date")
+  // and approves nothing when one changed. The two bindings are independent and may be sent
+  // together. Undefined sends an unbound (legacy) request.
+  async approveTools(serverName: string, tools?: string[], expectedIncarnation?: number, expectedHashes?: Record<string, string>): Promise<APIResponse<{ approved: number }>> {
+    const body: Record<string, unknown> = tools && tools.length > 0
       ? { tools }
       : { approve_all: true }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
       method: 'POST',
       body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
@@ -1630,10 +1635,15 @@ class APIService {
     })
   }
 
-  async securityApprove(serverName: string, force = false, block: string[] = [], expectedIncarnation?: number): Promise<APIResponse<void>> {
+  // Spec 117 PR-2 (#1566): expectedHashes binds the approval to the reviewed definitions ({} for
+  // an empty review); undefined sends an unbound request (a review without fingerprints). It is
+  // independent of expectedIncarnation (Spec 116 FR-017) and the two travel together.
+  async securityApprove(serverName: string, force = false, block: string[] = [], expectedIncarnation?: number, expectedHashes?: Record<string, string>): Promise<APIResponse<void>> {
+    const body: Record<string, unknown> = { force, block }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
       method: 'POST',
-      body: JSON.stringify(withExpectedIncarnation({ force, block }, expectedIncarnation)),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 

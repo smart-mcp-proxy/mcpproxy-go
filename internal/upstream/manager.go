@@ -1146,7 +1146,7 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, false)
+	tools, _, _, err := m.discoverTools(ctx, false)
 	return tools, err
 }
 
@@ -1157,6 +1157,15 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // FR-009: the discovery-completed marker must be stamped for the former and
 // left alone for the latter).
 func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+	tools, listed, _, err := m.discoverTools(ctx, dueOnly)
+	return tools, listed, err
+}
+
+// DiscoverToolsReportCaptured is DiscoverToolsReport that also returns, per
+// listed server, the capture of that server's own tools/list (Spec 117 PR-3,
+// FR-031): the sweep applies each server's inventory in capture order, not
+// under one ticket for the whole sweep.
+func (m *Manager) DiscoverToolsReportCaptured(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	return m.discoverTools(ctx, dueOnly)
 }
 
@@ -1167,11 +1176,11 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, true)
+	tools, _, _, err := m.discoverTools(ctx, true)
 	return tools, err
 }
 
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1218,6 +1227,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 	var allTools []*config.ToolMetadata
 	var listed []string
+	captures := make(map[string]managed.InventoryCapture)
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
@@ -1268,7 +1278,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		connectedCount++
 
-		tools, err := client.ListTools(ctx)
+		tools, capture, err := client.ListToolsCaptured(ctx)
 		if err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
@@ -1287,6 +1297,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
+			captures[snapshot.name] = capture
 		}
 
 		if tools != nil {
@@ -1303,7 +1314,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		zap.Bool("due_only", dueOnly),
 		zap.Int("skipped_not_due", skippedNotDue))
 
-	return allTools, listed, nil
+	return allTools, listed, captures, nil
 }
 
 // tryReconnectOnUse attempts a single synchronous reconnect for a disconnected

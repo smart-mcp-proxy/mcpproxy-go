@@ -81,7 +81,10 @@ func TestReviewCommandGoldens(t *testing.T) {
 
 	require.Len(t, requests, 8, "approve commands read review before writing")
 	assertReviewRequest(t, requests, "POST", "/api/v1/servers/filesystem/security/approve", map[string]any{"force": true, "block": []any{"delete_0"}})
-	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"tools": []any{"write_0"}})
+	// The trusted review is empty: the approval binds to the empty snapshot
+	// (Spec 117 PR-2); the filesystem review predates fingerprints, so it
+	// stays unbound.
+	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"tools": []any{"write_0"}, "expected_hashes": map[string]any{}})
 	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/block", map[string]any{"tools": []any{"write_0"}})
 }
 
@@ -625,4 +628,29 @@ func TestReviewApproveBlindPromptSaysLaterToolsWaitForReview(t *testing.T) {
 	require.Contains(t, prompt, "without seeing tools")
 	require.Contains(t, prompt, "wait for review")
 	require.Empty(t, recorder.writes(), "declining sends no write")
+}
+
+func TestFormatReviewResponseTablePrintsChangedToolDiff(t *testing.T) {
+	raw := []byte(`{"data":{"server":{"name":"github","quarantined":false},"tools":[` +
+		`{"name":"create_issue","tier":"write","approval_status":"changed","scan_verdict":"clean","description":"new text",` +
+		`"diff":{"description":"@@ -1 +1 @@\n-old text\n+new text","input_schema":"@@ -1 +1,2 @@\n-{}\n+{\"a\":1}","output_schema":"","annotations":"@@ -1 +1 @@\n-{\"readOnlyHint\":true}\n+{\"readOnlyHint\":false}"}},` +
+		`{"name":"list_issues","tier":"read","approval_status":"approved","scan_verdict":"clean","description":"same"}]}}`)
+
+	out := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
+	require.Contains(t, out, "Changed since approval: create_issue")
+	require.Contains(t, out, "-old text")
+	require.Contains(t, out, "+new text")
+	require.Contains(t, out, "Description")
+	require.Contains(t, out, "Input schema")
+	require.Contains(t, out, "Safety hints")
+	require.NotContains(t, out, "Output schema", "an unchanged section is not printed")
+	require.NotContains(t, out, "map[", "the diff object is formatted, never dumped")
+	require.Contains(t, out, "auto_approve_tool_changes")
+	require.Contains(t, out, "https://docs.mcpproxy.app/features/security-quarantine")
+	require.Contains(t, out, "mcpproxy review approve github --tools create_issue")
+
+	noChange := []byte(`{"data":{"server":{"name":"github"},"tools":[{"name":"a","tier":"read","approval_status":"approved","scan_verdict":"clean","description":"x"}]}}`)
+	out = captureReviewOutput(t, func() error { return formatReviewResponse("table", noChange, false) })
+	require.NotContains(t, out, "Changed since approval")
+	require.NotContains(t, out, "auto_approve_tool_changes")
 }

@@ -322,6 +322,15 @@ mcpproxy review show github [--full]
    [Durable tool baseline](#durable-tool-baseline)), so any tool the server
    lists later waits for review instead of being trusted automatically.
 
+**The approval is bound to the review on screen.** The Web UI, the CLI and
+the macOS tray send the review fingerprint of every tool they showed. If a
+tool's definition or safety hints changed, or a new tool appeared, after the
+review was loaded, nothing is approved: the server stays quarantined, the
+review reloads and shows "The review is out of date ...". Approve again after
+checking the reloaded list. A server approval promotes only the tools that were
+pending when it was committed; a tool the server lists afterwards waits for
+review. See [Review-bound approvals](/api/rest-api#review-bound-approvals).
+
 The review controls are deliberate: **Fetch tool definitions** (CLI: `mcpproxy review fetch`) uses the
 inspection-only `discover-tools` capture to store current upstream metadata
 without indexing it, **Allow this tool** selects an individual tool for
@@ -341,9 +350,11 @@ curl -H "X-API-Key: your-key" \
   http://127.0.0.1:8080/api/v1/servers/server-name/review
 
 # Submit the scan-gated approval. Omit block[] or list only the tools to keep
-# disabled; direct unquarantine is legacy-only.
+# disabled; direct unquarantine is legacy-only. expected_hashes binds the
+# approval to the review you read (each tool's current_hash; {} for an empty
+# review): a tool that changed since answers 409 review_out_of_date.
 curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
-  -d '{"block":["tool-to-keep-disabled"]}' \
+  -d '{"block":["tool-to-keep-disabled"],"expected_hashes":{"read_note":"rv2-...","tool-to-keep-disabled":"rv2-..."}}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
@@ -356,6 +367,10 @@ mcpproxy review approve github [--all | --tools a,b] [--except a,b] [--force] [-
 
 # Trusted server: approve only the listed new or changed tools
 mcpproxy review approve github --tools create_issue
+
+# Bind the approval to a review you saved and read first
+mcpproxy review show github -o json > review.json
+mcpproxy review approve github --from-review review.json --yes
 ```
 
 See [Review Commands](/cli/review-commands) for every flag.
@@ -496,6 +511,28 @@ skip the pass: its tools are approved and indexed as usual, and those approved
 tools are themselves the baseline, so the next pass writes the record before it
 can remove or auto-approve anything.
 
+### Tool lists are applied in the order they were captured {#capture-order}
+
+Several things re-list a server's tools: its connection, a
+`notifications/tools/list_changed`, the periodic sweep, an explicit refresh,
+the reindex after an approval or block, and the review capture of a quarantined
+server. They can finish in any order. MCPProxy numbers every upstream
+`tools/list` when it is sent, and applies a server's tool list only if no newer
+one was applied before it. An older list that arrives late changes nothing:
+not the review records, not the search index, not the tool hints that decide
+which `call_tool_*` variant may run a tool, and not the stored tool list the
+next reindex starts from. For example, a sweep that listed `read_note` as
+read-only cannot undo a later refresh that found it destructive and held it for
+review.
+
+The same rule covers a list that came from a connection that is gone: when a
+server's endpoint is replaced or the server is removed, or it reconnects, a
+list still in flight from the old connection is dropped. After a reconnect the
+reindex that follows an approval lists the server again instead of reusing the
+tool list the old connection returned. A list that came back empty and was
+ignored as a transient blip (connect and `tools/list_changed`) still counts as
+the newest list: an older non-empty one is dropped after it.
+
 ### Trust modes (auto | scan | manual)
 
 Since spec 086, each server carries a **trust mode** that governs both
@@ -595,6 +632,12 @@ link into the server's latest scan report highlighting matching findings.
 The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
+
+### Reviewing a held change {#reviewing-a-held-change}
+
+Every changed tool contract is held, in every trust mode except `auto`. To keep that cheap, the Web review screen and `mcpproxy review show <server>` show what differs from the approved definition: the description, parameters added, removed, retyped or newly required, output schema changes, and flips of the four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). **Approve update (N changed tools)** on the Web review screen approves exactly those tools in one click. The approval is bound to the definitions and the server incarnation on screen, so if a tool changes again, or the server is removed and re-added, between viewing and clicking, the request is refused with 409 and nothing is approved; reload and review again.
+
+A server you trust to update freely can opt out of the hold with `auto_approve_tool_changes: true` on its entry (or `trust_mode: auto`). The hold messages in the Web UI, the CLI and the refusal an MCP client receives name this option.
 
 ### Block (approve + disable)
 
