@@ -402,6 +402,32 @@ mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete((m).clients, name)\n\tdelete((*m).clients, name)\n\treturn nil\n}\n\nfunc (m *Manager) installLocked(name string, c *managed.Client) {\n\t(m).clients[name] = c\n\t(*m).clients[name] = c\n}\n\nfunc (m *Manager) read(name string) bool {\n\treturn (m).clients[name] == nil || len((*m).clients) > 0\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "parenthesized registry writes inside unregisterLocked/installLocked and reads elsewhere are allowed" 0 "$r"
 
+# The helper exemption covers only the helper BODY (Sol round 8): a
+# package-level func literal, or any later top-level declaration, after
+# installLocked/unregisterLocked does not inherit it.
+helpers='func (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete(m.clients, name)\n\treturn nil\n}\n\nfunc (m *Manager) installLocked(name string, c *managed.Client) {\n\tm.clients[name] = c\n}\n'
+for tail in 'var reconnect = func(m *Manager, name string, c *managed.Client) {\n\tm.clients[name] = c\n}\n' \
+            'var drop = func(m *Manager, name string) {\n\tdelete(m.clients, name)\n}\n' \
+            'var (\n\treset = func(m *Manager) {\n\t\tclear(m.clients)\n\t}\n)\n' \
+            'type hook struct{}\n\nvar h = func(m *Manager, c *managed.Client) { m.clients["x"] = c }\n'; do
+  case=$((${case:-0}+1))
+  for order in install unregister; do
+    r="$(mkroot "pr3-registry-pkglevel-$order-$RANDOM")"
+    mkdir -p "$r/internal/upstream"
+    if [[ $order == install ]]; then
+      body="$helpers"
+    else
+      body='func (m *Manager) installLocked(name string, c *managed.Client) {\n\tm.clients[name] = c\n}\n\nfunc (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete(m.clients, name)\n\treturn nil\n}\n'
+    fi
+    printf '%b\n%b' "$body" "$tail" > "$r/internal/upstream/manager_generation.go"
+    expect "package-level registry write after the $order helper (case $case) is not exempt" 1 "$r"
+  done
+done
+r="$(mkroot pr3-registry-multiline-signature-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) installLocked(\n\tname string,\n\tc *managed.Client,\n) {\n\tm.clients[name] = c\n}\n\nfunc (m *Manager) unregisterLocked(\n\tname string,\n) *managed.Client {\n\tdelete(m.clients, name)\n\treturn nil\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "helpers with a multi-line signature keep the exemption for their body" 0 "$r"
+
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
 # PATH or by an exported shell function.

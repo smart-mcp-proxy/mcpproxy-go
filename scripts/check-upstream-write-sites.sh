@@ -274,6 +274,16 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
         sub(/^func[ \t]*(\([^)]*\)[ \t]*)?/, "", fn)
         sub(/[^A-Za-z0-9_].*$/, "", fn)
         joined = ""; stack = ""; cont = 0
+      } else if (raw !~ /^[ \t]/ && decl ~ /^(}|(var|const|type|import)([ \t(]|$))/) {
+        # The helper exemption covers only the helper BODY (Sol round 8):
+        # gofmt closes a top-level func at a column-zero `}`, and any new
+        # top-level declaration ends it too, so a package-level
+        # `var x = func(m *Manager, ...) { m.clients[n] = c }` declared after
+        # installLocked/unregisterLocked is not exempt. The column-zero
+        # `) {` line of a multi-line signature does not clear it, and the
+        # lexed code (not the raw line) is tested, so a `}` inside a raw
+        # string or comment does not either.
+        fn = ""
       }
       gsub(/^[ \t]+|[ \t]+$/, "", code)
       if (code == "") next
