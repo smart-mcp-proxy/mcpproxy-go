@@ -444,7 +444,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		// sent, not of the stored one: it supersedes this flight, so the
 		// failure has no side effects (no clear, no latch).
 		if !req.StaticClient && rec.Revision != 0 && cur.Revision != rec.Revision {
-			return nil, 0, false, refreshErr
+			return nil, 0, false, supersededRefreshError(refreshErr)
 		}
 		// The clear acts on exactly the record the failed request used, by
 		// its revision (Spec 116 PR2b), never on a record re-read after it.
@@ -456,7 +456,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 			// registration the request sent, not of the stored one: no
 			// latch, no terminal outcome, and the next refresh tries the
 			// rewritten registration.
-			return nil, 0, false, refreshErr
+			return nil, 0, false, supersededRefreshError(refreshErr)
 		}
 		refreshErr = annotated
 		clearedByFlight = cleared
@@ -490,7 +490,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 					st.dcrCleared, st.clearedClientID = false, ""
 				}
 				c.mu.Unlock()
-				return nil, 0, false, refreshErr
+				return nil, 0, false, supersededRefreshError(refreshErr)
 			}
 			latchRec = again // after a DCR clear the generation changed
 		}
@@ -512,6 +512,21 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	st.cooldownErr = refreshErr
 	c.mu.Unlock()
 	return nil, 0, false, refreshErr
+}
+
+// supersededRefreshError re-classifies an invalid_client rejection that a
+// same-binding registration rewrite superseded (Sol r9 on #1621). The
+// rejection was of the registration the request sent, not of the stored one,
+// so it must not read as terminal to any caller: a proactive attempt
+// (RefreshManager.executeRefresh) keeps its schedule and retries with backoff,
+// and a reactive one surfaces as transient instead of "authorization
+// required". The original error stays in the chain for logs.
+func supersededRefreshError(err error) error {
+	return &RefreshFailure{
+		Class:   RefreshClassOther,
+		Message: "client registration was rewritten while the refresh ran; retrying with the rewritten registration",
+		Err:     err,
+	}
 }
 
 // handleInvalidClient implements FR-009 and returns the error to hand out.

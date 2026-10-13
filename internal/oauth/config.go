@@ -192,6 +192,12 @@ type TokenStoreManager struct {
 	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
 	tokenSavedBoundCallback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)
+	// Spec 116 PR2b review r9: the binding-aware completion callback (it
+	// wins over oauthCompletionCallback) and the resolver of the binding of
+	// the instance that serves a name now. A bound completion of a binding
+	// the resolver no longer reports records nothing and calls back nothing.
+	oauthCompletionBoundCallback func(serverName string, binding commitview.CredentialBinding)
+	completionBindingResolver    func(serverName string) (commitview.CredentialBinding, bool)
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
@@ -317,6 +323,25 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.oauthCompletionCallback = callback
 }
 
+// SetOAuthCompletionBoundCallback sets the binding-aware completion callback
+// (Spec 116 PR2b review r9). When set it is called instead of the name-only
+// callback, with the binding of the instance that completed the login (zero
+// for an unbound completion, e.g. the CLI process).
+func (m *TokenStoreManager) SetOAuthCompletionBoundCallback(callback func(serverName string, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthCompletionBoundCallback = callback
+}
+
+// SetCompletionBindingResolver sets the resolver of the credential binding of
+// the instance that serves a name now (Spec 116 PR2b review r9). nil keeps the
+// pre-PR2b behaviour: every bound completion is recorded and called back.
+func (m *TokenStoreManager) SetCompletionBindingResolver(resolve func(serverName string) (commitview.CredentialBinding, bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completionBindingResolver = resolve
+}
+
 // SetOAuthFailureCallback sets a callback invoked when an OAuth flow fails in a
 // place that has no caller to return the error to — a callback that could not
 // be delivered, a state mismatch, or a background token exchange that failed.
@@ -404,12 +429,37 @@ func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
 // MarkOAuthCompletedBound is MarkOAuthCompleted for an upstream instance bound
 // to binding: the recorded completion reads as recent only for readers with
 // the same binding (or unbound readers), never for a same-name replacement.
+//
+// Review r9: a bound completion of an instance a commit superseded (the
+// resolver reports another binding, or no instance, for the name) records
+// nothing and invokes no completion callback, so it can neither retry nor
+// disconnect a same-name replacement.
 func (m *TokenStoreManager) MarkOAuthCompletedBound(serverName string, binding commitview.CredentialBinding) {
+	m.mu.RLock()
+	resolve := m.completionBindingResolver
+	m.mu.RUnlock()
+	if !binding.IsZero() && resolve != nil {
+		if cur, ok := resolve(serverName); !ok || cur != binding {
+			m.logger.Debug("OAuth completion of a superseded server instance not recorded",
+				zap.String("server", serverName),
+				zap.String("binding", binding.String()))
+			return
+		}
+	}
+
 	m.mu.Lock()
 	callback := m.oauthCompletionCallback
+	boundCallback := m.oauthCompletionBoundCallback
 	completionTime := time.Now()
 	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
 	m.mu.Unlock()
+
+	if boundCallback != nil {
+		m.logger.Info("Triggering in-process OAuth completion callback",
+			zap.String("server", serverName))
+		boundCallback(serverName, binding)
+		return
+	}
 
 	m.logger.Info("OAuth completion recorded",
 		zap.String("server", serverName),

@@ -281,15 +281,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
 	tokenManager := oauth.GetTokenStoreManager()
-	tokenManager.SetOAuthCompletionCallback(func(serverName string) {
-		logger.Info("OAuth completion callback triggered, attempting connection retry",
-			zap.String("server", serverName))
-		if err := manager.RetryConnection(serverName); err != nil {
-			logger.Warn("Failed to trigger connection retry after OAuth completion",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
-	})
+	manager.installOAuthCompletionHandlers(tokenManager)
 
 	// Surface OAuth failures that have no caller to return an error to — an
 	// undeliverable callback, a state mismatch, a background token exchange
@@ -2123,6 +2115,36 @@ func (m *Manager) recordOAuthFailure(serverName string, cause error) {
 		zap.String("server", serverName),
 		zap.Error(cause))
 	client.StateManager.SetOAuthError(cause)
+}
+
+// installOAuthCompletionHandlers wires the in-process OAuth completion
+// callback (Spec 116 PR2b review r9): it is binding-checked, so the login
+// completion of an instance a commit removed, replaced or re-bound never
+// retries (disconnects and reconnects) the instance that serves the name now.
+func (m *Manager) installOAuthCompletionHandlers(tm *oauth.TokenStoreManager) {
+	tm.SetCompletionBindingResolver(m.CurrentCredentialBinding)
+	tm.SetOAuthCompletionBoundCallback(m.onOAuthCompleted)
+}
+
+// onOAuthCompleted retries the connection of serverName after an OAuth login
+// completed, only when the completing instance's binding (zero: unbound, e.g.
+// the CLI process) is still the registered instance's.
+func (m *Manager) onOAuthCompleted(serverName string, binding commitview.CredentialBinding) {
+	if !binding.IsZero() {
+		if cur, ok := m.CurrentCredentialBinding(serverName); !ok || cur != binding {
+			m.logger.Debug("Ignoring the OAuth completion of a superseded server instance",
+				zap.String("server", serverName),
+				zap.String("binding", binding.String()))
+			return
+		}
+	}
+	m.logger.Info("OAuth completion callback triggered, attempting connection retry",
+		zap.String("server", serverName))
+	if err := m.RetryConnection(serverName); err != nil {
+		m.logger.Warn("Failed to trigger connection retry after OAuth completion",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
 }
 
 // RetryConnection triggers a connection retry for a specific server

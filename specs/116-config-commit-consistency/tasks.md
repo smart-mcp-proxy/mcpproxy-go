@@ -239,7 +239,12 @@ from the design text:
   the flight's generation again), the re-read still carries a client id
   that the flight's own clear removed: that record is not the one cleared,
   so the flight skips the latch and the terminal outcome and resets its
-  re-registration state for that client id. `Forget`/`ForgetServer` run for purged and
+  re-registration state for that client id. In all three windows the
+  flight returns the rejection re-classified as non-terminal (`other`,
+  `supersededRefreshError`), so a proactive attempt
+  (`RefreshManager.executeRefresh`) does not fail its schedule, stop its
+  timer or emit a permanent failure, and a later attempt runs against the
+  rewritten registration (Sol r9 on #1621). `Forget`/`ForgetServer` run for purged and
   OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
   ignores a terminal outcome whose binding is not the registered instance's
   (`Runtime.CurrentCredentialBinding`), in addition to the existing
@@ -264,8 +269,15 @@ from the design text:
   core instances mark and read it through `MarkOAuthCompletedBound` /
   `HasRecentOAuthCompletionBound` with their binding, and a completion of
   another binding is not recent for a same-name replacement, which keeps
-  its deferral (Sol r8 on #1621). Unbound readers and unbound records (the
-  standalone CLI) keep the name-only semantics.
+  its deferral (Sol r8 on #1621). The in-process completion callback is
+  bound the same way (Sol r9 on #1621): `MarkOAuthCompletedBound` records
+  nothing and calls nothing back when the resolver
+  (`upstream.Manager.CurrentCredentialBinding`) reports another binding, or
+  no instance, for the name, and the manager's binding-aware callback
+  (`onOAuthCompleted`) re-checks the binding before `RetryConnection`, so a
+  superseded login never disconnects or reconnects a same-name replacement.
+  Unbound readers and unbound records (the standalone CLI) keep the
+  name-only semantics.
 - **Served revision after a reactive refresh.** `PersistentTokenStore`
   records as its served revision the record that holds the token it served:
   after a reactive refresh, the revision the refresh flight itself wrote

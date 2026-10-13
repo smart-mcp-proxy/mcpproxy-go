@@ -66,3 +66,36 @@ func TestBoundCompletionIsRecentOnlyForItsBinding(t *testing.T) {
 	m.MarkOAuthCompleted(name)
 	assert.True(t, m.HasRecentOAuthCompletionBound(name, repl))
 }
+
+// Review r9: the completion callback is binding-checked. A bound completion
+// whose binding the resolver no longer reports for the name records nothing
+// and calls back nothing; the current binding (and an unbound completion)
+// still call back, with the binding.
+func TestBoundCompletionCallbackIsBindingChecked(t *testing.T) {
+	const name = "r9-bound-callback"
+	forgetCompletion(name)
+	t.Cleanup(func() { forgetCompletion(name) })
+	old := commitview.CredentialBinding{Incarnation: 1, OAuthEpoch: 1}
+	repl := commitview.CredentialBinding{Incarnation: 3, OAuthEpoch: 3}
+	m := GetTokenStoreManager()
+
+	var got []commitview.CredentialBinding
+	nameOnly := 0
+	m.SetOAuthCompletionCallback(func(string) { nameOnly++ })
+	m.SetOAuthCompletionBoundCallback(func(_ string, b commitview.CredentialBinding) { got = append(got, b) })
+	m.SetCompletionBindingResolver(func(n string) (commitview.CredentialBinding, bool) { return repl, n == name })
+	t.Cleanup(func() {
+		m.SetOAuthCompletionCallback(nil)
+		m.SetOAuthCompletionBoundCallback(nil)
+		m.SetCompletionBindingResolver(nil)
+	})
+
+	m.MarkOAuthCompletedBound(name, old)
+	assert.Empty(t, got, "a superseded completion calls nothing back")
+	assert.False(t, m.HasRecentOAuthCompletionBound(name, commitview.CredentialBinding{}), "and records nothing")
+
+	m.MarkOAuthCompletedBound(name, repl)
+	m.MarkOAuthCompleted(name)
+	assert.Equal(t, []commitview.CredentialBinding{repl, {}}, got)
+	assert.Zero(t, nameOnly, "the bound callback replaces the name-only one")
+}
