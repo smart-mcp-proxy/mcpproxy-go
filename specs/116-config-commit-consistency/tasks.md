@@ -128,18 +128,18 @@ instead of the per-task file names below), with the shared fixture
 - [x] T044 [P] [US2] `internal/security/scanner/approve_incarnation_test.go`: T2.5
 - [x] T045 [P] [US2] `internal/storage/oauth_exact_key_test.go`: T2.6 (B2)
 - [x] T047 [P] [US2] `internal/security/scanner/late_scan_result_test.go`: T2.8 (scan for old `acme` completes after remove + re-add → no job or report under the new incarnation; unforced approve still refused)
-- [ ] **(deferred to PR2b)** T048 [P] [US2] `internal/oauth/late_token_save_test.go`: T2.9 (a `SaveToken` parked after its context check, then remove + re-add with the same URL → no token; the refresh schedule for the old incarnation is dropped)
+- [x] **(PR2b)** T048 [P] [US2] `internal/oauth/late_token_save_test.go`: T2.9 (a `SaveToken` parked after its context check, then remove + re-add with the same URL → no token; the refresh schedule for the old incarnation is dropped)
 - [x] T046a [P] [US2] `internal/runtime/readd_lastgood_test.go`: T2.10
 - [x] T046b [P] [US2] (T2.12 in PR2; T2.11 with the completion events in PR2b) `internal/upstream/completion_incarnation_test.go` (T2.11) and `internal/storage/identity_history_incarnation_test.go` (T2.12)
-- [ ] **(deferred to PR2b)** T048a [P] [US2] `internal/oauth/oauth_epoch_clear_test.go`: T2.13 (old instance's token and DCR persistence parked; OAuth config changed with the same name and URL; release → cleared records stay absent and are not reused; review R5.3)
-- [ ] **(deferred to PR2b)** T048b [P] [US2] `internal/runtime/oauth_construction_view_test.go`: T2.14 (an OAuth-changing commit, and a remove and re-add, parked at `afterStorage`; an old-generation worker released at `beforeBindingCheck` → `ErrStaleGeneration`, no instance, nothing persisted under the new binding; review R6.1)
-- [ ] **(deferred to PR2b)** T048c [P] [US2] `internal/oauth/oauth_bound_clear_test.go` and `internal/upstream/core/oauth_5xx_clear_bound_test.go`: T2.15 (the 5xx `ClearToken` and a config-build DCR clear parked at `beforeClear`; OAuth config change or `RestartServer`; replacement saves; release → replacement credentials unchanged; review R6.2)
-- [ ] **(deferred to PR2b)** T048d [P] [US2] `internal/oauth/refresh_coordinator_binding_test.go`: T2.16 (old-binding caller parked at `beforeRefreshDo` after its read; OAuth config change, then remove and re-add; replacement-binding flight started; release → neither binding receives the other's token, error, latch or cooldown; stale outcome ignored by `RefreshManager`; review R7.1)
+- [x] **(PR2b)** T048a [P] [US2] `internal/oauth/oauth_epoch_clear_test.go`: T2.13 (old instance's token and DCR persistence parked; OAuth config changed with the same name and URL; release → cleared records stay absent and are not reused; review R5.3)
+- [x] **(PR2b)** T048b [P] [US2] `internal/runtime/oauth_construction_view_test.go`: T2.14 (an OAuth-changing commit, and a remove and re-add, parked at `afterStorage`; an old-generation worker released at `beforeBindingCheck` → `ErrStaleGeneration`, no instance, nothing persisted under the new binding; review R6.1)
+- [x] **(PR2b)** T048c [P] [US2] `internal/oauth/oauth_bound_clear_test.go` and `internal/upstream/core/oauth_5xx_clear_bound_test.go`: T2.15 (the 5xx `ClearToken` and a config-build DCR clear parked at `beforeClear`; OAuth config change or `RestartServer`; replacement saves; release → replacement credentials unchanged; review R6.2)
+- [x] **(PR2b)** T048d [P] [US2] `internal/oauth/refresh_coordinator_binding_test.go`: T2.16 (old-binding caller parked at `beforeRefreshDo` after its read; OAuth config change, then remove and re-add; replacement-binding flight started; release → neither binding receives the other's token, error, latch or cooldown; stale outcome ignored by `RefreshManager`; review R7.1)
 - [x] T048f [P] [US2] (PR2 covers the purge and the parked approval; the parked OAuth save and the epoch are PR2b) `internal/runtime/commit_replace_purge_test.go`: T2.17 (one-commit remove and re-create with a parked approval and a parked old-binding OAuth save; purge ran, new epoch, both writes rejected; review R8.2)
-- [ ] **(deferred to PR2b)** T048g [P] [US2] `internal/upstream/cli/standalone_logout_test.go` + `scripts/check-upstream-write-sites_test.sh` case: T2.18 (standalone logout clears exactly the `GenerateServerKey` record; neighbours `acme_bar` and `other` untouched; planted call outside `cli/client.go` fails the script; review R8.3)
-- [ ] **(deferred to PR2b)** T048e [P] [US2] `internal/storage/oauth_revision_test.go`: every `oauth_tokens` write path bumps `Revision` from `NextSequence`; delete then re-create never reuses a revision (review R7.3)
+- [x] **(PR2b)** T048g [P] [US2] `internal/upstream/cli/standalone_logout_test.go` + `scripts/check-upstream-write-sites_test.sh` case: T2.18 (standalone logout clears exactly the `GenerateServerKey` record; neighbours `acme_bar` and `other` untouched; planted call outside `cli/client.go` fails the script; review R8.3)
+- [x] **(PR2b)** T048e [P] [US2] `internal/storage/oauth_revision_test.go`: every `oauth_tokens` write path bumps `Revision` from `NextSequence`; delete then re-create never reuses a revision (review R7.3)
 - [x] T048h [P] [US2] `internal/runtime/unquarantine_baseline_incarnation_test.go`: T2.19 (the real `QuarantineServer(acme, false)` parked at `afterUnquarantineCommitBeforeBaseline` after its commit; remove and re-add `acme` under manual trust; create pending tool records for the replacement; release → the replacement's records stay pending and no baseline promotion is recorded; review R9.5)
-- [ ] **(deferred to PR2b)** T048i [P] [US2] `internal/storage/oauth_bound_client_clear_test.go`: T2.20 (a record with tokens and DCR metadata; `ClearOAuthClientIfBound` with the matching binding and revision → tokens, expiry and record epoch kept, the four DCR fields empty, `Revision` increased; mismatched binding, epoch or revision → byte-identical record; absent record → `false`; review R9.4)
+- [x] **(PR2b)** T048i [P] [US2] `internal/storage/oauth_bound_client_clear_test.go`: T2.20 (a record with tokens and DCR metadata; `ClearOAuthClientIfBound` with the matching binding and revision → tokens, expiry and record epoch kept, the four DCR fields empty, `Revision` increased; mismatched binding, epoch or revision → byte-identical record; absent record → `false`; review R9.4)
 - [x] T046 [P] [US2] `internal/storage/toolhash_keys_test.go`: pin the `toolhash` key format (A11) so the purge decision is justified
 
 ### Implementation
@@ -151,15 +151,19 @@ instead of the per-task file names below), with the shared fixture
 - [x] T054 [US2] Prompt approvals (`internal/server/prompt_quarantine.go`) under L1 with the incarnation check
 - [x] T055 [US2] Scanner: incarnation captured in `approveServer`; baseline save under L1 with the check; the `afterBaselineBeforeUnquarantine` seam after the L1 section exits; `UnquarantineServer` → `Commit(ExpectIncarnation, SetQuarantined(false))` (makes T044 pass; T2.5 parks at that seam, review R5.6)
 - [x] T055a [US2] Scanner: `Incarnation` on jobs and reports; callbacks use `Save*IfIncarnation`; `approveServer` filters by the current incarnation; removal invalidates the summary cache (makes T047 pass)
-- [ ] **(deferred to PR2b)** T055b [US2] OAuth: `UpstreamRecord.OAuthEpoch` stamped on create and in the same tx as every OAuth-config-change clear; `PersistentTokenStore` and DCR lookups bound to `CredentialBinding{Incarnation, OAuthEpoch}` (reads ignore records of another binding); token, DCR and completion writes use `…IfBound`; `RefreshManager` keyed by `(name, incarnation, oauthEpoch)` (makes T048 and T048a pass; review R5.3)
-- [ ] **(deferred to PR2b)** T055d [US2] OAuth committed view and bound deletes: `ServerGen.OAuthEpoch` computed in `Prepare` and `ServerGen.Binding()`; workers, supervisor connect and `ConnectAll` pass `(cfg, ServerGen)` from one snapshot or commit result, and `RestartServer` reuses the replaced instance's binding; `storage.Manager.CheckCommittedView` before construction (`ErrStaleGeneration`, no OAuth config built); `DeleteOAuthTokenIfBound` (deletes the record) and `ClearOAuthClientIfBound` (rewrites the record with only the four DCR fields emptied, tokens and record epoch kept, `Revision` bumped, review R9.4) (row binding + record epoch + observed `Revision` in one `Update`, review R7.3; makes T048i pass) replacing `ClearToken`, `clearOAuthCredentials` and the two `…If` clears (their content predicates removed); `OAuthTokenRecord.Revision` set from the bucket's `NextSequence` on every write; `PersistentTokenStore` records the revision of the record it last served and the config-build hygiene check the revision it read; `CheckCommittedView` takes `commitview.ServerGen` and `CredentialBinding` lives in `commitview` (no `configsvc`↔`storage` import, review R7.2; compile and test `./internal/commitview ./internal/runtime/configsvc ./internal/storage ./internal/oauth ./internal/upstream/...` bare and `-tags server`); unexport the unconditional primitives; add `BoltDB.ClearOAuthTokenForStandaloneLogout(serverKey)` and convert `internal/upstream/cli/client.go:473` to it (review R8.3); extend `scripts/check-upstream-write-sites.sh` to forbid the unconditional primitives and their old names in `internal/upstream` and `internal/oauth`, with a one-file exception for the standalone clear in `internal/upstream/cli/client.go`; build `./cmd/mcpproxy` bare and with `-tags server -o /dev/null` (makes T048b, T048c and T048g pass; review R6.1, R6.2, R8.3)
+- [x] **(PR2b)** T055b [US2] OAuth: `UpstreamRecord.OAuthEpoch` stamped on create and in the same tx as every OAuth-config-change clear; `PersistentTokenStore` and DCR lookups bound to `CredentialBinding{Incarnation, OAuthEpoch}` (reads ignore records of another binding); token, DCR and completion writes use `…IfBound`; `RefreshManager` keyed by `(name, incarnation, oauthEpoch)` (makes T048 and T048a pass; review R5.3)
+- [x] **(PR2b)** T055d [US2] OAuth committed view and bound deletes: `ServerGen.OAuthEpoch` computed in `Prepare` and `ServerGen.Binding()`; workers, supervisor connect and `ConnectAll` pass `(cfg, ServerGen)` from one snapshot or commit result, and `RestartServer` reuses the replaced instance's binding; `storage.Manager.CheckCommittedView` before construction (`ErrStaleGeneration`, no OAuth config built); `DeleteOAuthTokenIfBound` (deletes the record) and `ClearOAuthClientIfBound` (rewrites the record with only the four DCR fields emptied, tokens and record epoch kept, `Revision` bumped, review R9.4) (row binding + record epoch + observed `Revision` in one `Update`, review R7.3; makes T048i pass) replacing `ClearToken`, `clearOAuthCredentials` and the two `…If` clears (their content predicates removed); `OAuthTokenRecord.Revision` set from the bucket's `NextSequence` on every write; `PersistentTokenStore` records the revision of the record it last served and the config-build hygiene check the revision it read; `CheckCommittedView` takes `commitview.ServerGen` and `CredentialBinding` lives in `commitview` (no `configsvc`↔`storage` import, review R7.2; compile and test `./internal/commitview ./internal/runtime/configsvc ./internal/storage ./internal/oauth ./internal/upstream/...` bare and `-tags server`); unexport the unconditional primitives; add `BoltDB.ClearOAuthTokenForStandaloneLogout(serverKey)` and convert `internal/upstream/cli/client.go:473` to it (review R8.3); extend `scripts/check-upstream-write-sites.sh` to forbid the unconditional primitives and their old names in `internal/upstream` and `internal/oauth`, with a one-file exception for the standalone clear in `internal/upstream/cli/client.go`; build `./cmd/mcpproxy` bare and with `-tags server -o /dev/null` (makes T048b, T048c and T048g pass; review R6.1, R6.2, R8.3)
 - [x] T055f [US2] (PR2: the full purge for `Replaces` and the in-memory purge; the `OAuthEpoch = G` stamp and `RefreshCoordinator.Forget` are PR2b) Replacement purge: `ApplyServerCommit` runs the full `PurgeSet` for `Replaces` before saving the new row (`Incarnation = OAuthEpoch = G`); the in-memory purge and `RefreshCoordinator.Forget` run for replaced names (makes T048f pass; review R8.2)
-- [ ] **(deferred to PR2b)** T055e [US2] Refresh coordinator bound by credential binding: `RefreshRequest.Binding`; flights, latch, cooldown and `lastSavedAt` keyed by `(serverKey, binding)`; `RefreshOutcome.Binding`, hook and `RefreshManager` ignore outcomes of another binding; `Forget(serverKey, binding)` from `OnTokenCleared`, the purge and the OAuth-config clear; both call sites pass the instance binding (makes T048d pass; review R7.1)
+- [x] **(PR2b)** T055e [US2] Refresh coordinator bound by credential binding: `RefreshRequest.Binding`; flights, latch, cooldown and `lastSavedAt` keyed by `(serverKey, binding)`; `RefreshOutcome.Binding`, hook and `RefreshManager` ignore outcomes of another binding; `Forget(serverKey, binding)` from `OnTokenCleared`, the purge and the OAuth-config clear; both call sites pass the instance binding (makes T048d pass; review R7.1)
 - [x] T055c [US2] (PR2: the completion purge by decoded `ServerName`, `RegisterServerIdentityIfIncarnation`, `RecordToolCallIfIncarnation`; completion events carrying the incarnation are PR2b with the OAuth binding) Completion events carry the incarnation and the consumer drops stale ones; the completion purge matches by decoded `ServerName`; `RegisterServerIdentityIfIncarnation`, `RecordToolCallIfIncarnation` (`code_execution` exempt) (makes T046b pass)
 - [x] T056 [US2] REST: `generation`/`incarnation` in server and review payloads; optional `expected_incarnation` on approve/block/unquarantine; 409 `server_replaced`; CLI message passthrough; `oas/swagger.yaml`; `docs/api/rest-api.md`
 - [x] T057 [P] [US2] Web UI: send `expected_incarnation` from the review and approval actions; vitest in `frontend/tests/unit/`; Playwright sweep per `docs/development/web-ui-verification.md`
 - [x] T058 [US2] Test-only `mcpproxy debug purge-report` (build tag `qa_hooks`) for live L2 inspection
 - [ ] T059 [US2] (race/lint/e2e matrix, live L2, evidence and docs done in the PR; the cross-model review is run by the lead) The race/lint/e2e matrix (as T031); live L2; evidence `s116-pr2`; Sol review; docs (`docs/features/security-quarantine.md` "Removal purges")
+
+**Checkpoint (PR2b)**: #1562's credential half and #1607 are closed — every
+OAuth write, read and clear of an instance is bound to its committed
+credential binding.
 
 **Checkpoint (PR2)**: the at-rest half is done — a removal purges the whole
 stored and in-memory purge set in its commit, and a re-add starts clean of
@@ -171,6 +175,73 @@ refuses it. Approval, history and scan writers are already incarnation-bound
 in PR2.
 
 ---
+
+### PR2b implementation note (as shipped, 2026-10-13; #1607)
+
+Branch `fix/1607-oauth-incarnation-binding`, from `main` after PR3 and PR4.
+The tests live in `internal/storage/oauth_binding_test.go` (T2.18, T2.20,
+T048e, the bound writes and reads, `CheckCommittedView`, bound completion
+events), `internal/oauth/oauth_binding_test.go` (T2.9, T2.13, T2.15 a/b with
+the R7.3 same-binding variants, T2.16), `internal/upstream/core/
+oauth_binding_test.go` (T2.9 through a real authorization-code exchange
+against `tests/oauthserver`), `internal/upstream/manager_binding_test.go`
+(binding threading, a binding move unregisters, T2.14 at the manager),
+`internal/runtime/spec116_pr2b_test.go` (commit stamping, T2.14 with the real
+commit parked at `afterStorage`, the OAuth half of T2.17) and
+`internal/runtime/configsvc/oauth_epoch_test.go` (the epoch rule). On the
+parent they fail to build (the API is new); with the storage binding check
+or the revision check mutated out they fail (evidence `1607`). Deviations
+from the design text:
+
+- **Zero binding.** The zero `CredentialBinding` is "unbound" and acts on
+  the current state of the name: once a commit was recorded an unbound write
+  needs the row to exist (a removed server's write is refused) and takes the
+  row's epoch; an unbound read sees every record. Daemon instances are always
+  bound (the manager stamps every instance from its desired view); unbound
+  callers are the standalone CLI and fixtures. Refusing every unbound write
+  once a commit exists would break `mcpproxy auth login` without a daemon.
+- **Record epoch only.** Records carry `OAuthEpoch` (and `Revision`), not
+  the incarnation: an epoch value is the generation of one commit, so it
+  identifies the binding of one name; the bound writers check both
+  incarnation and epoch on the row.
+- **Upgrade safety.** A server with no stored stamp (a database written
+  before Spec 116) gets an incarnation and keeps epoch 0, the epoch of every
+  record written before PR2b, so an upgrade signs nothing out. An unchanged,
+  stamped entry whose OAuth state the commit clears only because the stored
+  row differed (projection repair) keeps its stamp.
+- **`CheckCommittedView` lives in the manager**, in `addServerConfigAt` and
+  `ReplaceInstanceAt` (every constructor), with the binding from the
+  manager's desired view (recorded by `AdvanceGenerations` from the
+  snapshot), installed by the runtime through `SetCommittedViewChecker`. A
+  storage read error lets construction proceed (the bound writes still
+  guard the credentials); a missing or moved row refuses it.
+- **Unexported primitives.** The unconditional `BoltDB` mutators stay
+  exported for fixtures and tests; the write-site script forbids them (and
+  their old names) in non-test `internal/upstream/**` and `internal/oauth/**`
+  instead, and allows `ClearOAuthTokenForStandaloneLogout` only in
+  `internal/upstream/cli/client.go`.
+- **Login-path clears.** The two stale-DCR clears of the login flow
+  (`oauth_stale_dcr_client.go`) keep their client-id predicate inside the
+  bound transaction (`ClearOAuthClientIfBoundAndClientID`): that flow holds
+  the client id it sent, not the record it was read from.
+- **Refresh coordinator.** `RefreshRequest.Binding` keys flights, latch,
+  cooldown, re-registration state and `lastSavedAt`; `ClearClientAt` clears by
+  the revision of the record the flight re-read (`cur`, same generation as
+  the flight's own read). `Forget`/`ForgetServer` run for purged and
+  OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
+  ignores a terminal outcome whose binding is not the registered instance's
+  (`Runtime.CurrentCredentialBinding`), in addition to the existing
+  expiry match.
+- **Superseded failures.** A login whose result storage refused, or whose
+  instance was retired, is not recorded on the server status by name
+  (`core.reportOAuthFailure`, `TokenStoreManager.RecordOAuthFailure`): the
+  live check showed it flipping the re-added server from "pending auth" to
+  an error state.
+- **Refresh flights on `main`.** A refresh result parked across a removal
+  was already discarded on `main` by the Spec 113 FR-006a generation CAS
+  (the purge removed the record the flight started from), so the live
+  baseline reproduces the bug with a login's code exchange, whose save has
+  no flight generation.
 
 ### Review round 8 (Sol) design notes
 

@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -49,11 +50,11 @@ func TestResolveCallbackPortForPersistence_UsesLiveCallbackServer(t *testing.T) 
 	require.NoError(t, err)
 	require.Positive(t, callbackServer.Port)
 
-	got := resolveCallbackPortForPersistence(serverName, serverKey, db)
+	got := resolveCallbackPortForPersistence(serverName, serverKey, db, commitview.CredentialBinding{})
 	assert.Equal(t, callbackServer.Port, got,
 		"the live callback server port must win over the stored value")
 
-	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db)
+	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db, commitview.CredentialBinding{})
 	assert.Equal(t, callbackServer.RedirectURI, gotURI,
 		"the live callback server's redirect URI must win over the stored value")
 }
@@ -64,7 +65,7 @@ func TestResolveCallbackRedirectURIForPersistence_UsesRemoteCallback(t *testing.
 	cfg := &config.ServerConfig{Name: name, URL: "http://127.0.0.1:1/mcp", OAuth: &config.OAuthConfig{ClientID: "static", Scopes: []string{"read"}, CallbackBaseURL: "https://proxy.example"}}
 	created := oauth.CreateOAuthConfig(cfg, nil)
 	require.NotNil(t, created)
-	require.Equal(t, created.RedirectURI, resolveCallbackRedirectURIForPersistence(name, "", nil))
+	require.Equal(t, created.RedirectURI, resolveCallbackRedirectURIForPersistence(name, "", nil, commitview.CredentialBinding{}))
 }
 
 // TestResolveCallbackPortForPersistence_FallsBackToStoredPort verifies we do not
@@ -76,10 +77,10 @@ func TestResolveCallbackPortForPersistence_FallsBackToStoredPort(t *testing.T) {
 
 	require.NoError(t, db.UpdateOAuthClientCredentials(serverKey, "static-client", "", 43117, "http://127.0.0.1:43117/oauth/callback"))
 
-	got := resolveCallbackPortForPersistence(serverName, serverKey, db)
+	got := resolveCallbackPortForPersistence(serverName, serverKey, db, commitview.CredentialBinding{})
 	assert.Equal(t, 43117, got)
 
-	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db)
+	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db, commitview.CredentialBinding{})
 	assert.Equal(t, "http://127.0.0.1:43117/oauth/callback", gotURI)
 }
 

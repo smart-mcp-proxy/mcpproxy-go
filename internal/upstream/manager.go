@@ -18,6 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
@@ -185,6 +186,10 @@ type Manager struct {
 	// with the server name right before a registry mutation publishes that
 	// server's limiter. Nil in production.
 	limiterPublishHook atomic.Pointer[func(name string)]
+
+	// committedViewCheck is the construction-time committed-view check
+	// (Spec 116 PR2b, SetCommittedViewChecker); nil skips it.
+	committedViewCheck atomic.Pointer[func(name string, sg commitview.ServerGen) error]
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
@@ -2165,7 +2170,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 	var hasToken bool
 	var tokenExpires time.Time
 	if m.storage != nil {
-		ts := oauth.NewPersistentTokenStore(client.GetConfig().Name, client.GetConfig().URL, m.storage)
+		ts := oauth.NewBoundPersistentTokenStore(client.GetConfig().Name, client.GetConfig().URL, m.storage, client.CredentialBinding())
 		if tok, err := ts.GetToken(context.Background()); err == nil && tok != nil {
 			hasToken = true
 			tokenExpires = tok.ExpiresAt
@@ -2536,7 +2541,16 @@ func (m *Manager) processOAuthEvents() error {
 		m.mu.RLock()
 		c, exists := m.clients[event.ServerName]
 		m.mu.RUnlock()
-		if exists && (c.IsConnected() || c.IsConnecting()) {
+		// Spec 116 PR2b (T055c): an event a bound instance wrote names its
+		// credential binding. One that is not the registered instance's
+		// came from an instance a commit removed, replaced or re-bound: its
+		// login says nothing about the server that holds the name now.
+		stale := exists && c != nil && (event.Incarnation != 0 || event.OAuthEpoch != 0) &&
+			(commitview.CredentialBinding{Incarnation: event.Incarnation, OAuthEpoch: event.OAuthEpoch}) != c.CredentialBinding()
+		if stale {
+			m.logger.Debug("Dropping an OAuth completion event of a superseded server instance",
+				zap.String("server", event.ServerName))
+		} else if exists && (c.IsConnected() || c.IsConnecting()) {
 			m.logger.Info("Skipping retry for OAuth event: client already connected/connecting",
 				zap.String("server", event.ServerName),
 				zap.String("state", c.GetState().String()))
@@ -2607,7 +2621,7 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		// Check for a persisted token
-		ts := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, m.storage)
+		ts := oauth.NewBoundPersistentTokenStore(cfg.Name, cfg.URL, m.storage, c.CredentialBinding())
 		tok, err := ts.GetToken(context.Background())
 		if err != nil || tok == nil {
 			continue
@@ -2626,7 +2640,7 @@ func (m *Manager) scanForNewTokens() {
 		// and for a CLI login that could not persist its completion event, this
 		// scan is the only one left.
 		var writtenAt time.Time
-		if rec, recErr := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL)); recErr == nil && rec != nil {
+		if rec, recErr := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), c.CredentialBinding()); recErr == nil && rec != nil {
 			writtenAt = rec.Updated
 		}
 		fingerprint := tokenFingerprint(tok, writtenAt)
@@ -2694,6 +2708,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 		// quarantine) stops it: no browser, no registration, no code
 		// exchange, no token request.
 		coreClient.SetGate(client.Gate())
+		coreClient.SetCredentialBinding(client.CredentialBinding())
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
@@ -2720,6 +2735,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 				if err2 == nil {
 					testClient.SetGate(client.Gate())
+					testClient.SetCredentialBinding(client.CredentialBinding())
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)
 					tcancel()
@@ -2781,6 +2797,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	}
 	// Spec 116 PR4 (FR-024): behind the registered instance's gate.
 	coreClient.SetGate(client.Gate())
+	coreClient.SetCredentialBinding(client.CredentialBinding())
 	if qahooks.ParkLogin != nil {
 		qahooks.ParkLogin(cfg.Name)
 	}
@@ -2793,7 +2810,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 
 	// Snapshot BEFORE the flow starts so a completion can never precede it
 	// (the watcher below detects completion as a change from this value).
-	before := m.storedAccessToken(cfg)
+	before := m.storedAccessToken(cfg, client.CredentialBinding())
 
 	// Start the quick OAuth flow - this returns immediately with browser status
 	result, err := coreClient.StartOAuthFlowQuick(ctx)
@@ -2833,7 +2850,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 				return
 			case <-ticker.C:
 			}
-			if tok := m.storedAccessToken(cfg); tok != "" && tok != before {
+			if tok := m.storedAccessToken(cfg, client.CredentialBinding()); tok != "" && tok != before {
 				m.logger.Info("OAuth token obtained, triggering reconnect",
 					zap.String("server", cfg.Name))
 				if err := m.RetryConnection(cfg.Name); err != nil {
@@ -2851,11 +2868,11 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 
 // storedAccessToken returns the access token persisted for the server, or ""
 // when there is none (or no storage).
-func (m *Manager) storedAccessToken(cfg *config.ServerConfig) string {
+func (m *Manager) storedAccessToken(cfg *config.ServerConfig, b commitview.CredentialBinding) string {
 	if m.storage == nil {
 		return ""
 	}
-	record, err := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL))
+	record, err := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), b)
 	if err != nil || record == nil {
 		return ""
 	}
@@ -2892,6 +2909,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		// quarantine) stops it: no browser, no registration, no code
 		// exchange, no token request.
 		coreClient.SetGate(client.Gate())
+		coreClient.SetCredentialBinding(client.CredentialBinding())
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
@@ -2916,6 +2934,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 			if err2 == nil {
 				testClient.SetGate(client.Gate())
+				testClient.SetCredentialBinding(client.CredentialBinding())
 				tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 				_ = testClient.Connect(tctx)
 				tcancel()
@@ -3302,6 +3321,13 @@ func (m *Manager) ClearOAuthToken(serverName string) error {
 			// Continue - storage might not have the token
 		}
 	}
+	// A logout clears the credential whatever binding wrote it (an operator
+	// action on the current state, data-model §3): drop the refresh
+	// coordinator's latch, cooldown and re-registration state of every
+	// binding of the key, so the next sign-in starts clean (Spec 116 PR2b).
+	if serverConfig != nil {
+		oauth.DefaultRefreshCoordinator().ForgetServer(oauth.GenerateServerKey(serverName, serverConfig.URL))
+	}
 
 	// Note: We don't need to clear in-memory OAuth state on the managed client
 	// because the managed client will pick up the cleared state from storage
@@ -3393,7 +3419,7 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		// IMPORTANT: Use GenerateServerKey to match how PersistentTokenStore stores tokens.
 		// Tokens are stored with key = SHA256(serverName|serverURL)[:16], not just serverName.
 		serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
-		token, err := m.storage.GetOAuthToken(serverKey)
+		token, err := m.storage.GetOAuthTokenBound(serverKey, client.CredentialBinding())
 		if err == nil && token != nil && token.RefreshToken != "" {
 			hasStoredTokens = true
 			m.logger.Debug("Found OAuth token in database for dynamic OAuth server",

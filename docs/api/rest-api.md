@@ -516,12 +516,11 @@ nothing approved; with `trust_mode: "auto"` or an explicit
 can record a fresh approved baseline. Only the inherited records are purged. Activity log removal records carry the per-bucket counts in
 `metadata.purged`.
 
-Known limitation: OAuth credential writes are not yet bound to the server's
-incarnation. A token save or DCR registration that the removed server's
-connection had already started can still land after the removal and be found
-by a same-name server added right after it. Signing out (`POST
-/api/v1/servers/{id}/logout`) clears it. Binding OAuth writes to the
-incarnation is planned as a follow-up (Spec 116 PR2b).
+OAuth credential writes are bound to the server's incarnation and OAuth
+configuration (Spec 116 PR2b): a token save, login completion or DCR
+registration that the removed server's connection had already started is
+discarded when it lands, so a same-name server added right after it starts
+signed out.
 
 Every server payload (`GET /api/v1/servers`, the single-server routes and the
 review payload) carries two committed identifiers:

@@ -52,9 +52,15 @@ var ErrStaleGeneration = commitview.ErrStaleGeneration
 // desiredGen is the manager's record of one server name's committed state.
 // present=false is a tombstone left by a removal (manager memory only); a
 // later create overwrites it.
+//
+// binding is the committed credential binding at gen (Spec 116 PR2b): every
+// instance installed for the name at gen is bound to it, so it comes from the
+// same commit as the config and the generation, never from the stored row
+// (review R6.1).
 type desiredGen struct {
 	gen     int64
 	present bool
+	binding commitview.CredentialBinding
 }
 
 // GenerationChange is one server's state after a config commit, as commit
@@ -74,6 +80,9 @@ type GenerationChange struct {
 	Replaced bool
 	// Config is the committed entry (nil when removed).
 	Config *config.ServerConfig
+	// Binding is the server's committed credential binding in the published
+	// snapshot (Spec 116 PR2b; zero when removed).
+	Binding commitview.CredentialBinding
 }
 
 // AdvanceResult reports what AdvanceGenerations did.
@@ -127,14 +136,18 @@ func (m *Manager) AdvanceGenerations(changes []GenerationChange) AdvanceResult {
 		}
 		prev, had := m.desired[ch.Name]
 		moved := !had || !prev.present || prev.gen != ch.Gen
-		m.setDesiredLocked(ch.Name, desiredGen{gen: ch.Gen, present: true})
+		m.setDesiredLocked(ch.Name, desiredGen{gen: ch.Gen, present: true, binding: ch.Binding})
 		client, registered := m.clients[ch.Name]
 		if !registered || client == nil {
 			continue
 		}
 		switch {
 		case ch.Replaced || (moved && ch.Reconnect),
-			client.Generation() != ch.Gen && ch.Config != nil && !config.ConnectionEquivalent(client.GetConfig(), ch.Config):
+			client.Generation() != ch.Gen && ch.Config != nil && !config.ConnectionEquivalent(client.GetConfig(), ch.Config),
+			// PR2b: an instance never serves a credential binding it was not
+			// built for; a binding move (remove and re-add, OAuth config
+			// change) always replaces it.
+			!ch.Binding.IsZero() && client.CredentialBinding() != ch.Binding:
 			if old := m.unregisterLocked(ch.Name); old != nil {
 				res.Unregistered = append(res.Unregistered, old)
 			}
@@ -192,6 +205,96 @@ func (m *Manager) checkDesiredLocked(name string, gen int64) error {
 		return ErrStaleGeneration
 	}
 	return nil
+}
+
+// DesiredBinding reports the committed credential binding the manager holds
+// for name (zero and false when absent or removed). Test and diagnostics
+// accessor.
+func (m *Manager) DesiredBinding(name string) (commitview.CredentialBinding, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	d, ok := m.desired[name]
+	return d.binding, ok && d.present
+}
+
+// CurrentCredentialBinding reports the credential binding of the instance
+// registered for name (Spec 116 PR2b). The RefreshManager applies a refresh
+// flight's outcome only when it ran under this binding.
+func (m *Manager) CurrentCredentialBinding(name string) (commitview.CredentialBinding, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.clients[name]
+	if !ok || c == nil {
+		return commitview.CredentialBinding{}, false
+	}
+	return c.CredentialBinding(), true
+}
+
+// SetCommittedViewChecker installs the construction-time check of the
+// committed view (Spec 116 PR2b, review R6.1; storage.Manager.
+// CheckCommittedView): before an instance is built for (name, gen), the
+// stored row must still carry exactly the committed {gen, incarnation, OAuth
+// epoch} the manager holds for it. nil (tests, CLI-only managers) skips it.
+func (m *Manager) SetCommittedViewChecker(check func(name string, sg commitview.ServerGen) error) {
+	if check == nil {
+		m.committedViewCheck.Store(nil)
+		return
+	}
+	m.committedViewCheck.Store(&check)
+}
+
+// beforeBindingCheckHook is a test seam run before the committed-view check
+// (T2.14, oauthHooks.beforeBindingCheck). Nil in production.
+var beforeBindingCheckHook func(name string, sg commitview.ServerGen)
+
+// SetBeforeBindingCheckHookForTest installs the seam; test-only.
+func SetBeforeBindingCheckHookForTest(h func(name string, sg commitview.ServerGen)) (restore func()) {
+	prev := beforeBindingCheckHook
+	beforeBindingCheckHook = h
+	return func() { beforeBindingCheckHook = prev }
+}
+
+// checkCommittedView runs the construction-time check for (name, gen) with
+// no manager lock held (the check is one bbolt View, an L2 leaf). It returns
+// ErrStaleGeneration when the stored row was already written by a newer
+// commit (or deleted by a removal): the instance must not be built, because
+// it would pair this commit's configuration with credentials that no longer
+// belong to it. A check that passes is not a lease: a commit that lands
+// afterwards leaves the instance with an older binding, whose OAuth writes
+// storage refuses, and step 7 unregisters it.
+func (m *Manager) checkCommittedView(name string, gen int64) error {
+	p := m.committedViewCheck.Load()
+	if p == nil || gen <= 0 {
+		return nil
+	}
+	m.mu.RLock()
+	d, ok := m.desired[name]
+	m.mu.RUnlock()
+	if !ok || !d.present || d.gen != gen {
+		return ErrStaleGeneration
+	}
+	if d.binding.IsZero() {
+		return nil
+	}
+	sg := commitview.ServerGen{Gen: gen, Incarnation: d.binding.Incarnation, OAuthEpoch: d.binding.OAuthEpoch}
+	if h := beforeBindingCheckHook; h != nil {
+		h(name, sg)
+	}
+	err := (*p)(name, sg)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrStaleGeneration):
+		m.logger.Debug("Instance not built: the committed view moved on before construction",
+			zap.String("server", name), zap.Int64("generation", gen))
+		return ErrStaleGeneration
+	default:
+		// Storage could not be read: the bound OAuth writes still guard the
+		// credentials, so a degraded store does not keep the server down.
+		m.logger.Warn("Committed-view check failed; building the instance anyway",
+			zap.String("server", name), zap.Error(err))
+		return nil
+	}
 }
 
 // unregisterLocked is the ONLY code that removes an instance from m.clients
@@ -273,6 +376,12 @@ func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client for server %s: %w", cfg.Name, err)
 	}
+	// Spec 116 PR2b: the instance's OAuth state is bound to the committed
+	// credential binding at gen, taken from the same desired view the
+	// generation check read (never from the stored row, review R6.1).
+	if d, ok := m.desired[id]; ok && d.present {
+		client.SetCredentialBinding(d.binding)
+	}
 
 	// Set up notification callback for state changes
 	if m.notificationMgr != nil {
@@ -315,7 +424,8 @@ func (m *Manager) newWiredClientLocked(id string, cfg *config.ServerConfig, gen 
 // already checked the generation.
 func (m *Manager) installAtLocked(id string, cfg *config.ServerConfig, gen int64, unbound bool) (inst, unregistered *managed.Client, err error) {
 	if existing, ok := m.clients[id]; ok && existing != nil {
-		if config.ConnectionEquivalent(existing.GetConfig(), cfg) {
+		d := m.desired[id]
+		if config.ConnectionEquivalent(existing.GetConfig(), cfg) && (d.binding.IsZero() || existing.CredentialBinding() == d.binding) {
 			m.logger.Debug("Server configuration unchanged, keeping existing client",
 				zap.String("id", id),
 				zap.String("name", cfg.Name),
@@ -362,6 +472,9 @@ func (m *Manager) AddServerConfigAt(id string, serverConfig *config.ServerConfig
 func (m *Manager) addServerConfigAt(id string, serverConfig *config.ServerConfig, gen int64) (*managed.Client, error) {
 	if serverConfig == nil {
 		return nil, fmt.Errorf("nil config for server %s", id)
+	}
+	if err := m.checkCommittedView(id, gen); err != nil {
+		return nil, err
 	}
 	m.captureMu.Lock()
 	m.mu.Lock()
@@ -506,6 +619,9 @@ func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Cl
 	}
 	if cfg == nil {
 		return nil, fmt.Errorf("replace %s: no config", name)
+	}
+	if err := m.checkCommittedView(name, gen); err != nil {
+		return nil, err
 	}
 	m.captureMu.Lock()
 	m.mu.Lock()

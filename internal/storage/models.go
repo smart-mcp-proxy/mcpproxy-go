@@ -276,6 +276,11 @@ type UpstreamRecord struct {
 	// 116 reads as zero; the next commit that writes it stamps it.
 	Generation  int64 `json:"generation,omitempty"`
 	Incarnation int64 `json:"incarnation,omitempty"`
+	// OAuthEpoch is the generation of the commit that created the row or
+	// last cleared its OAuth state (Spec 116 PR2b, #1607). OAuth token,
+	// client and completion writes bound to {Incarnation, OAuthEpoch} land
+	// only while the row still carries both. 0 on a row written before PR2b.
+	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
@@ -567,6 +572,17 @@ type OAuthTokenRecord struct {
 	// These ensure re-authentication uses the same port registered during DCR
 	CallbackPort int    `json:"callback_port,omitempty"` // Port used during DCR for redirect_uri
 	RedirectURI  string `json:"redirect_uri,omitempty"`  // Full redirect URI registered with DCR
+	// OAuthEpoch is the credential binding epoch the record was written
+	// under (Spec 116 PR2b, #1607): the OAuthEpoch of the server's row when a
+	// bound writer saved it. A bound reader ignores a record of another
+	// epoch. 0 on a record written before PR2b, which only a binding with
+	// epoch 0 reads.
+	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
+	// Revision is set from the oauth_tokens bucket's sequence on every write
+	// of the record (review R7.3). A binding-conditional clear acts only on
+	// the exact revision its caller inspected, so a parked clear never
+	// erases a record somebody rewrote meanwhile.
+	Revision uint64 `json:"revision,omitempty"`
 }
 
 // GetServerName returns the actual server name for RefreshManager lookup.
@@ -583,6 +599,12 @@ type OAuthCompletionEvent struct {
 	ServerName  string     `json:"server_name"`
 	CompletedAt time.Time  `json:"completed_at"`
 	ProcessedAt *time.Time `json:"processed_at,omitempty"` // Nil if not yet processed by server
+	// Incarnation and OAuthEpoch are the credential binding of the instance
+	// that completed the login (Spec 116 PR2b, T055c). The consumer drops
+	// an event whose binding is not the registered instance's. Zero on an
+	// event written by an unbound caller or before PR2b.
+	Incarnation int64 `json:"incarnation,omitempty"`
+	OAuthEpoch  int64 `json:"oauth_epoch,omitempty"`
 }
 
 // DockerRecoveryState represents the persistent state of Docker recovery

@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
@@ -40,8 +41,15 @@ type RefreshFunc func(ctx context.Context, current *storage.OAuthTokenRecord) (*
 
 // RefreshRequest describes one caller's request to refresh a server's token.
 type RefreshRequest struct {
-	// Key is the server key (GenerateServerKey); all flights are keyed by it.
+	// Key is the server key (GenerateServerKey).
 	Key string
+	// Binding is the caller's committed credential binding (Spec 116 PR2b,
+	// review R7.1). Flights, the terminal latch, the transient cooldown and
+	// lastSavedAt are keyed by (Key, Binding): an instance a commit removed,
+	// replaced or re-bound never joins its replacement's flight (and gets
+	// its token), and the replacement never inherits the old instance's
+	// failure, latch or cooldown. Load must be the caller's bound loader.
+	Binding commitview.CredentialBinding
 	// ServerName is the display name (logs, flow-active checks, hook).
 	ServerName string
 	// ObservedRefreshToken is the refresh token the caller read. It is only
@@ -59,6 +67,10 @@ type RefreshRequest struct {
 	// failed request used (FR-006a).
 	// nil means there is nothing to clear (e.g. no storage).
 	ClearClient func(expectedClientID, expectedRefreshToken string) (bool, error)
+	// ClearClientAt, when set, replaces ClearClient (Spec 116 PR2b, review
+	// R7.3): it clears the DCR registration of exactly the record the flight
+	// read (its revision), bound to Binding.
+	ClearClientAt func(rec *storage.OAuthTokenRecord) (bool, error)
 }
 
 // RefreshOutcome is passed to the completion hook for a terminal flight
@@ -66,9 +78,13 @@ type RefreshRequest struct {
 type RefreshOutcome struct {
 	ServerName string
 	Key        string
-	Trigger    RefreshTrigger
-	Class      RefreshErrorClass
-	Err        error
+	// Binding is the flight's credential binding (Spec 116 PR2b): the
+	// RefreshManager applies the outcome only while it is the binding of
+	// the instance that serves the server now.
+	Binding commitview.CredentialBinding
+	Trigger RefreshTrigger
+	Class   RefreshErrorClass
+	Err     error
 	// ExpiresAt is the access-token expiry of the record the flight failed
 	// on. The RefreshManager only applies the outcome to a schedule built
 	// for that token, so a login that replaced the schedule after the
@@ -132,7 +148,7 @@ const proactiveFreshWindow = MinRefreshInterval
 // FR-001). It is process-wide; see DefaultRefreshCoordinator.
 type RefreshCoordinator struct {
 	mu     sync.Mutex
-	keys   map[string]*refreshKeyState
+	keys   map[flightKey]*refreshKeyState
 	hook   func(RefreshOutcome)
 	now    func() time.Time
 	logger *zap.Logger
@@ -141,7 +157,7 @@ type RefreshCoordinator struct {
 // NewRefreshCoordinator returns an empty coordinator.
 func NewRefreshCoordinator() *RefreshCoordinator {
 	return &RefreshCoordinator{
-		keys: make(map[string]*refreshKeyState),
+		keys: make(map[flightKey]*refreshKeyState),
 		now:  time.Now,
 	}
 }
@@ -167,7 +183,15 @@ func (c *RefreshCoordinator) log() *zap.Logger {
 	return zap.L().Named("oauth-refresh")
 }
 
-func (c *RefreshCoordinator) stateLocked(key string) *refreshKeyState {
+// flightKey is one credential's coordinator state: the server key and the
+// committed credential binding of the instances using it (Spec 116 PR2b,
+// review R7.1).
+type flightKey struct {
+	serverKey string
+	binding   commitview.CredentialBinding
+}
+
+func (c *RefreshCoordinator) stateLocked(key flightKey) *refreshKeyState {
 	st := c.keys[key]
 	if st == nil {
 		st = &refreshKeyState{}
@@ -176,14 +200,45 @@ func (c *RefreshCoordinator) stateLocked(key string) *refreshKeyState {
 	return st
 }
 
-// waiters reports how many callers are attached to the key's current flight (tests).
+// waiters reports how many unbound callers are attached to the key's current
+// flight (tests).
 func (c *RefreshCoordinator) waiters(key string) int {
+	return c.waitersFor(key, commitview.CredentialBinding{})
+}
+
+// waitersFor reports how many callers bound to b are attached to the key's
+// current flight (tests).
+func (c *RefreshCoordinator) waitersFor(key string, b commitview.CredentialBinding) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if st := c.keys[key]; st != nil && st.flight != nil {
+	if st := c.keys[flightKey{key, b}]; st != nil && st.flight != nil {
 		return st.flight.waiters
 	}
 	return 0
+}
+
+// Forget drops the coordinator state of one credential binding of serverKey
+// (Spec 116 PR2b): the removal purge, the OAuth-config clear and a logout
+// call it for the binding they made obsolete, so the map stays bounded by the
+// live bindings plus in-flight stale ones. A flight still running keeps its
+// own state value and finishes for its joiners; its result is recorded on
+// that orphaned value only.
+func (c *RefreshCoordinator) Forget(serverKey string, b commitview.CredentialBinding) {
+	c.mu.Lock()
+	delete(c.keys, flightKey{serverKey, b})
+	c.mu.Unlock()
+}
+
+// ForgetServer drops the coordinator state of every binding of serverKey
+// (a logout, which clears the credential whatever binding wrote it).
+func (c *RefreshCoordinator) ForgetServer(serverKey string) {
+	c.mu.Lock()
+	for k := range c.keys {
+		if k.serverKey == serverKey {
+			delete(c.keys, k)
+		}
+	}
+	c.mu.Unlock()
 }
 
 // Do runs at most one refresh flight per key. A caller arriving while a flight
@@ -225,7 +280,7 @@ var refreshRetiredRetryHook func(RefreshRequest)
 // started the flight it returns the result of.
 func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *client.Token, skipped, led bool, err error) {
 	c.mu.Lock()
-	st := c.stateLocked(req.Key)
+	st := c.stateLocked(flightKey{req.Key, req.Binding})
 	f := st.flight
 	if f == nil {
 		led = true
@@ -357,7 +412,9 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	}
 
 	if cls == RefreshClassInvalidClient {
-		refreshErr = c.handleInvalidClient(req, rec, st, refreshErr)
+		// cur has the flight's generation (checked above): it is the record
+		// the clear may act on, by its revision (Spec 116 PR2b).
+		refreshErr = c.handleInvalidClient(req, cur, st, refreshErr)
 	}
 
 	if cls.IsTerminal() {
@@ -382,7 +439,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		hook := c.hook
 		c.mu.Unlock()
 		if hook != nil {
-			hook(RefreshOutcome{ServerName: req.ServerName, Key: req.Key, Trigger: req.Trigger, Class: cls, Err: refreshErr, ExpiresAt: latchRec.ExpiresAt})
+			hook(RefreshOutcome{ServerName: req.ServerName, Key: req.Key, Binding: req.Binding, Trigger: req.Trigger, Class: cls, Err: refreshErr, ExpiresAt: latchRec.ExpiresAt})
 		}
 		return nil, false, refreshErr
 	}
@@ -415,8 +472,14 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 	// connect attempt that is itself running this refresh (tryOAuthAuth
 	// holds a flow for its whole duration) still gets the rejected
 	// registration removed and can re-register on the next sign-in.
-	if req.ClearClient != nil && rec.ClientID != "" {
-		cleared, clearErr := req.ClearClient(rec.ClientID, rec.RefreshToken)
+	if (req.ClearClient != nil || req.ClearClientAt != nil) && rec.ClientID != "" {
+		var cleared bool
+		var clearErr error
+		if req.ClearClientAt != nil {
+			cleared, clearErr = req.ClearClientAt(rec)
+		} else {
+			cleared, clearErr = req.ClearClient(rec.ClientID, rec.RefreshToken)
+		}
 		if clearErr != nil {
 			c.log().Warn("Failed to clear rejected DCR client registration",
 				zap.String("server", req.ServerName), zap.Error(clearErr))
@@ -446,6 +509,12 @@ const rejectsNewRegistrationsMessage = "the authorization server rejected the ne
 // is reported with an actionable terminal message.
 // exchangeClientID is the client id the exchange used.
 func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient bool, exchangeClientID string, err error) error {
+	return c.AnnotateCodeExchangeErrorFor(key, commitview.CredentialBinding{}, staticClient, exchangeClientID, err)
+}
+
+// AnnotateCodeExchangeErrorFor is AnnotateCodeExchangeError for a login bound
+// to the credential binding b (Spec 116 PR2b).
+func (c *RefreshCoordinator) AnnotateCodeExchangeErrorFor(key string, b commitview.CredentialBinding, staticClient bool, exchangeClientID string, err error) error {
 	if err == nil || staticClient {
 		return err
 	}
@@ -454,7 +523,7 @@ func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient 
 	}
 	c.mu.Lock()
 	cleared, clearedID := false, ""
-	if st := c.keys[key]; st != nil {
+	if st := c.keys[flightKey{key, b}]; st != nil {
 		cleared, clearedID = st.dcrCleared, st.clearedClientID
 	}
 	c.mu.Unlock()
@@ -470,9 +539,15 @@ func (c *RefreshCoordinator) AnnotateCodeExchangeError(key string, staticClient 
 // NoteTokenSaved records a successful token response for key (a login or a
 // refresh): the latch, cooldown and re-registration state are reset.
 func (c *RefreshCoordinator) NoteTokenSaved(key string) {
+	c.NoteTokenSavedFor(key, commitview.CredentialBinding{})
+}
+
+// NoteTokenSavedFor is NoteTokenSaved for a token saved under the credential
+// binding b (Spec 116 PR2b): only that binding's state is reset.
+func (c *RefreshCoordinator) NoteTokenSavedFor(key string, b commitview.CredentialBinding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st := c.stateLocked(key)
+	st := c.stateLocked(flightKey{key, b})
 	c.resetLocked(st)
 	st.lastSavedAt = c.now()
 	st.saveSeq++

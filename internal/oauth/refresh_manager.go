@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -99,6 +100,16 @@ type RefreshTokenStore interface {
 // RefreshRuntimeOperations defines runtime methods needed by RefreshManager.
 type RefreshRuntimeOperations interface {
 	RefreshOAuthToken(serverName string) error
+}
+
+// RefreshBindingResolver is optionally implemented by the runtime (Spec 116
+// PR2b): it reports the credential binding of the instance that serves the
+// server now. A reactive flight's terminal outcome is applied to the schedule
+// only when it ran under that binding, so the failure of a flight of an
+// instance a commit removed, replaced or re-bound never marks its
+// replacement as needing sign-in.
+type RefreshBindingResolver interface {
+	CurrentCredentialBinding(serverName string) (commitview.CredentialBinding, bool)
 }
 
 // RefreshEventEmitter defines event emission methods for OAuth refresh events.
@@ -821,6 +832,19 @@ func (m *RefreshManager) failScheduleIfCurrent(serverName string, expected *Refr
 func (m *RefreshManager) onRefreshOutcome(o RefreshOutcome) {
 	if o.Trigger != RefreshTriggerReactive || !o.Class.IsTerminal() || o.Err == nil {
 		return
+	}
+	if !o.Binding.IsZero() {
+		m.mu.RLock()
+		resolver, _ := m.runtime.(RefreshBindingResolver)
+		m.mu.RUnlock()
+		if resolver != nil {
+			if cur, ok := resolver.CurrentCredentialBinding(o.ServerName); !ok || cur != o.Binding {
+				m.logger.Debug("Ignoring the refresh outcome of a superseded server instance",
+					zap.String("server", o.ServerName),
+					zap.String("flight_binding", o.Binding.String()))
+				return
+			}
+		}
 	}
 	var match func(*RefreshSchedule) bool
 	if !o.ExpiresAt.IsZero() {

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
@@ -2346,6 +2347,25 @@ func (mc *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 		return ErrInstanceRetired
 	}
 	return mc.coreClient.RefreshOAuthTokenDirect(ctx)
+}
+
+// SetCredentialBinding binds the instance's OAuth state to the committed
+// credential binding b of the view it was built for (Spec 116 PR2b). The
+// upstream manager calls it before the instance becomes reachable.
+func (mc *Client) SetCredentialBinding(b commitview.CredentialBinding) {
+	if mc == nil || mc.coreClient == nil {
+		return
+	}
+	mc.coreClient.SetCredentialBinding(b)
+}
+
+// CredentialBinding returns the instance's credential binding (zero when
+// unbound).
+func (mc *Client) CredentialBinding() commitview.CredentialBinding {
+	if mc == nil || mc.coreClient == nil {
+		return commitview.CredentialBinding{}
+	}
+	return mc.coreClient.CredentialBinding()
 }
 
 // Gate returns the instance's retirement barrier (Spec 116 PR4). The upstream

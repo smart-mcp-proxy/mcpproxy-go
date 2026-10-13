@@ -11,11 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -224,7 +226,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
@@ -246,7 +248,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 HTTP OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -670,7 +672,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
@@ -692,7 +694,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 SSE OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -1714,7 +1716,7 @@ func (c *Client) finishOAuth(persistClient bool) {
 	// processes can detect completion without polling.
 	tm := oauth.GetTokenStoreManager()
 	if c.storage != nil {
-		if err := tm.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
+		if err := tm.MarkOAuthCompletedWithDBBound(c.config.Name, c.storage, c.CredentialBinding()); err != nil {
 			c.logger.Warn("Failed to persist OAuth completion event to DB; using in-memory notification",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
@@ -1780,8 +1782,9 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	// to record a port, so a static-client login persisted port 0 and the next
 	// login allocated a fresh loopback port — breaking providers that require an
 	// exact, unchanging callback URL (issue #975).
-	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
-	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage)
+	binding := c.CredentialBinding()
+	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage, binding)
+	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage, binding)
 
 	// An operator static client_id is written as before. A DCR client is
 	// written only while storage holds this same client, or neither a client
@@ -1790,13 +1793,15 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	// paused before this point must not overwrite a registration another login
 	// stored in the meantime, nor attach its client to another login's refresh
 	// token left behind when a refresh failure cleared that login's client.
-	var err error
-	saved := true
+	//
+	// Spec 116 PR2b: both writes are bound to the instance's credential
+	// binding; a login of an instance a commit superseded stores nothing.
+	mode := storage.OAuthClientSaveIfSameOrEmpty
 	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
-		err = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
-	} else {
-		saved, err = c.storage.SaveOAuthClientCredentialsIfSameOrEmpty(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+		mode = storage.OAuthClientSaveAlways
 	}
+	oauth.BeforePersistHook(c.config.Name, binding)
+	saved, err := c.storage.SaveOAuthClientIfBound(serverKey, c.config.Name, binding, mode, clientID, clientSecret, callbackPort, redirectURI)
 	if err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
@@ -1804,7 +1809,7 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 		return
 	}
 	if !saved {
-		c.logger.Warn("Another login stored a different OAuth client registration - leaving it in place",
+		c.logger.Warn("Another login stored a different OAuth client registration, or the server was removed or reconfigured - leaving storage as it is",
 			zap.String("server", c.config.Name),
 			zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."))
 		return
@@ -1825,7 +1830,7 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 // bind the same port and reuse the identical redirect_uri. Only when no callback
 // server is running do we fall back to whatever was stored previously, so a
 // refresh-only code path never downgrades a known port to 0.
-func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB) int {
+func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB, binding commitview.CredentialBinding) int {
 	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.Port > 0 {
 		return callbackServer.Port
 	}
@@ -1833,7 +1838,7 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 	if store == nil {
 		return 0
 	}
-	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+	if record, err := store.GetOAuthTokenBound(serverKey, binding); err == nil && record != nil {
 		return record.CallbackPort
 	}
 	return 0
@@ -1844,7 +1849,7 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 // hygiene check in CreateOAuthConfig can detect a pin whose PATH changed while its
 // port stayed the same (issue #1304) — comparing port alone would miss that and
 // reuse a client_id the provider registered for the old path.
-func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB) string {
+func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB, binding commitview.CredentialBinding) string {
 	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.RedirectURI != "" {
 		return callbackServer.EffectiveRedirectURI()
 	}
@@ -1852,7 +1857,7 @@ func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, stor
 	if store == nil {
 		return ""
 	}
-	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+	if record, err := store.GetOAuthTokenBound(serverKey, binding); err == nil && record != nil {
 		return record.RedirectURI
 	}
 	return ""
@@ -2392,8 +2397,19 @@ func oauthCallbackWaitContext(ctx context.Context) (context.Context, context.Can
 // reportOAuthFailure records an OAuth failure that has no caller to return an
 // error to (the background callback waiter), so the operator sees it on the
 // server's status instead of only in the log (issue #975).
+//
+// Spec 116 PR2b: the failure of a flow whose instance a commit retired, or
+// whose result storage refused because the server was removed, replaced or
+// reconfigured meanwhile, belongs to no server that exists now. Recording it
+// by name would mark the replacement as failed, so it is only logged.
 func (c *Client) reportOAuthFailure(err error) {
 	if err == nil {
+		return
+	}
+	if c.Retired() || errors.Is(err, oauth.ErrCredentialBindingStale) || dialgate.IsRetired(err) {
+		c.logger.Debug("OAuth failure of a superseded server instance not recorded on the server status",
+			zap.String("server", c.config.Name),
+			logSafeErrorField(err))
 		return
 	}
 	oauth.GetTokenStoreManager().RecordOAuthFailure(c.config.Name, err)

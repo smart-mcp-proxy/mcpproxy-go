@@ -101,7 +101,7 @@ func TestRefreshCoordinator_RetiredMidWrite_NoCooldown(t *testing.T) {
 	require.True(t, errors.Is(err, dialgate.ErrRetired), "got %v", err)
 
 	c.mu.Lock()
-	st := c.keys[f.key]
+	st := c.keys[flightKey{serverKey: f.key}]
 	if st != nil {
 		assert.True(t, st.cooldownUntil.IsZero(), "a retirement-cut refresh records no cooldown")
 		assert.Zero(t, st.transientFailures)

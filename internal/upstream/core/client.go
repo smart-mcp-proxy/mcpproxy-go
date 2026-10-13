@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
@@ -181,6 +182,11 @@ type Client struct {
 	// retired (the CLI client, a transient helper without SetGate) keeps an
 	// open gate. Read through Gate(); replaced only by SetGate before use.
 	gate atomic.Pointer[dialgate.Gate]
+
+	// binding is the committed credential binding of the view this instance
+	// was built for (Spec 116 PR2b). Read through CredentialBinding(); set
+	// only by SetCredentialBinding before use.
+	binding atomic.Pointer[commitview.CredentialBinding]
 
 	// stdioProc is the stdio child registered with the gate (FR-025a), so a
 	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
@@ -809,7 +815,7 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	}
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-	record, err := c.storage.GetOAuthToken(serverKey)
+	record, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding())
 	if err != nil {
 		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)
 	}
@@ -826,6 +832,7 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	req := c.oauthRefreshRequest(serverKey, handler)
 	req.ObservedRefreshToken = record.RefreshToken
 	req.Trigger = oauth.RefreshTriggerProactive
+	oauth.BeforeRefreshDoHook(c.config.Name, req.Binding)
 	_, skipped, err := oauth.DefaultRefreshCoordinator().Do(ctx, req)
 	if err != nil {
 		c.logger.Error("Direct OAuth token refresh failed",

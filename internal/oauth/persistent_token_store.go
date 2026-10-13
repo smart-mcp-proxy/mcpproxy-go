@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -37,10 +39,35 @@ type PersistentTokenStore struct {
 	// read-only behaviour.
 	binding atomic.Pointer[RefreshBinding]
 	now     func() time.Time
+
+	// cb is the committed credential binding of the upstream instance this
+	// store belongs to (Spec 116 PR2b, #1607); zero for an unbound store
+	// (the CLI, diagnostics). Reads ignore records of another binding, and
+	// every write and clear is binding-conditional in storage.
+	cb commitview.CredentialBinding
+	// servedRev is the revision of the record GetToken last served. The 5xx
+	// ClearToken deletes only that exact record (review R7.3).
+	servedRev atomic.Uint64
 }
 
-// NewPersistentTokenStore creates a new persistent token store for a server
+// NewPersistentTokenStore creates a new persistent token store for a server.
+// The store is unbound (see NewBoundPersistentTokenStore); the daemon uses
+// unbound stores only to read.
 func NewPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB) client.TokenStore {
+	return newPersistentTokenStore(serverName, serverURL, storage, commitview.CredentialBinding{})
+}
+
+// NewBoundPersistentTokenStore is the token store of an upstream instance
+// built for the committed credential binding b (Spec 116 PR2b): it serves
+// only records written under b, and its saves and clears land only while
+// the server's row still carries b. A store whose instance a commit removed,
+// replaced or re-bound therefore cannot re-create, reuse or erase the
+// credentials of whatever serves the name now.
+func NewBoundPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB, b commitview.CredentialBinding) client.TokenStore {
+	return newPersistentTokenStore(serverName, serverURL, storage, b)
+}
+
+func newPersistentTokenStore(serverName, serverURL string, storage *storage.BoltDB, b commitview.CredentialBinding) *PersistentTokenStore {
 	// Create unique key combining server name and URL to handle servers with same name but different URLs
 	serverKey := GenerateServerKey(serverName, serverURL)
 
@@ -50,13 +77,18 @@ func NewPersistentTokenStore(serverName, serverURL string, storage *storage.Bolt
 		storage:    storage,
 		logger:     zap.L().Named("persistent-token-store").With(zap.String("server", serverName), zap.String("server_key", serverKey)),
 		now:        time.Now,
+		cb:         b,
 	}
 }
+
+// CredentialBinding returns the binding the store is bound to (zero when
+// unbound).
+func (p *PersistentTokenStore) CredentialBinding() commitview.CredentialBinding { return p.cb }
 
 func (p *PersistentTokenStore) bindRefresher(b *RefreshBinding) { p.binding.Store(b) }
 
 func (p *PersistentTokenStore) loadRecord() (*storage.OAuthTokenRecord, error) {
-	return p.storage.GetOAuthToken(p.serverKey)
+	return p.storage.GetOAuthTokenBound(p.serverKey, p.cb)
 }
 
 // GenerateServerKey creates a unique key for a server by combining name and URL
@@ -94,7 +126,7 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		zap.String("server_name", p.serverName),
 		zap.String("server_key", p.serverKey))
 
-	record, err := p.storage.GetOAuthToken(p.serverKey)
+	record, err := p.storage.GetOAuthTokenBound(p.serverKey, p.cb)
 	if err != nil {
 		p.logger.Debug("❌ No stored OAuth token found",
 			zap.String("server_name", p.serverName),
@@ -114,12 +146,15 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		return nil, transport.ErrNoToken
 	}
 
+	p.servedRev.Store(record.Revision)
+
 	if b := p.binding.Load(); b != nil {
 		return reactiveToken(ctx, p.now, reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
-			load: p.loadRecord,
-			clear: func(expectedClientID, expectedRefreshToken string) (bool, error) {
-				return p.storage.ClearOAuthClientCredentialsIf(p.serverKey, expectedClientID, expectedRefreshToken)
+			binding: p.cb,
+			load:    p.loadRecord,
+			clearAt: func(rec *storage.OAuthTokenRecord) (bool, error) {
+				return clearClientIfBound(p.storage, p.serverKey, p.serverName, p.cb, rec)
 			},
 		}, record, b)
 	}
@@ -265,10 +300,22 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	// registration too: its token and the client it was issued to are written
 	// in this same transaction, so a concurrent login can never leave this
 	// token next to its own client_id (the next refresh would be rejected).
+	//
+	// Spec 116 PR2b: the write is bound to the instance's credential
+	// binding. An instance a commit removed, replaced or re-bound (an OAuth
+	// config change) whose code exchange or refresh was already past its
+	// network round-trip writes nothing: the removal purge or the OAuth
+	// clear raised the row's binding in the same transaction as the delete.
 	flightGen, inFlight := FlightGeneration(ctx)
 	login, isLogin := loginClientFrom(ctx)
 	discarded := false
-	err := p.storage.UpdateOAuthToken(p.serverKey, func(rec *storage.OAuthTokenRecord) error {
+	if hook := oauthBeforePersistHook; hook != nil {
+		hook(p.serverName, p.cb)
+	}
+	if qahooks.ParkOAuthPersist != nil {
+		qahooks.ParkOAuthPersist(p.serverName)
+	}
+	written, err := p.storage.UpdateOAuthTokenIfBound(p.serverKey, p.serverName, p.cb, func(rec *storage.OAuthTokenRecord) error {
 		if inFlight && !GenerationMatches(rec, flightGen) {
 			discarded = true
 			return storage.ErrSkipOAuthTokenUpdate
@@ -304,7 +351,13 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 			zap.String("server_key", p.serverKey))
 		return nil
 	}
-	DefaultRefreshCoordinator().NoteTokenSaved(p.serverKey)
+	if !written {
+		p.logger.Info("Discarded an OAuth token for a server instance that was removed, replaced or reconfigured",
+			zap.String("server", p.serverName),
+			zap.String("binding", p.cb.String()))
+		return fmt.Errorf("failed to save OAuth token: %w", ErrCredentialBindingStale)
+	}
+	DefaultRefreshCoordinator().NoteTokenSavedFor(p.serverKey, p.cb)
 
 	p.logger.Info("✅ OAuth token saved to persistent storage successfully",
 		zap.String("server", p.serverName),
@@ -327,17 +380,30 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	return nil
 }
 
-// ClearToken removes the OAuth token from persistent storage
+// ClearToken removes the OAuth token from persistent storage. It deletes
+// only the exact record this store last served (its revision) and only while
+// the server's row still carries the store's binding (Spec 116 PR2b, review
+// R6.2, R7.3): the 5xx recovery of an instance a commit superseded, or of an
+// instance whose replacement rewrote the record meanwhile, erases nothing.
 func (p *PersistentTokenStore) ClearToken() error {
 	p.logger.Info("🗑️ Clearing OAuth token from persistent storage",
 		zap.String("server_key", p.serverKey))
 
-	err := p.storage.DeleteOAuthToken(p.serverKey)
+	if hook := oauthBeforeClearHook; hook != nil {
+		hook(p.serverName, p.cb, "token")
+	}
+	deleted, err := p.storage.DeleteOAuthTokenIfBound(p.serverKey, p.serverName, p.cb, p.servedRev.Load())
 	if err != nil {
 		p.logger.Error("❌ Failed to clear OAuth token from persistent storage",
 			zap.String("server_key", p.serverKey),
 			zap.Error(err))
 		return fmt.Errorf("failed to clear OAuth token: %w", err)
+	}
+	if !deleted {
+		p.logger.Debug("oauth clear skipped: binding mismatch or record changed since it was read",
+			zap.String("server_key", p.serverKey),
+			zap.String("binding", p.cb.String()))
+		return nil
 	}
 
 	p.logger.Info("✅ OAuth token cleared from persistent storage successfully",
@@ -412,8 +478,9 @@ func accessTokenStillStored(t reactiveTarget, rec *storage.OAuthTokenRecord) boo
 type reactiveTarget struct {
 	key, name string
 	logger    *zap.Logger
+	binding   commitview.CredentialBinding
 	load      func() (*storage.OAuthTokenRecord, error)
-	clear     func(expectedClientID, expectedRefreshToken string) (bool, error)
+	clearAt   func(rec *storage.OAuthTokenRecord) (bool, error)
 }
 
 // reactiveToken is GetToken for a refresher-bound store. It refreshes through
@@ -434,10 +501,13 @@ func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget
 				return nil, fmt.Errorf("%w: access token expired and no refresh token is stored", transport.ErrOAuthAuthorizationRequired)
 			}
 		} else {
+			if hook := oauthBeforeRefreshDoHook; hook != nil {
+				hook(t.name, t.binding)
+			}
 			newTok, _, err := DefaultRefreshCoordinator().Do(ctx, RefreshRequest{
-				Key: t.key, ServerName: t.name, ObservedRefreshToken: rec.RefreshToken,
+				Key: t.key, Binding: t.binding, ServerName: t.name, ObservedRefreshToken: rec.RefreshToken,
 				Trigger: RefreshTriggerReactive, Load: t.load, Refresh: b.Refresh,
-				StaticClient: b.StaticClient, ClearClient: t.clear,
+				StaticClient: b.StaticClient, ClearClientAt: t.clearAt,
 			})
 			if err != nil {
 				// The flight may have taken a while: judge "still valid" by
@@ -543,7 +613,7 @@ func (m *coordinatedMemoryTokenStore) SaveToken(ctx context.Context, token *clie
 	}
 	m.mu.Unlock()
 	if err == nil {
-		DefaultRefreshCoordinator().NoteTokenSaved(m.key())
+		DefaultRefreshCoordinator().NoteTokenSavedFor(m.key(), commitview.CredentialBinding{})
 	}
 	return err
 }

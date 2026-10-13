@@ -630,6 +630,38 @@ printf 'package oauth\nfunc f() { return http.DefaultTransport }\n' > "$r/intern
 echo 'internal/oauth/env.go return http.DefaultTransport' > "$r/scripts/ungated-http-allowlist.txt"
 expect "FR-024a: an allowlisted fallback" 0 "$r"
 
+# Spec 116 PR2b (T2.18, review R6.2, R8.3): the unconditional OAuth mutators
+# are hits in internal/upstream and internal/oauth; the standalone logout clear
+# is allowed only in internal/upstream/cli/client.go.
+oauthsite() { # name dir file content expected
+  local r
+  r="$(mkroot "pr2b-$1")"
+  mkdir -p "$r/$2"
+  printf '%s\n' "$4" > "$r/$2/$3"
+  expect "PR2b: $1" "$5" "$r"
+}
+oauthsite "DeleteOAuthToken in core" internal/upstream/core a.go 'package core
+func f() { _ = c.storage.DeleteOAuthToken(key) }' 1
+oauthsite "UpdateOAuthToken in oauth" internal/oauth a.go 'package oauth
+func f() { _ = p.storage.UpdateOAuthToken(key, fn) }' 1
+oauthsite "ClearOAuthClientCredentialsIf split across lines" internal/upstream/core a.go 'package core
+func f() { _, _ = c.storage.
+	ClearOAuthClientCredentialsIf(key, id, rt) }' 1
+oauthsite "SaveOAuthClientCredentialsIfSameOrEmpty method value" internal/upstream/core a.go 'package core
+var save = db.SaveOAuthClientCredentialsIfSameOrEmpty' 1
+oauthsite "bound writer in core" internal/upstream/core a.go 'package core
+func f() { _, _ = c.storage.UpdateOAuthTokenIfBound(key, name, b, fn) }' 0
+oauthsite "unconditional mutator outside upstream and oauth" internal/server a.go 'package server
+func f() { _ = db.DeleteOAuthToken(key) }' 0
+oauthsite "standalone logout clear in cli/client.go" internal/upstream/cli client.go 'package cli
+func f() { _ = c.storage.ClearOAuthTokenForStandaloneLogout(key) }' 0
+oauthsite "standalone logout clear planted in core" internal/upstream/core a.go 'package core
+func f() { _ = c.storage.ClearOAuthTokenForStandaloneLogout(key) }' 1
+oauthsite "standalone logout clear planted in server" internal/server a.go 'package server
+func f() { _ = db.ClearOAuthTokenForStandaloneLogout(key) }' 1
+oauthsite "DeleteOAuthToken in a comment" internal/upstream/core a.go 'package core
+// c.storage.DeleteOAuthToken(key) is not called here' 0
+
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
 # PATH or by an exported shell function.

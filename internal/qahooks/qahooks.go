@@ -24,3 +24,8 @@ var ParkOAuth func(server string)
 // StartManualOAuthWithInfo) for server after it bound the login to the
 // instance's gate and before it sends anything (Spec 116 PR4 review round 3).
 var ParkLogin func(server string)
+
+// ParkOAuthPersist, when set, blocks an upstream instance's OAuth token save
+// (a login's code exchange or a refresh) for server after the network
+// response and before the result is persisted (Spec 116 PR2b, #1607).
+var ParkOAuthPersist func(server string)

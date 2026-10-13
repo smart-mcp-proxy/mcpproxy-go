@@ -479,6 +479,49 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
   fi
 fi
 
+# Spec 116 PR2b (#1607, T055d, review R6.2, R8.3): every OAuth write, clear
+# and DCR save an upstream instance makes is bound to its credential binding
+# (storage/oauth_binding.go). In internal/upstream/** and internal/oauth/**
+# (non-test) a selector of one of the unconditional oauth_tokens mutators is
+# a hit (a call or a method value, also split across lines). The one exported
+# current-state clear, ClearOAuthTokenForStandaloneLogout, is allowed in
+# exactly one file, internal/upstream/cli/client.go (the standalone CLI
+# logout), and is a hit in every other non-test file outside internal/storage.
+oauth_methods='SaveOAuthToken|UpdateOAuthToken|DeleteOAuthToken|UpdateOAuthClientCredentials|SaveOAuthClientCredentialsIfUnsetOrSame|SaveOAuthClientCredentialsIfSameOrEmpty|ClearOAuthClientCredentials|ClearOAuthClientCredentialsIf|ClearOAuthClientCredentialsIfClientID'
+standalone_method='ClearOAuthTokenForStandaloneLogout'
+pr2b_files=()
+for f in "${files[@]}"; do
+  pr2b_files+=("$f")
+done
+hits4=""
+if [[ ${#pr2b_files[@]} -gt 0 ]]; then
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits4="$(awk \
+    -v sel="[.][ \t]*(${oauth_methods})([^A-Za-z0-9_]|\$)" \
+    -v head="^(${oauth_methods})([^A-Za-z0-9_]|\$)" \
+    -v ssel="[.][ \t]*(${standalone_method})([^A-Za-z0-9_]|\$)" \
+    -v shead="^(${standalone_method})([^A-Za-z0-9_]|\$)" '
+'"$STRIP_AWK"'
+    FNR == 1 {
+      prev = ""; inblock = 0; inraw = 0
+      bound = (FILENAME ~ /^internal\/(upstream|oauth)\//)
+      standalone_ok = (FILENAME == "internal/upstream/cli/client.go")
+    }
+    {
+      code = strip($0)
+      gsub(/^[ \t]+|[ \t]+$/, "", code)
+      if (code == "") next
+      if (bound && (code ~ sel || (prev ~ /\.$/ && code ~ head))) print FILENAME ":" FNR ":" $0
+      else if (!standalone_ok && (code ~ ssel || (prev ~ /\.$/ && code ~ shead))) print FILENAME ":" FNR ":" $0
+      prev = code
+    }' "${pr2b_files[@]}")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "upstream write sites: OAuth binding scanner failed (awk exit $rc)" >&2
+    exit 2
+  fi
+fi
+
 status=0
 if [[ -n "$hits" ]]; then
   echo "Spec 116 FR-009: upstreams rows written outside the config commit (use runtime.Commit):"
@@ -500,5 +543,12 @@ if [[ -n "$hits3" ]]; then
   status=1
 else
   echo "Spec 116 FR-024a: every upstream HTTP request runs on a gated transport"
+fi
+if [[ -n "$hits4" ]]; then
+  echo "Spec 116 PR2b: unconditional OAuth writes or clears from an upstream instance (use the storage …IfBound methods with the instance's credential binding; ClearOAuthTokenForStandaloneLogout only in internal/upstream/cli/client.go):"
+  echo "$hits4"
+  status=1
+else
+  echo "Spec 116 PR2b: every upstream OAuth write and clear is bound to the instance's credential binding"
 fi
 exit $status

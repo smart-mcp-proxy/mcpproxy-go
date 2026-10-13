@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 )
 
 // Env is the environment an upstream instance runs its OAuth work in (Spec
@@ -17,9 +19,17 @@ import (
 // The zero Env is the process default (http.DefaultTransport, a background
 // context): the exported helpers that run outside an upstream instance (the
 // doctor, the REST diagnostics, the CLI) keep using it.
+//
+// Binding (Spec 116 PR2b, #1607) is the instance's committed credential
+// binding: the token store, the DCR client lookup and every OAuth clear the
+// config build makes are bound to it, so an instance that a commit removed,
+// replaced or re-bound (OAuth config change) cannot write, reuse or clear
+// the credentials of whatever serves the name now. The zero binding is
+// unbound (the doctor, the REST diagnostics, the standalone CLI).
 type Env struct {
 	Ctx       context.Context
 	Transport http.RoundTripper
+	Binding   commitview.CredentialBinding
 }
 
 func defaultEnv() Env { return Env{} }

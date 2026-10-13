@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // authorizeProbeHTTPClient is the HTTP client recoverStaleDCRClient probes
@@ -76,7 +77,8 @@ func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, err
 		callbackPort = callbackServer.Port
 		redirectURI = callbackServer.EffectiveRedirectURI()
 	}
-	saved, err := c.storage.SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	oauth.BeforePersistHook(c.config.Name, c.CredentialBinding())
+	saved, err := c.storage.SaveOAuthClientIfBound(serverKey, c.config.Name, c.CredentialBinding(), storage.OAuthClientSaveIfUnsetOrSame, clientID, clientSecret, callbackPort, redirectURI)
 	if err != nil {
 		return callbackPort, err
 	}
@@ -203,7 +205,8 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	if c.storage != nil {
-		cleared, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, persistedClientID)
+		oauth.BeforeClearHook(c.config.Name, c.CredentialBinding(), "dcr_client")
+		cleared, clearErr := c.storage.ClearOAuthClientIfBoundAndClientID(serverKey, c.config.Name, c.CredentialBinding(), persistedClientID)
 		if clearErr != nil {
 			c.logger.Warn("Failed to clear the rejected DCR client registration",
 				zap.String("server", c.config.Name),
@@ -329,7 +332,7 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 			zap.String("new_client_id", newClientID),
 			zap.String("authorize_response", secondRejection))
 		if c.storage != nil {
-			if _, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, newClientID); clearErr != nil {
+			if _, clearErr := c.storage.ClearOAuthClientIfBoundAndClientID(serverKey, c.config.Name, c.CredentialBinding(), newClientID); clearErr != nil {
 				c.logger.Warn("Failed to clear the rejected fresh DCR client registration",
 					zap.String("server", c.config.Name),
 					logSafeErrorField(clearErr))
