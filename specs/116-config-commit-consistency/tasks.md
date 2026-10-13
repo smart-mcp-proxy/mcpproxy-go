@@ -444,6 +444,8 @@ each documented in the PR:
   only while a member lives, and while one does the kernel does not hand the
   number out as a PID: a live process holding the number as its PID means
   the group is gone and the number reused, and `Kill` leaves it alone.
+  (Superseded in review round 6: after the reap the group is never
+  signalled; see the round-6 notes.)
 - A process registration's kill is serialized with `Process.Untrack`: from
   `Untrack`'s return no kill of that registration runs (a kill `Retire`
   already started has finished). The owner untracks BEFORE it reaps the
@@ -539,6 +541,27 @@ each documented in the PR:
   is a client literal whose `Transport:` key counts at its own depth. A
   `[]http.Client {` result type after a closing parenthesis opens a func
   body, not a literal.
+
+#### PR4 review round 6 (Sol) design notes
+
+- The launcher no longer signals a process group after its leader was
+  reaped. The round-2 guard (signal only when no live process holds the
+  number as its PID) could not tell our group from an unrelated group that
+  reused the number and whose own leader was reaped too, and its check and
+  signal raced with reuse. Instead the reaper, after observing the leader's
+  exit without reaping it, keeps the zombie while another non-zombie member
+  of its group runs (`awaitGroupEmpty`: the `kern.proc.pgrp` sysctl on
+  macOS, `/proc/<pid>/stat` on Linux, polled with a backoff capped at
+  250 ms). The zombie pins the group ID, so `Kill`, and `Stop`'s SIGTERM and
+  SIGKILL, signal the group soundly in that time. All of them run under
+  `reapMu` and only while `reaped` is false. `Done` stays open while a
+  descendant the launcher left behind runs, so `Stop` on disconnect now
+  brings that descendant down too. When the members cannot be listed (the
+  BSDs, or a listing error) the reaper SIGKILLs the rest of the group under
+  `reapMu` just before the reap, while the zombie still pins the ID. On the
+  degraded path without a non-reaping exit wait (`reapUnobserved`) a
+  descendant left in the group is not killed: an orphan is the safe
+  failure, signalling a reused group is not (documented assumption).
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

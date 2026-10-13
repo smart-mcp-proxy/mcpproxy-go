@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,9 +19,11 @@ import (
 )
 
 // Sol review round 2 (Spec 116 PR4): a launcher that backgrounds a
-// long-lived descendant with redirected streams and exits closes Done (the
-// pumps reach EOF and the leader is reaped) while the descendant still runs
-// in the launcher's process group. The retirement kill must still reach it.
+// long-lived descendant with redirected streams and exits leaves the
+// descendant running in its process group, and the retirement kill must
+// reach it. Since review round 6 the reaper keeps the exited leader a zombie
+// while such a member lives, so the group ID stays pinned (Kill signals it
+// soundly) and Done stays open: the handle's process tree is still running.
 func TestHandleKill_AfterLeaderExit_KillsDescendant(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "descendant.pid")
@@ -28,15 +31,18 @@ func TestHandleKill_AfterLeaderExit_KillsDescendant(t *testing.T) {
 		`sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "`+pidFile+`"`)
 	h, err := Spawn(context.Background(), &Spec{Cmd: cmd, Name: "bg-launcher"}, zap.NewNop())
 	require.NoError(t, err)
+	hh := h.(*handle)
 
-	select {
-	case <-h.Done():
-	case <-time.After(10 * time.Second):
-		t.Fatal("the launcher leader did not exit")
-	}
 	pid := readPid(t, pidFile)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	require.NoError(t, syscall.Kill(pid, 0), "control: the descendant outlives the leader")
+	require.Eventually(t, func() bool { return !liveNonZombie(hh.cmd.Process.Pid) },
+		10*time.Second, 20*time.Millisecond, "the launcher leader did not exit")
+	select {
+	case <-h.Done():
+		t.Fatal("Done closed while a member of the leader's process group still runs")
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.True(t, liveNonZombie(pid), "control: the descendant outlives the leader")
 
 	require.NoError(t, h.Kill())
 	// Gone or a zombie: in a container whose PID 1 does not reap orphans
@@ -45,6 +51,94 @@ func TestHandleKill_AfterLeaderExit_KillsDescendant(t *testing.T) {
 	require.Eventually(t, func() bool { return !liveNonZombie(pid) },
 		5*time.Second, 20*time.Millisecond,
 		"Kill after the leader exited must reach the descendant left in its process group")
+	select {
+	case <-h.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the leader was not reaped once its group emptied")
+	}
+	require.NoError(t, h.Kill(), "Kill after the reap is a no-op")
+}
+
+// Review round 6: Stop on a launcher whose leader already exited but left a
+// descendant in its group terminates the group (the zombie leader pins its
+// ID) and returns once the group is empty and the leader is reaped.
+func TestHandleStop_AfterLeaderExit_StopsDescendant(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "descendant.pid")
+	cmd := exec.Command("/bin/sh", "-c",
+		`sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "`+pidFile+`"`)
+	h, err := Spawn(context.Background(), &Spec{Cmd: cmd, Name: "bg-stop", StopGrace: 2 * time.Second}, zap.NewNop())
+	require.NoError(t, err)
+	hh := h.(*handle)
+	pid := readPid(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	require.Eventually(t, func() bool { return !liveNonZombie(hh.cmd.Process.Pid) },
+		10*time.Second, 20*time.Millisecond, "the launcher leader did not exit")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, h.Stop(ctx))
+	require.False(t, liveNonZombie(pid), "Stop must bring down the descendant left in the group")
+}
+
+// Where the group's members cannot be listed, the reaper falls back to
+// killing what is left of the group before the reap, while the zombie
+// leader still pins its ID (review round 6): the descendant does not
+// outlive the handle unreachable.
+func TestHandle_GroupScanUnavailable_KillsDescendantBeforeReap(t *testing.T) {
+	fail := func(int, int) (bool, error) { return false, errors.New("injected: no group scan") }
+	prev := groupScanHook.Swap(&fail)
+	t.Cleanup(func() { groupScanHook.Store(prev) })
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "descendant.pid")
+	cmd := exec.Command("/bin/sh", "-c",
+		`sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "`+pidFile+`"`)
+	h, err := Spawn(context.Background(), &Spec{Cmd: cmd, Name: "bg-noscan"}, zap.NewNop())
+	require.NoError(t, err)
+	select {
+	case <-h.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the launcher leader was not reaped")
+	}
+	pid := readPid(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	require.Eventually(t, func() bool { return !liveNonZombie(pid) },
+		5*time.Second, 20*time.Millisecond,
+		"the descendant must be killed before the leader is reaped")
+}
+
+// Sol review round 6: once the leader is reaped, no check can tell our
+// group from an unrelated group that reused the number and whose own leader
+// was reaped too while a descendant lives on (kill(pgid, 0) reports ESRCH
+// for both). Kill after the reap must leave such a group alone.
+func TestHandleKill_AfterGroupGone_DoesNotSignalReusedIDWithReapedLeader(t *testing.T) {
+	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "short-reaped"}, zap.NewNop())
+	require.NoError(t, err)
+	<-h.Done()
+	hh := h.(*handle)
+	require.Positive(t, hh.pgid, "the group is recorded at spawn")
+
+	// An unrelated group whose leader backgrounds a descendant and exits;
+	// the leader is reaped, the descendant lives on in the group.
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "other-descendant.pid")
+	other := exec.Command("/bin/sh", "-c",
+		`sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "`+pidFile+`"`)
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, other.Start())
+	require.NoError(t, other.Wait())
+	descendant := readPid(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(descendant, syscall.SIGKILL) })
+	groupID := other.Process.Pid
+	require.ErrorIs(t, syscall.Kill(groupID, 0), syscall.ESRCH, "control: the other group's leader is reaped")
+	require.NoError(t, syscall.Kill(-groupID, 0), "control: the other group still has a member")
+
+	hh.pgid = groupID
+	require.NoError(t, h.Kill())
+	time.Sleep(300 * time.Millisecond)
+	require.True(t, liveNonZombie(descendant),
+		"an unrelated group with a reused ID and a reaped leader was signalled")
 }
 
 // A process group ID is handed out again once the group is empty. After the

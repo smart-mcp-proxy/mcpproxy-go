@@ -76,8 +76,11 @@ type Handle interface {
 	// exec.Cmd.Wait() (nil on clean exit, *exec.ExitError on non-zero).
 	Wait() error
 
-	// Done is closed when the child has exited for any reason. Useful
-	// for select{}-driven supervision.
+	// Done is closed when the child has exited for any reason and been
+	// reaped. Useful for select{}-driven supervision. On Unix (Linux and
+	// macOS) the reaper keeps an exited leader unreaped while another
+	// member of its process group runs (Spec 116 PR4, review round 6), so
+	// Done stays open while a descendant the launcher left behind runs.
 	Done() <-chan struct{}
 
 	// Pid returns the OS process id, or 0 if the child has exited.
@@ -87,7 +90,8 @@ type Handle interface {
 	// group on Unix, the Job Object on Windows) at once, without a grace
 	// period and without waiting for the exit. It is the retirement kill
 	// of Spec 116 PR4: safe to call more than once and after the child
-	// exited. Stop (or Wait) still reaps the child.
+	// exited, while a descendant it left in its process group runs.
+	// The reaper reaps the child; Stop and Wait wait for that.
 	Kill() error
 }
 
@@ -225,9 +229,10 @@ type handle struct {
 	stopGrace time.Duration
 	job       io.Closer // Windows Job Object wrapper; nil on Unix (see createJob)
 	// pgid is the process group the child leads (Unix; 0 on Windows),
-	// recorded at spawn so the retirement kill still reaches a descendant
-	// left in the group after the leader exited and was reaped (Spec 116
-	// PR4, review round 2): Getpgid on a reaped PID fails.
+	// recorded at spawn (Spec 116 PR4, review round 2): the retirement kill
+	// and the reaper's killGroupBeforeReap signal it without a Getpgid
+	// lookup. It is never signalled after the leader was reaped (review
+	// round 6).
 	pgid int
 
 	pid    atomic.Int64 // 0 once exited
@@ -366,10 +371,18 @@ func (h *handle) reap() {
 	// reapUnobserved still reaps only under reapMu (review round 5): on
 	// Unix it polls a non-blocking wait4 under the lock, so the leader is
 	// never released between a Kill's reaped check and its signal.
+	//
+	// Before the locked reap, awaitGroupEmpty keeps the exited leader a
+	// zombie while another member of its process group runs, and
+	// killGroupBeforeReap kills whatever is left while the zombie still
+	// pins the group ID (review round 6): after the reap neither Kill nor
+	// Stop signals the group at all.
 	var err error
 	exitCode := -1
 	if observeExit(h.cmd.Process.Pid) {
+		h.awaitGroupEmpty()
 		h.reapMu.Lock()
+		h.killGroupBeforeReap()
 		err = h.cmd.Wait()
 		if hook := reapedLockedHook.Load(); hook != nil {
 			(*hook)(h)

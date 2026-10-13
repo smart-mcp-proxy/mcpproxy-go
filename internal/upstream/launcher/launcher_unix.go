@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -61,10 +62,38 @@ func killProcess(cmd *exec.Cmd, log *zap.Logger) error {
 }
 
 // terminate and kill are the two escalation steps stopLocked drives. On
-// Unix they are the process-group signals above; the Job Object argument
-// the Windows build needs does not exist here.
-func (h *handle) terminate() error { return terminateProcess(h.cmd, h.log) }
-func (h *handle) kill() error      { return killProcess(h.cmd, h.log) }
+// Unix they signal the recorded process group, under reapMu and only while
+// the leader is not reaped (review round 6): the reaper keeps an exited
+// leader a zombie while another member of its group runs, so Stop reaches
+// a descendant the launcher left behind, and a group ID released by the
+// reap is never signalled.
+func (h *handle) terminate() error { return h.signalUnreaped(syscall.SIGTERM) }
+func (h *handle) kill() error      { return h.signalUnreaped(syscall.SIGKILL) }
+
+func (h *handle) signalUnreaped(sig syscall.Signal) error {
+	h.reapMu.Lock()
+	defer h.reapMu.Unlock()
+	if h.reaped {
+		return nil
+	}
+	return h.signalLocked(sig)
+}
+
+// signalLocked signals the leader's process group. The caller holds reapMu
+// and has checked that the leader is not reaped, so the leader, alive or a
+// zombie, still holds the group ID.
+func (h *handle) signalLocked(sig syscall.Signal) error {
+	if h.pgid <= 0 {
+		if sig == syscall.SIGTERM {
+			return terminateProcess(h.cmd, h.log)
+		}
+		return killProcess(h.cmd, h.log)
+	}
+	if err := syscall.Kill(-h.pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
 
 // startedGroupID is the process group the child leads: applyProcAttrs
 // starts it with Setpgid and Pgid 0, so the group ID is its PID.
@@ -78,43 +107,82 @@ func startedGroupID(cmd *exec.Cmd) int {
 	return 0
 }
 
-// retireKill is Handle.Kill on Unix: SIGKILL to the recorded process group,
-// also after the leader exited (Spec 116 PR4, review round 2). A launcher
-// that backgrounds a descendant with redirected streams and exits closes
-// Done while the descendant runs on in the group.
+// retireKill is Handle.Kill on Unix: SIGKILL to the recorded process group
+// while the leader is not yet reaped.
 //
-// After the leader was reaped the group ID is ours only while a member of
-// the group lives, and while one does the kernel does not hand the number
-// out as a PID. A live process holding the number as its PID therefore means
-// our group is gone and the number was reused: the group is left alone.
+// While reaped is false the leader, alive or a zombie, holds the group ID,
+// so the number cannot have been reused and the signal reaches only our
+// group. reaped is set under reapMu, and the reap itself (cmd.Wait after a
+// non-reaping wait for the exit, or the non-blocking wait4 of
+// reapUnobserved) runs under the same lock (review rounds 3 to 5), so the
+// leader cannot be reaped between this check and the signal.
 //
-// "Reaped" is the flag reap sets under reapMu, not Done (review round 3):
-// Done closes only after reap has logged, so keying the reuse check on Done
-// left a window in which a reused group was signalled unchecked. Since
-// review round 4 the reap itself (cmd.Wait) also runs under reapMu, after a
-// non-reaping wait for the exit (waitExited), or, where that wait is not
-// available, as a non-blocking wait4 polled under the lock (reapUnobserved,
-// review round 5), so the leader cannot be reaped between the check and the
-// signal: while reaped is false the
-// leader, alive or a zombie, holds the group ID.
+// After the reap the group is never signalled (review round 6). No check can
+// tell our group from an unrelated group that reused the number once its
+// own leader was reaped too: kill(pgid, 0) reports ESRCH for both, and any
+// check followed by a signal races with reuse anyway. Instead the reaper
+// does not reap an exited leader while another member of its group runs
+// (awaitGroupEmpty), so a descendant the launcher backgrounded (review
+// round 2) is reached by this kill through the pinned group ID.
 func (h *handle) retireKill() error {
-	h.reapMu.Lock()
-	defer h.reapMu.Unlock()
+	return h.signalUnreaped(syscall.SIGKILL)
+}
+
+// groupScanMaxPoll caps the poll interval of awaitGroupEmpty.
+const groupScanMaxPoll = 250 * time.Millisecond
+
+// awaitGroupEmpty runs in the reaper after the leader's exit was observed
+// without reaping it (review round 6). It returns once no member of the
+// leader's process group other than the zombie leader is running, so the
+// zombie keeps the group ID pinned for as long as a descendant the launcher
+// left behind runs: Kill and Stop can signal the group soundly in that
+// time, and Done stays open while the handle's process tree runs.
+//
+// When the members cannot be listed (groupHasOtherMember fails, or the
+// platform has no listing), it returns at once, and killGroupBeforeReap
+// takes the remaining members down before the reap instead.
+func (h *handle) awaitGroupEmpty() {
 	if h.pgid <= 0 {
-		if h.reaped {
-			return nil
-		}
-		return h.kill()
+		return
 	}
-	if h.reaped {
-		if err := syscall.Kill(h.pgid, 0); !errors.Is(err, syscall.ESRCH) {
-			return nil
+	leader := h.cmd.Process.Pid
+	delay := 10 * time.Millisecond
+	for {
+		others, err := scanGroup(h.pgid, leader)
+		if err != nil {
+			h.log.Debug("cannot list the exited leader's process group; killing it before the reap",
+				zap.Error(err))
+			return
 		}
+		if !others {
+			return
+		}
+		time.Sleep(delay)
+		if delay *= 2; delay > groupScanMaxPoll {
+			delay = groupScanMaxPoll
+		}
+	}
+}
+
+// killGroupBeforeReap runs in the reaper under reapMu, after awaitGroupEmpty
+// and before cmd.Wait reaps the leader. The zombie leader still holds the
+// group ID, so the SIGKILL reaches only what is left of our own group:
+// nothing when the listing showed the group empty, and on the fallback
+// (members could not be listed) any descendant still running, which would
+// otherwise outlive the handle where no later Kill could safely reach it.
+//
+// reapUnobserved (the degraded path) cannot call it: it learns of the exit
+// only by reaping, after which the group ID is no longer pinned. On that
+// path a descendant left in the group is not killed (documented
+// assumption: an orphan is the safe failure, signalling a reused group is
+// not).
+func (h *handle) killGroupBeforeReap() {
+	if h.pgid <= 0 {
+		return
 	}
 	if err := syscall.Kill(-h.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+		h.log.Debug("killing the exited leader's process group failed", zap.Error(err))
 	}
-	return nil
 }
 
 // reapUnobservedMaxPoll caps the poll interval of reapUnobserved.
@@ -185,4 +253,15 @@ func (h *handle) reapUnobserved() (int, error) {
 	default:
 		return -1, waitErr
 	}
+}
+
+// groupScanHook replaces groupHasOtherMember in awaitGroupEmpty. A test
+// seam that injects a listing failure; nil in production.
+var groupScanHook atomic.Pointer[func(pgid, leader int) (bool, error)]
+
+func scanGroup(pgid, leader int) (bool, error) {
+	if hook := groupScanHook.Load(); hook != nil {
+		return (*hook)(pgid, leader)
+	}
+	return groupHasOtherMember(pgid, leader)
 }

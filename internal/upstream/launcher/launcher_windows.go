@@ -122,3 +122,12 @@ func (h *handle) reapUnobserved() (int, error) {
 	h.reapMu.Unlock()
 	return -1, err
 }
+
+// killGroupBeforeReap is a no-op on Windows: there is no process group, and
+// reap closes the Job Object, whose KILL_ON_JOB_CLOSE limit takes the rest
+// of the tree. (reap reaches it only after waitExited, which Windows lacks.)
+func (h *handle) killGroupBeforeReap() {}
+
+// awaitGroupEmpty is a no-op on Windows (no process group; see
+// killGroupBeforeReap).
+func (h *handle) awaitGroupEmpty() {}

@@ -230,7 +230,11 @@ replacement unhealthy. Teardown (the MCP close, the process-group kill,
 `docker stop`) still runs; the manual OAuth flow and token refresh refuse a
 retired instance and report it as "server not found". A launched process
 whose tree cannot be contained (a Windows Job Object that cannot be created
-or assigned) is killed and its start fails. `scripts/check-upstream-write-sites.sh` also fails on
+or assigned) is killed and its start fails. On Unix the launcher keeps an
+exited leader unreaped while a descendant it left in its process group runs,
+so the group ID stays pinned and the retirement kill (or `Stop`) reaches that
+descendant; a group whose leader was reaped is never signalled, since its ID
+may have been reused. `scripts/check-upstream-write-sites.sh` also fails on
 ungated HTTP in `internal/oauth`, `internal/upstream/core` and
 `internal/transport` (allowlist: `scripts/ungated-http-allowlist.txt`).
 Lock order: the gate's lock is innermost (`captureMu` → `Manager.mu` →
