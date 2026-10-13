@@ -251,6 +251,13 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logger.Info("🔄 Reconnecting after OAuth completion",
 			zap.String("server", c.config.Name))
 		c.connected = false
+		// Release the old stdio child from the gate before the close
+		// reaps it (Spec 116 PR4, review round 2): its process-group ID
+		// must not stay registered for a retirement to signal.
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
+		}
 		if c.client != nil {
 			c.client.Close()
 			c.client = nil

@@ -225,6 +225,13 @@ func (g *Gate) untrack(c *gatedConn) {
 type Process struct {
 	g    *Gate
 	kill func()
+
+	// mu serializes kill with Untrack (review round 2): Retire kills from
+	// a snapshot taken under connsMu, so without it a kill could run after
+	// Untrack returned, when the owner may already have reaped the child and
+	// the OS may have reused its process-group ID.
+	mu       sync.Mutex
+	released bool
 }
 
 // TrackProcess registers a process that was just started inside an admitted
@@ -245,15 +252,24 @@ func (g *Gate) TrackProcess(kill func()) (*Process, error) {
 	return p, nil
 }
 
-// Kill runs the process's kill function. Safe on nil.
+// Kill runs the process's kill function, unless the process was untracked.
+// Safe on nil.
 func (p *Process) Kill() {
-	if p != nil && p.kill != nil {
+	if p == nil || p.kill == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.released {
 		p.kill()
 	}
 }
 
 // Untrack removes the process from the gate: it exited, or the instance's
-// own teardown owns it now. Safe on nil.
+// own teardown owns it now. From its return no kill of this registration
+// runs: a kill Retire already started has finished, and a later one does
+// nothing. The owner calls it BEFORE it reaps the child, so the gate never
+// signals a process-group ID the OS may have handed out again. Safe on nil.
 func (p *Process) Untrack() {
 	if p == nil || p.g == nil {
 		return
@@ -261,6 +277,9 @@ func (p *Process) Untrack() {
 	p.g.connsMu.Lock()
 	delete(p.g.procs, p)
 	p.g.connsMu.Unlock()
+	p.mu.Lock()
+	p.released = true
+	p.mu.Unlock()
 }
 
 // Retire closes the gate permanently. It is idempotent and bounded: it sets

@@ -87,3 +87,19 @@ func killProcess(cmd *exec.Cmd, _ *zap.Logger) error {
 	}
 	return cmd.Process.Kill()
 }
+
+// startedGroupID: Windows has no process group; the Job Object reaches the
+// tree.
+func startedGroupID(_ *exec.Cmd) int { return 0 }
+
+// retireKill is Handle.Kill on Windows: the hard-kill step. After the child
+// exited there is nothing left to kill: reap closed the Job, and its
+// KILL_ON_JOB_CLOSE limit took the rest of the tree with it.
+func (h *handle) retireKill() error {
+	select {
+	case <-h.done:
+		return nil
+	default:
+	}
+	return h.kill()
+}

@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"errors"
 	"io"
 	"os/exec"
 	"syscall"
@@ -62,3 +63,48 @@ func killProcess(cmd *exec.Cmd, log *zap.Logger) error {
 // the Windows build needs does not exist here.
 func (h *handle) terminate() error { return terminateProcess(h.cmd, h.log) }
 func (h *handle) kill() error      { return killProcess(h.cmd, h.log) }
+
+// startedGroupID is the process group the child leads: applyProcAttrs
+// starts it with Setpgid and Pgid 0, so the group ID is its PID.
+func startedGroupID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil || cmd.SysProcAttr == nil {
+		return 0
+	}
+	if cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		return cmd.Process.Pid
+	}
+	return 0
+}
+
+// retireKill is Handle.Kill on Unix: SIGKILL to the recorded process group,
+// also after the leader exited (Spec 116 PR4, review round 2). A launcher
+// that backgrounds a descendant with redirected streams and exits closes
+// Done while the descendant runs on in the group.
+//
+// After the leader was reaped the group ID is ours only while a member of
+// the group lives, and while one does the kernel does not hand the number
+// out as a PID. A live process holding the number as its PID therefore means
+// our group is gone and the number was reused: the group is left alone. (The
+// leader may be reaped a moment before Done closes; that window is a few
+// instructions long and the number cannot be reused in it in practice.)
+func (h *handle) retireKill() error {
+	if h.pgid <= 0 {
+		select {
+		case <-h.done:
+			return nil
+		default:
+		}
+		return h.kill()
+	}
+	select {
+	case <-h.done:
+		if err := syscall.Kill(h.pgid, 0); !errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+	default:
+	}
+	if err := syscall.Kill(-h.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}

@@ -315,7 +315,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 ### Tests first (must fail on PR3)
 
 - [x] T080 [P] [US4] `internal/upstream/dialgate/gate_test.go`: Admit/Retire ordering, conn Write after Retire → `ErrRetired`, a blocked Write unblocked by Retire, Retire bounded (< 1 s with a hung peer), idempotent, under `-race -count=50`
-- [x] T081 [P] [US4] `internal/upstream/managed/retire_stdio_test.go`: T4.1 (marker launcher; Docker via a mock docker binary; launcher)
+- [x] T081 [P] [US4] `internal/upstream/retire_stdio_test.go` and `internal/upstream/retire_launch_admission_test.go`: T4.1 (marker launcher; Docker via a mock docker binary; launcher; each with an unretired control and the launch observer; review round 2)
 - [x] T082 [P] [US4] `internal/upstream/managed/retire_http_test.go`: T4.2 for HTTP and SSE × remove/replace/quarantine, synchronized on "commit returned"
 - [x] T083 [P] [US4] `internal/transport/retire_retry_test.go`: T4.3 (flaky reused connection forces a retry; zero hits after retirement; Retire bounded)
 - [x] T084 [P] [US4] `internal/upstream/core/retire_oauth_test.go`: T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused)
@@ -326,7 +326,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [ ] **(deferred: Windows follow-up)** T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12) and `internal/upstream/core/retire_browser_test.go` (T4.13)
 - [x] T085c [P] [US4] `internal/upstream/retire_same_generation_test.go`: T4.15 (old instance parked before its stdio launch and before its HTTP/OAuth send; `RestartServer`, `ForceReconnectAll` and Docker recovery replace it at the same generation; release → no launch, no request; replacement unaffected; review R5.4)
 - [x] T085d [P] [US4] `internal/upstream/dialgate/late_register_test.go`: T4.16 (dial parked before `track`; sweep finishes; register + blocking write → closed, `ErrRetired`, `Retire` ≤ 1 s; review R5.1)
-- [x] T085e [P] [US4] `internal/upstream/dialgate/capability_parity_test.go` (`TestWrapTransportCapabilityParity`, `TestMCPGoTransportMethodSetPinned`) and `internal/upstream/core/wrapped_transport_consumers_test.go`: T4.17 (a)-(f) with the production wrapped transports: OAuth handler extraction, concurrent reactive + proactive refresh, per-method-auth manual login, Streamable HTTP 404 session re-init, protocol header, server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler (review R8.1)
+- [x] T085e [P] [US4] `internal/upstream/dialgate/capability_parity_test.go` (`TestWrapTransportCapabilityParity`, `TestMCPGoTransportMethodSetPinned`), `internal/upstream/dialgate/wrap_forwarding_test.go` (server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler; review round 2) and `internal/upstream/core/retire_test.go` (`TestWrappedTransportConsumers`): T4.17 (a)-(f) with the production wrapped transports: OAuth handler extraction, concurrent reactive + proactive refresh, per-method-auth manual login, Streamable HTTP 404 session re-init, protocol header, server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler (review R8.1)
 - [x] T086 [P] [US4] `internal/upstream/dialgate/bench_test.go`: T4.7
 
 ### Implementation
@@ -433,6 +433,48 @@ each documented in the PR:
 - The OAuth browser launch is admitted only, not tracked: the opener
   (`open`/`xdg-open`/`rundll32`) hands the URL to a browser that is not the
   instance's process (docs corrected).
+
+#### PR4 review round 2 (Sol) design notes
+
+- The launcher records the process group it leads at spawn, and
+  `Handle.Kill` signals that group also after the leader exited (a launcher
+  that backgrounds a descendant with redirected streams closes `Done` while
+  the descendant runs on). Once the leader is reaped the group ID is ours
+  only while a member lives, and while one does the kernel does not hand the
+  number out as a PID: a live process holding the number as its PID means
+  the group is gone and the number reused, and `Kill` leaves it alone.
+- A process registration's kill is serialized with `Process.Untrack`: from
+  `Untrack`'s return no kill of that registration runs (a kill `Retire`
+  already started has finished). The owner untracks BEFORE it reaps the
+  child: `Disconnect` releases the stdio child before the MCP close (which
+  reaps it), and the post-OAuth reconnect does the same, so a retirement
+  never signals a process-group ID the OS may have reused.
+- FR-025a's "a failed Job assignment kills the child inside the section":
+  Windows `assignProcessTree` now fails when the Job cannot be created or
+  assigned, and the stdio launch section kills the child and fails the start
+  (it used to log and carry on with the PID). `CREATE_SUSPENDED` (T093b)
+  stays deferred.
+- A probe (background health ping or the post-cancellation liveness probe)
+  that was in flight when the instance was retired produces no verdict and
+  no accounting: `setErrorIfCurrentConnection` and the ambiguous-probe
+  verdict check the retired flag, and the health loop returns after the ping
+  when the instance was retired meanwhile (FR-026).
+- `RefreshCoordinator.Do` normalizes a nil context before its retry loop.
+- The FR-024a scan tracks brace depth: each open `http.Client{` literal has
+  the depth of its own body, and only a `Transport:` key at that depth gates
+  it (a nested client's or a nested struct's does not; a func literal's
+  closing brace does not close the client).
+- T4.1 covers the Docker (mock docker binary) and launcher branches as well
+  as plain stdio, each with an unretired control; a launch observer seam
+  (`core.SetLaunchObserverForTest`) sees a child the gate would kill before
+  it ran, so a marker file is not the only evidence. For stdio and Docker
+  the parked-before-admission window is closed three times over (`Admit`,
+  the gated transport's `Start`, the gate context the child is started
+  under); the tests fail only with all three removed.
+- T4.17's server-to-client ping (stdio and Streamable HTTP) and SSE
+  connection loss are exercised through the production wrappers
+  (`internal/upstream/dialgate/wrap_forwarding_test.go`); dropping the
+  `SetRequestHandler` or `SetConnectionLostHandler` forwarding fails them.
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

@@ -198,3 +198,12 @@ func startedProcessGroupID(cmd *exec.Cmd) int {
 	}
 	return 0
 }
+
+// assignProcessTree is the stdio launch section's containment step. On Unix
+// the child already leads its own process group (Setpgid at start), so this
+// only reads the group and cannot fail: 0 means the group could not be read
+// (the child already died) and the caller falls back to
+// startedProcessGroupID.
+func assignProcessTree(cmd *exec.Cmd, logger *zap.Logger, serverName string) (int, error) {
+	return extractProcessGroupID(cmd, logger, serverName), nil
+}

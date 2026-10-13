@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -542,10 +543,30 @@ func (c *Client) startStdioAdmitted(ctx context.Context) error {
 	if c.processCmd == nil || c.processCmd.Process == nil {
 		return nil
 	}
+	if c.isDockerCommand {
+		observeLaunch(c.config.Name, "docker")
+	} else {
+		observeLaunch(c.config.Name, "stdio")
+	}
 	if hook := stdioLaunchHook; hook != nil {
 		hook()
 	}
-	c.processGroupID = extractProcessGroupID(c.processCmd, c.logger, c.config.Name)
+	pgidAssigned, err := assignStdioProcessTree(c.processCmd, c.logger, c.config.Name)
+	if err != nil {
+		// FR-025a (review round 2): a child that cannot be contained (on
+		// Windows, no Job Object) is killed inside the admitted section and
+		// the start fails. Left running, its descendants would survive a
+		// retirement that can only reach the immediate process. On Windows
+		// a grandchild forked before this point is outside reach either
+		// way; CREATE_SUSPENDED (T093b, deferred) closes that window.
+		cmd := c.processCmd
+		killProcessTreeNow(startedProcessGroupID(cmd), cmd)
+		c.processGroupID = 0
+		release()
+		_ = c.client.Close()
+		return fmt.Errorf("contain stdio child: %w", err)
+	}
+	c.processGroupID = pgidAssigned
 	if c.processGroupID <= 0 {
 		// The child may already be dead (a retirement during the section
 		// cancelled the gate context, which kills the immediate child):
@@ -566,6 +587,24 @@ func (c *Client) startStdioAdmitted(ctx context.Context) error {
 	return nil
 }
 
+// launchObserver is a test seam told about every process a launch section
+// started (Spec 116 PR4, T4.1): it proves a retired instance launched
+// nothing, even a child the gate would kill at once. Nil in production.
+var launchObserver atomic.Pointer[func(server, kind string)]
+
+func observeLaunch(server, kind string) {
+	if fn := launchObserver.Load(); fn != nil {
+		(*fn)(server, kind)
+	}
+}
+
+// SetLaunchObserverForTest installs the launch observer and returns a
+// restore func. Test-only.
+func SetLaunchObserverForTest(fn func(server, kind string)) (restore func()) {
+	prev := launchObserver.Swap(&fn)
+	return func() { launchObserver.Store(prev) }
+}
+
 // SetStdioLaunchHookForTest installs the stdio launch-section test seam
 // (T4.11) and returns a restore func. Test-only.
 func SetStdioLaunchHookForTest(fn func()) (restore func()) {
@@ -573,3 +612,9 @@ func SetStdioLaunchHookForTest(fn func()) (restore func()) {
 	stdioLaunchHook = fn
 	return func() { stdioLaunchHook = prev }
 }
+
+// assignStdioProcessTree contains the just-started stdio child: on Unix it
+// reads the process group the child leads; on Windows it assigns the child
+// to a Job Object and fails when it cannot (Spec 116 PR4, FR-025a). A
+// variable so a test can make containment fail on any platform.
+var assignStdioProcessTree = assignProcessTree

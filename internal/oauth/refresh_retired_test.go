@@ -97,3 +97,55 @@ func TestRefreshCoordinator_RetiredFlightWaiterRunsOwnFlight(t *testing.T) {
 	require.NotNil(t, res.tok)
 	assert.Equal(t, int32(1), f.calls.Load(), "exactly one real token request, on the healthy transport")
 }
+
+// Review round 2: a caller passing a nil context that joins a retired
+// instance's flight retries on its own transport instead of panicking on
+// ctx.Err() in the retry loop.
+func TestRefreshCoordinator_RetiredFlightWaiterNilContext(t *testing.T) {
+	f := newCoordFixture(t, "dcr-client")
+	c := NewRefreshCoordinator()
+
+	entered := make(chan struct{})
+	releaseRetired := make(chan struct{})
+	retiredReq := f.req(RefreshTriggerReactive, "rt-0")
+	retiredReq.Refresh = func(_ context.Context, _ *storage.OAuthTokenRecord) (*client.Token, error) {
+		close(entered)
+		<-releaseRetired
+		return nil, fmt.Errorf("token request: %w", dialgate.ErrRetired)
+	}
+	healthyReq := f.req(RefreshTriggerReactive, "rt-0")
+	healthyReq.ServerName = "srv-healthy"
+
+	retiredDone := make(chan error, 1)
+	go func() {
+		_, _, err := c.Do(context.Background(), retiredReq)
+		retiredDone <- err
+	}()
+	<-entered
+
+	type result struct {
+		tok      *client.Token
+		err      error
+		panicked any
+	}
+	healthyDone := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				healthyDone <- result{panicked: r}
+			}
+		}()
+		//nolint:staticcheck // SA1012: a nil context is the case under test
+		tok, _, err := c.Do(nil, healthyReq)
+		healthyDone <- result{tok: tok, err: err}
+	}()
+	require.Eventually(t, func() bool { return c.waiters(f.key) == 2 }, 5*time.Second, time.Millisecond,
+		"the nil-context caller joined the retired flight")
+	close(releaseRetired)
+	require.ErrorIs(t, <-retiredDone, dialgate.ErrRetired)
+
+	res := <-healthyDone
+	require.Nil(t, res.panicked, "Do(nil, …) must not panic after joining a retired flight")
+	require.NoError(t, res.err)
+	require.NotNil(t, res.tok)
+}

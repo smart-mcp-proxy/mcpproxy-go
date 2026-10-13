@@ -428,6 +428,7 @@ func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec)
 	if err != nil {
 		return nil, err
 	}
+	observeLaunch(c.config.Name, "launcher")
 	// The handle's Kill reaches the whole tree on every platform: the
 	// process group on Unix and the launcher's own Job Object on Windows
 	// (core's Windows Job registry does not hold launcher children).

@@ -1667,7 +1667,10 @@ func (mc *Client) recordDeadConnection(toolName string, err error, callEpoch int
 func (mc *Client) setErrorIfCurrentConnection(err error, epoch int64) bool {
 	mc.epochMu.Lock()
 	defer mc.epochMu.Unlock()
-	if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+	// A retired instance's failure says nothing about the server (Spec 116
+	// PR4, FR-026; review round 2): retirement kills its transport under any
+	// request in flight, and the epoch does not move until a teardown runs.
+	if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 		return false
 	}
 	mc.StateManager.SetError(err)
@@ -1799,7 +1802,9 @@ func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 		// round 2).
 		mc.epochMu.Lock()
 		defer mc.epochMu.Unlock()
-		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+		// A retirement while the probe was in flight (Spec 116 PR4,
+		// FR-026; review round 2) closed its transport: no verdict.
+		if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
@@ -2150,6 +2155,13 @@ func (mc *Client) performHealthCheck() {
 	// bumps the epoch, so the verdict below must land on this generation only.
 	pingEpoch := mc.connectionEpoch.Load()
 	err := mc.probeLiveness(ctx, prober)
+
+	// Retired while the ping was in flight (Spec 116 PR4, FR-026; review
+	// round 2): its failure (the retirement closed the transport) is no
+	// health evidence, and neither is a success. No accounting either way.
+	if mc.retired.Load() {
+		return
+	}
 
 	if err != nil {
 		// Pick up any rate-limit hint this ping's response carried, BEFORE the

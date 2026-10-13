@@ -21,6 +21,7 @@ func TestRetire_StdioLaunchParked_RemovalLaunchesNothing(t *testing.T) {
 	dir := t.TempDir()
 	m := newGenTestManager(t)
 	cfg := markerCommand(t, "marker-srv", dir)
+	launches := observeLaunches(t, cfg.Name)
 	m.AdvanceGenerations([]GenerationChange{present(cfg.Name, 1, cfg)})
 	require.NoError(t, m.AddServerConfigAt(cfg.Name, cfg, 1))
 	inst := registered(t, m, cfg.Name)
@@ -41,6 +42,7 @@ func TestRetire_StdioLaunchParked_RemovalLaunchesNothing(t *testing.T) {
 	require.Error(t, err, "a retired instance cannot connect")
 	time.Sleep(300 * time.Millisecond) // a launched shell would have touched its marker by now
 	assert.Zero(t, markers(t, dir), "the removed server's command must not run")
+	assert.Zero(t, launches.Load(), "no process is started for the removed server")
 }
 
 // Control: the same marker command does launch when nothing retires it, so a

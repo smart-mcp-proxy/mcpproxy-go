@@ -153,6 +153,7 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		h.stopGrace = DefaultStopGrace
 	}
 	h.pid.Store(int64(cmd.Process.Pid))
+	h.pgid = startedGroupID(cmd)
 
 	// On Windows, wrap the just-started process in a Job Object so that
 	// terminateProcess/killProcess below (and the natural-exit path in
@@ -210,6 +211,11 @@ type handle struct {
 	done      chan struct{}
 	stopGrace time.Duration
 	job       io.Closer // Windows Job Object wrapper; nil on Unix (see createJob)
+	// pgid is the process group the child leads (Unix; 0 on Windows),
+	// recorded at spawn so the retirement kill still reaches a descendant
+	// left in the group after the leader exited and was reaped (Spec 116
+	// PR4, review round 2): Getpgid on a reaped PID fails.
+	pgid int
 
 	pid    atomic.Int64 // 0 once exited
 	pumpWG sync.WaitGroup
@@ -226,17 +232,14 @@ func (h *handle) Pid() int {
 }
 
 // Kill implements Handle.Kill: the same hard-kill step stopLocked
-// escalates to, without the SIGTERM and the grace period.
+// escalates to, without the SIGTERM and the grace period. Unlike Stop it
+// still acts after the leader exited: a descendant the launcher left in its
+// process group is killed too (see retireKill in the platform files).
 func (h *handle) Kill() error {
-	select {
-	case <-h.done:
-		return nil
-	default:
-	}
 	if h.cmd.Process == nil {
 		return nil
 	}
-	return h.kill()
+	return h.retireKill()
 }
 
 func (h *handle) Done() <-chan struct{} {

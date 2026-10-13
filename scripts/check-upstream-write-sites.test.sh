@@ -474,6 +474,30 @@ func f() {
 	}; d := &http.Client{Transport: u}
 	_, _ = c, d
 }' 1
+ungated "nested client: only the inner literal has a Transport (one line)" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{CheckRedirect: redirectFor(&http.Client{Transport: gated})}; _ = c }' 1
+ungated "nested client: only the inner literal has a Transport (multi-line)" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		CheckRedirect: redirectFor(&http.Client{Transport: gated}),
+		Timeout:       t,
+	}
+	_ = c
+}' 1
+ungated "multi-line gated client with a func literal before Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
+		Transport: gated,
+	}
+	_ = c
+}' 0
+ungated "one-line gated client with a func literal before Transport" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }, Transport: gated}; _ = c }' 0
+ungated "a nested struct field named Transport does not gate the client" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{Jar: jar(opts{Transport: gated})}; _ = c }' 1
 ungated "*http.Client return type" internal/transport a.go 'package transport
 func f() *http.Client {
 	return nil

@@ -411,3 +411,12 @@ func (c *Client) extractContainerNameFromArgs(dockerArgs []string) string {
 		zap.Strings("docker_args", logSafeArgs(dockerArgs)))
 	return ""
 }
+
+// SetDockerBinaryResolverForTest points the docker spawn at fn's binary (a
+// mock docker in the Spec 116 PR4 launch-admission tests) and returns a
+// restore func. Test-only.
+func SetDockerBinaryResolverForTest(fn func(*zap.Logger) (string, error)) (restore func()) {
+	prev := resolveDockerBinary
+	resolveDockerBinary = fn
+	return func() { resolveDockerBinary = prev }
+}

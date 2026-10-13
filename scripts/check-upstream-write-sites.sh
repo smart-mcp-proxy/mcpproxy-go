@@ -380,43 +380,50 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
     function report(file, n, raw) {
       if (!allowed(file, raw)) print file ":" n ":" raw
     }
-    # scan_clients checks EVERY http.Client{ literal on the line, each within
-    # its own braces (review round 1: a Transport: field of a second literal
-    # must not excuse the first). A literal that closes on the line without a
-    # Transport: field is a hit; one left open is pending until its closing
-    # brace on a later line.
-    function scan_clients(code, file, n, raw,    s, i, depth, ch, lit, closed) {
-      s = code
-      while (match(s, /(^|[^*A-Za-z0-9_.])http[.]Client[{]/)) {
-        s = substr(s, RSTART + RLENGTH)
-        depth = 1; closed = 0
-        for (i = 1; i <= length(s); i++) {
-          ch = substr(s, i, 1)
-          if (ch == "{") depth++
-          else if (ch == "}") { depth--; if (depth == 0) { closed = 1; break } }
+    # scan_clients tracks every http.Client{ literal with brace depth
+    # (review rounds 1 and 2): each open literal is on a stack with the depth
+    # of its own body, and a Transport: key counts only at that depth. A
+    # Transport: of a nested literal (another client, a struct, a func body)
+    # never excuses the outer one, and the closing brace of a nested func
+    # literal does not close the client. A literal that closes without a
+    # Transport: key is a hit, reported at its opening line; one still open
+    # at the end of its file too. bd is the brace depth of the file.
+    function scan_clients(code, file, n, raw,    i, L, ch, pc) {
+      L = length(code)
+      for (i = 1; i <= L; i++) {
+        ch = substr(code, i, 1)
+        if (ch == "{") {
+          bd++
+          if (i >= 12 && substr(code, i - 11, 12) == "http.Client{") {
+            pc = (i > 12) ? substr(code, i - 12, 1) : ""
+            if (pc !~ /[*A-Za-z0-9_.]/) {
+              ns++; sdepth[ns] = bd; shas[ns] = 0; sfile[ns] = file; sline[ns] = n; sraw[ns] = raw
+            }
+          }
+        } else if (ch == "}") {
+          if (ns > 0 && sdepth[ns] == bd) {
+            if (!shas[ns]) report(sfile[ns], sline[ns], sraw[ns])
+            ns--
+          }
+          bd--
+        } else if (ch == "T" && ns > 0 && bd == sdepth[ns] && substr(code, i, 9) == "Transport") {
+          pc = (i > 1) ? substr(code, i - 1, 1) : ""
+          if (pc !~ /[A-Za-z0-9_.]/ && substr(code, i + 9) ~ /^[ \t]*:/) shas[ns] = 1
         }
-        lit = substr(s, 1, i - 1)
-        if (lit ~ /Transport[ \t]*:/) { s = substr(s, i + 1); continue }
-        if (closed) { report(file, n, raw); return }
-        pending = raw; pfile = file; pline = n
-        return
       }
     }
+    function flush_clients(    k) {
+      for (k = 1; k <= ns; k++) if (!shas[k]) report(sfile[k], sline[k], sraw[k])
+      ns = 0; bd = 0
+    }
     FNR == 1 {
-      if (pending != "") report(pfile, pline, pending)
-      pending = ""; inblock = 0; inraw = 0
+      flush_clients()
+      inblock = 0; inraw = 0
     }
     {
       raw = $0
       code = strip(raw)
       http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
-      if (pending != "") {
-        # A Transport: field counts only before the literal closes.
-        tp = match(code, /Transport[ \t]*:/)
-        bp = index(code, "}")
-        if (tp > 0 && (bp == 0 || tp < bp)) pending = ""
-        else if (bp > 0) { report(pfile, pline, pending); pending = "" }
-      }
       if (http_scope) {
         if (code ~ /(^|[^A-Za-z0-9_.])http[.](Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /http[.]Default(Client|Transport)([^A-Za-z0-9_]|$)/)
           report(FILENAME, FNR, raw)
@@ -425,7 +432,7 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
       if (FILENAME ~ /^internal\/upstream\// && FILENAME != "internal/upstream/core/gate.go" && code ~ /GetTransport[ \t]*[(][ \t]*[)]/)
         report(FILENAME, FNR, raw)
     }
-    END { if (pending != "") report(pfile, pline, pending) }' "${pr4_files[@]}")"
+    END { flush_clients() }' "${pr4_files[@]}")"
   rc=$?
   if [[ $rc -ne 0 ]]; then
     echo "upstream write sites: ungated-HTTP scanner failed (awk exit $rc)" >&2

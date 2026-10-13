@@ -200,6 +200,12 @@ func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*clien
 	// initiator may start a new (also refused) flight first, and a single
 	// retry would join that one (review round 1). A retired caller's own
 	// flight is refused at once, so the loop ends; ctx bounds it.
+	//
+	// A nil ctx is normalized here, before the loop reads ctx.Err()
+	// (review round 2).
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
 		tok, skipped, led, err := c.do(ctx, req)
 		if !dialgate.IsRetired(err) || led || ctx.Err() != nil {
@@ -218,9 +224,6 @@ var refreshRetiredRetryHook func(RefreshRequest)
 // do joins the key's flight or starts one. led reports that this call
 // started the flight it returns the result of.
 func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *client.Token, skipped, led bool, err error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	c.mu.Lock()
 	st := c.stateLocked(req.Key)
 	f := st.flight
